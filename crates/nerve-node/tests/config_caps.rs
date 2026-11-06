@@ -822,7 +822,7 @@ command = ["id", "-un"]"#),
 
 /// A node run by hand has no `nerve-run`, which every capability of
 /// node.toml runs as, so it offers none: a call of one names an unknown
-/// capability, and `cap ls` says why each one is left out.
+/// capability, and `cap` says why each one is left out.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_run_by_hand_offers_none_and_says_why() {
     let dir = scratch();
@@ -849,7 +849,7 @@ command = ["id"]"#);
     let why =
         "left out: runs as nerve-run, which only the installed node has (sudo nerve-node install)";
     let paths = daemon.paths().clone();
-    let ls = cli(&paths, &["cap", "ls"]).await;
+    let ls = cli(&paths, &["cap"]).await;
     let row = ls
         .lines()
         .find(|l| l.starts_with("who.am"))
@@ -858,7 +858,7 @@ command = ["id"]"#);
     assert!(ls.contains("capability who.am: id\n"), "{ls}");
     // So does the CLI while no node runs.
     daemon.stop().await;
-    let ls = cli(&paths, &["cap", "ls"]).await;
+    let ls = cli(&paths, &["cap"]).await;
     assert!(ls.contains(why), "{ls}");
 }
 
@@ -1284,7 +1284,7 @@ async fn try_cli(paths: &NodePaths, words: &[&str]) -> Result<String, String> {
 }
 
 /// `cap add` takes a schema on stdin, as the owner pipes it in, and the
-/// running node offers what it declares at once; `cap ls` asks the node.
+/// running node offers what it declares at once; `cap` asks the node.
 #[tokio::test(flavor = "multi_thread")]
 async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
     use std::io::Write;
@@ -1306,7 +1306,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
             "say.word",
             "--effect",
             "read",
-            "--params-stdin",
+            "--params=-",
             "--",
             "printf",
             "%s",
@@ -1354,7 +1354,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
             .unwrap(),
         json!("hi there")
     );
-    let ls = cli(&paths, &["cap", "ls"]).await;
+    let ls = cli(&paths, &["cap"]).await;
     let row = ls
         .lines()
         .find(|l| l.starts_with("say.word"))

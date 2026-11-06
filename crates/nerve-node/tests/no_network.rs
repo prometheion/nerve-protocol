@@ -1,5 +1,5 @@
 //! The owner's network switch for a pairing's folder-mode commands
-//! (`folder network off`, docs/user/modes.md) on a real node daemon, in
+//! (`network off`, docs/user/modes.md) on a real node daemon, in
 //! process and run by hand: a command of that pairing, and a capability of
 //! the config it calls, opens no TCP connection and no UDP socket, which it
 //! opens without the switch, held by the node's seccomp filter whether or
@@ -291,7 +291,7 @@ async fn a_node_that_cannot_keep_commands_off_the_network_runs_none() {
     assert!(
         e.message.contains("cannot keep them off it")
             && e.message.contains("seccomp filters")
-            && e.message.contains("nerve-node folder network on"),
+            && e.message.contains("nerve-node network on"),
         "{}",
         e.message
     );
@@ -348,7 +348,7 @@ async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
             .expect_err("refused");
         assert!(
             e.message.contains("runs them as its own user")
-                && e.message.contains("nerve-node folder network on"),
+                && e.message.contains("nerve-node network on"),
             "{mode:?}: {}",
             e.message
         );

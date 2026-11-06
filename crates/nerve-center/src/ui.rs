@@ -36,6 +36,100 @@ const INDEX: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
 
 const WRONG_TOKEN: &str = "Wrong owner token.";
+
+/// The center's own commands and options for the Help page, from its
+/// clap definition: each with its line and the rest folded; the options
+/// apart from those under Advanced.
+fn center_help() -> Value {
+    use clap::CommandFactory;
+    let cmd = crate::config::Args::command();
+    let rest = |long: Option<String>, line: &str| {
+        let long = long.unwrap_or_default();
+        long.strip_prefix(line).unwrap_or(&long).trim().to_string()
+    };
+    let commands: Vec<Value> = cmd
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        .map(|c| {
+            let line = c.get_about().map(|a| a.to_string()).unwrap_or_default();
+            json!({
+                "name": c.get_name(),
+                "line": line,
+                "more": rest(c.get_long_about().map(|a| a.to_string()), &line),
+            })
+        })
+        .collect();
+    let options: Vec<Value> = cmd
+        .get_arguments()
+        .filter(|a| !a.is_hide_set() && a.get_long().is_some_and(|l| l != "help" && l != "version"))
+        .map(|a| {
+            let line = a.get_help().map(|h| h.to_string()).unwrap_or_default();
+            json!({
+                "name": format!("--{}", a.get_long().unwrap_or_default()),
+                "line": line,
+                "more": rest(a.get_long_help().map(|h| h.to_string()), &line),
+                "advanced": a.get_help_heading() == Some("Advanced"),
+            })
+        })
+        .collect();
+    json!({"commands": commands, "options": options})
+}
+
+/// The command that shows the owner token of the center in `state`: with
+/// `sudo` for the installed center, whose folder is its own user's, without
+/// it for a center you started, whose folder is yours. A UI beyond loopback
+/// shows its page to anyone who reaches it, so it does not name a folder
+/// (`local` is false): the person who runs the command knows it.
+fn token_command(state: &std::path::Path, local: bool) -> String {
+    let installed = crate::service::Layout::system();
+    token_command_of(
+        state,
+        installed.installed().then_some(installed.state.as_path()),
+        &crate::config::default_state_dir(),
+        local,
+    )
+}
+
+/// [`token_command`] where `installed` is the installed center's folder, if
+/// one is installed, and `default` the folder of a harness-started center.
+/// `owner-token` alone goes to the installed center's folder, else to
+/// `default` (crate::config::Args::owner_state_dir): any other folder is
+/// named with `--state-dir`, which `local` shows (else a placeholder).
+pub(crate) fn token_command_of(
+    state: &std::path::Path,
+    installed: Option<&std::path::Path>,
+    default: &std::path::Path,
+    local: bool,
+) -> String {
+    if installed == Some(state) {
+        return "sudo nerve-center owner-token".into();
+    }
+    if installed.is_none() && state == default {
+        return "nerve-center owner-token".into();
+    }
+    if !local {
+        return "nerve-center owner-token --state-dir <this center's folder>".into();
+    }
+    let dir = state.display().to_string();
+    let plain = dir
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-~:\\".contains(c));
+    match plain {
+        true => format!("nerve-center owner-token --state-dir {dir}"),
+        false => format!(
+            "nerve-center owner-token --state-dir '{}'",
+            dir.replace('\'', "'\\''")
+        ),
+    }
+}
+
+/// `text` for HTML: the login's tagline names a folder.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
@@ -55,6 +149,9 @@ pub struct Ui {
     owner: OwnerToken,
     sessions: Sessions,
     wrong: webui::WrongSecrets,
+    /// How this center serves MCP, for the Connect a harness card
+    /// (`/api/overview`'s `mcp`); stdio until the server says otherwise.
+    mcp: std::sync::OnceLock<Value>,
 }
 
 impl Ui {
@@ -69,7 +166,17 @@ impl Ui {
             owner: OwnerToken::new(center.dir()),
             sessions: Sessions::new(),
             wrong: webui::WrongSecrets::default(),
+            mcp: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Says how this center serves MCP: `mode` stdio, http or off, and for
+    /// http the endpoint's URL and, beyond loopback, the pin of the
+    /// certificate it serves.
+    pub fn set_mcp(&self, mode: &str, url: Option<String>, pin: Option<String>) {
+        let _ = self
+            .mcp
+            .set(json!({"mode": mode, "url": url, "fingerprint": pin}));
     }
 
     pub async fn serve(self: Arc<Self>, server: Server) {
@@ -194,7 +301,11 @@ impl Ui {
     }
 
     fn login_page(&self) -> Response {
-        webui::login_page("Owner token", "One center for all your machines.")
+        let tagline = format!(
+            "One center for all your machines. <code>{}</code> shows its owner token.",
+            html_text(&token_command(self.center.dir(), self.loopback))
+        );
+        webui::login_page("Owner token", &tagline)
     }
 
     /// Checks the token the login form posted. The answer is the session for
@@ -205,8 +316,12 @@ impl Ui {
         let given = webui::posted_secret(req);
         // A secret that also opens /mcp would give the agent's own token
         // the way into this UI (review round 7 of the center's sign-in).
+        let wrong = format!(
+            "{WRONG_TOKEN} `{}` shows it.",
+            token_command(self.center.dir(), self.loopback)
+        );
         let why = if given.is_empty() || !self.owner.ok(&given) {
-            Some(("wrong owner token", WRONG_TOKEN))
+            Some(("wrong owner token", wrong.as_str()))
         } else if crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given) {
             Some(("the owner token is also a harness token", SHARED_TOKEN))
         } else {
@@ -270,13 +385,14 @@ impl Ui {
                 "nodes": c.nodes_json(),
                 "alerts": c.alerts(),
                 "sessions": c.sessions_json(),
+                "mcp": self.mcp.get().cloned().unwrap_or_else(|| json!({"mode": "stdio"})),
             })),
             ("GET", "/api/stats") => Ok(c.stats_json()),
             ("GET", "/api/audit") => Ok(json!({"decisions": c.audit()})),
             ("GET", "/api/log") => Ok(c.log_json(&log_query(req)?)),
             // The node's own command list, as the node of this release has
             // it ([`NODE_HELP`]).
-            ("GET", "/api/help") => Ok(json!({"node": node_help()})),
+            ("GET", "/api/help") => Ok(json!({"node": node_help(), "center": center_help()})),
             ("POST", "/api/pair") => Ok(c.new_pairing()),
             ("POST", "/api/pair/status") => Ok(c.pairing_status(&s("code"))),
             ("POST", "/api/nodes/rename") => c
@@ -426,10 +542,9 @@ impl Ui {
             // The tokens made here, and the one of the settings, which only
             // a change of the settings removes.
             ("GET", "/api/tokens") => Ok(c.read(|st| {
-                let env = self
-                    .env_token
-                    .is_some()
-                    .then(|| json!({"id": "", "label": "NERVE_HARNESS_TOKEN", "settings": true}));
+                let env = self.env_token.is_some().then(
+                    || json!({"id": "", "label": "NERVE_CENTER_HARNESS_TOKEN", "settings": true}),
+                );
                 json!(
                     env.into_iter()
                         .chain(st.harness_tokens.iter().map(
@@ -798,13 +913,13 @@ mod tests {
         let body: Value = serde_json::from_slice(&r.body).unwrap();
         let mut listed: Vec<(String, String)> = Vec::new();
         for s in body["node"]["sections"].as_array().unwrap() {
-            assert!(!s["about"].as_str().unwrap().is_empty());
+            assert!(!s["line"].as_str().unwrap().is_empty());
             for c in s["cards"].as_array().unwrap() {
                 for held in c["holds"].as_array().unwrap() {
                     // Its sentence is the card's.
                     let held = held.as_str().unwrap().to_string();
                     let about = if c["name"] == held.as_str() {
-                        c["about"].as_str().unwrap().to_string()
+                        c["line"].as_str().unwrap().to_string()
                     } else {
                         String::new()
                     };
@@ -813,7 +928,7 @@ mod tests {
                 for v in c["verbs"].as_array().unwrap() {
                     listed.push((
                         v["name"].as_str().unwrap().to_string(),
-                        v["about"].as_str().unwrap().to_string(),
+                        v["line"].as_str().unwrap().to_string(),
                     ));
                 }
             }
@@ -1214,7 +1329,8 @@ mod tests {
         let help = &help[..help.find("\n}\n").unwrap()];
         for part in [
             "expander(\"Keyboard shortcuts\"",
-            "expander(\"Command reference\"",
+            "expander(\"nerve-node commands\"",
+            "more(`opts:${v.name}`",
             "[\"By topic\", \"A to Z\"]",
             "\"Filter the commands\"",
             "\"No command matches.\"",
@@ -1471,7 +1587,7 @@ mod tests {
             assert!(row.contains(part), "{part}");
         }
         let checker = &APP_JS[APP_JS.find("function checkerAuditRow(").unwrap()..];
-        assert!(checker.contains(r#"btn("Allow with this value", "", allow(false, pins.pin)"#));
+        assert!(checker.contains(r#"btn("Trust with this value", "", allow(false, pins.pin)"#));
         assert_eq!(
             APP_JS.matches(", ruleIn, ruleFieldsHint(ruleIn))").count(),
             3
@@ -1708,7 +1824,10 @@ mod tests {
                 ":remove`",
             ),
             ("btn(\"Switch on again\"", ":on`"),
-            ("btn(\"Delete\"", ":delete`"),
+            (
+                "btn(\"Remove\", \"danger-soft\", act(async () => { await api(\"POST\", \"/api/tokens/delete\"",
+                ":delete`",
+            ),
         ] {
             let lines: Vec<_> = APP_JS.lines().filter(|l| l.contains(label)).collect();
             assert!(!lines.is_empty(), "{label}");
@@ -1801,8 +1920,8 @@ mod tests {
         );
         // The pin of an argument, and its buttons, are named by the entry.
         assert!(APP_JS.contains("key: `${auditKey}:pin`"));
-        assert!(APP_JS.contains("`${auditKey}:Allow with this value`"));
-        assert!(APP_JS.contains("`${auditKey}:Allow as wildcard`"));
+        assert!(APP_JS.contains("`${auditKey}:Trust with this value`"));
+        assert!(APP_JS.contains("`${auditKey}:Trust as wildcard`"));
     }
 
     /// A save in flight pulls the focus back only while the focus is still
@@ -1985,9 +2104,13 @@ mod tests {
 
     /// A UI beyond loopback whose center's owner token is [`TOKEN`].
     fn locked(dir: &std::path::Path) -> Arc<Ui> {
+        locked_on(dir, false)
+    }
+
+    fn locked_on(dir: &std::path::Path, loopback: bool) -> Arc<Ui> {
         let c = center(dir);
         std::fs::write(crate::owner::path(dir), TOKEN).unwrap();
-        Ui::new(&c, None, false)
+        Ui::new(&c, None, loopback)
     }
 
     fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
@@ -2007,10 +2130,14 @@ mod tests {
 
     /// Posts the token as the login page does, and returns the answer.
     async fn sign_in(ui: &Ui, token: &str) -> Response {
+        sign_in_at(ui, HOST, token).await
+    }
+
+    async fn sign_in_at(ui: &Ui, host: (&str, &str), token: &str) -> Response {
         ui.request(req(
             "POST",
             "/login",
-            &[HOST, ("Content-Type", "application/json")],
+            &[host, ("Content-Type", "application/json")],
             &json!({ "token": token }).to_string(),
         ))
         .await
@@ -2070,18 +2197,69 @@ mod tests {
     #[tokio::test]
     async fn wrong_token_is_refused_without_echoing_it() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path());
-        let r = sign_in(&ui, "not-the-secret").await;
+        let local = ("Host", "127.0.0.1:7480");
+        let ui = locked_on(d.path(), true);
+        let r = sign_in_at(&ui, local, "not-the-secret").await;
         assert_eq!(r.status, 401);
         assert!(json(&r).get("session").is_none());
-        assert_eq!(json(&r)["error"], WRONG_TOKEN);
+        // The command names this center's own folder, which `owner-token`
+        // alone would not reach (round 1, correctness 11).
+        let command = format!(
+            "nerve-center owner-token --state-dir {}",
+            d.path().display()
+        );
+        assert_eq!(
+            json(&r)["error"],
+            format!("{WRONG_TOKEN} `{command}` shows it.")
+        );
+        // The login page names the command for this center, which runs from
+        // a folder of its own here: no sudo.
+        let page = body(&ui.request(req("GET", "/login", &[local], "")).await);
+        assert!(
+            page.contains(&format!("<code>{command}</code> shows its owner token")),
+            "{page}"
+        );
+        use std::path::Path;
+        let (installed, default) = (
+            Path::new("/var/lib/nerve-center"),
+            Path::new("/home/o/.local/state/nerve-center"),
+        );
+        let of = |state: &str, installed: Option<&Path>| {
+            token_command_of(Path::new(state), installed, default, true)
+        };
+        assert_eq!(
+            of("/var/lib/nerve-center", Some(installed)),
+            "sudo nerve-center owner-token"
+        );
+        assert_eq!(
+            of("/home/o/.local/state/nerve-center", None),
+            "nerve-center owner-token"
+        );
+        // With a center installed, `owner-token` alone goes to its folder.
+        assert_eq!(
+            of("/home/o/.local/state/nerve-center", Some(installed)),
+            "nerve-center owner-token --state-dir /home/o/.local/state/nerve-center"
+        );
+        assert_eq!(
+            of("/home/o/my centers/a", None),
+            "nerve-center owner-token --state-dir '/home/o/my centers/a'"
+        );
+        // Beyond loopback the page and the answer reach anyone: they name
+        // no folder (round 2, security 2).
+        let open = locked(d.path());
+        let folder = d.path().display().to_string();
+        let page = body(&open.request(req("GET", "/login", &[HOST], "")).await);
+        assert!(!page.contains(&folder), "{page}");
+        assert!(page.contains("--state-dir &lt;this center"), "{page}");
+        let r = sign_in(&open, "not-the-secret").await;
+        assert!(!body(&r).contains(&folder), "{}", body(&r));
         assert!(!body(&r).contains("not-the-secret"));
         // An empty post is no better.
-        assert_eq!(sign_in(&ui, "").await.status, 401);
-        let r = ui.request(req("POST", "/login", &[HOST], "")).await;
+        assert_eq!(sign_in_at(&ui, local, "").await.status, 401);
+        let r = ui.request(req("POST", "/login", &[local], "")).await;
         assert_eq!(r.status, 401);
         // The token is not accepted in a URL.
-        let mut q = req("POST", "/login", &[HOST], "");
+        let mut q = req("POST", "/login", &[local], "");
         q.query = format!("token={TOKEN}");
         assert_eq!(ui.request(q).await.status, 401);
     }
@@ -2308,7 +2486,7 @@ mod tests {
             .await;
         let listed = json(&r);
         assert_eq!(listed[0]["settings"], true, "{listed}");
-        assert_eq!(listed[0]["label"], "NERVE_HARNESS_TOKEN");
+        assert_eq!(listed[0]["label"], "NERVE_CENTER_HARNESS_TOKEN");
         assert_eq!(listed[1]["label"], "a");
     }
 
@@ -2989,6 +3167,91 @@ mod tests {
     /// No script of the center's page builds HTML from text: what a node
     /// wrote goes into text nodes only, and the page's session is readable
     /// by its scripts. The page has no inline script.
+    /// The overview tells the page how this center serves MCP, for the
+    /// Connect a harness card: stdio unless the server says otherwise, and
+    /// for HTTP the URL and, beyond loopback, the pin to trust.
+    #[tokio::test]
+    async fn the_overview_says_how_harnesses_connect() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(d.path()), None, true);
+        let h = ("Host", "127.0.0.1:7480");
+        let session = owner_login(&ui, h).await;
+        let ck = session_token(&session);
+        let get = req("GET", "/api/overview", &[h, (SESSION, &ck)], "");
+        let mcp = |r: Response| serde_json::from_slice::<Value>(&r.body).unwrap()["mcp"].clone();
+        assert_eq!(mcp(ui.request(get.clone()).await)["mode"], "stdio");
+        ui.set_mcp(
+            "http",
+            Some("https://0.0.0.0:7481/mcp".into()),
+            Some("PIN".into()),
+        );
+        let m = mcp(ui.request(get).await);
+        assert_eq!(m["url"], "https://0.0.0.0:7481/mcp");
+        assert_eq!(m["fingerprint"], "PIN");
+    }
+
+    /// The page's words and parts for a new user: Connect a harness with its
+    /// token and what to paste, the folder after a pairing, the checker's
+    /// Skip the model and Trust this, the way from a blocklist refusal to
+    /// its switch, a banner for a model that is on and does not run, and
+    /// folds for the detail (H6, H7, H10, H11, F4, F5).
+    #[test]
+    fn the_page_has_the_short_words_and_the_folds() {
+        for want in [
+            r#"el("span", { class: "name" }, "Connect a harness")"#,
+            "Make a token",
+            "claude mcp add --transport http nerve",
+            // `rwx`: in folder mode a command runs only where the folder has
+            // `x`, so `rw` would hand over a folder that refuses `git status`
+            // (round 4, correctness 3). The whole word, quote and all.
+            "folder add ~/project rwx\"",
+            "is paired",
+            "Skip the model",
+            "Trust this",
+            "Trust as wildcard",
+            "Switch this entry off for this machine",
+            "The decision model is on but does not run",
+            "every call it checks is refused. The Log page says why.",
+            "With the model on and none installed",
+            // With fail closed off the page says the calls pass unjudged,
+            // and does not fold that switch away (round 1, security 2).
+            "and fail closed is off: its calls pass unjudged",
+            "every checked call passes unjudged (fail closed is off)",
+            "fail closed is off, so a call it cannot judge runs",
+            // The Help page's harness card follows its token, and says what
+            // the Claude Code line costs (round 1, security 5 and 6).
+            "if (key !== helpKey) { helpParts = null; helpKey = key; }",
+            "the Claude Code line puts the token in your shell's history",
+            "m.fail_closed ? null : el(\"label\", { class: \"switch\" }, failClosed",
+            "more(\"settings:center\"",
+            "more(\"settings:machines\", \"Advanced",
+            "more(\"checker:advanced\", \"Advanced\"",
+        ] {
+            assert!(APP_JS.contains(want), "{want}");
+        }
+        // One word for taking a thing away, and the checker's rules are not
+        // allow rules: a node's allow rule lets a call run.
+        for gone in [
+            "\"Delete\"",
+            "\"Allow rules\"",
+            "Added a checker allow rule",
+            "~/project rw\"",
+        ] {
+            assert!(!APP_JS.contains(gone), "{gone}");
+        }
+    }
+
+    /// One line first (plan 4.1): every subtitle, banner and note of the
+    /// page says its short part in at most 120 characters; the rest is in a
+    /// fold.
+    #[test]
+    fn every_subtitle_is_short() {
+        assert_eq!(
+            nerve_transport::webui::long_subtitles(APP_JS, 120),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn the_page_builds_no_html_from_text() {
         assert_eq!(

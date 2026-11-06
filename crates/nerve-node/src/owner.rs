@@ -52,7 +52,8 @@ pub const OWNER_ENV: &str = "NERVE_OWNER";
 /// Set to `1` by the node for a command it runs for an owner whose own
 /// input is a terminal's: the input the command gets is the connection's,
 /// and only an owner at a terminal is asked what needs one (the keyring
-/// that `setup` installs as root, crate::keyring_setup).
+/// that `setup` or `config set machine.secret_storage keyring` installs as
+/// root, crate::keyring_setup).
 pub const TERMINAL_ENV: &str = "NERVE_OWNER_TERMINAL";
 
 /// Set to `web` by the node for a command it runs for an owner from the web
@@ -260,7 +261,9 @@ pub fn refused(cmd: &Cmd) -> Option<String> {
             "setup",
             "it can install a system keyring and restart the service",
         ),
-        Cmd::Sudo(SudoCmd::On) => (
+        Cmd::Sudo {
+            cmd: Some(SudoCmd::On),
+        } => (
             "sudo on",
             if cfg!(windows) {
                 "it lets commands run with an administrator's rights"
@@ -289,7 +292,7 @@ pub fn needs_admin(cmd: &Cmd) -> bool {
             ConfigCmd::Set { key, .. }
             | ConfigCmd::Unset { key }
             | ConfigCmd::Add { key, .. }
-            | ConfigCmd::Remove { key, .. },
+            | ConfigCmd::Rm { key, .. },
         ) => ROOT_ONLY.contains(&key.as_str()),
         c => refused(c).is_some(),
     }
@@ -355,7 +358,16 @@ fn wanted(cli: &Cli) -> bool {
     }
     let paths = NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
     let layout = crate::service::Layout::system();
-    paths == layout.paths && crate::service::check_access(&paths).is_err()
+    paths == layout.paths
+        && crate::service::check_access(&paths).is_err()
+        && !(matches!(cli.cmd, Cmd::Status) && !service_runs(&layout))
+}
+
+/// Whether the installed service runs. A stopped one has no owner endpoint
+/// to answer `status`, which then says the service's state here: that
+/// needs no rights on the node's folders.
+fn service_runs(layout: &crate::service::Layout) -> bool {
+    crate::cli::service_status(layout).is_ok_and(|s| s["state"] == "running")
 }
 
 /// Runs `cli`'s command through the owner endpoint when this process may not
@@ -387,9 +399,16 @@ pub fn forward_if_needed(cli: &Cli) -> Option<i32> {
     if let Some(file) = FileJob::of(&cli.cmd, std::env::current_dir().ok()) {
         return Some(rt.block_on(forward_file(&paths, args, cwd, file, cli.json)));
     }
-    let input = input_for(&cli.cmd);
+    let stdin_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let input = input_for(&cli.cmd, stdin_is_terminal, || {
+        crate::cli::proxy_password(&mut std::io::stdout())
+    });
+    let input = match input {
+        Ok(i) => i,
+        Err(e) => return Some(fail(cli.json, &e)),
+    };
     // The command is told whether the input it gets is a terminal's.
-    let terminal = terminal_of(&input, std::io::IsTerminal::is_terminal(&std::io::stdin()));
+    let terminal = terminal_of(&input, stdin_is_terminal);
     Some(rt.block_on(forward(&paths, args, cwd, input, terminal, cli.json)))
 }
 
@@ -403,13 +422,36 @@ pub enum Input {
     Text(String),
 }
 
-/// The input [`forward_if_needed`] passes for `cmd`.
-pub fn input_for(cmd: &Cmd) -> Input {
-    if reads_input(cmd) {
+/// The input [`forward_if_needed`] passes for `cmd`; `stdin_is_terminal`:
+/// this process's input is a terminal's. A proxy password alone is asked
+/// here (`ask`), without echo: the node's command gets a pipe, which would
+/// read it as typed, shown on the screen.
+pub fn input_for(
+    cmd: &Cmd,
+    stdin_is_terminal: bool,
+    ask: impl FnOnce() -> Result<String, String>,
+) -> Result<Input, String> {
+    use crate::cli::ProxyCmd;
+    if let Cmd::Proxy {
+        cmd: Some(ProxyCmd::Set { url, headers, .. }),
+    } = cmd
+        && stdin_is_terminal
+        && crate::cli::proxy_wants_password(url)
+        && !headers.iter().any(|h| h == "-")
+    {
+        // The installed node on Windows takes no proxy password, so it is
+        // not asked for one first (round 4, security 1).
+        #[cfg(windows)]
+        if crate::secrets::windows_service(&crate::service::Layout::system().paths) {
+            return Err(crate::secrets::proxy_windows_refusal());
+        }
+        return Ok(Input::Text(format!("{}\n", ask()?)));
+    }
+    Ok(if reads_input(cmd) {
         Input::Stdin
     } else {
         Input::None
-    }
+    })
 }
 
 /// The backup file of an owner's `backup` or `restore`, which this
@@ -442,7 +484,8 @@ impl FileJob {
             _ => return None,
         };
         let whole = |p: &Path| match &cwd {
-            Some(c) if p.is_relative() => c.join(p),
+            // `-` is stdin, no file.
+            Some(c) if p.is_relative() && p != Path::new("-") => c.join(p),
             _ => p.to_path_buf(),
         };
         Some(FileJob {
@@ -453,26 +496,29 @@ impl FileJob {
     }
 }
 
-/// Whether `cmd` reads this process's input: the questions of `setup`, the
-/// question of `center add` without `--yes`, what `proxy set` takes from
-/// stdin, and the schema `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
+/// Whether `cmd` reads this process's input: the questions of `setup` and
+/// of `config set machine.secret_storage keyring`, the question of `center
+/// add` without `--yes`, what `proxy set` takes from stdin, and the schema
+/// `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
     use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
         Cmd::Setup => true,
-        Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
-            spec.params_stdin || spec.result_stdin
-        }
-        Cmd::Center(CenterCmd::Add {
-            yes, link_stdin, ..
-        }) => !yes || *link_stdin,
-        Cmd::Proxy(ProxyCmd::Set {
-            password_stdin,
-            headers_stdin,
+        Cmd::Config(c) => crate::cli::moves_keys_to_keyring(c),
+        Cmd::Cap {
+            cmd: Some(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }),
             ..
-        }) => *password_stdin || *headers_stdin,
+        } => spec.params_stdin() || spec.result_stdin(),
+        Cmd::Center {
+            cmd: Some(CenterCmd::Add { yes, link, .. }),
+        } => !yes || link == "-",
+        // A URL with a user name and no password reads the password, and
+        // `--header -` the headers.
+        Cmd::Proxy {
+            cmd: Some(ProxyCmd::Set { url, headers, .. }),
+        } => headers.iter().any(|h| h == "-") || crate::cli::proxy_wants_password(url),
         _ => false,
     }
 }
@@ -555,9 +601,10 @@ pub fn forwarded_args(
 /// The folder or file `cmd` names, which the node gets as a whole path.
 fn named_path(cmd: &Cmd) -> Option<&PathBuf> {
     match cmd {
-        Cmd::Folder(
-            FolderCmd::Add { path, .. } | FolderCmd::Set { path, .. } | FolderCmd::Rm { path, .. },
-        ) => Some(path),
+        Cmd::Folder {
+            cmd: Some(FolderCmd::Add { path, .. } | FolderCmd::Rm { path, .. }),
+            ..
+        } => Some(path),
         Cmd::Backup { file, .. } | Cmd::Restore { file, .. } => Some(file),
         _ => None,
     }
@@ -565,7 +612,7 @@ fn named_path(cmd: &Cmd) -> Option<&PathBuf> {
 
 /// Which word of `given` is the path `path` the command was parsed with:
 /// the one that, put in place by another, changes that path. A command word
-/// or another argument may be spelt like it (`folder add folder +rwx`).
+/// or another argument may be spelt like it (`folder add folder rwx`).
 fn path_word(given: &[std::ffi::OsString], path: &Path) -> Option<usize> {
     const OTHER: &str = "nerve-forwarded-path";
     (0..given.len())
@@ -1435,23 +1482,23 @@ async fn locked_meanwhile(locked: &mut Option<tokio::sync::watch::Receiver<u64>>
 
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
-    use crate::cli::{
-        CapCmd, CenterCmd, ConfigCmd, ProviderCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd,
-    };
+    use crate::cli::ConfigCmd;
     matches!(
         cmd,
         Cmd::Status
             | Cmd::Audit { clear: None, .. }
             | Cmd::Log { clear: None, .. }
-            | Cmd::Center(CenterCmd::Ls)
-            | Cmd::Folder(FolderCmd::Ls { .. })
-            | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
+            | Cmd::Center { cmd: None }
+            | Cmd::Mode { mode: None, .. }
+            | Cmd::Network { state: None, .. }
+            | Cmd::Folder { cmd: None, .. }
+            | Cmd::Rule { cmd: None, .. }
+            | Cmd::Cap { cmd: None, .. }
+            | Cmd::Provider { cmd: None }
             | Cmd::Config(ConfigCmd::Get { .. })
-            | Cmd::Proxy(ProxyCmd::Ls)
-            | Cmd::Relay(RelayCmd::Ls)
-            | Cmd::Sudo(SudoCmd::Status)
-            | Cmd::Service(ServiceCmd::Status)
+            | Cmd::Proxy { cmd: None }
+            | Cmd::Relay { cmd: None }
+            | Cmd::Sudo { cmd: None }
     ) || matches!(cmd, Cmd::Ui { cmd } if crate::cli::ui::only_reads(cmd))
 }
 
@@ -1671,8 +1718,8 @@ fn spawn<F: HandedFd>(
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
             .env_remove(crate::cli::DESKTOP_USER_SID)
-            .env_remove("NERVE_CONFIG_DIR")
-            .env_remove("NERVE_STATE_DIR")
+            .env_remove(crate::paths::CONFIG_DIR_VAR)
+            .env_remove(crate::paths::STATE_DIR_VAR)
             .env_remove(crate::caller_file::OWNER_FILE_ENV)
             .env_remove(TERMINAL_ENV)
             .env_remove(VIA_ENV)
@@ -2275,24 +2322,26 @@ mod tests {
             &["status"][..],
             &["audit", "--last", "200"],
             &["log", "--problems"],
-            &["center", "ls"],
-            &["rule", "ls", "--center", "home"],
+            &["center"],
+            &["mode"],
+            &["network"],
+            &["rule", "--center", "home"],
             &["config", "get", "log.level"],
-            &["relay", "ls"],
-            &["service", "status"],
-            &["cap", "ls"],
-            &["cap", "provider", "ls"],
+            &["relay"],
+            &["cap"],
+            &["provider"],
         ] {
             assert!(only_reads(&cli(args).cmd), "{args:?}");
         }
         for args in [
             &["config", "set", "log.level", "debug"][..],
             &["rule", "add", "allow", "git status"],
-            &["center", "pause", "--center", "home"],
+            &["center", "pause", "home"],
             &["panic"],
             &["log", "clear"],
             &["audit", "clear"],
-            &["cap", "provider", "rm", "desk"],
+            &["provider", "rm", "desk"],
+            &["network", "off"],
         ] {
             assert!(!only_reads(&cli(args).cmd), "{args:?}");
         }
@@ -2327,18 +2376,18 @@ mod tests {
         assert_eq!(refused(&cli(&["setup"]).cmd).is_some(), cfg!(windows));
         for args in [
             &["status"][..],
-            &["center", "ls"],
+            &["center"],
             &["center", "add", "nerve://pair?x", "--yes"],
             &["rule", "add", "allow", "ls"],
-            &["mode", "set", "folder"],
+            &["mode", "folder"],
             &["config", "set", "log.level", "debug"],
             &["sudo", "off"],
-            &["sudo", "status"],
+            &["sudo"],
             &["audit", "--last", "5"],
             &["log", "--follow"],
             &["panic"],
             &["unlock"],
-            &["proxy", "rm"],
+            &["proxy", "off"],
             // With the file the owner's program hands over (item 14).
             &["backup", "/tmp/b"],
             &["restore", "/tmp/b"],
@@ -2362,7 +2411,6 @@ mod tests {
         }
         for args in [
             &["service", "restart"][..],
-            &["service", "status"],
             &["config", "set", "log.level", "debug"],
             &["rule", "add", "deny", "rm"],
             &["sudo", "off"],
@@ -2427,13 +2475,13 @@ mod tests {
             "folder",
             "add",
             "src",
-            "+r",
+            "r",
         ];
         let c = cli(&given);
         let whole = home.join("src");
         assert_eq!(
             forwarded_args(&c, os(&given), Some(home.clone())).unwrap(),
-            ["folder", "add", &*whole.to_string_lossy(), "+r"]
+            ["folder", "add", &*whole.to_string_lossy(), "r"]
         );
         // Without a folder to make it whole, it is refused.
         assert!(forwarded_args(&c, os(&given), None).is_err());
@@ -2476,17 +2524,15 @@ mod tests {
         // A command word spelt like the path stays a word: the path is
         // the argument the command was parsed with.
         for (given, at) in [
-            (vec!["folder", "add", "folder", "+rwx"], 2),
-            (vec!["folder", "add", "add", "+r"], 2),
-            (vec!["folder", "set", "set", "-w"], 2),
+            (vec!["folder", "add", "folder", "rwx"], 2),
+            (vec!["folder", "add", "add", "r"], 2),
             (vec!["folder", "rm", "rm"], 2),
             (vec!["backup", "backup", "--overwrite"], 1),
             (vec!["restore", "restore"], 1),
             // After `--` too: the words there go as they are, the path
             // among them not.
-            (vec!["folder", "add", "--", "srv", "+rw"], 3),
+            (vec!["folder", "add", "--", "srv", "rw"], 3),
             (vec!["folder", "rm", "--", "srv"], 3),
-            (vec!["folder", "set", "--", "srv", "-w"], 3),
         ] {
             let mut want: Vec<String> = given.iter().map(|w| w.to_string()).collect();
             want[at] = home.join(given[at]).display().to_string();
@@ -2526,9 +2572,13 @@ mod tests {
         assert!(!reads_input(
             &cli(&["center", "add", "nerve://pair?x", "--yes"]).cmd
         ));
+        assert!(reads_input(&cli(&["center", "add", "-", "--yes"]).cmd));
+        // A user name without a password, or `--header -`, reads them.
+        assert!(reads_input(&cli(&["proxy", "set", "http://u@h:1"]).cmd));
         assert!(reads_input(
-            &cli(&["proxy", "set", "http://u@h:1", "--password-stdin"]).cmd
+            &cli(&["proxy", "set", "http://h:1", "--header", "-"]).cmd
         ));
+        assert!(!reads_input(&cli(&["proxy", "set", "http://u:p@h:1"]).cmd));
         assert!(!reads_input(&cli(&["proxy", "set", "http://h:1"]).cmd));
         // A capability's schema comes on stdin when the owner says so.
         for (args, reads) in [
@@ -2539,13 +2589,13 @@ mod tests {
                     "a.b",
                     "--effect",
                     "read",
-                    "--params-stdin",
+                    "--params=-",
                     "--",
                     "x",
                 ][..],
                 true,
             ),
-            (&["cap", "edit", "a.b", "--result-stdin"], true),
+            (&["cap", "edit", "a.b", "--result=-"], true),
             (
                 &[
                     "cap", "add", "a.b", "--effect", "read", "--params", "none", "--", "x",
@@ -2558,8 +2608,23 @@ mod tests {
         }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
-        assert!(matches!(input_for(&cli(&["setup"]).cmd), Input::Stdin));
-        assert!(matches!(input_for(&cli(&["status"]).cmd), Input::None));
+        // So does the move of the keys into a keyring, which offers one.
+        assert!(reads_input(
+            &cli(&["config", "set", "machine.secret_storage", "keyring"]).cmd
+        ));
+        assert!(!reads_input(
+            &cli(&["config", "set", "machine.secret_storage", "file"]).cmd
+        ));
+        assert!(!reads_input(
+            &cli(&["config", "set", "log.level", "keyring"]).cmd
+        ));
+        let input = |args: &[&str], terminal| {
+            input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
+        };
+        assert!(matches!(input(&["setup"], true), Input::Stdin));
+        assert!(matches!(input(&["status"], true), Input::None));
+        let keyring = ["config", "set", "machine.secret_storage", "keyring"];
+        assert!(terminal_of(&input(&keyring, true), true));
         for args in [
             &["status"][..],
             &["rule", "add", "allow", "ls"],
@@ -2567,6 +2632,40 @@ mod tests {
         ] {
             assert!(!reads_input(&cli(args).cmd), "{args:?}");
         }
+    }
+
+    /// A proxy password typed at a terminal is asked here, hidden, and goes
+    /// to the node as text: the node's command reads a pipe, which shows
+    /// what is typed. From a pipe, or with headers after it, the input goes
+    /// on as it comes.
+    #[test]
+    fn a_proxy_password_at_a_terminal_is_asked_here() {
+        let input = |args: &[&str], terminal| {
+            input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
+        };
+        let set = ["proxy", "set", "http://u@h:1"];
+        // The installed node on Windows takes no proxy password, so a
+        // terminal is not asked for one there.
+        #[cfg(windows)]
+        {
+            let e = input_for(&cli(&set).cmd, true, || Ok("pw".into()));
+            assert!(matches!(e, Err(e) if e == crate::secrets::proxy_windows_refusal()));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
+            assert!(!terminal_of(&input(&set, true), true));
+            // A password not given ends it here.
+            let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
+            assert!(matches!(e, Err(e) if e == "no password given"));
+        }
+        assert!(matches!(input(&set, false), Input::Stdin));
+        let headers = ["proxy", "set", "http://u@h:1", "--header", "-"];
+        assert!(matches!(input(&headers, true), Input::Stdin));
+        assert!(matches!(
+            input(&["proxy", "set", "http://u:p@h:1"], true),
+            Input::None
+        ));
     }
 
     /// The owner pipe lets in SYSTEM, the administrators, the node's account,

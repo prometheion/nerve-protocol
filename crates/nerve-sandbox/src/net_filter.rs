@@ -1,5 +1,5 @@
 //! The seccomp filter that keeps a command off the network, for the owner's
-//! network switch (`nerve-node folder network off`): a command and all it
+//! network switch (`nerve-node network off`): a command and all it
 //! starts make no socket but a unix one. The socket a call would make is
 //! refused where it is made, whatever it would be for (TCP, UDP, raw,
 //! packet, netlink and every other domain), so no address is ever judged.

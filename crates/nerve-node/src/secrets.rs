@@ -126,14 +126,20 @@ fn absolute(p: &Path) -> std::path::PathBuf {
 /// `proxy set`. The node keeps them nowhere else.
 pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: a proxy's header values and password in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The node keeps them nowhere else";
 
+/// What the installed node on Windows says to a proxy that needs a header
+/// value or a password ([`PROXY_WINDOWS_SERVICE`]).
+pub fn proxy_windows_refusal() -> String {
+    format!(
+        "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
+    )
+}
+
 /// Puts the proxy's header values into the node's keyring entry, replacing
 /// what it held. The installed node on Windows refuses, before it asks the
 /// keyring ([`PROXY_WINDOWS_SERVICE`]).
 pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> Result<(), String> {
     if windows_service(paths) {
-        return Err(format!(
-            "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
-        ));
+        return Err(proxy_windows_refusal());
     }
     let entry = Entry::proxy(paths);
     let map: BTreeMap<&str, &str> = headers
@@ -153,7 +159,7 @@ pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> R
 /// or one without a value for a name, is an error that names the entry. On
 /// the installed node on Windows named headers are an error without a keyring
 /// call: whatever an administrator's keyring holds, the service does not find
-/// it, and the same answer must come from the service and from `proxy ls`.
+/// it, and the same answer must come from the service and from `proxy`.
 pub fn proxy_headers(paths: &NodePaths, names: &[String]) -> Result<Vec<(String, String)>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
@@ -1002,10 +1008,10 @@ impl Secrets for NodeSecrets {
                     // keyring for the life of the process: a running node
                     // that met one asks no keyring installed after it.
                     SecretStorage::Keyring if !self.locks && store::failed() => {
-                        " (this running node found no keyring and does not look again until it is restarted; on a Linux without a desktop, `nerve-node setup` installs one, then restart the node: `nerve-node service restart`)"
+                        " (this running node found no keyring and does not look again until it is restarted; on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install one; then restart the node, `nerve-node service restart`, and run it again)"
                     }
                     SecretStorage::Keyring => {
-                        " (on a Linux without a desktop, `nerve-node setup` can install a keyring)"
+                        " (on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install a keyring)"
                     }
                     SecretStorage::File => "",
                 };
@@ -1618,11 +1624,29 @@ mod tests {
             e.contains("stay in their files, and nothing was changed"),
             "{e}"
         );
-        assert!(e.contains("nerve-node setup"), "{e}");
+        // The command that offers a keyring: setup asks none while the keys
+        // are in files.
+        assert!(
+            e.contains("`nerve-node config set machine.secret_storage keyring` at a terminal"),
+            "{e}"
+        );
         assert_eq!(s.config().machine.secret_storage, SecretStorage::File);
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert!(paths.config_key().exists() && paths.key_file("home").exists());
         assert!(!paths.keys_moving().exists());
+        // A CLI that moves them itself, not the running node: the same
+        // command, and no restart.
+        drop(s);
+        let mut cli = cli_store(&paths);
+        store::set_unreachable(true);
+        let e = set_storage(&mut cli, SecretStorage::Keyring).unwrap_err();
+        store::set_unreachable(false);
+        assert!(
+            e.contains("`nerve-node config set machine.secret_storage keyring` at a terminal")
+                && !e.contains("restart"),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert_eq!(in_keyring(&paths, Key::Config), None);
         assert!(open(&paths).is_ok());
     }

@@ -13,24 +13,26 @@ In `folder` and `user` mode, allow rules do nothing. The mode decides.
 
 The commands below are the CLI's, on Linux. On Windows the
 [desktop app](desktop.md)'s **Permissions** page adds, edits and removes the
-rules (**Allowed commands**, **Forbidden commands**, the sudo list), and puts
-the guard on (**Add the guard**).
+rules (**Allowed commands**, **Forbidden commands**, the sudo list); the
+guard is built in.
 
 ## Allow a command
 
 ```sh
 nerve-node rule add allow 'git status'
-nerve-node rule add allow 'git status' --wildcard
+nerve-node rule add allow 'git status *'
 ```
 
-The first allows that exact command line. The second allows `git` with
-anything after it. A rule applies to one command line, so `git status` does not
-allow `git status --short`. Use `--wildcard` for that.
+The first allows that exact command line. The second allows `git status` with
+anything after it: a trailing ` *` is the wildcard, and `rule add` says what it
+covers. A rule applies to one command line, so `git status` does not allow
+`git status --short`. `'rm *'` allows every `rm` command, not the files of a
+folder.
 
 ## Deny a command
 
 ```sh
-nerve-node rule add deny 'rm' --wildcard
+nerve-node rule add deny 'rm *'
 nerve-node rule add deny 'git push origin main'
 ```
 
@@ -42,7 +44,7 @@ sandbox. (The guard's own rules read each command of a line; see below.)
 ## The guard against changing the node
 
 Every new pairing starts with deny rules that keep its commands off this
-node itself. `rule ls deny` shows them; remove any you do not want.
+node itself. `rule deny` shows them; remove any you do not want.
 
 | Rule | Refuses |
 |---|---|
@@ -138,19 +140,13 @@ straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
 part of the name (`pkill nerve`, which matches the node too), and `reg import` or `regedit` of a file that holds the service's key.
 
 A rule of the guard is written `guard:<name>`, and only these three exist.
-They belong on the deny list; the allow list refuses them.
-
-```sh
-nerve-node rule guard --center lab   # puts back the ones a pairing lacks
-```
-
-A pairing that lacks some of them (you removed them) gets them back with
-`rule guard`, and the desktop app offers it on **Permissions**. A pairing
-made before the guard read commands holds its rules as text patterns. They
-work on as they did, and the app says so (**The guard still reads commands as
-text**), until `rule guard` (or **Update the guard**) takes them off and puts
-the three rules in their place. Those older patterns hold tabs and
-line breaks: `rule ls` and the app's rule lists write them as `\t`, `\r` and
+The guard is built in: every pairing has its rules on top of its own deny
+rules, the node keeps them current, and none can be removed. `rule` shows it
+as one line (`guard: 8 rules, built in`). A pairing made before the guard
+read commands may still hold its rules as text patterns: they are deny rules
+of its own now, beside the guard, and `rule rm` takes them off. Those older
+patterns hold tabs and
+line breaks: `rule` and the app's rule lists write them as `\t`, `\r` and
 `\n`, so a rule stays one line, and `rule rm` and `rule edit` take the entry
 as it is listed there (the new entry of `rule edit` too). `config add` and
 the app's add field take the character itself: the listed text of such a
@@ -168,22 +164,23 @@ opens ([protected paths](protected-paths.md)).
 ## List, change and remove rules
 
 ```sh
-nerve-node rule ls            # all three lists
-nerve-node rule ls allow
+nerve-node rule            # all three lists
+nerve-node rule allow
 nerve-node rule edit allow 'exec.run:git status' 'git status --short'
 nerve-node rule rm allow 'git status'
-nerve-node rule rm allow 'git status' --wildcard
+nerve-node rule rm 'git status *'
 ```
 
 `rule edit` changes one entry in its place, as one change in the audit: the
-entry as `rule ls` prints it, then what it becomes. That is an entry in the
+entry as `rule` prints it, then what it becomes. That is an entry in the
 same form (`'exec.run:git *'`, `'fs.read:~/notes/*'`), or a plain command
 line, which becomes the rule `rule add` makes of it. It works on every list,
 and on the rules of the guard too. The desktop app's Permissions page edits a
 rule the same way (the pencil beside it).
 
-`rule rm` takes the same arguments as `rule add`. It also takes an entry as
-`rule ls` prints it, such as `'exec.run:git *'`. When the arguments could mean two entries on the list, `rule rm`
+`rule rm` takes the command line `rule add` was given, or an entry as `rule`
+prints it, such as `'exec.run:git *'`. The list is needed only when the entry
+is on two lists. When the text could mean two entries on the list, `rule rm`
 removes none and tells you the two commands that remove them one after the
 other.
 
@@ -192,10 +189,10 @@ other.
 `rule add` writes command rules and rules on an action's arguments
 (`lamp.set:room=office`, see above). It refuses an entry in the other pattern
 forms (`fs.read:...`, `fs:...`, and also `exec.run:...` and `exec:...`, the
-form `rule ls` prints), which would never match as a command. Give `rule add` the
+form `rule` prints), which would never match as a command. Give `rule add` the
 bare command (`'git *'`), not that form. (`rule rm` does take it.) For files and
 other actions, add the rule to the policy by name. `lab` is the center's name on this machine (see
-`nerve-node center ls`).
+`nerve-node center`).
 
 ```sh
 nerve-node config add center.lab.policy.allow 'fs.read:~/notes/*'
@@ -206,15 +203,17 @@ The web UI's [Audit](web-ui.md#audit) page writes the same rules with four
 buttons. That needs the [settings grant](settings-grant.md).
 
 `--action` makes the rule such a button makes for an audit entry of that
-action: the entry's path, or the folder it is in with `--wildcard`. An action
-without a path takes `''`, and covers its capability with `--wildcard`.
-`--pin FIELD=VALUE` holds such a rule to one argument of the call, as the
-audit buttons that pin one do (see below).
+action: the entry's path, or a folder and all below it as `/srv/data/*`. An
+action without a path takes `''`, and covers its capability as `'*'`.
+`--arg FIELD=VALUE` holds such a rule to one argument of the call, as the
+audit buttons that pin one do (see below). `--exact` takes the entry's text as
+it is, a `*` at its end too, as the **Allow** and **Deny** buttons do: an
+agent's `rm -rf *` stays that one command.
 
 ```sh
 nerve-node rule add allow /srv/data/report.txt --action fs.read
-nerve-node rule add deny /srv/data/report.txt --action fs.write --wildcard   # fs.write:/srv/data/*
-nerve-node rule add deny '' --action lamp.set --pin room=bedroom              # lamp.set:room=bedroom
+nerve-node rule add deny '/srv/data/*' --action fs.write                 # fs.write:/srv/data/*
+nerve-node rule add deny '' --action lamp.set --arg room=bedroom          # lamp.set:room=bedroom
 ```
 
 ## Rules on an action's arguments
@@ -238,7 +237,7 @@ nerve-node rule add deny  'notes.save:path~~/private/*'
 | `label~desk*` | is a string the glob matches |
 
 - A field is a top-level argument of the action, as its schema in
-  `cap ls --json` names it. A value is read as that argument's type.
+  `cap --json` names it. A value is read as that argument's type.
 - A `,` in a value is written `\,`, a `\` before it `\\`. The `,` inside a
   glob's `{a,b}` or `[...]` needs none. In the value of `=` and `!=` a `[` or
   `{` is a character like any other.
@@ -275,7 +274,7 @@ one the schema lists), the rule stays and decides as written, which is no
 longer what you meant. Where its argument is gone it fails closed: as a deny
 rule it refuses every call of that action, as an allow rule it covers none.
 Where its value is no longer listed, `room=bedroom` holds for no call. `rule
-ls` says so after the rules, `rule ls --json` lists them under `stale`, and the
+ls` says so after the rules, `rule --json` lists them under `stale`, and the
 desktop app marks the row:
 
 ```text
@@ -362,10 +361,10 @@ rule, or `/` in the path.
 ```sh
 nerve-node cap set exec.run off
 nerve-node cap set fs hidden
-nerve-node cap ls
+nerve-node cap
 ```
 
-`cap ls` lists every capability, each action with its effect and, per
+`cap` lists every capability, each action with its effect and, per
 center, whether it may use it now and the switch you set
 ([providers](providers.md#see-what-is-there)).
 

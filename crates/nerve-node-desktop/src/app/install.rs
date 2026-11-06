@@ -113,23 +113,19 @@ impl Ctl {
             );
             i.set_step("working".into());
         });
-        // The service's state needs no rights.
-        self.command(
-            vec!["service".into(), "status".into()],
-            None,
-            |c, answer| {
-                let v = answer.unwrap_or_default();
-                let app = v["present"] == true;
-                let installed = v["installed"] == true;
-                let version = v["version"].as_str().unwrap_or_default().to_string();
-                c.with_install(|i| {
-                    i.set_installed_version(version.as_str().into());
-                    i.set_newer(app && newer(&i.get_version(), &version));
-                    i.set_node_only(adds_the_app(installed, app, cfg!(windows)));
-                    i.set_step(if app { "installed" } else { "welcome" }.into());
-                });
-            },
-        );
+        // The service's state, in `status`, needs no rights.
+        self.command(vec!["status".into()], None, |c, answer| {
+            let v = answer.unwrap_or_default()["service"].clone();
+            let app = v["present"] == true;
+            let installed = v["installed"] == true;
+            let version = v["version"].as_str().unwrap_or_default().to_string();
+            c.with_install(|i| {
+                i.set_installed_version(version.as_str().into());
+                i.set_newer(app && newer(&i.get_version(), &version));
+                i.set_node_only(adds_the_app(installed, app, cfg!(windows)));
+                i.set_step(if app { "installed" } else { "welcome" }.into());
+            });
+        });
     }
 
     /// The app at its installed place: its service's state is asked for
@@ -221,10 +217,10 @@ impl Ctl {
                             i.set_did(shared(did));
                             i.set_warnings(shared(warn));
                         });
-                        c.command(vec!["service".into(), "status".into()], None, |c, v| {
+                        c.command(vec!["status".into()], None, |c, v| {
                             let version = v
                                 .ok()
-                                .and_then(|v| v["version"].as_str().map(str::to_string))
+                                .and_then(|v| v["service"]["version"].as_str().map(str::to_string))
                                 .unwrap_or_default();
                             c.with_install(|i| {
                                 if i.get_action() != "uninstall" {

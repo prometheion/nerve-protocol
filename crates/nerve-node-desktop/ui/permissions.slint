@@ -9,7 +9,7 @@ import { Store, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Divider, IconTile,
     Segmented, Picker, SectionTitle, OptionTile, Chip, ListRow, TextField, Switch, Icon, Code, Reveal,
-    PathText, ScrollBox,
+    PathText, ScrollBox, Fold,
 } from "widgets.slint";
 
 // A part of the page: its icon in its colour, its title, a line on it,
@@ -19,6 +19,8 @@ export component Section inherits Card {
     in property <Tone> tone: Tone.accent;
     in property <string> title;
     in property <string> text;
+    // The rest of the line on it, folded under it.
+    in property <string> more;
     pad: 0;
     gap: 0;
     HorizontalLayout {
@@ -50,6 +52,9 @@ export component Section inherits Card {
                 color: Theme.text-muted;
                 font-size: Type.small;
                 wrap: word-wrap;
+            }
+            if root.more != "": Fold {
+                more: root.more;
             }
         }
     }
@@ -135,13 +140,17 @@ component ModeSection inherits Section {
         }
         if Perm.no-network && !Perm.network-rules: Banner {
             tone: Tone.danger;
-            text: "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of " + Perm.center + "'s commands while this is on.";
+            text: "While this is on, none of these commands runs: this machine cannot block their network.";
+            more: "The node's seccomp filter cannot be used here.";
         }
         if Perm.no-network && Perm.network-rules && Perm.runs-as-owner: Banner {
             tone: Tone.danger;
             text: Perm.separate
-                ? "In this mode " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
-                : "This node runs by hand, so " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.";
+                ? "While this is on, none of these commands runs: in this mode they run as " + (Perm.owner-is-root ? "root." : "you.")
+                : "While this is on, none of these commands runs: here they run as " + (Perm.owner-is-root ? "root" : "you") + ", and nothing keeps them off the network.";
+            more: Perm.separate
+                ? "Nothing keeps commands that run as the owner off the network. Folder mode, or allowlist mode as nerve-run, runs them."
+                : "A node run by hand runs commands as its owner; only folder mode keeps them off the network, as a user that is not root and on Linux 7.1 or later. The installed node runs folder mode's commands as nerve-run.";
         }
         Reveal {
             shown: Perm.no-network;
@@ -175,7 +184,8 @@ component ModeSection inherits Section {
             Banner {
                 tone: Tone.warn;
                 title: "Its commands run as root";
-                text: "Root is the owner of this node, so " + Perm.center + "'s commands run as root here: they can do everything on this machine, Nerve and its keys included, and nothing in Nerve holds them back.";
+                text: "Root is the owner: user-mode commands run as root, with every right here.";
+                more: Perm.center + "'s commands can do everything on this machine, Nerve and its keys included, and nothing in Nerve holds them back.";
             }
         }
     }
@@ -810,26 +820,6 @@ export component PermissionsPage inherits PageFrame {
         shown: Perm.centers.length > 0 && Perm.read;
         gap: Space.xxl;
         VerticalLayout {
-            // A pairing from before the guard, one with the guard's older
-            // texts, or one whose guard rules were removed: one click puts
-            // them on (`rule guard` replaces the older texts).
-            Reveal {
-                shown: Perm.guard-missing || Perm.guard-older;
-                VerticalLayout {
-                    padding-bottom: Space.xxl;
-                    Banner {
-                        tone: Tone.warn;
-                        title: Perm.guard-older ? "The guard still reads commands as text" : "No guard against changing this node";
-                        text: Perm.guard-older
-                            ? "Its deny rules from before still work, but they miss a command behind env, timeout or bash -c, or in a substitution. The update has them read the commands of a line. They catch mistakes; an account of their own for commands is the real protection."
-                            : "Deny rules that keep " + Perm.center + "'s commands off Nerve itself. They catch mistakes; an account of their own for commands is the real protection.";
-                        action: Perm.guard-busy ? "" : (Perm.guard-older ? "Update the guard" : "Add the guard");
-                        acted => {
-                            Perm.guard-add();
-                        }
-                    }
-                }
-            }
           VerticalLayout {
             spacing: Space.xxl;
             ModeSection { }

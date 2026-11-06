@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use nerve_policy::audit::AuditLog;
-use nerve_policy::config::{Access, CapSetting, Folder, SecretStorage, SettingsGrant};
+use nerve_policy::config::{CapSetting, Folder, SecretStorage, SettingsGrant};
 use nerve_policy::{Mode, NodeConfig, SetError, SettingsStore, rules, sudo_command};
 use nerve_proto::link::PairLink;
 
@@ -33,14 +33,20 @@ pub use ui::{UiCmd, UiTokenCmd};
     about = "Links this machine to its Nerve centers."
 )]
 pub struct Cli {
-    /// Where node.toml and the keys live [env: NERVE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]
-    #[arg(long, global = true)]
+    /// Where node.toml and the keys live
+    ///
+    /// Where node.toml and the keys live [env: NERVE_NODE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]
+    #[arg(long, global = true, hide = true)]
     pub config_dir: Option<PathBuf>,
-    /// Where the control socket and the audit log live [env: NERVE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]
-    #[arg(long, global = true)]
+    /// Where the control socket and the audit log live
+    ///
+    /// Where the control socket and the audit log live [env: NERVE_NODE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]
+    #[arg(long, global = true, hide = true)]
     pub state_dir: Option<PathBuf>,
+    /// Print JSON instead of text
+    ///
     /// Print JSON for programs instead of text: the read commands their data, the others the lines they print, an error {"error": ...}
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub json: bool,
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -54,44 +60,190 @@ pub struct CenterArg {
     pub center: Option<String>,
 }
 
+/// The center a `center` verb is about, as its argument: `center rm lab`.
+#[derive(Debug, Args, Clone, Default)]
+pub struct CenterName {
+    /// The center's name; needed when more than one is paired.
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+}
+
+impl CenterName {
+    pub fn arg(&self) -> CenterArg {
+        CenterArg {
+            center: self.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Pair this machine with centers and decide what each one may change.
-    #[command(subcommand)]
-    Center(CenterCmd),
-    /// Choose the folders a center may use and what it may do in each.
-    #[command(subcommand)]
-    Folder(FolderCmd),
-    /// Choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you).
-    #[command(subcommand)]
-    Mode(ModeCmd),
-    /// Keep the lists of commands that are allowed, forbidden or run with sudo.
-    #[command(subcommand)]
-    Rule(RuleCmd),
-    /// Turn capabilities and single actions on or off, declare capabilities of your own in node.toml, and allow the programs that add capabilities.
-    #[command(subcommand)]
-    Cap(CapCmd),
-    /// Use sudo for the commands on the sudo list.
-    #[command(subcommand)]
-    Sudo(SudoCmd),
-    /// Choose the proxy the node uses to reach centers.
-    #[command(subcommand)]
-    Proxy(ProxyCmd),
-    /// Let nodes that cannot reach a center themselves reach this node's centers through it.
-    #[command(subcommand)]
-    Relay(RelayCmd),
-    /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
-    #[command(args_conflicts_with_subcommands = true)]
-    Ui {
-        #[command(subcommand)]
-        cmd: Option<UiCmd>,
+    /// Install the node as a service (Linux: with sudo; Windows: as administrator)
+    ///
+    /// Install the node as a service that starts with the machine and runs under a user of its own, make the account nerve-run for its commands and take you as the owner (Linux with sudo from your own account, Windows as administrator).
+    Install {
+        /// Who owns the node: you (default), `root` (needs --accept-root-owner) or `none`
+        ///
+        /// Run by root itself (Linux): `root` makes root the owner, so that user mode, and allowlist mode as the owner, run commands as root, with every right on the machine and over Nerve; needs --accept-root-owner. At a terminal install asks instead, and an owner root confirmed before stays. `none` leaves the node without an owner, root or another.
+        #[arg(long, value_name = "ACCOUNT", value_parser = ["root", "none"])]
+        owner: Option<String>,
+        /// Confirms --owner=root: nothing in Nerve holds those commands back
+        ///
+        /// Confirms --owner=root: you accept that nothing in Nerve holds those commands back.
+        #[arg(long)]
+        accept_root_owner: bool,
     },
-    /// Read or change any setting in node.toml by its name.
+    /// Pair a first center and give it a folder, step by step
+    ///
+    /// Pair a first center and give it a folder, step by step: the link, the mode, a folder and its rights, the network.
+    Setup,
+    /// Update to the latest release; config, keys and audit stay
+    ///
+    /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay.
+    Update {
+        /// Take the new program from this file instead of downloading the latest release.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
+    /// Remove the service and the program; config and state stay
+    ///
+    /// Stop and remove the service, nerve-run and its entries on your folders, the node's user and the program; the config and state folders stay.
+    Uninstall {
+        /// Delete the config and state folders too (keys, pairings, audit)
+        ///
+        /// Delete the config and state folders too: the keys, the pairings and the audit log.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Save the config and keys to a passphrase-protected file
+    ///
+    /// Write the config and the keys to a file that a passphrase protects, to keep or to move the node to another machine.
+    Backup {
+        /// The file to write. It is private to you (mode 0600).
+        file: PathBuf,
+        /// Also take the keys that are in the system keyring into the file
+        ///
+        /// Also take the keys that are in the system keyring into the file; without it they stay there and are left out.
+        #[arg(long)]
+        include_keyring: bool,
+        /// Replace the file when it exists.
+        #[arg(long)]
+        overwrite: bool,
+        /// Read the passphrase from this file (`-`: from stdin) instead of asking
+        ///
+        /// Read the passphrase from the first line of this file instead of asking; `-` reads it from stdin.
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
+    },
+    /// Restore a backup (stop the node first)
+    ///
+    /// Put the config and keys of a backup in place of this node's. The node must not run.
+    Restore {
+        /// The backup file.
+        file: PathBuf,
+        /// Replace a node here that is not the one the backup is of.
+        #[arg(long)]
+        replace: bool,
+        /// Keep the keys in `file` or in the `keyring` here, whatever the backup says
+        ///
+        /// Keep the keys in `file` or in the system `keyring` here, whatever the backup's config says.
+        #[arg(long, value_name = "file|keyring")]
+        secret_storage: Option<String>,
+        /// Leave the proxy, with its secrets, out of the restored config
+        ///
+        /// Leave the proxy out of the restored config, with its password and header values; set it again on this machine.
+        #[arg(long)]
+        without_proxy: bool,
+        /// Read the passphrase from this file (`-`: from stdin) instead of asking
+        ///
+        /// Read the passphrase from the first line of this file instead of asking; `-` reads it from stdin.
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
+    },
+    /// Start, stop or restart the installed service (`status` shows its state)
     #[command(subcommand)]
-    Config(ConfigCmd),
-    /// Run the node in the foreground.
-    Run,
-    /// Show whether the node runs and which centers it is paired with.
+    Service(ServiceCmd),
+    /// Print the files of the service this program installs, as JSON (for `update`)
+    ///
+    /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
+    #[command(hide = true)]
+    ServiceFiles {
+        /// The owner the unit names.
+        #[arg(long, value_name = "ACCOUNT")]
+        owner: Option<String>,
+        /// What polkit takes here: rules, a .pkla file (polkit 0.105), or none.
+        #[arg(long, default_value = "rules", value_parser = ["rules", "pkla", "none"])]
+        polkit: String,
+    },
+    /// Show the paired centers, pair another, and set what each may change
+    ///
+    /// Show the paired centers, pair this machine with another, and decide what each one may change.
+    #[command(args_conflicts_with_subcommands = true)]
+    Center {
+        #[command(subcommand)]
+        cmd: Option<CenterCmd>,
+    },
+    /// Choose how much a center may do: folder, allowlist or user mode (as you)
+    ///
+    /// Show each center's mode, or choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you).
+    Mode {
+        /// `folder` (default; reads what all accounts may), `allowlist`, `user` (as you)
+        ///
+        /// `allowlist` (only what an allow rule names, as nerve-run), `folder` (what each folder's rights allow, as nerve-run, the default; on the installed node a file call may also read what every account may read) or `user` (anything you could do yourself, as you, protected files aside). Without it, each center's mode is shown.
+        #[arg(value_name = "MODE")]
+        mode: Option<String>,
+        /// End the mode after this many hours (user: back to the mode before)
+        ///
+        /// End the mode after this many hours: user goes back to the mode before it, folder to allowlist (without it they stay until you change them).
+        #[arg(long = "for", value_name = "HOURS")]
+        for_hours: Option<u64>,
+        /// With allowlist: run the allowed commands as you, outside the sandbox
+        ///
+        /// With allowlist: run the allowed commands as you instead of as nerve-run, outside the folders' sandbox (installed node, Linux).
+        #[arg(long)]
+        as_owner: bool,
+        #[command(flatten)]
+        center: CenterArg,
+    },
+    /// Show a center's folders, or choose them and their rights
+    ///
+    /// Show a center's folders, or choose the folders it may use and what it may do in each.
+    #[command(args_conflicts_with_subcommands = true)]
+    Folder {
+        #[command(subcommand)]
+        cmd: Option<FolderCmd>,
+        #[command(flatten)]
+        center: CenterArg,
+    },
+    /// Keep a center's commands off the network (`off`); in user mode nothing runs
+    ///
+    /// Keep a center's commands off the network, or let them on it again: `off` lets them open no socket but a unix one, in every mode, and no sudo-list command runs; where they run as you (user mode, allowlist --as-owner) or the machine cannot hold them, none of them runs.
+    Network {
+        /// `off` or `on`; without it, each center's network is shown.
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+        #[command(flatten)]
+        center: CenterArg,
+    },
+    /// Show a center's rules, or keep its lists of allowed and forbidden commands
+    ///
+    /// Show a center's rules, or keep its lists of commands that are allowed, forbidden or run with sudo.
+    #[command(args_conflicts_with_subcommands = true)]
+    Rule {
+        #[command(subcommand)]
+        cmd: Option<RuleCmd>,
+        /// The list to show: `allow`, `deny` or `sudo`; all three if left out.
+        list: Option<List>,
+        #[command(flatten)]
+        center: CenterArg,
+    },
+    /// Show whether sudo is on, or use sudo for the commands on the sudo list.
+    #[command(args_conflicts_with_subcommands = true)]
+    Sudo {
+        #[command(subcommand)]
+        cmd: Option<SudoCmd>,
+    },
+    /// Show how the node is: its service, each center, and what to do next.
     Status,
     /// Show what the node allowed and refused.
     #[command(args_conflicts_with_subcommands = true)]
@@ -103,7 +255,7 @@ pub enum Cmd {
         follow: bool,
         /// Show only the calls that were refused.
         #[arg(long)]
-        denied: bool,
+        refused: bool,
         /// Show only the newest N entries (with --follow, then the new ones).
         #[arg(long, value_name = "N")]
         last: Option<usize>,
@@ -127,85 +279,60 @@ pub enum Cmd {
     Panic,
     /// Let the node work again after `panic`.
     Unlock,
-    /// Install the node as a service that starts with the machine and runs under a user of its own, make the account nerve-run for its commands and take you as the owner (Linux with sudo from your own account, Windows as administrator).
-    Install {
-        /// Run by root itself (Linux): `root` makes root the owner, so that user mode, and allowlist mode as the owner, run commands as root, with every right on the machine and over Nerve; needs --accept-root-owner. At a terminal install asks instead, and an owner root confirmed before stays. `none` leaves the node without an owner, root or another.
-        #[arg(long, value_name = "ACCOUNT", value_parser = ["root", "none"])]
-        owner: Option<String>,
-        /// Confirms --owner=root: you accept that nothing in Nerve holds those commands back.
+    /// Turn capabilities on or off, and add your own
+    ///
+    /// Show every capability, turn capabilities and single actions on or off, and declare capabilities of your own in node.toml.
+    #[command(args_conflicts_with_subcommands = true)]
+    Cap {
+        #[command(subcommand)]
+        cmd: Option<CapCmd>,
+        /// Only this center's settings.
         #[arg(long)]
-        accept_root_owner: bool,
+        center: Option<String>,
     },
-    /// Name the node, choose where it keeps its keys, pair the first center and choose its mode and folder, one question at a time.
-    Setup,
-    /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay.
-    Update {
-        /// Take the new program from this file instead of downloading the latest release.
-        #[arg(long, value_name = "FILE")]
-        from: Option<PathBuf>,
+    /// Show the programs that may add capabilities (providers), allow one, or remove it.
+    #[command(args_conflicts_with_subcommands = true)]
+    Provider {
+        #[command(subcommand)]
+        cmd: Option<ProviderCmd>,
     },
-    /// Start, stop or restart the installed service, or show its state.
+    /// Show or choose the proxy the node uses to reach centers.
+    #[command(args_conflicts_with_subcommands = true)]
+    Proxy {
+        #[command(subcommand)]
+        cmd: Option<ProxyCmd>,
+    },
+    /// Let other nodes reach your centers through this node
+    ///
+    /// Let nodes that cannot reach a center themselves reach this node's centers through it.
+    #[command(args_conflicts_with_subcommands = true)]
+    Relay {
+        #[command(subcommand)]
+        cmd: Option<RelayCmd>,
+    },
+    /// Turn the node's web UI on or off, and manage its tokens
+    ///
+    /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
+    #[command(args_conflicts_with_subcommands = true)]
+    Ui {
+        #[command(subcommand)]
+        cmd: Option<UiCmd>,
+    },
+    /// Read or change any setting in node.toml by its name.
     #[command(subcommand)]
-    Service(ServiceCmd),
-    /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
-    #[command(hide = true)]
-    ServiceFiles {
-        /// The owner the unit names.
-        #[arg(long, value_name = "ACCOUNT")]
-        owner: Option<String>,
-        /// What polkit takes here: rules, a .pkla file (polkit 0.105), or none.
-        #[arg(long, default_value = "rules", value_parser = ["rules", "pkla", "none"])]
-        polkit: String,
-    },
-    /// Stop and remove the service, nerve-run and its entries on your folders, the node's user and the program; the config and state folders stay.
-    Uninstall {
-        /// Delete the config and state folders too: the keys, the pairings and the audit log.
-        #[arg(long)]
-        purge: bool,
-    },
-    /// Write the config and the keys to a file that a passphrase protects, to keep or to move the node to another machine.
-    Backup {
-        /// The file to write. It is private to you (mode 0600).
-        file: PathBuf,
-        /// Also take the keys that are in the system keyring into the file; without it they stay there and are left out.
-        #[arg(long)]
-        include_keyring: bool,
-        /// Replace the file when it exists.
-        #[arg(long)]
-        overwrite: bool,
-        /// Read the passphrase from the first line of this file instead of asking.
-        #[arg(long, value_name = "FILE")]
-        passphrase_file: Option<PathBuf>,
-    },
-    /// Put the config and keys of a backup in place of this node's. The node must not run.
-    Restore {
-        /// The backup file.
-        file: PathBuf,
-        /// Replace a node here that is not the one the backup is of.
-        #[arg(long)]
-        replace: bool,
-        /// Keep the keys in `file` or in the system `keyring` here, whatever the backup's config says.
-        #[arg(long, value_name = "file|keyring")]
-        secret_storage: Option<String>,
-        /// Leave the proxy out of the restored config, with its password and header values; set it again on this machine.
-        #[arg(long)]
-        without_proxy: bool,
-        /// Read the passphrase from the first line of this file instead of asking.
-        #[arg(long, value_name = "FILE")]
-        passphrase_file: Option<PathBuf>,
-    },
+    Config(ConfigCmd),
+    /// Run the node in the foreground.
+    Run,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum CenterCmd {
     /// Pair this machine with a center, using the pairing link it showed.
     Add {
-        /// The pairing link.
-        #[arg(required_unless_present = "link_stdin")]
-        link: Option<String>,
-        /// Read the pairing link from the first line of stdin: it holds the pairing code, and never shows in the process list.
-        #[arg(long, conflicts_with = "link")]
-        link_stdin: bool,
+        /// The pairing link; `-` reads it from stdin (never in the process list)
+        ///
+        /// The pairing link; `-` reads it from the first line of stdin, where it never shows in the process list.
+        link: String,
         /// The name to use for the center here (the center's own name if left out).
         #[arg(long)]
         name: Option<String>,
@@ -214,53 +341,30 @@ pub enum CenterCmd {
         yes: bool,
     },
     /// Forget a center and delete its key.
-    Rm(CenterArg),
-    /// List the paired centers and how they are set.
-    Ls,
+    Rm(CenterName),
     /// Stop the link to a center until you resume it.
-    Pause(CenterArg),
+    Pause(CenterName),
     /// Link to a paused center again.
-    Resume(CenterArg),
+    Resume(CenterName),
+    /// Give this machine a new key for a center (the node must run)
+    ///
     /// Give this machine a new key for a center; the center takes the old one for 7 more days. Needs the running node, linked to that center.
     RotateKey {
+        #[command(flatten)]
+        center: CenterName,
         /// End the 7 days now: the center takes only the new key from then on.
         #[arg(long)]
         end_grace: bool,
-        #[command(flatten)]
-        center: CenterArg,
     },
-    /// Let a center change its own rights on this machine, up to user mode and sudo, or take that right away.
-    Grant {
-        /// What to grant; only `settings` exists.
-        what: String,
-        /// `off`, or `write`: the center may then set everything this machine lets it do.
-        value: String,
+    /// Let a center change its own rights here (`on`), up to user mode and sudo
+    ///
+    /// Let a center change its own rights on this machine, up to user mode and sudo (`on`), or take that right away (`off`).
+    Settings {
+        /// `on` or `off`.
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
         #[command(flatten)]
-        center: CenterArg,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ModeCmd {
-    /// Pick allowlist, folder or user mode.
-    Set {
-        /// `allowlist` (only what an allow rule names, as nerve-run), `folder`
-        /// (what each folder's rights allow, as nerve-run, the default; on
-        /// the installed node a file call may also read what every account
-        /// may read) or
-        /// `user` (anything you could do yourself, as you, protected files
-        /// aside).
-        mode: String,
-        /// Go back to allowlist after this many hours (folder and user mode
-        /// otherwise stay until you change them).
-        #[arg(long = "for", value_name = "HOURS")]
-        for_hours: Option<u64>,
-        /// With allowlist: run the allowed commands as you instead of as
-        /// nerve-run, outside the folders' sandbox (installed node, Linux).
-        #[arg(long)]
-        as_owner: bool,
-        #[command(flatten)]
-        center: CenterArg,
+        center: CenterName,
     },
 }
 
@@ -272,66 +376,71 @@ pub enum List {
     Sudo,
 }
 
+/// The lists `rule add` puts a command on: a sudo command goes on the sudo
+/// list by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AddList {
+    Allow,
+    Deny,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum RuleCmd {
-    /// Put a command on a list.
+    /// Allow or forbid a command; `sudo …` goes on the sudo list, ` *` is a wildcard
+    ///
+    /// Put a command on a list; one that starts with `sudo` goes on the sudo list. A trailing ` *` covers every command that starts so (`'git status *'`).
     Add {
-        /// The list: `allow` (may run in allowlist mode), `deny` (a command
-        /// line that matches never runs, in any mode) or `sudo` (may run with
-        /// sudo while sudo is on).
-        list: List,
-        /// The command line.
+        /// `allow` (in allowlist mode; a sudo command: with sudo) or `deny` (never runs)
+        ///
+        /// The list: `allow` (may run in allowlist mode; a sudo command may run with sudo while sudo is on) or `deny` (a command line that matches never runs, in any mode).
+        list: AddList,
+        /// The command line; a trailing ` *` covers what starts with the words before it
+        ///
+        /// The command line; a trailing ` *` covers every command that starts with the words before it.
         command: String,
-        /// Cover every command that starts with the same program.
-        #[arg(long)]
-        wildcard: bool,
-        /// Make the rule of an audit entry of this action instead, as the audit buttons do: `fs.read` takes a path and covers its folder with --wildcard, an action without a target takes "" and covers its capability.
+        /// Make the rule from an audit entry's action, as the audit buttons do
+        ///
+        /// Make the rule of an audit entry of this action instead, as the audit buttons do: `fs.read` takes a path (`/srv/data/*` covers the folder), an action without a target takes "" (`*` covers its capability).
         #[arg(long, value_name = "CAP.ACTION")]
         action: Option<String>,
-        /// With --action: hold the rule to one argument of the call, as the audit buttons do: `--pin room=office` makes `lamp.set:room=office`.
+        /// With --action: hold the rule to one argument, like room=office
+        ///
+        /// With --action: hold the rule to one argument of the call, as the audit buttons do: `--arg room=office` makes `lamp.set:room=office`.
         #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
-        pin: Option<String>,
+        arg: Option<String>,
+        /// With --action: take the target as it is, a `*` in it too (the exact buttons)
+        ///
+        /// With --action: take the target as the audit entry has it, a `*` at its end too, so that `rm -rf *` stays that one command. The audit's Allow and Deny buttons make their rule so; without it a trailing `*` is the wildcard.
+        #[arg(long, requires = "action")]
+        exact: bool,
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Take a command off a list.
+    /// Take a rule off its list, as `rule` shows it
+    ///
+    /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it.
+    #[command(override_usage = "nerve-node rule rm [OPTIONS] [LIST] <ENTRY>")]
     Rm {
-        /// The list: `allow`, `deny` or `sudo`.
-        list: List,
-        /// The command line, or an entry as `ls` shows it.
-        command: String,
-        /// The entry was added with --wildcard.
-        #[arg(long)]
-        wildcard: bool,
-        /// The entry was added with this --action.
-        #[arg(long, value_name = "CAP.ACTION")]
-        action: Option<String>,
-        /// The entry was added with this --pin.
-        #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
-        pin: Option<String>,
+        /// The list, needed only when the entry is on two; then the entry
+        ///
+        /// The list (`allow`, `deny` or `sudo`), needed only when the entry is on two; then the entry.
+        #[arg(value_name = "ENTRY", required = true, num_args = 1..=2)]
+        words: Vec<String>,
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show one list, or all three.
-    Ls {
-        /// The list; all three if left out.
-        list: Option<List>,
-        #[command(flatten)]
-        center: CenterArg,
-    },
-    /// Change one entry of a list in place, as one change: the entry as `ls` shows it, and what it becomes.
+    /// Change one rule in place, as one change
+    ///
+    /// Change one entry of a list in place, as one change: the entry as `rule` shows it, and what it becomes.
     Edit {
         /// The list: `allow`, `deny` or `sudo`.
         list: List,
-        /// The entry as `ls` shows it.
+        /// The entry as `rule` shows it.
         entry: String,
-        /// What it becomes: an entry as `ls` shows them (`exec.run:git status`, `fs.read:~/notes/*`; on the sudo list a sudo command's pattern), or a plain command line, which becomes the rule `add` makes of it.
+        /// The new rule, as `rule` shows it, or a plain command line
+        ///
+        /// What it becomes: an entry as `rule` shows them (`exec.run:git status`, `fs.read:~/notes/*`; on the sudo list a sudo command's pattern), or a plain command line, which becomes the rule `add` makes of it.
         new: String,
-        #[command(flatten)]
-        center: CenterArg,
-    },
-    /// Put the deny rules that keep a center's commands off this node itself (its programs, service, socket and folders) on the deny list, as a new pairing has them, in place of their older texts. They catch mistakes, not someone who hides the name.
-    Guard {
         #[command(flatten)]
         center: CenterArg,
     },
@@ -348,12 +457,8 @@ pub enum CapCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show every capability: the node's own, those of node.toml and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and those of node.toml, and lists the programs you allow without their capabilities.
-    Ls {
-        /// Only this center's settings.
-        #[arg(long)]
-        center: Option<String>,
-    },
+    /// Declare a capability that runs a fixed command (the words after `--`)
+    ///
     /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, held to the folders; a node run by hand offers none.
     Add {
         /// `cap.action`, like sensors.read.
@@ -364,6 +469,8 @@ pub enum CapCmd {
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
+    /// Change a capability you declared
+    ///
     /// Change a capability you declared: what you give replaces what it has, and a command after `--` its command.
     Edit {
         /// The capability, `cap.action`.
@@ -374,7 +481,9 @@ pub enum CapCmd {
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
-    /// Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings grant write); `cap set NAME off --center` turns it off instead.
+    /// Remove a capability you declared (from every center at once)
+    ///
+    /// Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings on); `cap set NAME off --center` turns it off instead.
     Rm {
         /// The capability, `cap.action`.
         name: String,
@@ -382,46 +491,61 @@ pub enum CapCmd {
         #[arg(long)]
         center: Option<String>,
     },
-    /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
-    #[command(subcommand)]
-    Provider(ProviderCmd),
 }
 
 /// What `cap add` and `cap edit` set of a capability of node.toml
-/// (docs/user/config-capabilities.md). The schemas come inline or on stdin,
-/// never from a file the node would open.
+/// (docs/user/config-capabilities.md). The schemas come inline or on stdin
+/// (`-`), never from a file the node would open.
 #[derive(Debug, Args, Clone, Default)]
 pub struct CapSpec {
+    /// What it does: read, write, execute, sense or actuate
+    ///
     /// What it does: read, write, execute, sense or actuate. Sense and actuate need your `cap set NAME on` for a center.
     #[arg(long)]
     pub effect: Option<String>,
     /// One line for the agent: what it does.
     #[arg(long)]
     pub summary: Option<String>,
-    /// The JSON Schema of its arguments, an object; `none` takes no arguments. A property marked "x-nerve-path": "read" or "write" is a path the node holds to the folders.
+    /// JSON Schema of its arguments, `none`, or `-` for stdin
+    ///
+    /// The JSON Schema of its arguments, an object; `none` takes no arguments; `-` reads it from stdin. A property marked "x-nerve-path": "read" or "write" is a path the node holds to the folders.
     #[arg(long, value_name = "JSON")]
     pub params: Option<String>,
-    /// Read the arguments' schema from stdin instead.
-    #[arg(long, conflicts_with_all = ["params", "result_stdin"])]
-    pub params_stdin: bool,
-    /// What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit.
+    /// What it returns: `text` (the default), or a JSON Schema; `-` for stdin
+    ///
+    /// What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit; `-` reads it from stdin.
     #[arg(long, value_name = "text|JSON")]
     pub result: Option<String>,
-    /// Read the result's schema from stdin instead.
-    #[arg(long, conflicts_with = "result")]
-    pub result_stdin: bool,
+    /// How long it may run, in seconds, or `default`
+    ///
     /// How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default.
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<String>,
+    /// Where it runs: any (the default), linux or windows
+    ///
     /// Where it runs: any (the default), linux or windows. A node offers only those of its platform.
     #[arg(long)]
     pub platform: Option<String>,
 }
 
+impl CapSpec {
+    /// `--params -`: the schema comes on stdin.
+    pub fn params_stdin(&self) -> bool {
+        self.params.as_deref() == Some("-")
+    }
+
+    /// `--result -`: the schema comes on stdin.
+    pub fn result_stdin(&self) -> bool {
+        self.result.as_deref() == Some("-")
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProviderCmd {
+    /// Allow the program EXE to add capabilities as provider NAME
+    ///
     /// Let the program EXE attach as the provider NAME; it replaces the program allowed under that name. The node checks that the program that attaches runs this very file.
-    Allow {
+    Add {
         /// The provider's name, which its capabilities carry: 1 to 32 of a-z, 0-9 and `-`.
         name: String,
         /// The full path of the program's executable.
@@ -432,69 +556,57 @@ pub enum ProviderCmd {
         /// The provider's name.
         name: String,
     },
-    /// Show the programs you allow, and on a running node whether each is attached.
-    Ls,
 }
 
 #[derive(Debug, Subcommand, Clone, Copy)]
 pub enum ServiceCmd {
     /// Start the installed service; the owner needs no root or administrator for it.
     Start,
+    /// Stop the service: the node ends its links and runs nothing
+    ///
     /// Stop it: the node ends its links and runs nothing until it starts again, at the latest with the machine.
     Stop,
     /// Stop it and start it again, so the node takes every change in node.toml.
     Restart,
-    /// Show whether the node is installed as a service, whether it runs, and the program it runs with its version.
-    Status,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum AuditCmd {
+    /// Start the audit log afresh (the old one becomes audit.jsonl.1)
+    ///
     /// Start the audit log afresh. The entries so far become its one older file (audit.jsonl.1, in place of the one before), and the new log begins with an entry of who cleared it.
     Clear,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum LogCmd {
+    /// Empty the node's log and its older file
+    ///
     /// Empty the node's log and its older file. The new log begins with a line of who cleared it.
     Clear,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SudoCmd {
+    /// Turn sudo on; the password stays in memory only
+    ///
     /// Turn sudo on; asks for your sudo password and keeps it in memory only (on Windows the password of the account commands run as, kept with DPAPI).
     On,
     /// Turn sudo off and forget the password.
     Off,
-    /// Show whether sudo is on.
-    Status,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum FolderCmd {
-    /// Let a center use a folder; name at least one right: +r, +w or +x.
+    /// Let a center use a folder (r, w, x); none closes one to file calls only
+    ///
+    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
     Add {
         /// The folder.
         path: PathBuf,
-        /// The rights: +r reads, +w writes, +x runs commands (`+r +x`, `+rw`).
-        #[arg(value_name = "+r|+w|+x", required = true, num_args = 1..)]
-        rights: Vec<String>,
-        #[command(flatten)]
-        center: CenterArg,
-    },
-    /// Change what a center may do in a folder it already has.
-    Set {
-        /// The folder.
-        path: PathBuf,
-        /// The changes, applied left to right: `=rwx` sets exactly these
-        /// rights, `+x` adds one, `-w` takes one away.
-        #[arg(
-            value_name = "=rwx|+x|-w",
-            required = true,
-            num_args = 1..,
-            allow_hyphen_values = true
-        )]
-        changes: Vec<String>,
+        /// The rights, one word: `r`, `rw`, `rwx` and so on, or `none`.
+        #[arg(value_name = "RIGHTS")]
+        rights: String,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -505,25 +617,10 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show a center's folders and their rights.
-    Ls {
-        #[command(flatten)]
-        center: CenterArg,
-    },
-    /// Give nerve-run its access to everything in the folders of every
-    /// center again, also what was moved into them (the installed node on
-    /// Linux): a pass over every granted folder.
+    /// Give nerve-run its access to every granted folder again (installed Linux node)
+    ///
+    /// Give nerve-run its access to everything in the folders of every center again, also what was moved into them (the installed node on Linux): a pass over every granted folder.
     Sync,
-    /// Keep a center's commands off the network, or let them on it again:
-    /// `off` lets them open no socket but a unix one, in every mode, and no
-    /// sudo-list command runs; where they run as you (user mode, allowlist
-    /// --as-owner) or the machine cannot hold them, none of them runs.
-    Network {
-        /// `off` or `on`.
-        state: String,
-        #[command(flatten)]
-        center: CenterArg,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -553,46 +650,51 @@ pub enum ConfigCmd {
         value: String,
     },
     /// Remove a value from a list.
-    Remove {
+    Rm {
         /// The dotted key of a list, like `center.<name>.policy.allow`.
         key: String,
         /// The value to remove.
         value: String,
     },
-    /// Trust node.toml as it is now, after the node refused it for a change
-    /// made outside nerve-node. Read the file first.
+    /// Trust node.toml as it is now, after a change made outside nerve-node
+    ///
+    /// Trust node.toml as it is now, after the node refused it for a change made outside nerve-node. Read the file first.
     Accept,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProxyCmd {
+    /// Reach centers through an HTTP proxy or a relay
+    ///
     /// Reach centers through an HTTP proxy. Header values and a password are kept in the system keyring, never in node.toml; the installed node on Windows takes neither.
     Set {
-        /// The proxy, http://host:port, or http://user:password@host:port when it wants a login; https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token.
+        /// http://[user[:password]@]host:port, https://… or a nerve://relay link
+        ///
+        /// The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the first line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token.
         url: String,
-        /// The pin of an https:// proxy's certificate (a relay's: `nerve-node relay ls` there shows it); without it the system's roots check it.
+        /// The pin of an https:// proxy's certificate
+        ///
+        /// The pin of an https:// proxy's certificate (a relay's: `nerve-node relay` there shows it); without it the system's roots check it.
         #[arg(long)]
         pin: Option<String>,
-        /// A header for the proxy, `Name: value`; can be given more than once. The value goes into the system keyring.
+        /// A header for the proxy, `Name: value`, kept in the keyring; `-` for stdin
+        ///
+        /// A header for the proxy, `Name: value`; can be given more than once. The value goes into the system keyring. `-` reads headers from stdin, one a line, after the password.
         #[arg(long = "header", value_name = "NAME: VALUE")]
         headers: Vec<String>,
-        /// Read the proxy's password from the first line of stdin, for a URL with a user name and no password (http://user@host:port); it never shows in the process list.
-        #[arg(long)]
-        password_stdin: bool,
-        /// Read headers from stdin, one `Name: value` a line, after the password with --password-stdin.
-        #[arg(long)]
-        headers_stdin: bool,
     },
+    /// Reach centers directly again, without a proxy
+    ///
     /// Reach centers directly again, and delete the proxy's values from the system keyring.
-    Rm,
-    /// Show the proxy that is set and the names of its headers, never their values.
-    Ls,
+    Off,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum RelayCmd {
+    /// Turn the relay on at ADDRESS, like 0.0.0.0:7490
+    ///
     /// Turn the relay on: listen for other nodes at ADDRESS, like 0.0.0.0:7490. A node reaches only this node's own https centers through it.
-    Set {
+    On {
         /// The address and port to listen on, like 0.0.0.0:7490 or [::]:7490.
         address: String,
         /// Tunnels at once, over every relayed node (16 unless set).
@@ -601,47 +703,61 @@ pub enum RelayCmd {
         /// Tunnels at once of one relayed node (4 unless set).
         #[arg(long, value_name = "N")]
         max_links_per_node: Option<u32>,
-        /// Tunnels one relayed node may open a minute, every node alike (30 unless set; for a relay behind this one, use `relay set-limits <name>`).
+        /// Tunnels one relayed node may open per minute (30)
+        ///
+        /// Tunnels one relayed node may open a minute, every node alike (30 unless set; for a relay behind this one, use `relay set <name>`).
         #[arg(long, value_name = "N")]
         max_opens_per_minute: Option<u32>,
     },
+    /// Turn the relay off; its nodes and their tokens stay
+    ///
     /// Turn the relay off: stop listening and end every tunnel. The nodes and their tokens stay.
     Off,
-    /// Let a node use the relay: makes its token and shows it once, in a link the other node pastes. Without --center its tunnels may go to every https center of this node.
+    /// Let a node use the relay (shows its link once)
+    ///
+    /// Let a node use the relay: makes its token and shows it once, in a link the other node pastes. Without --to its tunnels may go to every https center of this node.
     Add {
-        /// The relayed node's name here, 1 to 32 of a-z, 0-9 and -, starting and
-        /// ending with a letter or digit.
+        /// The relayed node's name here: 1 to 32 of a-z, 0-9 and -
+        ///
+        /// The relayed node's name here, 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit.
         name: String,
+        /// A center it may reach (more than once); without it, every one
+        ///
         /// A center of this node the relayed node may reach; can be given more than once. Without it, every one.
-        #[arg(long = "center", value_name = "CENTER")]
+        #[arg(long = "to", value_name = "CENTER")]
         centers: Vec<String>,
+        /// Where the other node reaches this machine, HOST[:PORT], for its link
+        ///
         /// Where the other node reaches this machine, HOST or HOST:PORT, for its link (without it: the address the relay listens on, else this machine's host name).
         #[arg(long, value_name = "HOST[:PORT]")]
         address: Option<String>,
     },
-    /// Change which centers of this node a relayed node may reach; without --center, every one. Its tunnels to others end.
-    SetCenters {
+    /// Change the centers or the limits of one relayed node
+    ///
+    /// Change what a relayed node may: the centers it may reach (its tunnels to others end), and limits of its own in place of the relay's, for a relay behind this one, which carries many nodes. What is not given stays.
+    Set {
         /// The relayed node's name.
         name: String,
-        /// A center of this node the relayed node may reach; can be given more than once.
-        #[arg(long = "center", value_name = "CENTER")]
+        /// A center it may reach (more than once); `*` for every one
+        ///
+        /// A center of this node the relayed node may reach; can be given more than once; `*` for every one.
+        #[arg(long = "to", value_name = "CENTER")]
         centers: Vec<String>,
-    },
-    /// Give a relayed node limits of its own, in place of the relay's --max-links-per-node and --max-opens-per-minute: for a relay behind this one, which carries many nodes. A flag not given keeps that limit; without either flag, the relay's limits again.
-    SetLimits {
-        /// The relayed node's name.
-        name: String,
-        /// Its tunnels at once.
+        /// Its tunnels at once; `default` for the relay's --max-links-per-node.
         #[arg(long, value_name = "N")]
-        max_links: Option<u32>,
-        /// The tunnels it may open a minute.
+        max_links: Option<String>,
+        /// The tunnels it may open a minute; `default` for the relay's.
         #[arg(long, value_name = "N")]
-        max_opens_per_minute: Option<u32>,
+        max_opens_per_minute: Option<String>,
     },
+    /// Give a relayed node a new token (shows its link once)
+    ///
     /// Give a relayed node a new token and end the tunnels of the old one; its centers and limits stay. Shows the token once, in a link the other node pastes.
     Token {
         /// The relayed node's name.
         name: String,
+        /// Where the other node reaches this machine, HOST[:PORT], for its link
+        ///
         /// Where the other node reaches this machine, HOST or HOST:PORT, for its link (as for `relay add`).
         #[arg(long, value_name = "HOST[:PORT]")]
         address: Option<String>,
@@ -651,8 +767,6 @@ pub enum RelayCmd {
         /// The relayed node's name.
         name: String,
     },
-    /// Show the relay, the nodes that may use it and, on a running node, who is connected.
-    Ls,
 }
 
 /// The command list as `nerve-node --help` has it, for anything that shows
@@ -663,10 +777,15 @@ pub enum RelayCmd {
 pub struct Help {
     /// What the node is.
     pub about: String,
+    /// The options every command takes and those that commands on several
+    /// cards take alike (`--center`), said once, at the end of the page.
+    pub options: Vec<ArgHelp>,
     /// Options every command takes.
+    #[serde(skip)]
     pub global: Vec<ArgHelp>,
     /// Arguments that cards on different places take alike (`--center`),
     /// said once here and left out of the cards.
+    #[serde(skip)]
     pub common: Vec<ArgHelp>,
     /// The cards, grouped by what a person wants to do, in reading order.
     pub sections: Vec<Section>,
@@ -679,51 +798,122 @@ pub struct Help {
 /// in a section of its own, and a test fails until it is placed.
 const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     (
-        "Install and set up",
-        "Run the node as a service under a user of its own (Linux with sudo, Windows as administrator), set it up, keep it current, and back it up or move it.",
+        "Set up",
+        "Install the node as a service, set it up, keep it current, and back it up.",
         &[
             &["install", "uninstall"],
-            &["service"],
             &["setup"],
             &["update"],
             &["backup", "restore"],
+            &["service"],
         ],
     ),
-    (
-        "Pair and connect",
-        "Link this machine to centers and choose how it reaches them.",
-        &[&["center"], &["proxy"], &["relay"], &["ui"]],
-    ),
+    ("Centers", "Pair this machine with centers.", &[&["center"]]),
     (
         "What a center may do",
-        "Every center has its own rights on this machine. `config` reaches any setting by its name.",
-        &[
-            &["mode"],
-            &["folder"],
-            &["rule"],
-            &["cap"],
-            &["sudo"],
-            &["config"],
-        ],
+        "Every center has its own rights on this machine.",
+        &[&["mode"], &["folder"], &["network"], &["rule"], &["sudo"]],
     ),
     (
-        "Run and watch",
-        "Start the node, see what it did, and stop it.",
+        "Watch and stop",
+        "See what the node did, and stop it.",
+        &[&["status"], &["audit"], &["log"], &["panic", "unlock"]],
+    ),
+    (
+        "More",
+        "Capabilities, proxy and relay, the web UI, any setting, the foreground run.",
         &[
+            &["cap"],
+            &["provider"],
+            &["proxy"],
+            &["relay"],
+            &["ui"],
+            &["config"],
             &["run"],
-            &["status"],
-            &["audit"],
-            &["log"],
-            &["panic", "unlock"],
         ],
     ),
 ];
+
+/// The top page of `nerve-node --help`: the commands in the groups of
+/// [`SECTIONS`], one line each, then the options every command takes, which
+/// the commands' own pages leave out.
+pub const TOP_TEMPLATE: &str = "{about-with-newline}\n{usage-heading} {usage}{after-help}";
+
+/// What [`TOP_TEMPLATE`] lists, read from the [`Cli`] definition.
+pub fn top_help(program: &str) -> String {
+    let root = Cli::command();
+    let mut out = String::new();
+    let width = root
+        .get_subcommands()
+        .filter(|c| visible(c))
+        .map(|c| c.get_name().len())
+        .max()
+        .unwrap_or(8);
+    for (name, _, cards) in SECTIONS {
+        out.push_str(&format!("{name}:\n"));
+        for c in cards.iter().flat_map(|c| c.iter()) {
+            if let Some(cmd) = root.find_subcommand(c) {
+                out.push_str(&format!("  {c:width$}  {}\n", about_of(cmd)));
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("Options every command takes:\n");
+    for a in root.get_arguments().filter(|a| a.is_global_set()) {
+        let h = arg_help(a);
+        out.push_str(&format!("  {:25}  {}\n", h.name, h.about));
+    }
+    out.push_str(&format!(
+        "\n`{program} <command> --help` says more of one command; the user guide is in docs/user."
+    ));
+    out
+}
+
+/// The command as `--help` shows it: the top page of [`top_help`], and each
+/// command's long page (`<command> --help`) ending on its user guide page.
+pub fn help_pages(cmd: clap::Command, program: &'static str) -> clap::Command {
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    names
+        .iter()
+        .fold(cmd, |cmd, name| {
+            cmd.mut_subcommand(name, |c| {
+                c.after_long_help(format!(
+                    "More in the user guide: docs/user/{}",
+                    doc_of(name)
+                ))
+            })
+        })
+        .name(program)
+        .bin_name(program)
+        .help_template(TOP_TEMPLATE)
+        .after_help(top_help(program))
+}
+
+/// What a bare `nerve-node` prints: the commands of every day.
+pub fn everyday(program: &str) -> String {
+    format!(
+        "{program} links this machine to its Nerve centers.
+
+  sudo {program} install                 install it as a service, then pair a center
+  {program} status                       how it is, and what to do next
+  {program} center add '<link>'          pair with a center
+  {program} folder add ~/project rwx     let the center use a folder
+  {program} rule add allow '<command>'   allow a command (allowlist mode)
+  {program} audit                        what was allowed and refused
+
+`{program} --help` lists every command."
+    )
+}
 
 /// A heading with its sentence, and the cards below it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Section {
     pub name: String,
     /// What the section is for, said once for all its cards.
+    #[serde(rename = "line")]
     pub about: String,
     pub cards: Vec<Card>,
 }
@@ -734,8 +924,13 @@ pub struct Section {
 pub struct Card {
     /// `folder`, `panic / unlock`.
     pub name: String,
-    /// What it is for; empty when its commands say it themselves.
+    /// What it is for, one line; empty when its commands say it themselves.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of what it is for, folded under the line.
+    pub more: String,
+    /// The page of the user guide that says more (docs/user/<doc>).
+    pub doc: String,
     /// The commands that only hold more commands (`folder`), which the card
     /// covers without a line of their own.
     pub holds: Vec<String>,
@@ -751,8 +946,11 @@ pub struct Verb {
     pub name: String,
     /// The usage line, for example `nerve-node folder add [OPTIONS] <PATH>`.
     pub usage: String,
-    /// The explanation: the doc comment of the command.
+    /// The explanation's first line: the command's `about`.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of the explanation (its `long_about`), folded.
+    pub more: String,
     /// Its own arguments and flags, without the global and the shared ones.
     pub args: Vec<ArgHelp>,
     /// Every argument and flag it takes but the global ones, the shared
@@ -764,10 +962,13 @@ pub struct Verb {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ArgHelp {
-    /// How it is written: `--for <HOURS>`, `<PATH>`, `--wildcard`.
+    /// How it is written: `--for <HOURS>`, `<PATH>`, `--refused`.
     pub name: String,
-    /// The explanation; empty when the argument has none.
+    /// The explanation's first line; empty when the argument has none.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of the explanation (its long help), folded.
+    pub more: String,
     /// Whether it can be left out.
     pub optional: bool,
 }
@@ -826,13 +1027,15 @@ pub fn help() -> Help {
         });
     }
     let common = hoist_common(&mut sections);
+    let global: Vec<ArgHelp> = root
+        .get_arguments()
+        .filter(|a| a.is_global_set())
+        .map(arg_help)
+        .collect();
     Help {
         about: about_of(&root),
-        global: root
-            .get_arguments()
-            .filter(|a| a.is_global_set())
-            .map(arg_help)
-            .collect(),
+        options: global.iter().chain(&common).cloned().collect(),
+        global,
         common,
         sections,
     }
@@ -868,6 +1071,40 @@ fn about_of(c: &clap::Command) -> String {
     c.get_about().map(ToString::to_string).unwrap_or_default()
 }
 
+/// The long text after a first `line` (clap's long help is the line, a
+/// blank line and the rest): the rest, or nothing.
+fn rest_of(long: Option<String>, line: &str) -> String {
+    let long = long.unwrap_or_default();
+    match long.strip_prefix(line) {
+        Some(rest) => rest.trim().to_string(),
+        None if long == line => String::new(),
+        None => long,
+    }
+}
+
+/// The user guide's page for a command of the top level.
+pub fn doc_of(command: &str) -> &'static str {
+    match command.split([' ', '/']).next().unwrap_or_default() {
+        "install" | "uninstall" | "setup" | "update" | "service" => "service.md",
+        "backup" | "restore" => "backup.md",
+        "center" => "pairing.md",
+        "mode" | "folder" | "network" => "modes.md",
+        "rule" => "rules.md",
+        "sudo" => "sudo.md",
+        "status" => "troubleshooting.md",
+        "audit" => "audit.md",
+        "log" => "logs.md",
+        "panic" | "unlock" => "stop.md",
+        "cap" => "config-capabilities.md",
+        "provider" => "providers.md",
+        "proxy" => "proxy.md",
+        "relay" => "relay.md",
+        "ui" => "node-web-ui.md",
+        "config" => "config.md",
+        _ => "commands.md",
+    }
+}
+
 fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
     if let [one] = cmds
         && one.has_subcommands()
@@ -880,6 +1117,22 @@ fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
 }
 
 fn card(name: &str, about: String, holds: Vec<String>, mut verbs: Vec<Verb>) -> Card {
+    card_with(
+        name,
+        about,
+        String::new(),
+        holds,
+        std::mem::take(&mut verbs),
+    )
+}
+
+fn card_with(
+    name: &str,
+    about: String,
+    more: String,
+    holds: Vec<String>,
+    mut verbs: Vec<Verb>,
+) -> Card {
     // An argument that two verbs take alike is said once, on the card.
     let mut shared: Vec<ArgHelp> = Vec::new();
     for a in verbs.iter().flat_map(|v| &v.args) {
@@ -893,6 +1146,8 @@ fn card(name: &str, about: String, holds: Vec<String>, mut verbs: Vec<Verb>) -> 
     Card {
         name: name.into(),
         about,
+        more,
+        doc: doc_of(name).into(),
         holds,
         shared_args: shared,
         verbs,
@@ -921,7 +1176,9 @@ fn noun_cards(noun: &clap::Command, name: &str) -> Vec<Card> {
                     .map(|c| verb(c, &format!("{name} {}", c.get_name()))),
             )
             .collect();
-        out.push(card(name, about_of(noun), holds, verbs));
+        let line = about_of(noun);
+        let more = rest_of(noun.get_long_about().map(ToString::to_string), &line);
+        out.push(card_with(name, line, more, holds, verbs));
     }
     for h in &holders {
         out.extend(noun_cards(h, &format!("{name} {}", h.get_name())));
@@ -945,10 +1202,12 @@ fn verb(sub: &clap::Command, name: &str) -> Verb {
         .filter(|a| !a.is_global_set() && !matches!(a.get_id().as_str(), "help" | "version"))
         .map(arg_help)
         .collect();
+    let line = about_of(sub);
     Verb {
         name: name.into(),
         usage: usage.strip_prefix("Usage: ").unwrap_or(usage).to_string(),
-        about: about_of(sub),
+        more: rest_of(sub.get_long_about().map(ToString::to_string), &line),
+        about: line,
         takes: args.clone(),
         args,
     }
@@ -964,9 +1223,11 @@ fn arg_help(a: &clap::Arg) -> ArgHelp {
         Some(long) => format!("--{long}"),
         None => format!("<{value}>"),
     };
+    let line = a.get_help().map(ToString::to_string).unwrap_or_default();
     ArgHelp {
         name,
-        about: a.get_help().map(ToString::to_string).unwrap_or_default(),
+        more: rest_of(a.get_long_help().map(ToString::to_string), &line),
+        about: line,
         optional: !a.is_required_set(),
     }
 }
@@ -1132,7 +1393,7 @@ async fn edit_saved_as(
 /// The allow and deny rules with conditions on a call's arguments
 /// (nerve_policy::conditions) that `new` gives a center and `old` did not,
 /// with the center's name. The rules a center kept stay as they are, also
-/// one whose argument went since (`rule ls` says so).
+/// one whose argument went since (`rule` says so).
 fn added_conditions(old: &NodeConfig, new: &NodeConfig) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for c in &new.centers {
@@ -1151,7 +1412,7 @@ fn added_conditions(old: &NodeConfig, new: &NodeConfig) -> Vec<(String, String)>
     out
 }
 
-/// The arguments schema of each action that `cap ls`'s listing `v` shows,
+/// The arguments schema of each action that `cap`'s listing `v` shows,
 /// for a rule of `center`: not one another center added.
 fn listed_params(v: &Value, center: &str) -> impl Fn(&str, &str) -> Option<Value> + use<> {
     let rows: Vec<(String, Value)> = v["capabilities"]
@@ -1170,7 +1431,7 @@ fn listed_params(v: &Value, center: &str) -> impl Fn(&str, &str) -> Option<Value
 }
 
 /// Checks the conditions of each rule `new` adds ([`added_conditions`])
-/// against the schemas of `listing`, `cap ls`'s.
+/// against the schemas of `listing`, `cap`'s.
 fn check_conditions(listing: &Value, old: &NodeConfig, new: &NodeConfig) -> Result<(), String> {
     for (center, rule) in added_conditions(old, new) {
         rules::check_typed(&rule, &listed_params(listing, &center))?;
@@ -1241,13 +1502,18 @@ async fn rotate_key(
         );
         return Ok(());
     }
-    let days = nerve_proto::ROTATE_GRACE_MS / 86_400_000;
     json::also("public_key", json!(key));
-    let _ = writeln!(
-        out,
-        "center {name} took this machine's new key:\n  {key}\nThe old key is deleted here. The center takes it for {days} more days, unless you end that now with `nerve-node center rotate-key --end-grace --center {name}`."
-    );
+    let _ = writeln!(out, "{}", rotated_text(&name, key));
     Ok(())
+}
+
+/// What `center rotate-key` says once the center took the new key, with
+/// the command that ends the old key's grace.
+fn rotated_text(name: &str, key: &str) -> String {
+    let days = nerve_proto::ROTATE_GRACE_MS / 86_400_000;
+    format!(
+        "center {name} took this machine's new key:\n  {key}\nThe old key is deleted here. The center takes it for {days} more days, unless you end that now with `nerve-node center rotate-key --end-grace {name}`."
+    )
 }
 
 /// Changes one center's entry.
@@ -1259,40 +1525,12 @@ async fn edit_center(
     let (cfg, _) = read_config(paths).await?;
     let name = pick_center(&cfg, center)?;
     edit(paths, |c| {
-        let e = c
-            .center_mut(&name)
-            .ok_or_else(|| format!("no center named {name}"))?;
+        let missing = no_center_named(c, &name);
+        let e = c.center_mut(&name).ok_or(missing)?;
         f(e)
     })
     .await?;
     Ok(name)
-}
-
-/// `folder set` takes changes that start with `-`, so clap hands it every
-/// word after the path, `--center` included. This takes the flag out again.
-fn take_center_flag(
-    words: Vec<String>,
-    mut center: CenterArg,
-) -> Result<(Vec<String>, CenterArg), String> {
-    let mut changes = Vec::new();
-    let mut words = words.into_iter();
-    while let Some(word) = words.next() {
-        let given = if word == "--center" {
-            Some(words.next().ok_or("--center needs a name")?)
-        } else {
-            word.strip_prefix("--center=").map(str::to_string)
-        };
-        match given {
-            Some(name) if center.center.is_none() => center.center = Some(name),
-            Some(_) => return Err("--center is given twice".into()),
-            None if word.starts_with("--") => return Err(format!("unknown option {word}")),
-            None => changes.push(word),
-        }
-    }
-    if changes.is_empty() {
-        return Err("name what to change: =rwx, +x or -w".into());
-    }
-    Ok((changes, center))
 }
 
 fn push_unique(list: &mut Vec<String>, rule: &str) {
@@ -1343,6 +1581,12 @@ impl List {
         }
     }
 
+    fn parse(word: &str) -> Option<List> {
+        [List::Allow, List::Deny, List::Sudo]
+            .into_iter()
+            .find(|l| l.word() == word)
+    }
+
     /// The entry a command line stands for, for `rule add`: the same as
     /// [`List::command_rule`], but a line in the pattern form of `config add`
     /// (`fs.read:~/notes/*`, `fs:~/private/*`) is refused. As a command it
@@ -1352,15 +1596,15 @@ impl List {
     fn entry(
         self,
         command: &str,
-        wildcard: bool,
         action: Option<&str>,
-        pin: Option<&str>,
+        arg: Option<&str>,
+        exact: bool,
     ) -> Result<String, String> {
         if let Some(action) = action {
-            return self.action_rule(action, command, wildcard, pin);
+            return self.action_rule(action, command, arg, exact);
         }
-        if pin.is_some() {
-            return Err("--pin names an argument of the action --action names".into());
+        if arg.is_some() {
+            return Err("--arg names an argument of the action --action names".into());
         }
         // A rule with conditions on an action's arguments
         // (`lamp.set:room=office`) is the rule as it is; the node checks
@@ -1370,9 +1614,6 @@ impl List {
             && rules::has_conditions(text)
             && rules::scope_of(text).contains('.')
         {
-            if wildcard {
-                return Err("a rule with conditions has no wildcard form".into());
-            }
             rules::validate(text)?;
             return Ok(text.to_string());
         }
@@ -1382,7 +1623,7 @@ impl List {
             && rules::valid_scope(scope)
         {
             let hint = if scope == "guard" {
-                "; the guard's rules are put on with `nerve-node rule guard`".to_string()
+                "; the guard's rules are built in".to_string()
             } else {
                 String::new()
             };
@@ -1391,11 +1632,11 @@ impl List {
                 self.word()
             ));
         }
-        self.command_rule(command, wildcard)
+        self.command_rule(command)
     }
 
     /// What an edited entry becomes, for `rule edit`: an entry in the form
-    /// `ls` shows (a `cap.action:pattern` rule; on the sudo list a pattern
+    /// `rule` shows (a `cap.action:pattern` rule; on the sudo list a pattern
     /// of a sudo command) as it is, a plain command line as `add` makes it.
     fn edited(self, new: &str) -> Result<String, String> {
         let new = new.trim();
@@ -1410,7 +1651,7 @@ impl List {
                     rules::validate(new)?;
                     Ok(new.to_string())
                 }
-                _ => self.command_rule(new, false),
+                _ => self.command_rule(new),
             },
             List::Sudo => {
                 let glob = if sudo_command(new).is_some() {
@@ -1426,13 +1667,18 @@ impl List {
 
     /// The rule of an audit entry of `action` (`fs.read`) with `target`, as
     /// the audit buttons of the desktop app and of the center make it
-    /// ([`rules::rule_for`]). The sudo list takes sudo commands only.
+    /// ([`rules::rule_for`]). A target that ends in `*` is the wildcard: a
+    /// command's ` *`, a folder's `/*`, or `*` alone for the capability of
+    /// an action without a target. With `exact` the target is taken as it
+    /// is, a `*` in it too: the audit's Allow and Deny buttons hand over the
+    /// command an agent sent, and its `rm -rf *` must not become every
+    /// `rm -rf`. The sudo list takes sudo commands only.
     pub(crate) fn action_rule(
         self,
         action: &str,
         target: &str,
-        wildcard: bool,
-        pin: Option<&str>,
+        arg: Option<&str>,
+        exact: bool,
     ) -> Result<String, String> {
         // A cut target is no longer the call's, so no rule can name it.
         if nerve_policy::audit::is_cut_target(target) {
@@ -1445,44 +1691,160 @@ impl List {
             List::Sudo if (cap, act) != ("exec", "run") => {
                 Err("the sudo list is for sudo commands (--action exec.run)".into())
             }
-            List::Sudo if pin.is_some() => {
-                Err("the sudo list holds commands; --pin is for the allow and deny lists".into())
+            List::Sudo if arg.is_some() => {
+                Err("the sudo list holds commands; --arg is for the allow and deny lists".into())
             }
-            List::Sudo => self.command_rule(target, wildcard),
-            // `--pin FIELD=VALUE`: the value as the audit entry shows it,
+            List::Sudo if exact => rules::sudo_rule_for(target, false),
+            List::Sudo => self.command_rule(target),
+            // `--arg FIELD=VALUE`: the value as the audit entry shows it,
             // which the rule then holds to; the node reads it as the
             // argument's type when it saves the rule.
-            _ if pin.is_some() => {
-                let (field, value) = pin
+            _ if arg.is_some() => {
+                let (field, value) = arg
                     .and_then(|p| p.split_once('='))
-                    .ok_or("--pin takes FIELD=VALUE, like room=office")?;
-                rules::rule_for(cap, act, target, wildcard, Some((field, &json!(value))))
+                    .ok_or("--arg takes FIELD=VALUE, like room=office")?;
+                rules::rule_for(cap, act, target, false, Some((field, &json!(value))))
             }
-            List::Allow if (cap, act) == ("exec", "run") => self.command_rule(target, wildcard),
-            List::Allow | List::Deny => rules::rule_for(cap, act, target, wildcard, None),
+            _ if exact => {
+                if (cap, act) == ("exec", "run") && sudo_command(target.trim()).is_some() {
+                    // The same refusal as the command line without --exact.
+                    self.command_rule(target)?;
+                }
+                rules::rule_for(cap, act, target, false, None)
+            }
+            _ if (cap, act) == ("exec", "run") => self.command_rule(target),
+            List::Allow | List::Deny if cap == "fs" => match target.trim().strip_suffix("/*") {
+                Some(folder) => {
+                    if !folder.is_empty() && !folder.starts_with('/') {
+                        return Err(format!("{target:?} is not an absolute path"));
+                    }
+                    Ok(format!("{action}:{}/*", rules::escape(folder)))
+                }
+                None => rules::rule_for(cap, act, target, false, None),
+            },
+            List::Allow | List::Deny => {
+                let wildcard = target.trim() == "*";
+                let target = if wildcard { "" } else { target };
+                rules::rule_for(cap, act, target, wildcard, None)
+            }
         }
     }
 
     /// The rule a command line stands for. The allow and deny lists hold
     /// `exec.run` rules; the sudo list holds the sudo command lines, and takes
-    /// the command with or without the `sudo` in front. `rule rm` uses it
-    /// as it is, so a rule is removed with the arguments that made it.
-    fn command_rule(self, command: &str, wildcard: bool) -> Result<String, String> {
-        match self {
+    /// the command with or without the `sudo` in front. A trailing ` *` is
+    /// the wildcard: every command that starts with the words before it.
+    /// `rule rm` uses it as it is, so a rule is removed with the command
+    /// line that made it.
+    fn command_rule(self, command: &str) -> Result<String, String> {
+        let command = command.trim();
+        let sudo = match self {
             List::Allow if sudo_command(command).is_some() => {
-                Err("a sudo command goes on the sudo list: `nerve-node rule add sudo`".into())
+                return Err(format!(
+                    "a sudo command goes on the sudo list: `nerve-node rule add allow '{command}'` puts it there"
+                ));
             }
-            List::Allow | List::Deny => rules::rule_for("exec", "run", command, wildcard, None),
-            List::Sudo if sudo_command(command).is_some() => {
-                rules::sudo_rule_for(command, wildcard)
+            List::Allow | List::Deny => false,
+            List::Sudo => true,
+        };
+        if command == "*" {
+            return Err("a `*` alone names no command: put it after one, as in `git *`".into());
+        }
+        let line = if sudo && sudo_command(command).is_none() {
+            format!("sudo {command}")
+        } else {
+            command.to_string()
+        };
+        let Some(start) = wildcard_start(&line) else {
+            return if sudo {
+                rules::sudo_rule_for(&line, false)
+            } else {
+                rules::rule_for("exec", "run", &line, false, None)
+            };
+        };
+        let glob = format!("{} *", rules::escape(start));
+        if sudo {
+            // `sudo *` would be every command as root.
+            let named = sudo_command(start)
+                .is_some_and(|rest| rest.split_whitespace().any(|w| !w.starts_with('-')));
+            if !named {
+                return Err(format!(
+                    "{line:?}: name the command after sudo before the *"
+                ));
             }
-            List::Sudo => rules::sudo_rule_for(&format!("sudo {}", command.trim()), wildcard),
+            rules::validate_command_glob(&glob)?;
+            Ok(glob)
+        } else {
+            let rule = format!("exec.run:{glob}");
+            rules::validate(&rule)?;
+            Ok(rule)
         }
     }
 }
 
+/// What `rule add allow` adds for a center in `mode`: in folder and user
+/// mode the allow rules do not count, and nothing else would say so.
+fn allow_rules_note(name: &str, mode: Mode) -> Option<String> {
+    (mode != Mode::Allowlist).then(|| {
+        format!(
+            "note: {name} is in {} mode, where allow rules do not count; `nerve-node mode allowlist --center {name}` uses them",
+            mode.as_str()
+        )
+    })
+}
+
+/// The words before a command line's trailing ` *`, its wildcard; `None`
+/// for a line without one. A `*` alone names no command.
+fn wildcard_start(line: &str) -> Option<&str> {
+    let start = line.trim().strip_suffix('*')?;
+    let trimmed = start.trim_end();
+    (trimmed.len() < start.len() && !trimmed.is_empty()).then_some(trimmed)
+}
+
+/// What a rule made of `command` covers, said after `rule add` when the
+/// command has a wildcard: `rm *` is every `rm`, not the files in a folder.
+fn wildcard_note(list: List, command: &str) -> Option<String> {
+    let start = wildcard_start(command)?;
+    let verb = match list {
+        List::Deny => "forbids",
+        List::Allow | List::Sudo => "allows",
+    };
+    Some(if start.split_whitespace().count() == 1 {
+        format!("it {verb} every `{start}` command")
+    } else {
+        format!("it {verb} every command that starts with `{start}`")
+    })
+}
+
+/// The target of `rule add --action` that widens an audit entry's `target`
+/// as the audit buttons' wildcard does: a command to its program (a sudo
+/// command to its program after `sudo` and its flags), a path to its
+/// folder, any other action to its capability.
+pub fn wildcard_target(cap: &str, action: &str, target: &str) -> String {
+    let target = target.trim();
+    match (cap, action) {
+        ("exec", "run") => {
+            let mut words = Vec::new();
+            let sudo = sudo_command(target).is_some();
+            for (i, w) in target.split_whitespace().enumerate() {
+                words.push(w);
+                if !sudo || (i > 0 && !w.starts_with('-')) {
+                    break;
+                }
+            }
+            format!("{} *", words.join(" "))
+        }
+        ("fs", _) => {
+            let target = target.trim_end_matches('/');
+            let folder = target.rfind('/').map_or("", |i| &target[..i]);
+            format!("{folder}/*")
+        }
+        _ => "*".into(),
+    }
+}
+
 /// The entry of `list` that `text` names: `text` itself, or the entry that
-/// `rule ls` prints as `text` (its tab, carriage return and line feed written
+/// `rule` prints as `text` (its tab, carriage return and line feed written
 /// `\t`, `\r`, `\n`). Else `text`.
 fn shown_entry(list: &[String], text: &str) -> String {
     if list.iter().any(|r| r == text) {
@@ -1496,18 +1858,56 @@ fn shown_entry(list: &[String], text: &str) -> String {
     }
 }
 
-/// `rule add|rm|ls`.
-async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<(), String> {
+/// The entry of one list that `text` names for `rule rm`: as the list shows
+/// it, or the command line that made it. An error when both forms are on
+/// the list as two entries.
+fn entry_on(list: List, l: &[String], text: &str, center: &str) -> Result<Option<String>, String> {
+    let shown = shown_entry(l, text);
+    let made = list.command_rule(text).ok();
+    match made {
+        Some(made) if made != shown && l.contains(&shown) && l.contains(&made) => Err(format!(
+            "both {shown:?} and {made:?} are on the {}: remove {made:?} first with `nerve-node rule rm {word} '{made}' --center {center}`, and then {shown:?} with `nerve-node rule rm {word} '{shown}' --center {center}`",
+            list.label(),
+            word = list.word(),
+        )),
+        _ if l.contains(&shown) => Ok(Some(shown)),
+        Some(made) if l.contains(&made) => Ok(Some(made)),
+        _ => Ok(None),
+    }
+}
+
+/// `rule`, `rule add|rm|edit|guard`.
+async fn rule_cmd(
+    paths: &NodePaths,
+    c: Option<RuleCmd>,
+    shown_list: Option<List>,
+    shown_center: CenterArg,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let Some(c) = c else {
+        return show_rules(paths, shown_list, &shown_center, out).await;
+    };
     match c {
         RuleCmd::Add {
             list,
             command,
-            wildcard,
             action,
-            pin,
+            arg,
+            exact,
             center,
         } => {
-            let rule = list.entry(&command, wildcard, action.as_deref(), pin.as_deref())?;
+            // A sudo command goes on the sudo list: the command says where.
+            let target_is_sudo = action.as_deref().is_none_or(|a| a == "exec.run")
+                && sudo_command(command.trim()).is_some();
+            let list = match list {
+                AddList::Allow if target_is_sudo => List::Sudo,
+                AddList::Allow => List::Allow,
+                AddList::Deny => List::Deny,
+            };
+            let rule = match (list, &action) {
+                (List::Sudo, None) => list.command_rule(&command)?,
+                _ => list.entry(&command, action.as_deref(), arg.as_deref(), exact)?,
+            };
             let name = edit_center(paths, &center, |e| {
                 push_unique(list.of(&mut e.policy), &rule);
                 Ok(())
@@ -1518,50 +1918,94 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                 _ => "",
             };
             let _ = writeln!(out, "{name}: {} {rule:?}{note}", list.label());
+            // A wildcard is said with --action too: an audit entry's target
+            // copied by hand may end in ` *` without meaning every command.
+            if !exact
+                && arg.is_none()
+                && action.as_deref().is_none_or(|a| a == "exec.run")
+                && let Some(covers) = wildcard_note(list, &command)
+            {
+                let _ = writeln!(out, "{covers}");
+            }
+            // An allow rule that does not count where the center is now is
+            // said, not left to look like it works.
+            if list == List::Allow {
+                let (cfg, _) = read_config(paths).await?;
+                let mode = cfg.center(&name).map(|c| c.policy.mode_at(crate::now_ms()));
+                if let Some(note) = mode.and_then(|m| allow_rules_note(&name, m)) {
+                    let _ = writeln!(out, "{note}");
+                }
+            }
         }
-        RuleCmd::Rm {
-            list,
-            command,
-            wildcard,
-            action,
-            pin,
-            center,
-        } => {
-            let removed = std::sync::Mutex::new(String::new());
+        RuleCmd::Rm { words, center } => {
+            // `rule rm [LIST] ENTRY`, and a line of `rule` as it shows all
+            // three lists (`allow  exec.run:git status`).
+            let (named, text) =
+                match words.as_slice() {
+                    [list, entry] => (
+                        Some(List::parse(list).ok_or_else(|| {
+                            format!("{list:?} is not a list: allow, deny or sudo")
+                        })?),
+                        entry.clone(),
+                    ),
+                    [entry] => match entry.split_once("  ").map(|(l, e)| (List::parse(l), e)) {
+                        Some((Some(l), e)) => (Some(l), e.to_string()),
+                        _ => (None, entry.clone()),
+                    },
+                    _ => return Err("name the entry to remove".into()),
+                };
+            let removed = std::sync::Mutex::new((List::Allow, String::new()));
             let name = edit_center(paths, &center, |e| {
                 let name = e.name.clone();
-                let l = list.of(&mut e.policy);
-                // An entry copied from `ls` goes as it is, so rules for
-                // files and other actions can be removed too (also one with
-                // a line break, which `ls` writes `\n`). The arguments of
-                // `add` stand for the command rule they made.
-                let command = shown_entry(l, &command);
-                let made = match &action {
-                    Some(a) => list.action_rule(a, &command, wildcard, pin.as_deref()),
-                    None => list.command_rule(&command, wildcard),
+                let lists = match named {
+                    Some(l) => vec![l],
+                    // Only a command that starts with `sudo` is looked for
+                    // on the sudo list when no list is named.
+                    None if sudo_command(text.trim()).is_some() => {
+                        vec![List::Allow, List::Deny, List::Sudo]
+                    }
+                    None => vec![List::Allow, List::Deny],
                 };
-                let rule = match made {
-                    Ok(made) if made != command && l.contains(&command) && l.contains(&made) => {
+                let mut found = Vec::new();
+                for l in lists {
+                    if let Some(entry) = entry_on(l, l.of(&mut e.policy), &text, &name)? {
+                        found.push((l, entry));
+                    }
+                }
+                if rules::is_guard(text.trim()) {
+                    return Err(format!(
+                        "{text:?} is a rule of the guard, which is built in: it cannot be removed"
+                    ));
+                }
+                let (list, rule) = match found.as_slice() {
+                    [] => {
+                        return Err(match named {
+                            Some(l) => format!(
+                                "{text:?} is not on the {}; `nerve-node rule {}` shows it",
+                                l.label(),
+                                l.word()
+                            ),
+                            None => format!(
+                                "{text:?} is on no list of {name}; `nerve-node rule` shows them"
+                            ),
+                        });
+                    }
+                    [one] => one.clone(),
+                    [(a, _), (b, _), ..] => {
                         return Err(format!(
-                            "both {command:?} and {made:?} are on the {}: remove {made:?} first with `nerve-node rule rm {word} '{made}' --center {center}`, and then {command:?} with `nerve-node rule rm {word} '{command}' --center {center}`",
-                            list.label(),
-                            word = list.word(),
-                            center = name
+                            "{text:?} is on the {} and the {} list: name the list, as in `nerve-node rule rm {} '{text}'`",
+                            a.word(),
+                            b.word(),
+                            a.word()
                         ));
                     }
-                    _ if l.contains(&command) => command.clone(),
-                    made => made?,
                 };
-                let before = l.len();
-                l.retain(|r| *r != rule);
-                if l.len() == before {
-                    return Err(format!("{rule:?} is not on the {}", list.label()));
-                }
-                *removed.lock().unwrap() = rule;
+                list.of(&mut e.policy).retain(|r| *r != rule);
+                *removed.lock().unwrap() = (list, rule);
                 Ok(())
             })
             .await?;
-            let removed = removed.into_inner().unwrap();
+            let (list, removed) = removed.into_inner().unwrap();
             let _ = writeln!(out, "{name}: removed {removed:?} from the {}", list.label());
         }
         RuleCmd::Edit {
@@ -1573,16 +2017,25 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
             let done = std::sync::Mutex::new((String::new(), String::new()));
             let name = edit_center(paths, &center, |e| {
                 let l = list.of(&mut e.policy);
-                // The entry as `ls` prints it, with its line breaks written
+                // The entry as `rule` prints it, with its line breaks written
                 // `\n`: the new entry is written so too.
                 let (entry, new) = match shown_entry(l, &entry) {
                     shown if shown == entry => (entry.clone(), new.clone()),
                     shown => (shown, rules::unescape_controls(&new)),
                 };
+                if rules::is_guard(&entry) {
+                    return Err(format!(
+                        "{entry:?} is a rule of the guard, which is built in: it cannot be changed"
+                    ));
+                }
                 let rule = list.edited(&new)?;
                 rules::check_not_a_listed_form(&rule, l)?;
                 let Some(at) = l.iter().position(|r| *r == entry) else {
-                    return Err(format!("{entry:?} is not on the {}", list.label()));
+                    return Err(format!(
+                        "{entry:?} is not on the {}; `nerve-node rule {}` shows it",
+                        list.label(),
+                        list.word()
+                    ));
                 };
                 if rule == entry {
                     return Err(format!("{entry:?} is that already"));
@@ -1606,111 +2059,99 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                 list.label()
             );
         }
-        RuleCmd::Guard { center } => {
-            let added = std::sync::Mutex::new((0usize, 0usize));
-            let name = edit_center(paths, &center, |e| {
-                // The guard's older texts go: the new ones replace them.
-                let mut deny: Vec<String> = e
-                    .policy
-                    .deny
-                    .iter()
-                    .filter(|r| !nerve_policy::rules::GUARD_OLD.contains(&r.as_str()))
-                    .cloned()
-                    .collect();
-                let replaced = e.policy.deny.len() - deny.len();
-                let missing = nerve_policy::rules::guard_missing(&deny);
-                if missing.is_empty() && replaced == 0 {
-                    return Err(format!(
-                        "{} has every deny rule of the guard already",
-                        e.name
-                    ));
+    }
+    Ok(())
+}
+
+/// How `rule` shows the guard, which every pairing has built in.
+fn guard_line() -> String {
+    format!(
+        "guard: {} rules, built in, that keep the commands off Nerve itself (they catch mistakes, not someone who hides the name)",
+        rules::GUARD.len()
+    )
+}
+
+/// `rule [LIST]`: one list of a center, or all three.
+async fn show_rules(
+    paths: &NodePaths,
+    list: Option<List>,
+    center: &CenterArg,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let (cfg, _) = read_config(paths).await?;
+    let name = pick_center(&cfg, center)?;
+    let mut policy = cfg.center(&name).expect("picked").policy.clone();
+    // The guard is built in: one line for it, and no stored copy of it.
+    policy.deny.retain(|r| !rules::is_guard(r));
+    // After the rules, so each line stays one rule `rule rm` takes:
+    // those whose conditions no longer fit the action's arguments.
+    let shown: Vec<(List, String)> = match list {
+        Some(l) => vec![l],
+        None => vec![List::Allow, List::Deny],
+    }
+    .into_iter()
+    .filter(|l| *l != List::Sudo)
+    .flat_map(|l| {
+        l.of(&mut policy.clone())
+            .iter()
+            .map(|r| (l, r.clone()))
+            .collect::<Vec<_>>()
+    })
+    .collect();
+    let stale = stale_rules(paths, &cfg, &name, shown.iter().map(|(_, r)| r)).await?;
+    let warn = |out: &mut dyn Write| {
+        for (rule, why) in &stale {
+            let Some((l, _)) = shown.iter().find(|(_, r)| r == rule) else {
+                continue;
+            };
+            let scope = rules::scope_of(rule);
+            let does = match l {
+                // What it does depends on why it no longer fits: a
+                // gone argument refuses every call, a value the action
+                // no longer takes may refuse none.
+                List::Deny => {
+                    format!("as a deny rule it may refuse calls of {scope} it was not meant for")
                 }
-                *added.lock().unwrap() = (missing.len(), replaced);
-                deny.extend(missing.into_iter().map(str::to_string));
-                e.policy.deny = deny;
-                Ok(())
-            })
-            .await?;
-            let (added, replaced) = added.into_inner().unwrap();
-            let replaced = match replaced {
-                0 => String::new(),
-                n => format!(" ({n} of an older text replaced)"),
+                _ => format!(
+                    "as an allow rule it may not cover the calls of {scope} it was meant for"
+                ),
             };
             let _ = writeln!(
                 out,
-                "{name}: added {added} deny rules of the guard{replaced}; commands that run this node's programs, name its socket or folders, or stop its service are forbidden"
+                "warning: the {} {rule:?} no longer fits: {why}; {does} until you change it",
+                l.label()
             );
         }
-        RuleCmd::Ls { list, center } => {
-            let (cfg, _) = read_config(paths).await?;
-            let name = pick_center(&cfg, &center)?;
-            let mut policy = cfg.center(&name).expect("picked").policy.clone();
-            // After the rules, so each line stays one rule `rule rm` takes:
-            // those whose conditions no longer fit the action's arguments.
-            let shown: Vec<(List, String)> = match list {
-                Some(l) => vec![l],
-                None => vec![List::Allow, List::Deny],
+    };
+    if let Some(list) = list {
+        if list == List::Deny {
+            let _ = writeln!(out, "{}", guard_line());
+        }
+        let entries = list.of(&mut policy);
+        if entries.is_empty() {
+            let more = if list == List::Deny { " else" } else { "" };
+            let _ = writeln!(out, "{name}: nothing{more} on the {}", list.label());
+        }
+        for r in entries.iter() {
+            let _ = writeln!(out, "{}", rules::escape_controls(r));
+        }
+        warn(out);
+    } else {
+        // All three: each line says which list it is on.
+        let mut any = false;
+        for list in [List::Allow, List::Deny, List::Sudo] {
+            if list == List::Deny {
+                let _ = writeln!(out, "deny  {}", guard_line());
             }
-            .into_iter()
-            .filter(|l| *l != List::Sudo)
-            .flat_map(|l| {
-                l.of(&mut policy.clone())
-                    .iter()
-                    .map(|r| (l, r.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-            let stale = stale_rules(paths, &cfg, &name, shown.iter().map(|(_, r)| r)).await?;
-            let warn = |out: &mut dyn Write| {
-                for (rule, why) in &stale {
-                    let Some((l, _)) = shown.iter().find(|(_, r)| r == rule) else {
-                        continue;
-                    };
-                    let scope = rules::scope_of(rule);
-                    let does = match l {
-                        // What it does depends on why it no longer fits: a
-                        // gone argument refuses every call, a value the action
-                        // no longer takes may refuse none.
-                        List::Deny => {
-                            format!(
-                                "as a deny rule it may refuse calls of {scope} it was not meant for"
-                            )
-                        }
-                        _ => format!(
-                            "as an allow rule it may not cover the calls of {scope} it was meant for"
-                        ),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "warning: the {} {rule:?} no longer fits: {why}; {does} until you change it",
-                        l.label()
-                    );
-                }
-            };
-            if let Some(list) = list {
-                let entries = list.of(&mut policy);
-                if entries.is_empty() {
-                    let _ = writeln!(out, "{name}: nothing on the {}", list.label());
-                }
-                for r in entries.iter() {
-                    let _ = writeln!(out, "{}", rules::escape_controls(r));
-                }
-                warn(out);
-            } else {
-                // All three: each line says which list it is on.
-                let mut any = false;
-                for list in [List::Allow, List::Deny, List::Sudo] {
-                    for r in list.of(&mut policy).iter() {
-                        any = true;
-                        let _ = writeln!(out, "{}  {}", list.word(), rules::escape_controls(r));
-                    }
-                }
-                if !any {
-                    let _ = writeln!(out, "{name}: nothing on any rule list");
-                }
-                warn(out);
+            for r in list.of(&mut policy).iter() {
+                any = true;
+                let _ = writeln!(out, "{}  {}", list.word(), rules::escape_controls(r));
             }
         }
+        if !any {
+            let _ = writeln!(out, "{name}: nothing else on any rule list");
+        }
+        warn(out);
     }
     Ok(())
 }
@@ -1727,7 +2168,7 @@ pub async fn execute(cli: Cli, out: &mut dyn Write) -> Result<(), String> {
     if service && (cli.config_dir.is_some() || cli.state_dir.is_some()) {
         let l = Layout::system();
         return Err(format!(
-            "install, update and uninstall keep the node's files in {} and {}; --config-dir and --state-dir do not go with them",
+            "install, update, uninstall and service keep the node's files in {} and {}: leave out --config-dir and --state-dir",
             l.paths.config_dir.display(),
             l.paths.state_dir.display()
         ));
@@ -1781,14 +2222,17 @@ async fn said(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), Str
     // itself when its change counts (crate::winsudo).
     // A restore says itself what comes next.
     let own_say =
-        (cfg!(windows) && matches!(cmd, Cmd::Sudo(_))) || matches!(cmd, Cmd::Restore { .. });
+        (cfg!(windows) && matches!(cmd, Cmd::Sudo { .. })) || matches!(cmd, Cmd::Restore { .. });
     let before = (!matches!(cmd, Cmd::Run) && !service && !own_say)
         .then(|| std::fs::read(paths.config_file()).ok());
     // On Windows the running node takes folder changes over its pipe, and
     // nothing else yet.
     let folders = matches!(
         cmd,
-        Cmd::Folder(FolderCmd::Add { .. } | FolderCmd::Set { .. } | FolderCmd::Rm { .. })
+        Cmd::Folder {
+            cmd: Some(FolderCmd::Add { .. } | FolderCmd::Rm { .. }),
+            ..
+        }
     );
     let r = command(paths.clone(), cmd, out).await;
     if r.is_ok()
@@ -1948,7 +2392,7 @@ pub fn service_log(cli: &Cli) -> Option<Result<PathBuf, String>> {
 /// the service the app installs and starts.
 pub const BY_HAND: &str = "on Windows the node runs only as its service: the desktop app's installer installs it, and Start on the app's Overview starts it";
 
-/// `service status` as JSON (crate::service::service_status): the
+/// The installed service's state as JSON (crate::service::service_status): the
 /// installed service's state as this machine's service manager says it.
 pub(crate) fn service_status(layout: &Layout) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
@@ -2075,13 +2519,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             opts.exe = std::env::current_exe().ok();
             Daemon::run(opts).await
         }
-        Cmd::Center(CenterCmd::Add {
-            link,
-            link_stdin,
-            name,
-            yes,
-        }) => {
-            let link = PairLink::parse(&given_link(link, link_stdin)?)?;
+        Cmd::Center {
+            cmd: Some(CenterCmd::Add { link, name, yes }),
+        } => {
+            let link = PairLink::parse(&given_link(&link)?)?;
             w(out, crate::pair::preview(&link, name.as_deref()));
             if !yes {
                 // Asked only when the pairing can work: the center answers,
@@ -2100,9 +2541,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             tell_pairings_apart(&paths, out).await;
             Ok(())
         }
-        Cmd::Center(CenterCmd::Rm(center)) => {
+        Cmd::Center {
+            cmd: Some(CenterCmd::Rm(center)),
+        } => {
             let (cfg, _) = read_config(&paths).await?;
-            let name = pick_center(&cfg, &center)?;
+            let name = pick_center(&cfg, &center.arg())?;
             let gone = std::sync::Mutex::new(Vec::new());
             // Saved also when the folder grants of the other pairings do not
             // follow: the pairing is gone then, so its key and profile go
@@ -2174,10 +2617,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 None => Ok(()),
             }
         }
-        Cmd::Center(CenterCmd::Ls) => {
+        Cmd::Center { cmd: None } => {
             let (cfg, _) = read_config(&paths).await?;
             if cfg.centers.is_empty() {
-                w(out, "no center is paired".into());
+                w(out, NO_CENTER_PAIRED.into());
             }
             let now = crate::now_ms();
             for c in &cfg.centers {
@@ -2220,29 +2663,28 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Center(CenterCmd::RotateKey { end_grace, center }) => {
-            rotate_key(&paths, &center, end_grace, out).await
-        }
-        Cmd::Center(CenterCmd::Pause(center)) => pause_center(&paths, &center, true, out).await,
-        Cmd::Center(CenterCmd::Resume(center)) => pause_center(&paths, &center, false, out).await,
-        Cmd::Center(CenterCmd::Grant {
-            what,
-            value,
-            center,
-        }) => {
-            let (name, g) = match what.as_str() {
-                "settings" => {
-                    let g: SettingsGrant = parse_enum(&value, "off or write")?;
-                    let name = edit_center(&paths, &center, |e| {
-                        e.settings = g;
-                        Ok(())
-                    })
-                    .await?;
-                    (name, g)
-                }
-                other => return Err(format!("unknown grant {other} (settings)")),
+        Cmd::Center {
+            cmd: Some(CenterCmd::RotateKey { end_grace, center }),
+        } => rotate_key(&paths, &center.arg(), end_grace, out).await,
+        Cmd::Center {
+            cmd: Some(CenterCmd::Pause(center)),
+        } => pause_center(&paths, &center.arg(), true, out).await,
+        Cmd::Center {
+            cmd: Some(CenterCmd::Resume(center)),
+        } => pause_center(&paths, &center.arg(), false, out).await,
+        Cmd::Center {
+            cmd: Some(CenterCmd::Settings { state, center }),
+        } => {
+            let g = match state.as_str() {
+                "on" => SettingsGrant::Write,
+                _ => SettingsGrant::Off,
             };
-            w(out, format!("{name}: {what} {value}"));
+            let name = edit_center(&paths, &center.arg(), |e| {
+                e.settings = g;
+                Ok(())
+            })
+            .await?;
+            w(out, format!("{name}: settings {state}"));
             let root = crate::owner::is_root(crate::service::owner_of(&paths).as_deref());
             if let Some(warning) = settings_grant_warning(&name, g, root) {
                 w(out, warning);
@@ -2250,65 +2692,56 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Status => {
-            // On Windows the node answers over its control pipe.
-            if let Some(v) = live_status(&paths).await? {
-                for line in status_lines(&v) {
-                    w(out, line);
-                }
-                return Ok(());
-            }
-            let cfg = SettingsStore::peek_with(
-                &paths.config_file(),
-                &crate::secrets::NodeSecrets::for_cli(&paths),
-            )?;
-            let owner = crate::service::owner_of(&paths);
-            for line in stopped_lines(&cfg, owner.as_deref()) {
+            // The same data as `status --json`, for people.
+            let v = json::status(&paths).await?;
+            for line in status_lines(&v) {
                 w(out, line);
-            }
-            if let Some(warning) = pairings_warning_here(&paths, &cfg) {
-                w(out, format!("warning: {warning}"));
             }
             Ok(())
         }
-        Cmd::Mode(ModeCmd::Set {
-            mode,
+        Cmd::Mode {
+            mode: Some(mode),
             for_hours,
             as_owner,
             center,
-        }) => set_mode(&paths, &mode, for_hours, as_owner, &center, out).await,
-        Cmd::Folder(FolderCmd::Add {
-            path,
-            rights,
+        } => set_mode(&paths, &mode, for_hours, as_owner, &center, out).await,
+        Cmd::Mode {
+            mode: None,
+            for_hours,
+            as_owner,
             center,
-        }) => add_folder(&paths, &path, &rights, &center, out).await,
-        Cmd::Folder(FolderCmd::Set {
-            path,
-            changes,
-            center,
-        }) => {
-            let (changes, center) = take_center_flag(changes, center)?;
-            let a = change_stored_folder(&paths, &center, &path, |at| FolderChange::Set {
-                path: at.clone(),
-                given: at,
-                changes: changes.clone(),
-            })
-            .await?;
-            let access = a.access.unwrap_or(Access::NONE);
-            w(
-                out,
-                format!("{}: folder {} {}", a.center, a.path, access.to_chmod()),
-            );
-            if access.is_none() {
-                w(
-                    out,
-                    "note: the folder grants nothing now (`nerve-node folder rm` removes it)"
-                        .into(),
-                );
+        } => {
+            if for_hours.is_some() || as_owner {
+                return Err("name the mode: `nerve-node mode allowlist|folder|user`".into());
             }
-            tell_grants(&paths, true, out).await;
+            let (cfg, _) = read_config(&paths).await?;
+            let names = match &center.center {
+                Some(_) => vec![pick_center(&cfg, &center)?],
+                None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
+            };
+            if names.is_empty() {
+                w(out, NO_CENTER_PAIRED.into());
+            }
+            let now = crate::now_ms();
+            for name in names {
+                let p = &cfg.center(&name).expect("listed").policy;
+                w(out, format!("{name}: {}", mode_line(p, now)));
+            }
             Ok(())
         }
-        Cmd::Folder(FolderCmd::Rm { path, center }) => {
+        Cmd::Folder {
+            cmd:
+                Some(FolderCmd::Add {
+                    path,
+                    rights,
+                    center,
+                }),
+            ..
+        } => add_folder(&paths, &path, &rights, &center, out).await,
+        Cmd::Folder {
+            cmd: Some(FolderCmd::Rm { path, center }),
+            ..
+        } => {
             let a = change_stored_folder(&paths, &center, &path, |at| FolderChange::Rm {
                 path: at.clone(),
                 given: at,
@@ -2318,11 +2751,40 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             tell_grants(&paths, false, out).await;
             Ok(())
         }
-        Cmd::Folder(FolderCmd::Sync) => sync_folders(&paths, out).await,
-        Cmd::Folder(FolderCmd::Network { state, center }) => {
-            set_network(&paths, &state, &center, out).await
+        Cmd::Folder {
+            cmd: Some(FolderCmd::Sync),
+            ..
+        } => sync_folders(&paths, out).await,
+        Cmd::Network {
+            state: Some(state),
+            center,
+        } => set_network(&paths, &state, &center, out).await,
+        Cmd::Network {
+            state: None,
+            center,
+        } => {
+            let (cfg, _) = read_config(&paths).await?;
+            let names = match &center.center {
+                Some(_) => vec![pick_center(&cfg, &center)?],
+                None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
+            };
+            if names.is_empty() {
+                w(out, NO_CENTER_PAIRED.into());
+            }
+            let installed = crate::service::is_service_node(&paths);
+            for name in names {
+                let p = &cfg.center(&name).expect("listed").policy;
+                match p.no_network {
+                    true => w(out, format!("{name}: off: {NO_NETWORK_LINE}")),
+                    false => w(out, format!("{name}: on")),
+                }
+                if let Some(note) = network_mode_note(p, installed, apart_by_hand_here()) {
+                    w(out, note);
+                }
+            }
+            Ok(())
         }
-        Cmd::Folder(FolderCmd::Ls { center }) => {
+        Cmd::Folder { cmd: None, center } => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
             let policy = &cfg.center(&name).expect("picked").policy;
@@ -2344,11 +2806,15 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Set {
-            cap,
-            setting,
-            center,
-        }) => {
+        Cmd::Cap {
+            cmd:
+                Some(CapCmd::Set {
+                    cap,
+                    setting,
+                    center,
+                }),
+            ..
+        } => {
             let s = CapSetting::parse(&setting)
                 .ok_or_else(|| format!("unknown setting {setting} (on, off or hidden)"))?;
             let name = edit_center(&paths, &center, |e| {
@@ -2359,11 +2825,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             w(out, format!("{name}: {cap} {setting}"));
             Ok(())
         }
-        Cmd::Cap(CapCmd::Ls { center }) => {
+        Cmd::Cap { cmd: None, center } => {
             let (cfg, _) = read_config(&paths).await?;
             if let Some(c) = &center {
-                cfg.center(c)
-                    .ok_or_else(|| format!("no center named {c}"))?;
+                cfg.center(c).ok_or_else(|| no_center_named(&cfg, c))?;
             }
             let v = cap_listing(&paths, &cfg).await?;
             for l in cap_lines(&cfg, &v, center.as_deref()) {
@@ -2371,11 +2836,15 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Add {
-            name,
-            spec,
-            command,
-        }) => {
+        Cmd::Cap {
+            cmd:
+                Some(CapCmd::Add {
+                    name,
+                    spec,
+                    command,
+                }),
+            ..
+        } => {
             let effect = spec
                 .effect
                 .as_deref()
@@ -2428,11 +2897,15 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Edit {
-            name,
-            spec,
-            command,
-        }) => {
+        Cmd::Cap {
+            cmd:
+                Some(CapCmd::Edit {
+                    name,
+                    spec,
+                    command,
+                }),
+            ..
+        } => {
             let input = cap_stdin(&spec)?;
             let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |cfg| {
@@ -2441,7 +2914,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     .capabilities
                     .iter_mut()
                     .find(|d| d.name == name)
-                    .ok_or_else(|| format!("no capability {name} is declared"))?;
+                    .ok_or_else(|| {
+                        format!("no capability {name} is declared; `nerve-node cap` lists them")
+                    })?;
                 if let Some(e) = &spec.effect {
                     c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
                 }
@@ -2458,7 +2933,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .capabilities
                 .iter()
                 .find(|d| d.name == name)
-                .ok_or_else(|| format!("no capability {name} is declared"))?;
+                .ok_or_else(|| {
+                    format!("no capability {name} is declared; `nerve-node cap` lists them")
+                })?;
             w(out, format!("capability {name} changed: {}", cap_line(c)));
             let notes = CapNotes {
                 installed: crate::service::is_service_node(&paths),
@@ -2470,15 +2947,18 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Rm {
-            name,
-            center: Some(center),
-        }) => {
+        Cmd::Cap {
+            cmd:
+                Some(CapCmd::Rm {
+                    name,
+                    center: Some(center),
+                }),
+            ..
+        } => {
             edit(&paths, |c| {
                 let owners = c.capabilities.clone();
-                let e = c
-                    .center_mut(&center)
-                    .ok_or_else(|| format!("no center named {center}"))?;
+                let missing = no_center_named(c, &center);
+                let e = c.center_mut(&center).ok_or(missing)?;
                 if !crate::config_cap::remove_added(e, &name, &owners) {
                     return Err(format!("center {center} added no capability {name}"));
                 }
@@ -2488,7 +2968,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             w(out, format!("capability {name} of center {center} removed"));
             Ok(())
         }
-        Cmd::Cap(CapCmd::Rm { name, center: None }) => {
+        Cmd::Cap {
+            cmd: Some(CapCmd::Rm { name, center: None }),
+            ..
+        } => {
             let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |c| {
                 let was = c.clone();
@@ -2506,7 +2989,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                             "no capability {name} is declared in node.toml; center {} added one: cap rm {name} --center {first}",
                             by.join(", center ")
                         ),
-                        None => format!("no capability {name} is declared"),
+                        None => format!("no capability {name} is declared; `nerve-node cap` lists them"),
                     });
                 }
                 // A center's own of that name that senses is offered again,
@@ -2521,7 +3004,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
+        Cmd::Provider {
+            cmd: Some(ProviderCmd::Add { name, exe }),
+        } => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
                     "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node, config or center-added"
@@ -2546,18 +3031,22 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 Ok(())
             })
             .await?;
-            w(out, format!("provider {name} allowed: {exe}"));
+            w(out, format!("provider {name} added: {exe}"));
             if let Some(note) = NO_PROVIDERS_HERE {
                 w(out, note.to_string());
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Provider(ProviderCmd::Rm { name })) => {
+        Cmd::Provider {
+            cmd: Some(ProviderCmd::Rm { name }),
+        } => {
             edit(&paths, |c| {
                 let before = c.providers.allowed.len();
                 c.providers.allowed.retain(|p| p.name != name);
                 if c.providers.allowed.len() == before {
-                    return Err(format!("no provider {name} is allowed"));
+                    return Err(format!(
+                        "no provider {name} is allowed; `nerve-node provider` lists them"
+                    ));
                 }
                 Ok(())
             })
@@ -2565,7 +3054,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             w(out, format!("provider {name} removed"));
             Ok(())
         }
-        Cmd::Cap(CapCmd::Provider(ProviderCmd::Ls)) => {
+        Cmd::Provider { cmd: None } => {
             let (cfg, _) = read_config(&paths).await?;
             let v = cap_listing(&paths, &cfg).await?;
             for l in program_lines(&v) {
@@ -2574,7 +3063,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Config(c) => config_cmd(&paths, c, out).await,
-        Cmd::Rule(c) => rule_cmd(&paths, c, out).await,
+        Cmd::Rule { cmd, list, center } => rule_cmd(&paths, cmd, list, center, out).await,
         Cmd::Panic => {
             let saved = edit_saved_as(&paths, true, |c| {
                 c.locked = true;
@@ -2622,9 +3111,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Audit {
             clear: None,
             follow,
-            denied,
+            refused,
             last,
-        } => audit(&paths, follow, denied, last, false, out).await,
+        } => audit(&paths, follow, refused, last, false, out).await,
         Cmd::Log {
             clear: Some(LogCmd::Clear),
             ..
@@ -2640,10 +3129,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             last,
             problems,
         } => log_cmd(&paths, follow, last, problems, false, out).await,
-        Cmd::Proxy(c) => proxy_cmd(&paths, c, out).await,
-        Cmd::Relay(c) => relay_cmd(&paths, c, out).await,
+        Cmd::Proxy { cmd } => proxy_cmd(&paths, cmd, out).await,
+        Cmd::Relay { cmd } => relay_cmd(&paths, cmd, out).await,
         Cmd::Ui { cmd } => ui::ui_cmd(&paths, cmd, out).await,
-        Cmd::Sudo(c) => sudo_cmd(&paths, c, out).await,
+        Cmd::Sudo { cmd } => sudo_cmd(&paths, cmd, out).await,
         Cmd::Backup {
             file,
             include_keyring,
@@ -2747,23 +3236,20 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     &exe,
                     &invoker,
                     out,
-                )
+                )?;
+                // One first run: at a terminal setup's questions follow.
+                if terminal {
+                    setup_after_install(&layout, &invoker, out);
+                }
+                Ok(())
             }
         }
         Cmd::Setup => {
             owner_check(&[&paths]).await?;
             let mut input = std::io::BufReader::new(std::io::stdin());
-            let layout = Layout::system();
-            let machine = (!cfg!(windows) && layout.installed() && paths == layout.paths)
-                .then_some(&Host as &dyn crate::service::System);
             // The installed program, which the node's user can run, asks
             // its keyring.
-            let keyring = match machine {
-                Some(_) => crate::keyring_setup::HostKeyring {
-                    exe: layout.bin.clone(),
-                },
-                None => crate::keyring_setup::HostKeyring::this_program(),
-            };
+            let (machine, keyring) = keyring_of(&paths);
             // Asked whether to install a keyring as root only at a
             // terminal: the owner's own, for a setup the node runs for its
             // owner (crate::owner).
@@ -2784,34 +3270,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 crate::service::service_files_text(&Layout::system(), owner.as_deref(), &polkit);
             writeln!(out, "{text}").map_err(|e| e.to_string())
         }
-        Cmd::Service(ServiceCmd::Status) => {
-            let v = service_status(&Layout::system())?;
-            let state = match v["state"].as_str() {
-                None => "not installed as a service".to_string(),
-                Some(state) => {
-                    let boot = match v["enabled"].as_bool() {
-                        Some(true) => ", starts with the machine",
-                        Some(false) => ", does not start with the machine",
-                        None => "",
-                    };
-                    format!("{state}{boot}")
-                }
-            };
-            let version = v["version"]
-                .as_str()
-                .map_or_else(String::new, |v| format!(" (version {v})"));
-            let program = if v["present"] == true {
-                format!("{}{version}", v["program"].as_str().unwrap_or_default())
-            } else {
-                format!("none at {}", v["program"].as_str().unwrap_or_default())
-            };
-            writeln!(out, "service: {state}\nprogram: {program}").map_err(|e| e.to_string())
-        }
         Cmd::Service(c) => {
             let action = match c {
                 ServiceCmd::Start => crate::service::ServiceAction::Start,
                 ServiceCmd::Stop => crate::service::ServiceAction::Stop,
-                _ => crate::service::ServiceAction::Restart,
+                ServiceCmd::Restart => crate::service::ServiceAction::Restart,
             };
             let layout = Layout::system();
             // An owner without root does not reach the control socket; the
@@ -2917,7 +3380,7 @@ fn owner_line(owner: Option<&str>, root: bool) -> Option<String> {
     }
 }
 
-/// What `center grant settings write` warns of where root is the owner
+/// What `center settings on` warns of where root is the owner
 /// (`root`): the center may then set its own mode to user, whose commands
 /// run as root, with no password asked.
 fn settings_grant_warning(name: &str, g: SettingsGrant, root: bool) -> Option<String> {
@@ -2952,37 +3415,41 @@ async fn tell_pairings_apart(paths: &NodePaths, out: &mut dyn Write) {
     }
 }
 
-/// What `status` says of a node that does not run, with the config `cfg`
-/// and the `owner` the unit names, a line each.
-fn stopped_lines(cfg: &NodeConfig, owner: Option<&str>) -> Vec<String> {
-    let mut lines = vec!["daemon: not running".to_string()];
-    lines.extend(owner_line(owner, crate::owner::is_root(owner)));
-    let limits = crate::cgroup::status(&cfg.limits.command, &Err("the node does not run".into()));
-    if let Some(line) = limits_lines(&limits).first() {
-        lines.push(line.clone());
-    }
-    if cfg.locked {
-        lines.push("LOCKED (panic): nothing runs until `nerve-node unlock`".into());
-    }
-    for c in &cfg.centers {
-        lines.push(format!("{}  {}", c.name, c.url));
-    }
-    lines
-}
-
-/// What `status` says of a running node, from its `status` answer `v`, a
-/// line each.
+/// What `status` says of the node, from `status --json`'s `v` (a running
+/// node's answer, or what the config says of a stopped one), a line each:
+/// the node and its service, the warnings, each center, and the next step.
 fn status_lines(v: &Value) -> Vec<String> {
-    let mut lines = vec![format!(
-        "daemon: running (confinement {})",
-        v["confinement"].as_str().unwrap_or("?")
-    )];
+    let running = v["daemon"] != "not running";
+    let mut lines = vec![match running {
+        true => format!(
+            "node: running (confinement {})",
+            v["confinement"].as_str().unwrap_or("?")
+        ),
+        false => "node: not running".to_string(),
+    }];
+    lines.extend(service_line(&v["service"]));
+    if let Some(why) = v["unread"].as_str() {
+        lines.push(format!(
+            "centers: not shown while the node is stopped, its folders are not yours to read ({why})"
+        ));
+    }
     if let Some(why) = v["folder_commands_off"].as_str() {
         lines.push(format!("folder mode runs no command: {why}"));
     }
-    lines.extend(limits_lines(&v["command_limits"]));
+    // A stopped node knows only the limits it would set.
+    let limits = match v["command_limits"].is_null() {
+        true => Vec::new(),
+        false => limits_lines(&v["command_limits"]),
+    };
+    match running {
+        true => lines.extend(limits),
+        false => lines.extend(limits.into_iter().take(1)),
+    }
     if v["locked"] == true {
         lines.push("LOCKED (panic): nothing runs until `nerve-node unlock`".into());
+    }
+    if let Some(s) = v["sudo"].as_str() {
+        lines.push(format!("sudo: {s}"));
     }
     lines.extend(owner_line(v["owner"].as_str(), v["owner_is_root"] == true));
     if let Some(h) = v["home_warning"]["warning"].as_str() {
@@ -2995,7 +3462,7 @@ fn status_lines(v: &Value) -> Vec<String> {
         lines.push(format!("warning: {p}"));
     }
     lines.extend(
-        grant_lines(&v["folder_grants"])
+        grant_lines(&v["folder_access"])
             .into_iter()
             .map(|l| format!("warning: {l}")),
     );
@@ -3009,12 +3476,34 @@ fn status_lines(v: &Value) -> Vec<String> {
             Some(a) => format!(", as {a}"),
             None => String::new(),
         };
+        // A timed mode says how long it has and where it ends.
+        let timer = match (
+            c["until"].as_u64().filter(|u| *u > crate::now_ms()),
+            c["then"].as_str(),
+        ) {
+            (Some(until), Some(then)) => {
+                let left = until.saturating_sub(crate::now_ms());
+                let then = Mode::parse(then).unwrap_or(Mode::Allowlist);
+                let rules = c["allow_rules"].as_u64().unwrap_or(0) as usize;
+                format!(
+                    " for {} more, then {}",
+                    nerve_transport::log::span(Duration::from_millis(left)),
+                    then_text(then, rules)
+                )
+            }
+            _ => String::new(),
+        };
+        // A stopped node has no link to tell: the center's address then.
+        let link = c["status"]
+            .as_str()
+            .or_else(|| c["url"].as_str())
+            .unwrap_or_default();
         lines.push(format!(
-            "{}  {}  mode {}{whom}",
+            "{}  {link}  mode {}{timer}{whom}",
             c["name"].as_str().unwrap_or_default(),
-            c["status"].as_str().unwrap_or_default(),
             c["mode"].as_str().unwrap_or_default(),
         ));
+        lines.extend(center_summary(c));
     }
     for p in v["providers"].as_array().into_iter().flatten() {
         let caps: Vec<&str> = p["capabilities"]
@@ -3038,11 +3527,84 @@ fn status_lines(v: &Value) -> Vec<String> {
     if relay["listen"].is_string() {
         let tunnels = relay["tunnels"].as_array().map_or(0, Vec::len);
         lines.push(format!(
-            "relay: {}, {tunnels} tunnels open (`nerve-node relay ls` names them)",
+            "relay: {}, {tunnels} tunnels open (`nerve-node relay` names them)",
             relay["status"].as_str().unwrap_or_default()
         ));
     }
+    lines.extend(next_steps(v).into_iter().map(|s| format!("next: {s}")));
     lines
+}
+
+/// What `status` says of the installed service, from `status --json`'s
+/// `service` (`None` where there is none to tell).
+fn service_line(s: &Value) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    let Some(state) = s["state"].as_str() else {
+        return Some("service: not installed (this node runs by hand)".into());
+    };
+    let boot = match s["enabled"].as_bool() {
+        Some(true) => ", starts with the machine",
+        Some(false) => ", does not start with the machine",
+        None => "",
+    };
+    let version = s["version"]
+        .as_str()
+        .map_or_else(String::new, |v| format!(", version {v}"));
+    Some(format!("service: {state}{boot}{version}"))
+}
+
+/// One center's rights in a line, for `status`: its folders, its network,
+/// and how many rules each list has.
+fn center_summary(c: &Value) -> Option<String> {
+    let n = |k: &str| c[k].as_u64();
+    let (folders, allow, deny, sudo) = (
+        n("folders")?,
+        n("allow_rules")?,
+        n("deny_rules")?,
+        n("sudo_rules")?,
+    );
+    let network = if c["no_network"] == true { "off" } else { "on" };
+    Some(format!(
+        "  folders: {folders}; network: {network}; rules: {allow} allow, {deny} deny and the guard, {sudo} sudo"
+    ))
+}
+
+/// What to do next, from `status --json`'s `v`: start a node that does
+/// not run, pair a first center, give a folder-mode center a folder.
+fn next_steps(v: &Value) -> Vec<String> {
+    let mut steps = Vec::new();
+    if v["daemon"] == "not running" {
+        steps.push(match v["service"]["state"].as_str() {
+            Some(_) => "start it: `nerve-node service start`".to_string(),
+            None => "start it: `sudo nerve-node install` installs it as a service (or `nerve-node run` in the foreground)".to_string(),
+        });
+    }
+    if v["locked"] == true {
+        steps.push("let it work again: `nerve-node unlock`".into());
+    }
+    // Its centers were not read: none to pair or to give a folder.
+    if v["unread"].is_string() {
+        return steps;
+    }
+    let centers = v["centers"].as_array().cloned().unwrap_or_default();
+    if centers.is_empty() {
+        steps.push("pair a center: `nerve-node center add '<link>'`".into());
+    }
+    for c in &centers {
+        if c["mode"] == "folder" && c["folders"].as_u64() == Some(0) {
+            let name = c["name"].as_str().unwrap_or_default();
+            let which = match centers.len() {
+                1 => String::new(),
+                _ => format!(" --center {name}"),
+            };
+            steps.push(format!(
+                "give {name} a folder: `nerve-node folder add ~/project rwx{which}`"
+            ));
+        }
+    }
+    steps
 }
 
 /// The texts of `v`, a list of strings.
@@ -3061,7 +3623,7 @@ fn error_about(e: &str, path: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(':') || rest.starts_with('/'))
 }
 
-/// What the node's folder grants (`status`'s `folder_grants`, the answer of
+/// What the node's folder grants (`status`'s `folder_access`, the answer of
 /// `folder.grants`) say, a line each. Access `nerve-run` keeps although it
 /// should have lost it (`stale`) comes first, as no command of it runs
 /// until it is off; then the grants it did not get whole.
@@ -3119,6 +3681,50 @@ pub async fn setup(
     r
 }
 
+/// The service manager and the keyring program of the node at `paths`: the
+/// installed program for the installed node on Linux, which the node's user
+/// can run, else this one.
+fn keyring_of(
+    paths: &NodePaths,
+) -> (
+    Option<&'static dyn crate::service::System>,
+    crate::keyring_setup::HostKeyring,
+) {
+    let layout = Layout::system();
+    let machine = (!cfg!(windows) && layout.installed() && *paths == layout.paths)
+        .then_some(&Host as &dyn crate::service::System);
+    let keyring = match machine {
+        Some(_) => crate::keyring_setup::HostKeyring {
+            exe: layout.bin.clone(),
+        },
+        None => crate::keyring_setup::HostKeyring::this_program(),
+    };
+    (machine, keyring)
+}
+
+/// `config set machine.secret_storage keyring` at a terminal (`input`):
+/// where no keyring answers for the node's keys, offers to install one, and
+/// a node that found none before is restarted once it answers. Nothing for
+/// keys that are there already, or where they may not be (the installed
+/// node on Windows, which `config set` refuses).
+async fn offer_keyring(
+    paths: &NodePaths,
+    machine: Option<&dyn crate::service::System>,
+    keyring: &dyn crate::keyring_setup::Keyring,
+    input: Option<&mut dyn BufRead>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let (now, _) = read_config(paths).await?;
+    if now.machine.secret_storage == SecretStorage::Keyring
+        || crate::secrets::no_keyring(paths).is_some()
+    {
+        return Ok(());
+    }
+    let me = crate::keyring_setup::me()?;
+    crate::keyring_setup::ensure(keyring, &me, input, out)?;
+    after_keyring_answers(paths, machine, out).await
+}
+
 /// Once the keyring answers setup, whether setup installed it or it came some
 /// other way: a node that runs and found none before does not look again
 /// (`keyring_failed` in its status, [`crate::secrets::store::failed`]), so it
@@ -3165,10 +3771,10 @@ fn restart_for_keyring(
     // Run by the node for its owner, setup would end with the node it runs
     // in.
     if for_owner {
-        return Err("the system keyring answers now, but the node found none when it started and does not look again until it is restarted; `nerve-node service restart`, then run `nerve-node setup` again".into());
+        return Err("the system keyring answers now, but the node found none when it started and does not look again until it is restarted; `nerve-node service restart`, then run this again".into());
     }
     let Some(sys) = machine else {
-        return Err("the system keyring answers now, but the node that runs for this folder found none before and does not look again until it is restarted; restart it, then run `nerve-node setup` again".into());
+        return Err("the system keyring answers now, but the node that runs for this folder found none before and does not look again until it is restarted; restart it, then run this again".into());
     };
     sys.systemctl(&["restart", crate::service::UNIT_NAME])?;
     sys.wait_running(paths)?;
@@ -3200,68 +3806,28 @@ async fn setup_steps(
         crate::keyring_setup::ensure(keyring, &me, terminal.then_some(&mut *input), out)?;
         after_keyring_answers(paths, machine, out).await?;
     }
-    let (cfg, _) = read_config(paths).await?;
-    let _ = writeln!(out, "Set up this node. Enter keeps what is in [brackets].");
-    let current = crate::descriptor::node_name(&cfg);
-    let name = ask(
-        input,
-        out,
-        &format!("Name of this node, as centers show it [{current}]: "),
-    )?;
-    if !name.is_empty() && name != current {
-        if !nerve_proto::valid_node_name(&name) {
-            return Err(format!(
-                "{name:?} is not a node name: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit"
-            ));
-        }
-        edit(paths, |c| {
-            c.node.name = Some(name.clone());
-            Ok(())
-        })
-        .await?;
-        steps.push(format!("named the node {name}"));
-    }
-
-    // Where the keys go, before pairing makes one. Where they may not be in
-    // the keyring (the installed node on Windows), setup does not ask; it
-    // says why.
-    let now = read_config(paths).await?.0.machine.secret_storage;
-    let storage = if let Some(n) = no_keyring {
+    // Where the keys may not be in the keyring (the installed node on
+    // Windows), keys left there go into files.
+    if let Some(n) = no_keyring
+        && read_config(paths).await?.0.machine.secret_storage == SecretStorage::Keyring
+    {
         let _ = writeln!(out, "Warning: {}.", n.why());
-        SecretStorage::File
-    } else {
-        let answer = ask(
-            input,
-            out,
-            &format!(
-                "Where the node keeps its keys: file (files only the node's user can read) or keyring (the system keyring) [{}]: ",
-                enum_str(&now)
-            ),
-        )?;
-        match answer.as_str() {
-            "" => now,
-            a => parse_enum::<SecretStorage>(a, "file or keyring")?,
-        }
-    };
-    if storage != now {
-        if storage == SecretStorage::Keyring {
-            let me = crate::keyring_setup::me()?;
-            crate::keyring_setup::ensure(keyring, &me, terminal.then_some(&mut *input), out)?;
-            after_keyring_answers(paths, machine, out).await?;
-        }
-        let cfg = edit(paths, |c| {
-            c.machine.secret_storage = storage;
+        edit(paths, |c| {
+            c.machine.secret_storage = SecretStorage::File;
             Ok(())
         })
         .await?;
-        let step = format!("the node's keys are in {} now", storage_place(storage));
+        let step = format!(
+            "the node's keys are in {} now",
+            storage_place(SecretStorage::File)
+        );
         let _ = writeln!(out, "{step}");
         steps.push(step);
-        if storage == SecretStorage::Keyring {
-            tell_folder_commands(paths, &cfg, out).await;
-        }
     }
-
+    // The node's name and where its keys go keep their defaults: `config
+    // set node.name` and `config set machine.secret_storage` change them.
+    // The question that matters comes first.
+    let _ = writeln!(out, "Set up this node. Enter keeps what is in [brackets].");
     let link = ask(
         input,
         out,
@@ -3295,7 +3861,7 @@ async fn setup_steps(
             _ => {
                 let _ = writeln!(
                     out,
-                    "Several centers are paired; `nerve-node mode set <mode> --center <name>` sets the mode of each."
+                    "Several centers are paired; `nerve-node mode <mode> --center <name>` sets the mode of each."
                 );
                 return Ok(());
             }
@@ -3305,7 +3871,7 @@ async fn setup_steps(
     let (cfg, _) = read_config(paths).await?;
     let entry = cfg
         .center(&center)
-        .ok_or_else(|| format!("no center named {center}"))?;
+        .ok_or_else(|| no_center_named(&cfg, &center))?;
     let now = entry.policy.mode_at(crate::now_ms()).as_str().to_string();
     let mode = ask(
         input,
@@ -3328,28 +3894,175 @@ async fn setup_steps(
             out,
             &format!("A folder {center} may use (Enter to skip): "),
         )?;
+        // `~` is the home of whoever runs setup, also through sudo.
+        let folder = typed_folder(&folder, &invoker_home());
+        let folder = folder.display().to_string();
         if !folder.is_empty() {
             let rights = ask(
                 input,
                 out,
-                "What it may do there: +r reads, +w writes, +x runs commands, as in `+r +x` [+rwx]: ",
+                "What it may do there: r reads, w writes, x runs commands, as one word like rx [rwx]: ",
             )?;
             // Folder mode runs a command only where it may run one, so
             // Enter gives a folder commands can work in.
-            let rights: Vec<String> = if rights.is_empty() {
-                vec!["+rwx".into()]
+            let rights = if rights.is_empty() {
+                "rwx".to_string()
             } else {
-                rights.split_whitespace().map(str::to_string).collect()
+                rights
             };
             add_folder(paths, Path::new(&folder), &rights, &which, out).await?;
-            steps.push(format!("{center}: folder {folder} {}", rights.join(" ")));
+            steps.push(format!("{center}: folder {folder} {rights}"));
         }
+    }
+    // The network switch: in user mode, and in allowlist mode as you, no
+    // command runs while it is off, which is said before it is saved.
+    let (cfg, _) = read_config(paths).await?;
+    let policy = cfg.center(&center).expect("picked above").policy.clone();
+    let now = if policy.no_network { "off" } else { "on" };
+    let net = ask(
+        input,
+        out,
+        &format!("Network for {center}'s commands: on or off [{now}]: "),
+    )?;
+    let net = if net.is_empty() { now.to_string() } else { net };
+    if net != now {
+        if net == "off" && policy.runs_as_owner(crate::now_ms()) {
+            let _ = writeln!(
+                out,
+                "Warning: {center} is in {} mode, where its commands run as you: with the network off, none of them runs.",
+                policy.mode_at(crate::now_ms()).as_str()
+            );
+        }
+        set_network(paths, &net, &which, out).await?;
+        steps.push(format!("{center}: network {net}"));
     }
     let _ = writeln!(
         out,
-        "Done. `nerve-node folder add <folder> +rwx` gives a folder, `nerve-node rule add allow '<command>'` allows a command in allowlist mode; `nerve-node --help` lists the rest."
+        "Done. `nerve-node status` shows the node and what to do next; `nerve-node --help` lists the commands."
     );
     Ok(())
+}
+
+/// What `install` runs at a terminal once the service runs: setup's
+/// questions, as the person who ran sudo or pkexec, so that `~` is their
+/// home and the answers go the way their own commands go (crate::owner).
+/// Setup that does not finish leaves the install as it is, and says what
+/// to run.
+#[cfg(unix)]
+fn setup_after_install(layout: &Layout, invoker: &str, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "Now pair a first center and give it a folder; Enter skips a question."
+    );
+    let _ = out.flush();
+    let ran = match crate::account::lookup(invoker) {
+        Ok(Some(a)) => setup_run(&layout.bin, &a)
+            .command()
+            .status()
+            .map_err(|e| format!("cannot start {}: {e}", layout.bin.display()))
+            .and_then(|s| match s.success() {
+                true => Ok(()),
+                false => Err(format!("it ended with {s}")),
+            }),
+        Ok(None) => Err(format!("no account {invoker}")),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = ran {
+        let _ = writeln!(
+            out,
+            "setup did not finish ({e}); `nerve-node setup` asks again.\n{}",
+            crate::service::NEXT
+        );
+    }
+}
+
+/// How `install` starts setup: the installed program, as `account`, with
+/// its home and names.
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+struct SetupRun {
+    program: PathBuf,
+    uid: u32,
+    gid: u32,
+    home: PathBuf,
+    user: String,
+}
+
+#[cfg(unix)]
+fn setup_run(bin: &Path, account: &crate::service::Account) -> SetupRun {
+    SetupRun {
+        program: bin.to_path_buf(),
+        uid: account.uid,
+        gid: account.gid,
+        home: account.home.clone(),
+        user: account.name.clone(),
+    }
+}
+
+#[cfg(unix)]
+impl SetupRun {
+    fn command(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new(&self.program);
+        c.arg("setup")
+            .env("HOME", &self.home)
+            .env("USER", &self.user)
+            .env("LOGNAME", &self.user)
+            .current_dir(&self.home);
+        // Dropped from root to the account (std clears root's other
+        // groups); root itself stays root.
+        if self.uid != 0 {
+            c.gid(self.gid).uid(self.uid);
+        }
+        c
+    }
+}
+
+/// A folder as typed at setup's question: `~` and `~/…` are in `home`,
+/// the rest as typed.
+fn typed_folder(text: &str, home: &Path) -> PathBuf {
+    match text.strip_prefix('~') {
+        Some("") => home.to_path_buf(),
+        Some(rest) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(text),
+    }
+}
+
+/// The home of the person who runs this command: through sudo or pkexec
+/// the home of the account that ran it, not root's; for the owner of the
+/// installed node, whose commands the node runs as its own user, the
+/// owner's, not the node's.
+pub(crate) fn invoker_home() -> PathBuf {
+    #[cfg(unix)]
+    let root = nerve_transport::net::euid() == 0;
+    #[cfg(not(unix))]
+    let root = false;
+    home_of_invoker(
+        root,
+        crate::owner::owner_running().is_some(),
+        || {
+            crate::account::lookup(&invoker())
+                .ok()
+                .flatten()
+                .map(|a| a.home)
+        },
+        crate::paths::home_dir(),
+    )
+}
+
+/// [`invoker_home`] with what it reads given: whether this runs as root,
+/// whether the node runs it for its owner, the home of the account that ran
+/// it, and `HOME`.
+fn home_of_invoker(
+    root: bool,
+    for_owner: bool,
+    account_home: impl FnOnce() -> Option<PathBuf>,
+    home: PathBuf,
+) -> PathBuf {
+    match root || for_owner {
+        true => account_home().unwrap_or(home),
+        false => home,
+    }
 }
 
 /// How setup names where the keys are.
@@ -3377,7 +4090,51 @@ pub(crate) fn ask(
     Ok(line.trim().to_string())
 }
 
-/// `mode set`, and the mode step of `setup`.
+pub(crate) use crate::folder_change::{NO_CENTER_PAIRED, no_center_named};
+
+/// A center's mode as `mode` shows it: `folder`, `allowlist, as you`,
+/// `user for 1h 59m more, then folder`.
+fn mode_line(p: &nerve_policy::config::CenterPolicy, now: u64) -> String {
+    let mode = p.mode_at(now);
+    let whom = if p.runs_as_owner(now) && mode == Mode::Allowlist {
+        ", as you"
+    } else {
+        ""
+    };
+    let timer = match p.ends(now) {
+        Some((until, then)) => format!(
+            " for {} more, then {}",
+            nerve_transport::log::span(Duration::from_millis(until - now)),
+            then_text(then, p.allow.len())
+        ),
+        None => String::new(),
+    };
+    format!("{}{whom}{timer}", mode.as_str())
+}
+
+/// The mode a timer ends in, in words: allowlist says what it then runs.
+fn then_text(then: Mode, allow_rules: usize) -> String {
+    match (then, allow_rules) {
+        (Mode::Allowlist, 0) => "allowlist (no allow rule: nothing runs)".into(),
+        (Mode::Allowlist, 1) => "allowlist (1 allow rule)".into(),
+        (Mode::Allowlist, n) => format!("allowlist ({n} allow rules)"),
+        (m, _) => m.as_str().into(),
+    }
+}
+
+/// A center's mode for `mode --json`.
+pub(crate) fn mode_data(name: &str, p: &nerve_policy::config::CenterPolicy, now: u64) -> Value {
+    let ends = p.ends(now);
+    json!({
+        "center": name,
+        "mode": p.mode_at(now).as_str(),
+        "as_owner": p.as_owner && p.mode_at(now) == Mode::Allowlist,
+        "until_ms": ends.map(|(u, _)| u),
+        "then": ends.map(|(_, m)| m.as_str()),
+    })
+}
+
+/// `mode <MODE>`, and the mode step of `setup`.
 async fn set_mode(
     paths: &NodePaths,
     mode: &str,
@@ -3418,29 +4175,62 @@ async fn set_mode(
                 .ok_or_else(|| "--for is too large".to_string())
         })
         .transpose()?;
+    let ends = std::cell::Cell::new(None);
     let name = edit_center(paths, center, |e| {
+        // A timed user mode goes back to the mode before it, never to
+        // user; a timed folder mode to allowlist (CenterPolicy::after).
+        // The mode before is a folder mode without a timer, or the one a
+        // timed user mode in force came from, so a timer set again ends
+        // where it did. A timed folder mode would lose its own end there,
+        // so a user mode from it ends in allowlist.
+        let now = crate::now_ms();
+        let from = match e.policy.mode_at(now) {
+            Mode::Folder if e.policy.ends(now).is_none() => Some(Mode::Folder),
+            Mode::User if e.policy.ends(now).is_some() => e.policy.then,
+            _ => None,
+        };
+        e.policy.then = from.filter(|_| m == Mode::User && until.is_some());
         e.policy.mode = m;
         e.policy.until = until;
         e.policy.as_owner = as_owner;
+        ends.set(
+            e.policy
+                .ends(crate::now_ms())
+                .map(|(_, then)| (then, e.policy.allow.len())),
+        );
         Ok(())
     })
     .await?;
     let whom = if as_owner { ", as you" } else { "" };
-    w(out, format!("{name}: mode {}{whom}", m.as_str()));
+    let timer = match (for_hours, ends.get()) {
+        (Some(h), Some((then, rules))) => format!(" for {h} h, then {}", then_text(then, rules)),
+        _ => String::new(),
+    };
+    w(out, format!("{name}: mode {}{whom}{timer}", m.as_str()));
+    // A mode whose commands run as you, with the network off, runs none of
+    // them: said now, not found out from a refused call.
+    let (cfg, _) = read_config(paths).await?;
+    let installed = crate::service::is_service_node(paths);
+    if let Some(note) = cfg
+        .center(&name)
+        .and_then(|c| network_mode_note(&c.policy, installed, apart_by_hand_here()))
+    {
+        w(out, note);
+    }
     Ok(())
 }
 
-/// What `folder network off` and `folder ls` say of a center whose network
+/// What `network off` and `folder` say of a center whose network
 /// is off.
 const NO_NETWORK_LINE: &str =
     "its commands have no network (no socket but unix ones), and its sudo-list commands do not run";
 
-/// What `folder network off` adds: a command that started with the network
+/// What `network off` adds: a command that started with the network
 /// does not keep it, which the running node sees to (`link::Link::
 /// end_commands_without_network`).
 const NO_NETWORK_RUNNING: &str = "a command of it that runs now is ended by the node";
 
-/// `folder network`: the pairing's network switch for its commands
+/// `network`: the pairing's network switch for its commands
 /// (`policy.no_network`), in every mode. Where this machine cannot hold
 /// them to it, or they run as the owner in the mode the pairing is in, the
 /// node runs none of them, and this says so.
@@ -3486,7 +4276,7 @@ async fn set_network(
     Ok(())
 }
 
-/// What `folder network off` and `folder ls` add where the center's
+/// What `network off` and `folder` add where the center's
 /// commands run as the owner in the mode it is in now: user mode and
 /// allowlist mode as the owner on the installed node; on a node run by hand
 /// every mode, but folder mode where it can keep them apart
@@ -3551,7 +4341,12 @@ fn network_rules_here() -> bool {
 /// What `folder.add` is asked: a page's request that a panic overtook (its
 /// count of locks is no longer the node's) adds nothing.
 #[cfg(unix)]
-fn folder_add_params(center: &str, path: &str, access: Access, web_locks: Option<u64>) -> Value {
+fn folder_add_params(
+    center: &str,
+    path: &str,
+    access: nerve_policy::config::Access,
+    web_locks: Option<u64>,
+) -> Value {
     let mut params = json!({"center": center, "path": path, "access": access.to_string()});
     if let Some(n) = web_locks {
         params["web_locks"] = json!(n);
@@ -3562,7 +4357,7 @@ fn folder_add_params(center: &str, path: &str, access: Access, web_locks: Option
 async fn add_folder(
     paths: &NodePaths,
     path: &Path,
-    rights: &[String],
+    rights: &str,
     center: &CenterArg,
     out: &mut dyn Write,
 ) -> Result<(), String> {
@@ -3606,14 +4401,22 @@ async fn add_folder(
         Some(a) => a,
         None => {
             // No node to ask (on Windows the node's pipe takes the change but
-            // not the judging): judge the path here, as this process sees it.
-            let settled = crate::exec::settle(&cfg, &crate::paths::home_dir(), Path::new(&given));
-            let (stored, recorded) = match settled {
-                crate::exec::Settled::Refused(why) => {
-                    return Err(crate::daemon::refusal(&given, &why));
+            // not the judging): judge the path here, as this process sees it,
+            // unless it narrows a listed folder, which stays that entry.
+            let listed = cfg
+                .center(&name)
+                .and_then(|e| crate::folder_change::narrowed(e, &given, access));
+            let (stored, recorded) = match listed {
+                Some(entry) => entry,
+                None => {
+                    match crate::exec::settle(&cfg, &crate::paths::home_dir(), Path::new(&given)) {
+                        crate::exec::Settled::Refused(why) => {
+                            return Err(crate::daemon::refusal(&given, &why));
+                        }
+                        crate::exec::Settled::At(place) => (place.display().to_string(), true),
+                        crate::exec::Settled::Unknown => (given.clone(), false),
+                    }
                 }
-                crate::exec::Settled::At(place) => (place.display().to_string(), true),
-                crate::exec::Settled::Unknown => (given.clone(), false),
             };
             let change = FolderChange::Add {
                 path: stored.clone(),
@@ -3628,6 +4431,13 @@ async fn add_folder(
         out,
         format!("{name}: folder {stored} {}", access.to_chmod()),
     );
+    if access.is_none() {
+        w(
+            out,
+            "note: the folder grants nothing: it closes it to file calls; a command run in the folder around it still reaches it (`nerve-node folder rm` removes it)"
+                .into(),
+        );
+    }
     if !recorded {
         w(
             out,
@@ -3649,11 +4459,19 @@ async fn add_folder(
         w(
             out,
             format!(
-                "note: folders do not count here: {name} is in {mode} mode, whose commands are not held to them (`nerve-node mode set folder`)"
+                "note: folders do not count here: {name} is in {mode} mode, whose commands are not held to them (`nerve-node mode folder`)"
             ),
         );
     }
-    tell_grants(paths, false, out).await;
+    // New rights for a folder it had reach what is in it already, and what
+    // was moved into it: every grant is walked, as `folder sync` does.
+    let had = cfg.center(&name).is_some_and(|c| {
+        c.policy
+            .folders
+            .iter()
+            .any(|f| same_folder(&f.path, &stored) || same_folder(&f.path, &given))
+    });
+    tell_grants(paths, had, out).await;
     Ok(())
 }
 
@@ -3763,7 +4581,7 @@ fn same_folder(a: &str, b: &str) -> bool {
     within(Path::new(a), Path::new(b)) && within(Path::new(b), Path::new(a))
 }
 
-/// `folder set` and `folder rm`: the change `make` builds for the stored
+/// `folder rm`: the change `make` builds for the stored
 /// folder `path` means ([`stored_folder`]), made as [`change_folder`] makes
 /// it. The folder is looked up on the config as the CLI reads it, then named
 /// by its stored path, so that a change to the file in between ends in "not
@@ -3820,13 +4638,22 @@ async fn change_folder(
     Ok(applied.into_inner().expect("applied when edit succeeds"))
 }
 
-/// `nerve-node sudo on|off|status`. The password lives in the running
+/// `nerve-node sudo`, `sudo on|off`. The password lives in the running
 /// daemon only, so `on` needs one; `off` without a daemon edits the file.
 /// Windows has no control socket: there the password is kept with DPAPI
 /// for the service (crate::winsudo).
-async fn sudo_cmd(paths: &NodePaths, c: SudoCmd, out: &mut dyn Write) -> Result<(), String> {
+async fn sudo_cmd(
+    paths: &NodePaths,
+    c: Option<SudoCmd>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let w = |out: &mut dyn Write, s: &str| {
         let _ = writeln!(out, "{s}");
+    };
+    let Some(c) = c else {
+        let on = sudo_is_on(paths).await?;
+        w(out, if on { "sudo: on" } else { "sudo: off" });
+        return Ok(());
     };
     #[cfg(unix)]
     {
@@ -3866,10 +4693,6 @@ async fn sudo_cmd(paths: &NodePaths, c: SudoCmd, out: &mut dyn Write) -> Result<
                 }
                 w(out, "sudo: off");
             }
-            SudoCmd::Status => {
-                let on = sudo_is_on(paths).await?;
-                w(out, if on { "sudo: on" } else { "sudo: off" });
-            }
         }
         Ok(())
     }
@@ -3882,20 +4705,12 @@ async fn sudo_cmd(paths: &NodePaths, c: SudoCmd, out: &mut dyn Write) -> Result<
                 crate::winsudo::on(paths, &WinHost, installed, out).await
             }
             SudoCmd::Off => crate::winsudo::off(paths, &WinHost, out).await,
-            SudoCmd::Status => {
-                let on = sudo_is_on(paths).await?;
-                w(out, if on { "sudo: on" } else { "sudo: off" });
-                Ok(())
-            }
         }
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (paths, out, w);
-        match c {
-            SudoCmd::Status => Ok(()),
-            _ => Err("the sudo switch works on Linux and Windows only".into()),
-        }
+        let _ = (paths, out, w, c);
+        Err("the sudo switch works on Linux and Windows only".into())
     }
 }
 
@@ -3956,13 +4771,12 @@ fn read_password(out: &mut dyn Write, prompt: &str) -> Result<String, String> {
     Ok(password)
 }
 
-/// The pairing link of `center add`: the one given, or the first line of
-/// stdin (`--link-stdin`).
-pub(crate) fn given_link(link: Option<String>, from_stdin: bool) -> Result<String, String> {
-    if let Some(l) = link {
-        return Ok(l);
+/// The pairing link of `center add`: the one given, or for `-` the first
+/// line of stdin.
+pub(crate) fn given_link(link: &str) -> Result<String, String> {
+    if link != "-" {
+        return Ok(link.to_string());
     }
-    debug_assert!(from_stdin);
     let mut line = String::new();
     std::io::stdin()
         .lock()
@@ -3970,7 +4784,7 @@ pub(crate) fn given_link(link: Option<String>, from_stdin: bool) -> Result<Strin
         .map_err(|e| format!("cannot read the pairing link: {e}"))?;
     let line = line.trim();
     if line.is_empty() {
-        return Err("--link-stdin: the first line of stdin is empty, not a pairing link".into());
+        return Err("center add -: the first line of stdin is empty, not a pairing link".into());
     }
     Ok(line.to_string())
 }
@@ -3983,7 +4797,7 @@ fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool, String>
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// What `cap ls` lists (crate::provider::listing): the running node's, over
+/// What `cap` lists (crate::provider::listing): the running node's, over
 /// its control socket (on Windows its pipe), else what the config alone
 /// tells.
 async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, String> {
@@ -4007,7 +4821,7 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     }
 }
 
-/// The lines of `cap ls`: one per action (and a program's state key, event
+/// The lines of `cap`: one per action (and a program's state key, event
 /// or stream, with its kind), with its effect, where it comes
 /// from and each center's setting (`center` only), the settings that name
 /// no action offered now, and the programs.
@@ -4095,7 +4909,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     lines
 }
 
-/// Whether the row `r` of `cap ls --json` is of a capability a center other
+/// Whether the row `r` of `cap --json` is of a capability a center other
 /// than `center` added (crate::provider::listing gives it the source
 /// `center NAME`).
 fn added_by_other(r: &Value, center: &str) -> bool {
@@ -4109,7 +4923,10 @@ fn added_by_other(r: &Value, center: &str) -> bool {
 /// command, from the owner's input (crate::owner::reads_input), never from
 /// a file the node would open.
 fn cap_stdin(spec: &CapSpec) -> Result<Option<String>, String> {
-    if !(spec.params_stdin || spec.result_stdin) {
+    if spec.params_stdin() && spec.result_stdin() {
+        return Err("stdin holds one schema: give --params or --result as `-`, not both".into());
+    }
+    if !(spec.params_stdin() || spec.result_stdin()) {
         return Ok(None);
     }
     let mut text = String::new();
@@ -4134,7 +4951,7 @@ fn cap_spec(
     if let Some(s) = &spec.summary {
         c.summary = s.trim().to_string();
     }
-    let params = match (&spec.params, spec.params_stdin) {
+    let params = match (&spec.params, spec.params_stdin()) {
         (_, true) => Some(stdin()?),
         (p, false) => p.clone(),
     };
@@ -4145,7 +4962,7 @@ fn cap_spec(
             serde_json::from_str(&p).map_err(|e| format!("--params: not JSON: {e}"))?
         };
     }
-    let result = match (&spec.result, spec.result_stdin) {
+    let result = match (&spec.result, spec.result_stdin()) {
         (_, true) => Some(stdin()?),
         (r, false) => r.clone(),
     };
@@ -4208,7 +5025,7 @@ fn shadowed_note(center: &str, name: &str) -> String {
 fn with_own_note(center: &str, name: &str) -> String {
     let cap = name.split_once('.').map_or(name, |(c, _)| c);
     format!(
-        "{center}: keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}, and the file's on or allow rule for {name} would go with the center's own when it is removed; {name} is off there now, and stays so: remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's (cap set {name} on --center {center})"
+        "{center}: keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}, and the file's on or allow rule for {name} would go with the center's own when it is removed; {name} is off there now, and stays so: remove the center's first (cap --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's (cap set {name} on --center {center})"
     )
 }
 
@@ -4289,7 +5106,7 @@ impl CapNotes {
     }
 }
 
-/// The lines of `cap ls` for the capabilities of node.toml: each one's
+/// The lines of `cap` for the capabilities of node.toml: each one's
 /// command and what else the owner set. Of those the centers added, only
 /// `center`'s where one is given.
 fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
@@ -4308,7 +5125,7 @@ fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
             // One a center added says which, and how it counts: as execute,
             // unless it senses or actuates, which only the owner turns on.
             // It says so as what the capability is, not whether it is on
-            // now: the rows of `cap ls` above say that.
+            // now: the rows of `cap` above say that.
             let by = match &e.center {
                 Some(c) if e.effect == nerve_proto::descriptor::Effect::Sense => {
                     format!(" (added by center {c}, senses: only you turn it on)")
@@ -4334,7 +5151,7 @@ fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// What [`config_lines`] reads of an entry of `cap ls --json`'s `config`.
+/// What [`config_lines`] reads of an entry of `cap --json`'s `config`.
 #[derive(serde::Deserialize)]
 struct ConfigEntry {
     name: String,
@@ -4347,7 +5164,7 @@ struct ConfigEntry {
     center: Option<String>,
 }
 
-/// What `cap provider allow` and `ls` add where no program attaches: the
+/// What `provider add` and `provider` add where no program attaches: the
 /// node tells a provider's program by what Linux shows of it.
 const NO_PROVIDERS_HERE: Option<&str> = if cfg!(target_os = "linux") {
     None
@@ -4355,7 +5172,7 @@ const NO_PROVIDERS_HERE: Option<&str> = if cfg!(target_os = "linux") {
     Some("programs attach as providers on Linux only for now: this node takes none")
 };
 
-/// The lines of `cap provider ls`: each program allowed, and whether it is
+/// The lines of `provider`: each program allowed, and whether it is
 /// attached.
 fn program_lines(v: &Value) -> Vec<String> {
     let programs = v["programs"].as_array().cloned().unwrap_or_default();
@@ -4392,7 +5209,7 @@ fn parse_enum<T: serde::de::DeserializeOwned>(s: &str, choices: &str) -> Result<
     serde_json::from_value(json!(s)).map_err(|_| format!("{s:?}: expected {choices}"))
 }
 
-/// The path of the stored folder `folder set` and `folder rm` mean by `path`,
+/// The path of the stored folder `folder rm` means by `path`,
 /// found before the path is resolved, which fails where a dangling link or a
 /// loop of links stands now. In this order: the folder the path is spelled as
 /// (made absolute and tidy, no link followed); the folder its resolution lands
@@ -4822,9 +5639,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
     }
     if let ConfigCmd::Get { key } = &c {
         let (cfg, _) = read_config(paths).await?;
-        let doc = as_table(&cfg)?;
-        let v = lookup(&toml::Value::Table(doc), &segments(key))
-            .ok_or_else(|| format!("{key} is not set"))?;
+        let v = setting(&cfg, key)?;
         let _ = writeln!(out, "{}", show(&v));
         return Ok(());
     }
@@ -4833,7 +5648,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
         && let ConfigCmd::Set { key, .. }
         | ConfigCmd::Unset { key }
         | ConfigCmd::Add { key, .. }
-        | ConfigCmd::Remove { key, .. } = &c
+        | ConfigCmd::Rm { key, .. } = &c
         && (key == "ui" || key.starts_with("ui."))
     {
         return Err(crate::owner::NOT_FROM_THE_WEB.into());
@@ -4844,10 +5659,17 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
         && let ConfigCmd::Set { key, .. }
         | ConfigCmd::Unset { key }
         | ConfigCmd::Add { key, .. }
-        | ConfigCmd::Remove { key, .. } = &c
+        | ConfigCmd::Rm { key, .. } = &c
         && key == "machine.user"
     {
         return Err(NO_ACCOUNT_TO_CHOOSE.into());
+    }
+    // Keys into the keyring: at a terminal, where none answers, the owner
+    // is offered one (as root for the node's user) before anything moves.
+    if moves_keys_to_keyring(&c) && crate::owner::at_terminal() {
+        let (machine, keyring) = keyring_of(paths);
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        offer_keyring(paths, machine, &keyring, Some(&mut input), out).await?;
     }
     let before = std::cell::Cell::new(SecretStorage::File);
     let cfg = edit(paths, |cfg| {
@@ -4874,7 +5696,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
                 let toml::Value::Array(a) = list else {
                     return Err(format!("{key} is not a list"));
                 };
-                // The text `rule ls` prints for a tab or line break is not
+                // The text `rule` prints for a tab or line break is not
                 // one: the rule would look like the listed one and not be.
                 // Any other text is a rule as it stands (`C:\tools` too).
                 if ["allow", "deny", "sudo_allow"]
@@ -4889,7 +5711,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
                 }
                 a.push(literal(value));
             }
-            ConfigCmd::Remove { key, value } => {
+            ConfigCmd::Rm { key, value } => {
                 let (parent, last) = split_key(key)?;
                 let t = table_at(&mut doc, &parent, false)?;
                 let Some(toml::Value::Array(a)) = t.get_mut(&last) else {
@@ -5013,23 +5835,40 @@ fn keyring_turns_commands_off(
 /// proxy, a relay token, is kept with the node's own keys instead, where
 /// `machine.secret_storage` says, and its user name in `connection.login`.
 /// Nothing here prints, logs or audits a value.
-async fn proxy_cmd(paths: &NodePaths, c: ProxyCmd, out: &mut dyn Write) -> Result<(), String> {
+async fn proxy_cmd(
+    paths: &NodePaths,
+    c: Option<ProxyCmd>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let Some(c) = c else {
+        return show_proxy(paths, out).await;
+    };
     match c {
         ProxyCmd::Set {
             url,
             pin,
             mut headers,
-            password_stdin,
-            headers_stdin,
         } => {
+            // A URL with a user name and no password takes the password from
+            // stdin (asked without echo at a terminal), and `--header -`
+            // the headers, one a line after it: neither shows in the
+            // process list.
+            let headers_stdin = headers.iter().any(|h| h == "-");
+            headers.retain(|h| h != "-");
+            let password_stdin = proxy_wants_password(&url);
             let mut stdin_password = None;
-            if password_stdin || headers_stdin {
+            if headers_stdin {
                 let mut text = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
                     .map_err(|e| format!("cannot read stdin: {e}"))?;
-                let (password, more) = stdin_secrets(&text, password_stdin, headers_stdin);
+                let (password, more) = stdin_secrets(&text, password_stdin, true);
                 stdin_password = password;
                 headers.extend(more);
+            } else if password_stdin {
+                stdin_password = Some(proxy_password(out)?);
+            }
+            if stdin_password.as_ref().is_some_and(String::is_empty) {
+                return Err("no password given: the first line of stdin is empty".into());
             }
             // A relay's link holds the proxy URL with this node's login and
             // the pin: one paste (docs/user/relay.md).
@@ -5056,16 +5895,11 @@ async fn proxy_cmd(paths: &NodePaths, c: ProxyCmd, out: &mut dyn Write) -> Resul
                 hs.push((k, v.trim().to_string()));
             }
             let (url, mut login) = split_credentials(&url)?;
-            if let Some(password) = stdin_password {
-                match &mut login {
-                    Some((_, p)) if p.is_empty() => *p = password,
-                    Some(_) => {
-                        return Err("the proxy URL has a password already; with --password-stdin give the user name alone, http://user@host:port".into());
-                    }
-                    None => {
-                        return Err("--password-stdin needs a proxy URL with a user name: http://user@host:port".into());
-                    }
-                }
+            if let Some(password) = stdin_password
+                && let Some((_, p)) = &mut login
+                && p.is_empty()
+            {
+                *p = password;
             }
             let https = url.to_ascii_lowercase().starts_with("https://");
             let (now, _) = read_config(paths).await?;
@@ -5148,7 +5982,7 @@ async fn proxy_cmd(paths: &NodePaths, c: ProxyCmd, out: &mut dyn Write) -> Resul
             }
             Ok(())
         }
-        ProxyCmd::Rm => {
+        ProxyCmd::Off => {
             let (cfg, _) = read_config(paths).await?;
             edit(paths, |c| {
                 c.connection.proxy = None;
@@ -5179,62 +6013,96 @@ async fn proxy_cmd(paths: &NodePaths, c: ProxyCmd, out: &mut dyn Write) -> Resul
             }
             Ok(())
         }
-        ProxyCmd::Ls => {
-            let (cfg, _) = read_config(paths).await?;
-            let Some(url) = &cfg.connection.proxy else {
-                let _ = writeln!(out, "no proxy");
-                return Ok(());
-            };
-            let _ = writeln!(out, "proxy {url}");
-            if let Some(p) = &cfg.connection.pin {
-                let _ = writeln!(out, "pin {p}");
-            }
-            if let Some(u) = &cfg.connection.login {
-                let storage = cfg.machine.secret_storage;
-                match crate::secrets::proxy_login(paths, storage) {
-                    Ok(_) => {
-                        let _ = writeln!(
-                            out,
-                            "login {u} (its password is kept with the node's keys: {})",
-                            keys_place(storage)
-                        );
-                    }
-                    Err(e) => {
-                        let _ = writeln!(out, "login {u}");
-                        let _ = writeln!(out, "the link cannot use this proxy: {e}");
-                    }
-                }
-            }
-            // The keyring is asked whether it holds every value; only the
-            // names are shown.
-            let names = &cfg.connection.headers;
-            match crate::secrets::proxy_headers(paths, names) {
-                Ok(_) => {
-                    for n in names {
-                        let _ = writeln!(out, "header {n} (its value is in the system keyring)");
-                    }
-                }
-                Err(e) => {
-                    for n in names {
-                        let _ = writeln!(out, "header {n}");
-                    }
-                    let _ = writeln!(out, "the link cannot use this proxy: {e}");
-                }
-            }
-            Ok(())
-        }
     }
 }
 
-/// `relay set|off|add|token|set-centers|set-limits|rm|ls` (crate::relay).
-/// A token is shown once, by `add` or `token`; `node.toml` keeps only its
-/// hash. Each change says when it is in force ([`relay_in_force`]).
-async fn relay_cmd(paths: &NodePaths, c: RelayCmd, out: &mut dyn Write) -> Result<(), String> {
+/// `proxy`: the proxy that is set and the names of its headers, never
+/// their values.
+async fn show_proxy(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    let (cfg, _) = read_config(paths).await?;
+    let Some(url) = &cfg.connection.proxy else {
+        let _ = writeln!(out, "no proxy");
+        return Ok(());
+    };
+    let _ = writeln!(out, "proxy {url}");
+    if let Some(p) = &cfg.connection.pin {
+        let _ = writeln!(out, "pin {p}");
+    }
+    if let Some(u) = &cfg.connection.login {
+        let storage = cfg.machine.secret_storage;
+        match crate::secrets::proxy_login(paths, storage) {
+            Ok(_) => {
+                let _ = writeln!(
+                    out,
+                    "login {u} (its password is kept with the node's keys: {})",
+                    keys_place(storage)
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(out, "login {u}");
+                let _ = writeln!(out, "the link cannot use this proxy: {e}");
+            }
+        }
+    }
+    // The keyring is asked whether it holds every value; only the
+    // names are shown.
+    let names = &cfg.connection.headers;
+    match crate::secrets::proxy_headers(paths, names) {
+        Ok(_) => {
+            for n in names {
+                let _ = writeln!(out, "header {n} (its value is in the system keyring)");
+            }
+        }
+        Err(e) => {
+            for n in names {
+                let _ = writeln!(out, "header {n}");
+            }
+            let _ = writeln!(out, "the link cannot use this proxy: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// The password of a proxy URL with a user name and no password: asked
+/// without echo at a terminal (a console on Windows, as `sudo on` asks), else
+/// the first line of stdin.
+pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
+    #[cfg(unix)]
+    return read_password(out, "proxy password: ");
+    #[cfg(windows)]
+    return crate::winsvc::WinSystem::read_password(
+        &crate::win_host::WinHost,
+        "proxy password: ",
+        out,
+    );
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = out;
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| format!("cannot read stdin: {e}"))?;
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    }
+}
+
+/// `relay`, `relay on|off|add|set|token|rm` (crate::relay). A token is
+/// shown once, by `add` or `token`; `node.toml` keeps only its hash. Each
+/// change says when it is in force ([`relay_in_force`]).
+async fn relay_cmd(
+    paths: &NodePaths,
+    c: Option<RelayCmd>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let w = |out: &mut dyn Write, s: String| {
         let _ = writeln!(out, "{s}");
     };
+    let Some(c) = c else {
+        return show_relay(paths, out).await;
+    };
     match c {
-        RelayCmd::Set {
+        RelayCmd::On {
             address,
             max_links,
             max_links_per_node,
@@ -5364,53 +6232,98 @@ async fn relay_cmd(paths: &NodePaths, c: RelayCmd, out: &mut dyn Write) -> Resul
             if cfg.relay.listen.is_none() {
                 w(
                     out,
-                    "the relay is off: `nerve-node relay set <address>` turns it on".into(),
+                    "the relay is off: `nerve-node relay on <address>` turns it on".into(),
                 );
             }
             relay_in_force(paths, out, None).await;
             Ok(())
         }
-        RelayCmd::SetLimits {
+        RelayCmd::Set {
             name,
+            centers,
             max_links,
             max_opens_per_minute,
         } => {
+            // `relay set 0.0.0.0:7490` was how the relay was turned on.
+            if name.parse::<std::net::SocketAddr>().is_ok() || name.contains(':') {
+                return Err(format!(
+                    "{name:?} is an address, not a relayed node: turn the relay on with `nerve-node relay on {name}`"
+                ));
+            }
+            if centers.is_empty() && max_links.is_none() && max_opens_per_minute.is_none() {
+                return Err(
+                    "name what to change: --to CENTER (`*` for every one), --max-links N or --max-opens-per-minute N (`default` for the relay's)"
+                        .into(),
+                );
+            }
+            let every = centers.iter().any(|c| c == "*");
+            if every && centers.len() > 1 {
+                return Err("--to '*' is every center; give no other --to with it".into());
+            }
+            let reach: Option<Vec<String>> = match () {
+                _ if every => Some(Vec::new()),
+                _ if centers.is_empty() => None,
+                _ => Some(centers.clone()),
+            };
+            let limit = |what: &str, v: &Option<String>| -> Result<Option<Option<u32>>, String> {
+                match v.as_deref() {
+                    None => Ok(None),
+                    Some("default") => Ok(Some(None)),
+                    Some(n) => n
+                        .parse()
+                        .map(|n| Some(Some(n)))
+                        .map_err(|_| format!("--{what} {n}: a number, or default")),
+                }
+            };
+            let links_limit = limit("max-links", &max_links)?;
+            let opens_limit = limit("max-opens-per-minute", &max_opens_per_minute)?;
             let cfg = edit(paths, |c| {
+                if let Some(reach) = &reach {
+                    relay_centers(c, reach)?;
+                }
                 let node = c
                     .relay
                     .nodes
                     .iter_mut()
                     .find(|n| n.name == name)
                     .ok_or_else(|| format!("the relay knows no node {name}"))?;
-                // As `relay set`: a limit not given stays; no flag at all
-                // gives the node the relay's limits again.
-                if max_links.is_none() && max_opens_per_minute.is_none() {
-                    node.max_links = None;
-                    node.max_opens_per_minute = None;
+                if let Some(reach) = &reach {
+                    node.centers = reach.clone();
                 }
-                if let Some(n) = max_links {
-                    node.max_links = Some(n);
+                if let Some(n) = links_limit {
+                    node.max_links = n;
                 }
-                if let Some(n) = max_opens_per_minute {
-                    node.max_opens_per_minute = Some(n);
+                if let Some(n) = opens_limit {
+                    node.max_opens_per_minute = n;
                 }
                 Ok(())
             })
             .await?;
             let node = cfg.relay.node(&name).expect("set above");
-            let links = node.links(&cfg.relay);
-            let mut line = format!(
-                "relay node {name}: at most {links} tunnels at once, {} opened a minute",
-                node.opens(&cfg.relay)
-            );
-            if cfg.relay.max_links < links {
-                line.push_str(&format!(
-                    " (the relay's {} tunnels in all bound it; `relay set <address> --max-links N` raises that)",
-                    cfg.relay.max_links
-                ));
+            if let Some(reach) = &reach {
+                w(
+                    out,
+                    format!("relay node {name} may reach {}", reach_of(reach)),
+                );
             }
-            w(out, line);
-            relay_in_force(paths, out, None).await;
+            if links_limit.is_some() || opens_limit.is_some() {
+                let links = node.links(&cfg.relay);
+                let mut line = format!(
+                    "relay node {name}: at most {links} tunnels at once, {} opened a minute",
+                    node.opens(&cfg.relay)
+                );
+                if cfg.relay.max_links < links {
+                    line.push_str(&format!(
+                        " (the relay's {} tunnels in all bound it; `relay on <address> --max-links N` raises that)",
+                        cfg.relay.max_links
+                    ));
+                }
+                w(out, line);
+            }
+            let ends = reach
+                .is_some()
+                .then_some("its tunnels to other centers end");
+            relay_in_force(paths, out, ends).await;
             Ok(())
         }
         RelayCmd::Token { name, address } => {
@@ -5465,7 +6378,7 @@ async fn relay_cmd(paths: &NodePaths, c: RelayCmd, out: &mut dyn Write) -> Resul
             if cfg.relay.listen.is_none() {
                 w(
                     out,
-                    "the relay is off: `nerve-node relay set <address>` turns it on".into(),
+                    "the relay is off: `nerve-node relay on <address>` turns it on".into(),
                 );
             }
             relay_in_force(
@@ -5474,26 +6387,6 @@ async fn relay_cmd(paths: &NodePaths, c: RelayCmd, out: &mut dyn Write) -> Resul
                 Some("the old token no longer works, and its tunnels end"),
             )
             .await;
-            Ok(())
-        }
-        RelayCmd::SetCenters { name, centers } => {
-            edit(paths, |c| {
-                relay_centers(c, &centers)?;
-                let node = c
-                    .relay
-                    .nodes
-                    .iter_mut()
-                    .find(|n| n.name == name)
-                    .ok_or_else(|| format!("the relay knows no node {name}"))?;
-                node.centers = centers.clone();
-                Ok(())
-            })
-            .await?;
-            w(
-                out,
-                format!("relay node {name} may reach {}", reach_of(&centers)),
-            );
-            relay_in_force(paths, out, Some("its tunnels to other centers end")).await;
             Ok(())
         }
         RelayCmd::Rm { name } => {
@@ -5515,89 +6408,92 @@ async fn relay_cmd(paths: &NodePaths, c: RelayCmd, out: &mut dyn Write) -> Resul
             .await;
             Ok(())
         }
-        RelayCmd::Ls => {
-            let (cfg, _) = read_config(paths).await?;
-            let r = &cfg.relay;
-            #[cfg(unix)]
-            let live =
-                match nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await {
-                    Ok(v) => Some(v["relay"].clone()),
-                    Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
-                    Err(e) => return Err(e),
-                };
-            // Windows: the control pipe answers `status` too. Only a pipe
-            // that is not there means no node runs; any other error is
-            // said, not taken for "no tunnel".
-            #[cfg(windows)]
-            let live = match crate::pipe::call(paths, "status", json!({})).await {
-                Ok(v) => Some(v["relay"].clone()),
-                Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
-                Err(e) => return Err(format!("cannot ask the running node: {e}")),
-            };
-            #[cfg(not(any(unix, windows)))]
-            let live: Option<Value> = None;
-            match (&r.listen, &live) {
-                (None, _) => w(out, "relay off".into()),
-                (Some(l), Some(v)) => w(
+    }
+}
+
+/// `relay`: the relay, the nodes that may use it and, on a running node,
+/// who is connected.
+async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    let w = |out: &mut dyn Write, s: String| {
+        let _ = writeln!(out, "{s}");
+    };
+    let (cfg, _) = read_config(paths).await?;
+    let r = &cfg.relay;
+    #[cfg(unix)]
+    let live = match nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await {
+        Ok(v) => Some(v["relay"].clone()),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
+        Err(e) => return Err(e),
+    };
+    // Windows: the control pipe answers `status` too. Only a pipe
+    // that is not there means no node runs; any other error is
+    // said, not taken for "no tunnel".
+    #[cfg(windows)]
+    let live = match crate::pipe::call(paths, "status", json!({})).await {
+        Ok(v) => Some(v["relay"].clone()),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
+        Err(e) => return Err(format!("cannot ask the running node: {e}")),
+    };
+    #[cfg(not(any(unix, windows)))]
+    let live: Option<Value> = None;
+    match (&r.listen, &live) {
+        (None, _) => w(out, "relay off".into()),
+        (Some(l), Some(v)) => w(
+            out,
+            format!(
+                "relay on {l}: {}",
+                v["status"].as_str().unwrap_or("not known")
+            ),
+        ),
+        (Some(l), None) => w(out, format!("relay on {l}")),
+    }
+    w(
+        out,
+        format!(
+            "at most {} tunnels, {} per node, {} opened a minute per node",
+            r.max_links, r.max_links_per_node, r.max_opens_per_minute
+        ),
+    );
+    if let Some(pin) = &r.pin {
+        w(out, format!("pin {pin}"));
+    }
+    if r.nodes.is_empty() {
+        w(out, "no node may use it".into());
+    }
+    for n in &r.nodes {
+        let mut line = format!("node {}: {}", n.name, reach_of(&n.centers));
+        if n.max_links.is_some() || n.max_opens_per_minute.is_some() {
+            line.push_str(&format!(
+                "; its own limits: {} tunnels at once, {} opened a minute",
+                n.links(r),
+                n.opens(r)
+            ));
+        }
+        w(out, line);
+    }
+    match live {
+        Some(v) => {
+            let now = crate::now_ms();
+            for t in v["tunnels"].as_array().into_iter().flatten() {
+                let since = t["since_ms"].as_u64().unwrap_or(now);
+                w(
                     out,
                     format!(
-                        "relay on {l}: {}",
-                        v["status"].as_str().unwrap_or("not known")
+                        "tunnel {} from {} to center {} for {}",
+                        t["node"].as_str().unwrap_or_default(),
+                        t["from"].as_str().unwrap_or_default(),
+                        t["center"].as_str().unwrap_or_default(),
+                        nerve_transport::log::span(std::time::Duration::from_millis(
+                            now.saturating_sub(since)
+                        )),
                     ),
-                ),
-                (Some(l), None) => w(out, format!("relay on {l}")),
+                );
             }
-            w(
-                out,
-                format!(
-                    "at most {} tunnels, {} per node, {} opened a minute per node",
-                    r.max_links, r.max_links_per_node, r.max_opens_per_minute
-                ),
-            );
-            if let Some(pin) = &r.pin {
-                w(out, format!("pin {pin}"));
-            }
-            if r.nodes.is_empty() {
-                w(out, "no node may use it".into());
-            }
-            for n in &r.nodes {
-                let mut line = format!("node {}: {}", n.name, reach_of(&n.centers));
-                if n.max_links.is_some() || n.max_opens_per_minute.is_some() {
-                    line.push_str(&format!(
-                        "; its own limits: {} tunnels at once, {} opened a minute",
-                        n.links(r),
-                        n.opens(r)
-                    ));
-                }
-                w(out, line);
-            }
-            match live {
-                Some(v) => {
-                    let now = crate::now_ms();
-                    for t in v["tunnels"].as_array().into_iter().flatten() {
-                        let since = t["since_ms"].as_u64().unwrap_or(now);
-                        w(
-                            out,
-                            format!(
-                                "tunnel {} from {} to center {} for {}",
-                                t["node"].as_str().unwrap_or_default(),
-                                t["from"].as_str().unwrap_or_default(),
-                                t["center"].as_str().unwrap_or_default(),
-                                nerve_transport::log::span(std::time::Duration::from_millis(
-                                    now.saturating_sub(since)
-                                )),
-                            ),
-                        );
-                    }
-                }
-                None if r.listen.is_some() => {
-                    w(out, "no node runs here, so no tunnel is open".into())
-                }
-                None => {}
-            }
-            Ok(())
         }
+        None if r.listen.is_some() => w(out, "no node runs here, so no tunnel is open".into()),
+        None => {}
     }
+    Ok(())
 }
 
 /// Says when a relay change is in force. A running node that took it
@@ -5810,6 +6706,13 @@ fn stdin_secrets(text: &str, password: bool, headers: bool) -> (Option<String>, 
     (pw, hs)
 }
 
+/// Whether `proxy set` reads the password of `url`: a URL with a user name
+/// and no password (`http://user@host:port`).
+pub fn proxy_wants_password(url: &str) -> bool {
+    !url.trim().to_ascii_lowercase().starts_with("nerve://")
+        && matches!(split_credentials(url), Ok((_, Some((_, p)))) if p.is_empty())
+}
+
 fn split_credentials(url: &str) -> Result<(String, Option<(String, String)>), String> {
     let Some(at) = url.rfind('@') else {
         return Ok((url.to_string(), None));
@@ -5907,6 +6810,84 @@ fn as_table(cfg: &NodeConfig) -> Result<toml::Table, String> {
     toml::from_str(&cfg.to_toml()).map_err(|e| e.to_string())
 }
 
+/// The keys of node.toml that hold the node's own state, not a setting:
+/// `config get` leaves them out (each center's, and the file's own).
+const STATE_KEYS: &[&str] = &["version", "locked"];
+const CENTER_STATE_KEYS: &[&str] = &[
+    "center_id",
+    "node_id",
+    "pin",
+    "public_key",
+    "key_rotations",
+    "pin_rotations",
+    "old_pin",
+    "revoked",
+    "unknown",
+    "places",
+];
+
+/// The tables of node.toml a setting may be in, by their first word.
+const SETTING_TABLES: &[&str] = &[
+    "node",
+    "machine",
+    "limits",
+    "connection",
+    "relay",
+    "ui",
+    "log",
+    "providers",
+    "capability",
+    "center",
+];
+
+/// node.toml without the node's own state ([`STATE_KEYS`]).
+fn settings_table(cfg: &NodeConfig) -> Result<toml::Value, String> {
+    let mut doc = as_table(cfg)?;
+    for k in STATE_KEYS {
+        doc.remove(*k);
+    }
+    for c in doc
+        .get_mut("center")
+        .and_then(toml::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(t) = c.as_table_mut() {
+            for k in CENTER_STATE_KEYS {
+                t.remove(*k);
+            }
+        }
+    }
+    Ok(toml::Value::Table(doc))
+}
+
+/// `config get`: one setting, or a table of them, without the node's own
+/// state. A key that is not set says whether its default applies or it is
+/// no setting at all.
+fn setting(cfg: &NodeConfig, key: &str) -> Result<toml::Value, String> {
+    let words = segments(key);
+    if let Some(v) = lookup(&settings_table(cfg)?, &words) {
+        return Ok(v);
+    }
+    if lookup(&toml::Value::Table(as_table(cfg)?), &words).is_some() {
+        return Err(format!(
+            "{key} is the node's own state, not a setting; `nerve-node status` shows the node"
+        ));
+    }
+    match words.as_slice() {
+        [c, name, ..] if c == "center" && cfg.center(name).is_none() => {
+            Err(no_center_named(cfg, name))
+        }
+        [first, ..] if SETTING_TABLES.contains(&first.as_str()) => Err(format!(
+            "{key} is not set, so its default applies (docs/user/config.md lists the defaults)"
+        )),
+        _ => Err(format!(
+            "{key} is no setting of node.toml; its tables are {}",
+            SETTING_TABLES.join(", ")
+        )),
+    }
+}
+
 fn segments(key: &str) -> Vec<String> {
     key.split('.').map(str::to_string).collect()
 }
@@ -5915,6 +6896,14 @@ fn split_key(key: &str) -> Result<(Vec<String>, String), String> {
     let mut s = segments(key);
     let last = s.pop().filter(|l| !l.is_empty()).ok_or("empty key")?;
     Ok((s, last))
+}
+
+/// Whether `c` is `config set machine.secret_storage keyring`, which at a
+/// terminal offers to install a keyring where none answers: the owner's
+/// input goes to the installed node for it (crate::owner::reads_input).
+pub fn moves_keys_to_keyring(c: &ConfigCmd) -> bool {
+    matches!(c, ConfigCmd::Set { key, value }
+        if key == "machine.secret_storage" && literal(value).as_str() == Some("keyring"))
 }
 
 /// A value as TOML reads it (`true`, `3`, `["a"]`), else as a string.
@@ -5962,11 +6951,16 @@ fn table_at<'a>(
         let list = t
             .get_mut("center")
             .and_then(toml::Value::as_array_mut)
-            .ok_or("no center is paired")?;
+            .ok_or(NO_CENTER_PAIRED)?;
         let entry = list
             .iter_mut()
             .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(rest[0].as_str()))
-            .ok_or_else(|| format!("no center named {}", rest[0]))?;
+            .ok_or_else(|| {
+                format!(
+                    "no center named {}; `nerve-node center` lists them",
+                    rest[0]
+                )
+            })?;
         return table_at(entry, &rest[1..], create);
     }
     if !t.contains_key(first.as_str()) {
@@ -5981,6 +6975,7 @@ fn table_at<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nerve_policy::config::Access;
 
     /// A folder the web UI adds carries the count of locks its request began
     /// with, so a panic that overtook it adds nothing (the node compares it
@@ -6137,41 +7132,41 @@ mod tests {
     #[test]
     fn per_center_commands_refuse_to_guess() {
         let (_d, paths) = setup(&["a", "b"]);
-        let e = run(&paths, &["mode", "set", "user"]).unwrap_err();
+        let e = run(&paths, &["mode", "user"]).unwrap_err();
         assert!(e.contains("--center"), "{e}");
-        run(&paths, &["mode", "set", "user", "--center", "b"]).unwrap();
+        run(&paths, &["mode", "user", "--center", "b"]).unwrap();
         assert_eq!(load(&paths).center("b").unwrap().policy.mode, Mode::User);
         // A center whose file names no mode is in default deny.
         assert_eq!(
             load(&paths).center("a").unwrap().policy.mode,
             Mode::Allowlist
         );
-        run(&paths, &["mode", "set", "folder", "--center", "a"]).unwrap();
+        run(&paths, &["mode", "folder", "--center", "a"]).unwrap();
         assert_eq!(load(&paths).center("a").unwrap().policy.mode, Mode::Folder);
-        run(&paths, &["mode", "set", "allowlist", "--center", "a"]).unwrap();
+        run(&paths, &["mode", "allowlist", "--center", "a"]).unwrap();
         assert_eq!(
             load(&paths).center("a").unwrap().policy.mode,
             Mode::Allowlist
         );
-        let e = run(&paths, &["mode", "set", "ask", "--center", "a"]).unwrap_err();
+        let e = run(&paths, &["mode", "ask", "--center", "a"]).unwrap_err();
         assert!(e.contains("unknown mode"), "{e}");
         let e = run(&paths, &["cap", "set", "fs", "ask", "--center", "a"]).unwrap_err();
         assert!(e.contains("unknown setting"), "{e}");
     }
 
-    /// `folder network off` keeps the center's commands off the network,
-    /// `on` lets them on it again, `folder ls` says which, and a machine
+    /// `network off` keeps the center's commands off the network,
+    /// `on` lets them on it again, `folder` says which, and a machine
     /// without the node's network filter is warned of; so is a mode in
     /// which the commands run as the owner, where none of them runs.
     #[test]
-    fn folder_network_switches_the_folder_commands_network() {
+    fn network_switches_the_commands_network() {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
         // A node by hand runs allowlist commands as the owner.
         let by_hand = "note: this node runs by hand, so its commands run as you";
-        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        let out = run(&paths, &["network", "off"]).unwrap();
         assert!(out.contains(by_hand), "{out}");
-        assert!(run(&paths, &["folder", "ls"]).unwrap().contains(by_hand));
+        assert!(run(&paths, &["folder"]).unwrap().contains(by_hand));
         // The installed node runs them as nerve-run, unless as the owner.
         let mut p = policy();
         assert!(network_mode_note(&p, true, false).is_none());
@@ -6189,8 +7184,8 @@ mod tests {
         // root, with Landlock's unix socket rule; else it says so there too.
         assert!(network_mode_note(&p, false, true).is_none());
         assert!(network_mode_note(&p, false, false).is_some_and(|n| n.contains(by_hand)));
-        run(&paths, &["mode", "set", "folder"]).unwrap();
-        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        run(&paths, &["mode", "folder"]).unwrap();
+        let out = run(&paths, &["network", "off"]).unwrap();
         assert_eq!(out.contains("note:"), !apart_by_hand_here(), "{out}");
         assert!(
             out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
@@ -6199,17 +7194,32 @@ mod tests {
         assert!(out.contains(NO_NETWORK_RUNNING), "{out}");
         assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
         assert!(policy().no_network);
-        let ls = run(&paths, &["folder", "ls"]).unwrap();
+        let ls = run(&paths, &["folder"]).unwrap();
         assert!(ls.contains(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
-        let out = run(&paths, &["folder", "network", "on"]).unwrap();
+        let out = run(&paths, &["network", "on"]).unwrap();
         assert!(
             out.starts_with("home: its commands may use the network\n"),
             "{out}"
         );
         assert!(!policy().no_network);
-        assert!(!run(&paths, &["folder", "ls"]).unwrap().contains("network"));
-        let e = run(&paths, &["folder", "network", "maybe"]).unwrap_err();
-        assert!(e.contains("unknown network setting maybe"), "{e}");
+        assert!(!run(&paths, &["folder"]).unwrap().contains("network"));
+        let e = run(&paths, &["network", "maybe"]).unwrap_err();
+        assert!(e.contains("'maybe'"), "{e}");
+        // Bare, it shows each center's switch.
+        assert_eq!(run(&paths, &["network"]).unwrap(), "home: on\n");
+        run(&paths, &["network", "off"]).unwrap();
+        let shown = run(&paths, &["network"]).unwrap();
+        assert!(
+            shown.starts_with(&format!("home: off: {NO_NETWORK_LINE}\n")),
+            "{shown}"
+        );
+        // A mode whose commands run as you says, with the network off, that
+        // none of them runs.
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(
+            out.contains("note:") && out.contains("runs none of them"),
+            "{out}"
+        );
     }
 
     /// Allowlist mode runs as the owner only when asked for, and setting a
@@ -6218,13 +7228,13 @@ mod tests {
     fn allowlist_mode_runs_as_the_owner_when_asked_for() {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
-        let out = run(&paths, &["mode", "set", "allowlist", "--as-owner"]).unwrap();
+        let out = run(&paths, &["mode", "allowlist", "--as-owner"]).unwrap();
         assert!(out.contains("mode allowlist, as you"), "{out}");
         assert!(policy().as_owner && policy().runs_as_owner(crate::now_ms()));
-        run(&paths, &["mode", "set", "allowlist"]).unwrap();
+        run(&paths, &["mode", "allowlist"]).unwrap();
         assert!(!policy().as_owner);
         for mode in ["folder", "user"] {
-            let e = run(&paths, &["mode", "set", mode, "--as-owner"]).unwrap_err();
+            let e = run(&paths, &["mode", mode, "--as-owner"]).unwrap_err();
             assert!(e.contains("--as-owner only goes with allowlist"), "{e}");
         }
         assert!(!policy().as_owner);
@@ -6235,39 +7245,91 @@ mod tests {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
         for mode in ["user", "folder"] {
-            run(&paths, &["mode", "set", mode]).unwrap();
+            run(&paths, &["mode", mode]).unwrap();
             assert_eq!(policy().until, None, "{mode}");
         }
         // --for sets a limit of any length, on folder as on user.
         let before = crate::now_ms();
-        run(&paths, &["mode", "set", "folder", "--for", "1000"]).unwrap();
+        run(&paths, &["mode", "folder", "--for", "1000"]).unwrap();
         let until = policy().until.unwrap();
         assert!(until >= before + 1000 * 3_600_000, "{until}");
         assert_eq!(policy().mode_at(before), Mode::Folder);
         assert_eq!(policy().mode_at(until), Mode::Allowlist);
-        run(&paths, &["mode", "set", "user", "--for", "9"]).unwrap();
+        run(&paths, &["mode", "user", "--for", "9"]).unwrap();
         assert_eq!(policy().mode, Mode::User);
         // Setting the mode again without --for drops the old limit.
-        run(&paths, &["mode", "set", "user"]).unwrap();
+        run(&paths, &["mode", "user"]).unwrap();
         assert_eq!(policy().until, None);
         // Allowlist has nothing to limit; nonsense hours are refused.
-        run(&paths, &["mode", "set", "folder", "--for", "1"]).unwrap();
-        let e = run(&paths, &["mode", "set", "allowlist", "--for", "1"]).unwrap_err();
+        run(&paths, &["mode", "folder", "--for", "1"]).unwrap();
+        let e = run(&paths, &["mode", "allowlist", "--for", "1"]).unwrap_err();
         assert!(e.contains("--for"), "{e}");
-        let e = run(&paths, &["mode", "set", "user", "--for", "0"]).unwrap_err();
+        let e = run(&paths, &["mode", "user", "--for", "0"]).unwrap_err();
         assert!(e.contains("at least 1"), "{e}");
-        let e = run(
-            &paths,
-            &["mode", "set", "user", "--for", "18446744073709551615"],
-        )
-        .unwrap_err();
+        let e = run(&paths, &["mode", "user", "--for", "18446744073709551615"]).unwrap_err();
         assert!(e.contains("too large"), "{e}");
-        let e = run(&paths, &["mode", "set", "user", "--for", "soon"]).unwrap_err();
+        let e = run(&paths, &["mode", "user", "--for", "soon"]).unwrap_err();
         assert!(e.contains("invalid value"), "{e}");
         // A refused change leaves the mode as it was.
         assert_eq!(policy().mode, Mode::Folder);
-        run(&paths, &["mode", "set", "allowlist"]).unwrap();
+        run(&paths, &["mode", "allowlist"]).unwrap();
         assert_eq!(policy().until, None);
+    }
+
+    /// A timed user mode goes back to the mode before it, never to user; a
+    /// timed folder mode ends in allowlist. `mode` and `status` say where a
+    /// timer ends, and what allowlist mode then runs.
+    #[test]
+    fn a_timer_ends_in_the_mode_before_and_says_where() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        run(&paths, &["mode", "folder"]).unwrap();
+        let out = run(&paths, &["mode", "user", "--for", "2"]).unwrap();
+        assert!(
+            out.starts_with("home: mode user for 2 h, then folder\n"),
+            "{out}"
+        );
+        let until = policy().until.unwrap();
+        assert_eq!(policy().mode_at(until - 1), Mode::User);
+        assert_eq!(policy().mode_at(until), Mode::Folder);
+        let shown = run(&paths, &["mode"]).unwrap();
+        assert!(
+            shown.starts_with("home: user for 1 h 59 min more, then folder\n"),
+            "{shown}"
+        );
+        let status = run(&paths, &["status"]).unwrap();
+        assert!(
+            status.contains("mode user for 1 h 59 min more, then folder"),
+            "{status}"
+        );
+        let v = json_of(&paths, &["mode"]);
+        assert_eq!(v["modes"][0]["then"], "folder", "{v}");
+        // Timed again from that timed user mode: it ends where that one
+        // did, in folder mode (round 1, correctness 1).
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(out.contains("for 1 h, then folder"), "{out}");
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Folder);
+        // From a timed folder mode a timed user mode ends in allowlist, not
+        // in a folder mode that would have lost its own end; allowlist
+        // says it runs nothing without a rule.
+        run(&paths, &["mode", "folder", "--for", "3"]).unwrap();
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(
+            out.contains("then allowlist (no allow rule: nothing runs)"),
+            "{out}"
+        );
+        assert_eq!(policy().then, None);
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
+        // A timed folder mode ends in allowlist.
+        run(&paths, &["mode", "folder"]).unwrap();
+        run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
+        let out = run(&paths, &["mode", "folder", "--for", "1"]).unwrap();
+        assert!(out.contains("then allowlist (1 allow rule)"), "{out}");
+        assert_eq!(policy().then, None);
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
+        // Without a timer nothing is said of one.
+        run(&paths, &["mode", "user"]).unwrap();
+        assert_eq!(run(&paths, &["mode"]).unwrap(), "home: user\n");
     }
 
     /// Without a control socket to tell (no daemon, or Windows, which has
@@ -6281,20 +7343,20 @@ mod tests {
         let next = "takes effect at the next start of the node";
         let line = format!("the change is in node.toml; it {next}");
         for args in [
-            &["folder", "add", folder.to_str().unwrap(), "+r"][..],
-            &["mode", "set", "user"],
+            &["folder", "add", folder.to_str().unwrap(), "r"][..],
+            &["mode", "user"],
             &["rule", "add", "deny", "rm -rf /"],
         ] {
             let out = run(&paths, args).unwrap();
             assert_eq!(out.lines().last(), Some(line.as_str()), "{args:?}: {out}");
             assert_eq!(out.matches(next).count(), 1, "{args:?}: {out}");
         }
-        for args in [&["status"][..], &["center", "ls"], &["folder", "ls"]] {
+        for args in [&["status"][..], &["center"], &["folder"]] {
             let out = run(&paths, args).unwrap();
             assert!(!out.contains(&line), "{args:?}: {out}");
         }
         // A command that fails changed nothing.
-        assert!(run(&paths, &["mode", "set", "ask"]).is_err());
+        assert!(run(&paths, &["mode", "ask"]).is_err());
     }
 
     #[test]
@@ -6302,23 +7364,16 @@ mod tests {
         let (d, paths) = setup(&["home"]);
         let folder = d.path().join("work");
         std::fs::create_dir(&folder).unwrap();
-        let note = run(
-            &paths,
-            &["folder", "add", folder.to_str().unwrap(), "+rw", "+x"],
-        )
-        .unwrap();
+        let note = run(&paths, &["folder", "add", folder.to_str().unwrap(), "rwx"]).unwrap();
         assert!(note.contains("folders do not count here"), "{note}");
         run(&paths, &["cap", "set", "exec.run", "off"]).unwrap();
-        run(&paths, &["center", "grant", "settings", "write"]).unwrap();
-        run(
-            &paths,
-            &["rule", "add", "allow", "git status --short", "--wildcard"],
-        )
-        .unwrap();
-        run(&paths, &["rule", "add", "sudo", "sudo apt update"]).unwrap();
+        run(&paths, &["center", "settings", "on"]).unwrap();
+        let out = run(&paths, &["rule", "add", "allow", "git *"]).unwrap();
+        assert!(out.contains("it allows every `git` command"), "{out}");
+        run(&paths, &["rule", "add", "allow", "sudo apt update"]).unwrap();
         run(&paths, &["rule", "add", "deny", "rm -rf /"]).unwrap();
         run(&paths, &["rule", "add", "deny", "rm -rf /"]).unwrap();
-        run(&paths, &["mode", "set", "user", "--for", "2"]).unwrap();
+        run(&paths, &["mode", "user", "--for", "2"]).unwrap();
         let cfg = load(&paths);
         let c = cfg.center("home").unwrap();
         let real = nerve_policy::paths::resolve(&folder).unwrap();
@@ -6339,48 +7394,93 @@ mod tests {
         assert!(!load(&paths).locked);
     }
 
+    /// Narrowing a listed folder changes that entry, also where its path
+    /// has become a link to elsewhere since: the wider entry does not stay
+    /// beside a narrow one at the link's end (round 1, correctness 10).
+    #[cfg(unix)]
     #[test]
-    fn folder_add_needs_a_right_and_takes_only_plus() {
+    fn narrowing_a_listed_folder_changes_that_entry() {
+        let (d, paths) = setup(&["home"]);
+        let proj = d.path().join("proj");
+        std::fs::create_dir(&proj).unwrap();
+        let listed = proj.to_str().unwrap().to_string();
+        run(&paths, &["folder", "add", &listed, "rwx"]).unwrap();
+        let folders = || load(&paths).centers[0].policy.folders.clone();
+        assert_eq!(folders()[0].path, listed);
+        let moved = d.path().join("srv-proj");
+        std::fs::rename(&proj, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &proj).unwrap();
+        run(&paths, &["folder", "add", &listed, "r"]).unwrap();
+        let f = folders();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            (f[0].path.as_str(), f[0].access.to_string().as_str()),
+            (listed.as_str(), "r")
+        );
+        // Wider is looked at again: the link's end is the folder then.
+        run(&paths, &["folder", "add", &listed, "rw"]).unwrap();
+        assert!(folders().iter().any(|f| f.path == moved.to_str().unwrap()));
+    }
+
+    /// `folder add` takes its rights as one word, and changes the rights of
+    /// a folder it has; `none` closes one inside another.
+    #[test]
+    fn folder_add_takes_its_rights_as_one_word() {
         let (d, paths) = setup(&["home"]);
         let dir = d.path().join("work");
         std::fs::create_dir(&dir).unwrap();
         let dir = dir.to_str().unwrap();
         let folders = || load(&paths).centers[0].policy.folders.clone();
-        // No sign at all: refused, nothing stored.
-        let e = run(&paths, &["folder", "add", dir]).unwrap_err();
-        assert!(e.contains("+r"), "{e}");
+        // No rights at all: refused, nothing stored.
+        assert!(run(&paths, &["folder", "add", dir]).is_err());
         assert!(folders().is_empty());
-        // The old flags and the other signs are no rights of a new folder.
-        for bad in [
-            &["--rw"][..],
-            &["--execute"],
-            &["--ro"],
-            &["rw"],
-            &["-w"],
-            &["=r"],
-            &["+"],
-            &["+q"],
-        ] {
-            let mut args = vec!["folder", "add", dir];
-            args.extend(bad);
-            assert!(run(&paths, &args).is_err(), "{bad:?}");
+        // The old signs, flags and other words are no rights.
+        for bad in ["--rw", "--execute", "+r", "-w", "=r", "+", "q", "rr", ""] {
+            assert!(
+                run(&paths, &["folder", "add", dir, bad]).is_err(),
+                "{bad:?}"
+            );
         }
+        // Two words are not one.
+        assert!(run(&paths, &["folder", "add", dir, "r", "x"]).is_err());
         assert!(folders().is_empty());
-        // Each right alone, and several in one word or in several.
+        // Each right alone, and several in one word.
         for (rights, want) in [
-            (&["+r"][..], "r"),
-            (&["+w"], "w"),
-            (&["+x"], "x"),
-            (&["+r", "+x"], "rx"),
-            (&["+wx"], "wx"),
-            (&["+r", "+w", "+x"], "rwx"),
+            ("r", "r"),
+            ("w", "w"),
+            ("x", "x"),
+            ("rx", "rx"),
+            ("xw", "wx"),
+            ("rwx", "rwx"),
         ] {
-            let mut args = vec!["folder", "add", dir];
-            args.extend(rights);
-            run(&paths, &args).unwrap();
+            run(&paths, &["folder", "add", dir, rights]).unwrap();
             assert_eq!(folders().len(), 1, "added again, not twice");
             assert_eq!(folders()[0].access.to_string(), want, "{rights:?}");
         }
+        let inner = d.path().join("work/secret");
+        std::fs::create_dir(&inner).unwrap();
+        let out = run(&paths, &["folder", "add", inner.to_str().unwrap(), "none"]).unwrap();
+        assert!(out.contains("the folder grants nothing"), "{out}");
+        // Its limit is said where it is made, and in the first line of its
+        // help (round 1, security 3).
+        assert!(
+            out.contains("a command run in the folder around it still reaches it"),
+            "{out}"
+        );
+        let add = Cli::command();
+        let add = add
+            .find_subcommand("folder")
+            .and_then(|f| f.find_subcommand("add"))
+            .unwrap();
+        assert!(
+            add.get_about()
+                .unwrap()
+                .to_string()
+                .contains("file calls only"),
+            "{:?}",
+            add.get_about()
+        );
+        assert_eq!(folders()[1].access, Access::NONE);
     }
 
     /// `folder add` records the place it stores, so that a link which
@@ -6402,18 +7502,18 @@ mod tests {
         let (work, link) = (work.to_str().unwrap(), link.to_str().unwrap());
         let places = || load(&paths).centers[0].policy.places.clone();
         assert!(places().is_empty());
-        run(&paths, &["folder", "add", work, "+r"]).unwrap();
+        run(&paths, &["folder", "add", work, "r"]).unwrap();
         assert_eq!(places(), std::slice::from_ref(&real));
         // The same place again, and by a link: one folder, one entry.
-        run(&paths, &["folder", "add", link, "+rw"]).unwrap();
-        run(&paths, &["folder", "set", work, "+x"]).unwrap();
+        run(&paths, &["folder", "add", link, "rw"]).unwrap();
+        run(&paths, &["folder", "add", work, "rwx"]).unwrap();
         assert_eq!(load(&paths).centers[0].policy.folders.len(), 1);
         assert_eq!(places(), std::slice::from_ref(&real));
         run(&paths, &["folder", "rm", link]).unwrap();
         assert!(load(&paths).centers[0].policy.folders.is_empty());
         assert!(places().is_empty());
         // Added once more, it is recorded once more.
-        run(&paths, &["folder", "add", work, "+r"]).unwrap();
+        run(&paths, &["folder", "add", work, "r"]).unwrap();
         assert_eq!(places(), std::slice::from_ref(&real));
     }
 
@@ -6435,7 +7535,7 @@ mod tests {
         let proj = home.join("proj");
         let closed = std::fs::Permissions::from_mode(0o000);
         std::fs::set_permissions(&home, closed).unwrap();
-        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "+rw"]);
+        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "rw"]);
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         let out = out.unwrap();
         assert!(out.contains("not recorded at its real place"), "{out}");
@@ -6444,37 +7544,47 @@ mod tests {
         assert_eq!(policy.folders.len(), 1);
         assert!(policy.places.is_empty(), "{policy:?}");
         // One it could judge says nothing of the kind.
-        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "+rw"]).unwrap();
+        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "rw"]).unwrap();
         assert!(!out.contains("not recorded"), "{out}");
         assert_eq!(load(&paths).centers[0].policy.places.len(), 1);
-        // Added again where it cannot look, the rights change and the record
-        // it has stays: a record only narrows, and the node checks it as the
-        // account before each command.
+        // Narrowed where it cannot look, the listed entry changes in place
+        // with its record: nothing needs a look.
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "+r"]);
+        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "r"]);
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(out.unwrap().contains("not recorded at its real place"));
+        assert!(!out.unwrap().contains("not recorded"));
         let policy = load(&paths).centers[0].policy.clone();
         assert_eq!(policy.folders.len(), 1);
         assert_eq!(policy.folders[0].access.to_string(), "r");
         assert_eq!(policy.places, [proj.display().to_string()]);
+        // Widened where it cannot look, the rights change and the record it
+        // has stays: a record only narrows, and the node checks it as the
+        // account before each command.
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "rwx"]);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(out.unwrap().contains("not recorded at its real place"));
+        let policy = load(&paths).centers[0].policy.clone();
+        assert_eq!(policy.folders.len(), 1);
+        assert_eq!(policy.folders[0].access.to_string(), "rwx");
+        assert_eq!(policy.places, [proj.display().to_string()]);
     }
 
     /// In the state the new warning reports, a link has replaced a recorded
-    /// folder and its real place is another folder. `folder set` and `folder
-    /// rm` act on the folder the path is spelled as (also with a trailing
-    /// slash), name it, and leave the folder the link leads to alone; a path
-    /// that is a link to a folder still finds the folder at its real place.
+    /// folder and its real place is another folder. `folder rm` acts on the
+    /// folder the path is spelled as (also with a trailing slash), names it,
+    /// and leaves the folder the link leads to alone; a path that is a link
+    /// to a folder still finds the folder at its real place.
     #[cfg(unix)]
     #[test]
-    fn folder_set_and_rm_find_a_folder_a_link_replaced_by_its_spelling() {
+    fn folder_rm_finds_a_folder_a_link_replaced_by_its_spelling() {
         let (d, paths) = setup(&["home"]);
         let root = std::fs::canonicalize(d.path()).unwrap();
         let (work, docs) = (root.join("work"), root.join("docs"));
         let bin = work.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir(&docs).unwrap();
-        for (p, rights) in [(&work, "+rw"), (&bin, "+r"), (&docs, "+r")] {
+        for (p, rights) in [(&work, "rw"), (&bin, "r"), (&docs, "r")] {
             run(&paths, &["folder", "add", p.to_str().unwrap(), rights]).unwrap();
         }
         std::fs::remove_dir(&bin).unwrap();
@@ -6486,14 +7596,7 @@ mod tests {
             f.map(|f| f.access.to_string())
         };
         let spelled = format!("{}/", bin.display());
-
-        let out = run(&paths, &["folder", "set", &spelled, "+x"]).unwrap();
-        assert!(
-            out.contains(&format!("folder {} r-x", bin.display())),
-            "{out}"
-        );
-        assert_eq!(access(&bin).as_deref(), Some("rx"));
-        assert_eq!(access(&docs).as_deref(), Some("r"));
+        assert_eq!(access(&bin).as_deref(), Some("r"));
 
         let out = run(&paths, &["folder", "rm", &spelled]).unwrap();
         assert!(out.contains(&format!("removed {}", bin.display())), "{out}");
@@ -6514,15 +7617,15 @@ mod tests {
         assert_eq!(access(&work).as_deref(), Some("rw"));
     }
 
-    /// `folder rm` and `folder set` find the stored folder by the path the
-    /// owner gave `folder add`, when that went through a link of the owner's
+    /// `folder rm` finds the stored folder by the path the owner gave
+    /// `folder add`, when that went through a link of the owner's
     /// and the stored place has been replaced by a link since; and where a
     /// dangling link or a loop of links stands in the folder's place, which
     /// resolving the path would refuse. A folder the path only passes is not
     /// the folder it names.
     #[cfg(unix)]
     #[test]
-    fn folder_rm_and_set_reach_a_folder_through_links_and_where_none_resolves() {
+    fn folder_rm_reaches_a_folder_through_links_and_where_none_resolves() {
         let (d, paths) = setup(&["home"]);
         let root = std::fs::canonicalize(d.path()).unwrap();
         let (work, docs, data) = (root.join("work"), root.join("docs"), root.join("data"));
@@ -6532,10 +7635,10 @@ mod tests {
         }
         std::os::unix::fs::symlink(&real, &code).unwrap();
         for (p, rights) in [
-            (&work, "+rw"),
-            (&work.join("bin"), "+r"),
-            (&code, "+r"),
-            (&docs, "+r"),
+            (&work, "rw"),
+            (&work.join("bin"), "r"),
+            (&code, "r"),
+            (&docs, "r"),
         ] {
             run(&paths, &["folder", "add", p.to_str().unwrap(), rights]).unwrap();
         }
@@ -6554,11 +7657,6 @@ mod tests {
         // the owner gave, still names the stored folder and not `docs`.
         std::fs::remove_dir(&real).unwrap();
         std::os::unix::fs::symlink(&docs, &real).unwrap();
-        let out = run(&paths, &["folder", "set", code.to_str().unwrap(), "+x"]).unwrap();
-        assert!(
-            out.contains(&format!("folder {} r-x", real.display())),
-            "{out}"
-        );
         let out = run(&paths, &["folder", "rm", code.to_str().unwrap()]).unwrap();
         assert!(
             out.contains(&format!("removed {}", real.display())),
@@ -6579,11 +7677,7 @@ mod tests {
         let bin = work.join("bin");
         std::fs::remove_dir(&bin).unwrap();
         std::os::unix::fs::symlink(root.join("nowhere"), &bin).unwrap();
-        let out = run(&paths, &["folder", "set", bin.to_str().unwrap(), "-r"]).unwrap();
-        assert!(
-            out.contains(&format!("folder {} ---", bin.display())),
-            "{out}"
-        );
+        assert!(has(&bin));
         std::fs::remove_file(&bin).unwrap();
         std::os::unix::fs::symlink(&bin, &bin).unwrap();
         let out = run(&paths, &["folder", "rm", bin.to_str().unwrap()]).unwrap();
@@ -6599,12 +7693,12 @@ mod tests {
 
     /// The installed node's CLI runs as `nerve`, which cannot look into the
     /// owner's home: a link there stays as typed, and the folder `folder add`
-    /// stored at the place the link leads to is not found. `folder set` and
-    /// `folder rm` then name the path `folder ls` shows (issue #98), also where
-    /// the center has more folders than the hint would list.
+    /// stored at the place the link leads to is not found. `folder rm` then
+    /// names the path `folder` shows (issue #98), also where the center has
+    /// more folders than the hint would list.
     #[cfg(unix)]
     #[test]
-    fn folder_set_and_rm_name_the_listed_folder_for_a_link_the_cli_cannot_look_into() {
+    fn folder_rm_names_the_listed_folder_for_a_link_the_cli_cannot_look_into() {
         use std::os::unix::fs::PermissionsExt;
         if nerve_transport::net::euid() == 0 {
             return; // root looks into every folder
@@ -6621,34 +7715,28 @@ mod tests {
         std::os::unix::fs::symlink(&proj, &link).unwrap();
         std::os::unix::fs::symlink(&work, &far).unwrap();
         for p in [&proj, &work] {
-            run(&paths, &["folder", "add", p.to_str().unwrap(), "+r"]).unwrap();
+            run(&paths, &["folder", "add", p.to_str().unwrap(), "r"]).unwrap();
         }
         let listed = |n: usize| load(&paths).centers[0].policy.folders.len() == n;
         // While the CLI can look at the link, it finds the folder.
-        let out = run(&paths, &["folder", "set", link.to_str().unwrap(), "+x"]).unwrap();
+        let out = run(&paths, &["folder", "add", link.to_str().unwrap(), "rx"]).unwrap();
         assert!(
             out.contains(&format!("folder {} r-x", proj.display())),
             "{out}"
         );
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
         let mut errors = Vec::new();
-        for args in [["set", "+w"], ["rm", ""]] {
-            let mut cmd = vec!["folder", args[0], link.to_str().unwrap()];
-            if !args[1].is_empty() {
-                cmd.push(args[1]);
-            }
-            errors.push(run(&paths, &cmd).unwrap_err());
-        }
+        errors.push(run(&paths, &["folder", "rm", link.to_str().unwrap()]).unwrap_err());
         // Only folders far from the path are listed, and more than the hint
         // would name: it still says what to do.
         for n in ["a", "b"] {
             let p = root.join(n);
             std::fs::create_dir(&p).unwrap();
-            run(&paths, &["folder", "add", p.to_str().unwrap(), "+r"]).unwrap();
+            run(&paths, &["folder", "add", p.to_str().unwrap(), "r"]).unwrap();
         }
         errors.push(run(&paths, &["folder", "rm", far.to_str().unwrap()]).unwrap_err());
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for e in &errors[..2] {
+        for e in &errors[..1] {
             assert!(
                 e.starts_with(&format!(
                     "{} is not a folder of this center",
@@ -6658,13 +7746,13 @@ mod tests {
             );
             assert!(
                 e.ends_with(&format!(
-                    "`nerve-node folder ls` shows for the folder: {}",
+                    "`nerve-node folder` shows for the folder: {}",
                     proj.display()
                 )),
                 "{e}"
             );
         }
-        let e = &errors[2];
+        let e = &errors[1];
         assert!(e.contains("this account cannot look into it"), "{e}");
         assert!(e.ends_with("shows for the folder"), "{e}");
         // The refused calls changed nothing.
@@ -6684,13 +7772,13 @@ mod tests {
         let bin = work.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir(&docs).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "+rw"]).unwrap();
+        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
         // The folder is a plain one first, and then a command replaces it.
-        run(&paths, &["folder", "add", bin.to_str().unwrap(), "+r"]).unwrap();
+        run(&paths, &["folder", "add", bin.to_str().unwrap(), "r"]).unwrap();
         std::fs::remove_dir(&bin).unwrap();
         std::os::unix::fs::symlink(&docs, &bin).unwrap();
         let before = load(&paths).centers[0].policy.clone();
-        let e = run(&paths, &["folder", "add", bin.to_str().unwrap(), "+rx"]).unwrap_err();
+        let e = run(&paths, &["folder", "add", bin.to_str().unwrap(), "rx"]).unwrap_err();
         assert!(e.contains("link") && e.contains("may write"), "{e}");
         let policy = load(&paths).centers[0].policy.clone();
         assert_eq!(
@@ -6703,7 +7791,7 @@ mod tests {
         // A link of the owner's outside every write folder is followed.
         let to_docs = root.join("to-docs");
         std::os::unix::fs::symlink(&docs, &to_docs).unwrap();
-        run(&paths, &["folder", "add", to_docs.to_str().unwrap(), "+r"]).unwrap();
+        run(&paths, &["folder", "add", to_docs.to_str().unwrap(), "r"]).unwrap();
         assert!(
             load(&paths).centers[0]
                 .policy
@@ -6722,7 +7810,7 @@ mod tests {
         let bin = work.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir(&docs).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "+rw"]).unwrap();
+        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
         std::fs::remove_dir(&bin).unwrap();
         let made = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
@@ -6731,65 +7819,38 @@ mod tests {
             .output()
             .unwrap();
         assert!(made.status.success(), "{made:?}");
-        let e = run(&paths, &["folder", "add", bin.to_str().unwrap(), "+rx"]).unwrap_err();
+        let e = run(&paths, &["folder", "add", bin.to_str().unwrap(), "rx"]).unwrap_err();
         assert!(e.contains("link") && e.contains("may write"), "{e}");
         let policy = load(&paths).centers[0].policy.clone();
         assert_eq!(policy.folders.len(), 1, "nothing was stored: {policy:?}");
         assert!(!policy.is_placed(&docs.display().to_string()));
     }
 
+    /// `folder add` of a folder the center has sets its rights to the ones
+    /// given; a bad word changes nothing.
     #[test]
-    fn folder_set_applies_its_changes_left_to_right() {
+    fn folder_add_again_changes_the_rights() {
         let (d, paths) = setup(&["home"]);
         let dir = d.path().join("work");
         std::fs::create_dir(&dir).unwrap();
         let dir = dir.to_str().unwrap();
         let access = || load(&paths).centers[0].policy.folders[0].access.to_string();
-        // A folder that is not the center's is an error.
-        assert!(run(&paths, &["folder", "set", dir, "+x"]).is_err());
-        run(&paths, &["folder", "add", dir, "+r"]).unwrap();
-        for (change, want) in [
-            (&["+x"][..], "rx"),
-            (&["-r"], "x"),
-            (&["=rwx"], "rwx"),
-            (&["-w"], "rx"),
-            (&["+rw"], "rwx"),
-            (&["-rw"], "x"),
-            (&["=w"], "w"),
-            (&["=rwx", "-x", "+x", "-r"], "wx"),
-            (&["=r", "+w", "-r"], "w"),
-            (&["="], ""),
-        ] {
-            let mut args = vec!["folder", "set", dir];
-            args.extend(change);
-            run(&paths, &args).unwrap();
-            assert_eq!(access(), want, "{change:?}");
+        run(&paths, &["folder", "add", dir, "r"]).unwrap();
+        for (rights, want) in [("rx", "rx"), ("x", "x"), ("rwx", "rwx"), ("none", "")] {
+            run(&paths, &["folder", "add", dir, rights, "--center", "home"]).unwrap();
+            assert_eq!(access(), want, "{rights}");
         }
-        // A bad change anywhere in the list changes nothing.
-        run(&paths, &["folder", "set", dir, "=rx"]).unwrap();
-        for bad in [&["+w", "rw"][..], &["+q"], &["+"], &["=rr"]] {
-            let mut args = vec!["folder", "set", dir];
-            args.extend(bad);
-            assert!(run(&paths, &args).is_err(), "{bad:?}");
+        run(&paths, &["folder", "add", dir, "rx", "--center=home"]).unwrap();
+        for bad in ["+w", "q", "=rr", "rr"] {
+            assert!(
+                run(&paths, &["folder", "add", dir, bad]).is_err(),
+                "{bad:?}"
+            );
             assert_eq!(access(), "rx", "{bad:?}");
         }
-        // --center still works after hyphen-led changes.
-        run(&paths, &["folder", "set", dir, "-w", "--center", "home"]).unwrap();
-        run(&paths, &["folder", "set", dir, "+w", "--center=home"]).unwrap();
-        run(&paths, &["folder", "set", "--center", "home", dir, "-w"]).unwrap();
+        assert!(run(&paths, &["folder", "add", dir, "r", "--center", "nobody"]).is_err());
         assert_eq!(access(), "rx");
-        for bad in [
-            &["--center", "nobody", "-w"][..],
-            &["-w", "--center"],
-            &["-w", "--bogus"],
-            &["--center", "home"],
-        ] {
-            let mut args = vec!["folder", "set", dir];
-            args.extend(bad);
-            assert!(run(&paths, &args).is_err(), "{bad:?}");
-        }
-        assert_eq!(access(), "rx");
-        let out = run(&paths, &["folder", "ls"]).unwrap();
+        let out = run(&paths, &["folder"]).unwrap();
         assert!(out.starts_with("r-x  "), "{out}");
         run(&paths, &["folder", "rm", dir]).unwrap();
         assert!(load(&paths).centers[0].policy.folders.is_empty());
@@ -6800,15 +7861,15 @@ mod tests {
     fn centers_pause_and_resume_by_the_owner() {
         let (_d, paths) = setup(&["a", "b"]);
         assert!(run(&paths, &["center", "pause"]).is_err());
-        run(&paths, &["center", "pause", "--center", "a"]).unwrap();
+        run(&paths, &["center", "pause", "a"]).unwrap();
         let cfg = load(&paths);
         assert!(cfg.center("a").unwrap().paused);
         assert!(!cfg.center("b").unwrap().paused);
-        let ls = run(&paths, &["center", "ls"]).unwrap();
+        let ls = run(&paths, &["center"]).unwrap();
         assert!(ls.contains("[paused]"), "{ls}");
-        run(&paths, &["center", "resume", "--center", "a"]).unwrap();
+        run(&paths, &["center", "resume", "a"]).unwrap();
         assert!(!load(&paths).center("a").unwrap().paused);
-        run(&paths, &["center", "rm", "--center", "b"]).unwrap();
+        run(&paths, &["center", "rm", "b"]).unwrap();
         assert!(load(&paths).center("b").is_none());
     }
 
@@ -6832,7 +7893,7 @@ mod tests {
         );
         assert!(profile.exists(), "{}", profile.display());
         assert!(!crate::grants::record_file(&paths).exists());
-        let ls = run(&paths, &["center", "ls"]).unwrap();
+        let ls = run(&paths, &["center"]).unwrap();
         assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(
@@ -6864,7 +7925,7 @@ mod tests {
             &name,
         );
         assert!(profile.exists(), "{}", profile.display());
-        let ls = run(&paths, &["center", "ls"]).unwrap();
+        let ls = run(&paths, &["center"]).unwrap();
         assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(out.contains(&name), "{out}");
@@ -6896,7 +7957,7 @@ mod tests {
         let (d, paths) = setup(&["home"]);
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "+rw"]).unwrap();
+        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
         assert!(crate::grants::record_file(&paths).exists());
         let name = crate::grants::container(&paths, "n");
         let profile = profile_of(&name);
@@ -6916,7 +7977,7 @@ mod tests {
         let (d, paths) = setup(&["home"]);
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "+rw"]).unwrap();
+        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
         let name = crate::grants::container(&paths, "n");
         let profile = profile_of(&name);
         let out = run(&paths, &["center", "rm"]).unwrap();
@@ -6954,7 +8015,7 @@ mod tests {
         cfg.save(&paths.config_file()).unwrap();
         let name = crate::grants::container(&paths, "n-lab");
         let profile = profile_of(&name);
-        let e = run(&paths, &["center", "rm", "--center", "lab"]).unwrap_err();
+        let e = run(&paths, &["center", "rm", "lab"]).unwrap_err();
         assert!(e.contains("the folder grants do not follow"), "{e}");
         assert!(load(&paths).center("lab").is_none());
         assert!(!profile.exists(), "{}", profile.display());
@@ -6981,12 +8042,7 @@ mod tests {
         );
         run(
             &paths,
-            &[
-                "config",
-                "remove",
-                "center.home.policy.deny",
-                "fs:~/secret/*",
-            ],
+            &["config", "rm", "center.home.policy.deny", "fs:~/secret/*"],
         )
         .unwrap();
         assert!(load(&paths).centers[0].policy.deny.is_empty());
@@ -6994,6 +8050,74 @@ mod tests {
         assert!(run(&paths, &["config", "set", "limits.bogus", "1"]).is_err());
         run(&paths, &["config", "unset", "limits.max_running"]).unwrap();
         assert_eq!(load(&paths).limits.max_running, 16);
+    }
+
+    /// `config get` shows settings, not the node's own state: a center's
+    /// keys and counters are left out of its table, and asked by name they
+    /// are said to be state. A key that is not set says whether its default
+    /// applies or it is no setting at all.
+    #[test]
+    fn config_get_hides_the_nodes_own_state() {
+        let (_d, paths) = setup(&["home"]);
+        let table = run(&paths, &["config", "get", "center.home"]).unwrap();
+        assert!(table.contains("name = \"home\""), "{table}");
+        for state in ["center_id", "node_id", "public_key", "pin ="] {
+            assert!(!table.contains(state), "{state}: {table}");
+        }
+        let whole = run(&paths, &["config", "get", "center"]).unwrap();
+        assert!(!whole.contains("node_id"), "{whole}");
+        let e = run(&paths, &["config", "get", "center.home.node_id"]).unwrap_err();
+        assert!(e.contains("the node's own state, not a setting"), "{e}");
+        let e = run(&paths, &["config", "get", "version"]).unwrap_err();
+        assert!(e.contains("the node's own state"), "{e}");
+        let e = run(&paths, &["config", "get", "center.home.policy.until"]).unwrap_err();
+        assert!(e.contains("not set, so its default applies"), "{e}");
+        let e = run(&paths, &["config", "get", "nonsense"]).unwrap_err();
+        assert!(e.contains("no setting of node.toml"), "{e}");
+        let e = run(&paths, &["config", "get", "center.lab.policy"]).unwrap_err();
+        assert!(e.contains("paired: home"), "{e}");
+        let v = json_of(&paths, &["config", "get", "center.home"]);
+        assert!(v["value"].get("node_id").is_none(), "{v}");
+    }
+
+    /// The errors of a command name what to do next: how to pair, the
+    /// centers that are paired, the command that lists what was meant.
+    #[test]
+    fn the_errors_name_the_fix() {
+        let (_d, none) = setup(&[]);
+        let e = run(&none, &["folder"]).unwrap_err();
+        assert!(
+            e.contains("pair one: `nerve-node center add '<link>'`"),
+            "{e}"
+        );
+        let (_d, paths) = setup(&["home", "work"]);
+        let e = run(&paths, &["folder", "--center", "lab"]).unwrap_err();
+        assert_eq!(e, "no center named lab; paired: home, work");
+        let e = run(&paths, &["rule", "rm", "allow", "ls", "--center", "home"]).unwrap_err();
+        assert!(e.contains("`nerve-node rule allow` shows it"), "{e}");
+        let e = run(&paths, &["cap", "edit", "a.b", "--timeout", "5"]).unwrap_err();
+        assert!(e.contains("`nerve-node cap` lists them"), "{e}");
+        let e = run(&paths, &["provider", "rm", "desk"]).unwrap_err();
+        assert!(e.contains("`nerve-node provider` lists them"), "{e}");
+    }
+
+    /// An allow rule added where the center is not in allowlist mode is
+    /// said not to count, with the command that makes it count.
+    #[test]
+    fn an_allow_rule_outside_allowlist_mode_is_said_not_to_count() {
+        let (_d, paths) = setup(&["home"]);
+        run(&paths, &["mode", "folder"]).unwrap();
+        let out = run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
+        assert!(
+            out.contains("note: home is in folder mode, where allow rules do not count; `nerve-node mode allowlist --center home` uses them"),
+            "{out}"
+        );
+        // Deny rules count in every mode; in allowlist mode allow rules do.
+        let out = run(&paths, &["rule", "add", "deny", "rm -rf /"]).unwrap();
+        assert!(!out.contains("do not count"), "{out}");
+        run(&paths, &["mode", "allowlist"]).unwrap();
+        let out = run(&paths, &["rule", "add", "allow", "git log"]).unwrap();
+        assert!(!out.contains("do not count"), "{out}");
     }
 
     /// No account for the commands is chosen on Linux: `config` refuses
@@ -7054,7 +8178,7 @@ mod tests {
             &["uninstall", "--purge"],
         ] {
             let e = run(&paths, cmd).unwrap_err();
-            assert!(e.contains("--config-dir and --state-dir do not go"), "{e}");
+            assert!(e.contains("leave out --config-dir and --state-dir"), "{e}");
             assert!(!e.contains("not done"), "{e}");
         }
     }
@@ -7105,7 +8229,7 @@ mod tests {
             "home_warning": {"warning": "Without Landlock, nerve-run can read every file in your home /home/alice"},
             "landlock_warning": "this kernel's Landlock is ABI 4, which does not guard device ioctls",
             "pairings_warning": "Without Landlock nothing keeps the pairings apart: the commands of a, b all run as nerve-run",
-            "folder_grants": {
+            "folder_access": {
                 "stale": ["/home/alice/gone", "/var/lib/nerve/state/acl.json"],
                 "errors": [
                     "/home/alice/gone/x: Permission denied (os error 13)",
@@ -7179,18 +8303,26 @@ mod tests {
         assert!(crate::owner::ROOT_OWNER_NOTE.contains("run as root"));
         assert_eq!(owner_line(None, false), None);
         // So does a stopped node's.
-        let cfg = NodeConfig::default();
         let root_line = format!("owner: {}", crate::owner::ROOT_OWNER_NOTE);
-        let stopped = stopped_lines(&cfg, Some("root"));
-        assert_eq!(stopped[0], "daemon: not running");
-        assert_eq!(stopped.contains(&root_line), !cfg!(windows), "{stopped:#?}");
-        let alice = stopped_lines(&cfg, Some("alice"));
+        let stopped = |owner: Option<&str>| {
+            status_lines(&json!({
+                "daemon": "not running",
+                "owner": owner,
+                "owner_is_root": crate::owner::is_root(owner),
+            }))
+        };
+        assert_eq!(stopped(Some("root"))[0], "node: not running");
+        assert_eq!(
+            stopped(Some("root")).contains(&root_line),
+            !cfg!(windows),
+            "{:#?}",
+            stopped(Some("root"))
+        );
+        let alice = stopped(Some("alice"));
         assert!(alice.contains(&"owner: alice".to_string()), "{alice:#?}");
         assert!(!alice.contains(&root_line), "{alice:#?}");
         assert!(
-            !stopped_lines(&cfg, None)
-                .iter()
-                .any(|l| l.starts_with("owner:")),
+            !stopped(None).iter().any(|l| l.starts_with("owner:")),
             "no owner, no line"
         );
         // Nothing of the kind on a node that has none of it.
@@ -7199,6 +8331,88 @@ mod tests {
             !plain.contains("warning") && !plain.contains("Landlock,"),
             "{plain}"
         );
+    }
+
+    /// `status` is one place to look: the node and its service, each
+    /// center's mode and what it may do, and the next step to take.
+    #[test]
+    fn the_status_says_the_service_each_center_and_the_next_step() {
+        let lines = status_lines(&json!({
+            "daemon": "not running",
+            "sudo": "off",
+            "service": {"installed": true, "state": "stopped", "enabled": true, "version": "0.0.7"},
+            "centers": [],
+        }));
+        assert_eq!(
+            lines,
+            [
+                "node: not running",
+                "service: stopped, starts with the machine, version 0.0.7",
+                "sudo: off",
+                "next: start it: `nerve-node service start`",
+                "next: pair a center: `nerve-node center add '<link>'`",
+            ]
+        );
+        let by_hand = status_lines(&json!({
+            "daemon": "not running",
+            "service": {"installed": false, "state": null},
+            "centers": [{"name": "lab", "url": "https://c.example", "mode": "allowlist",
+                         "folders": 0, "allow_rules": 1, "deny_rules": 2, "sudo_rules": 0}],
+        }));
+        assert!(
+            by_hand.contains(&"service: not installed (this node runs by hand)".to_string()),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand
+                .iter()
+                .any(|l| l.contains("`sudo nerve-node install`")),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand.contains(&"lab  https://c.example  mode allowlist".to_string()),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand.contains(
+                &"  folders: 0; network: on; rules: 1 allow, 2 deny and the guard, 0 sudo"
+                    .to_string()
+            ),
+            "{by_hand:#?}"
+        );
+        // A running node with a folder-mode center and no folder: give it one.
+        let lines = status_lines(&json!({
+            "confinement": "landlock abi 6",
+            "centers": [
+                {"name": "lab", "status": "connected", "mode": "folder", "no_network": true,
+                 "folders": 0, "allow_rules": 0, "deny_rules": 0, "sudo_rules": 0},
+                {"name": "home", "status": "the center is older than this node: update it first", "mode": "folder",
+                 "folders": 1, "allow_rules": 0, "deny_rules": 0, "sudo_rules": 0},
+            ],
+        }));
+        assert!(
+            lines.contains(
+                &"  folders: 0; network: off; rules: 0 allow, 0 deny and the guard, 0 sudo"
+                    .to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(
+                &"next: give lab a folder: `nerve-node folder add ~/project rwx --center lab`"
+                    .to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("give home")), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("home  the center is older than this node")),
+            "{lines:#?}"
+        );
+        // `service status` is gone: `status` says it.
+        assert!(Cli::try_parse_from(["nerve-node", "service", "status"]).is_err());
     }
 
     /// After a change of the folders the CLI says what the node's sync
@@ -7231,36 +8445,46 @@ mod tests {
     }
 
     /// Setup's folder step gives a folder commands can work in where the
-    /// owner presses Enter: `+rwx`, as folder mode runs a command only where
+    /// owner presses Enter: `rwx`, as folder mode runs a command only where
     /// it may run one.
     #[test]
     fn setup_gives_a_folder_every_right_on_enter() {
         let (d, paths) = setup(&["home"]);
         let work = d.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let (r, out) = setup_with(&paths, &format!("\n\n\nfolder\n{}\n\n", work.display()));
+        let (r, out) = setup_with(&paths, &format!("\nfolder\n{}\n\n\n", work.display()));
         r.unwrap();
-        assert!(out.contains("[+rwx]: "), "{out}");
+        assert!(out.contains("[rwx]: "), "{out}");
         let folders = &load(&paths).centers[0].policy.folders;
         assert_eq!(folders.len(), 1, "{folders:?}");
         assert_eq!(folders[0].access, Access::parse("rwx").unwrap());
     }
 
-    /// Only at a terminal is the owner asked whether to install a keyring
-    /// as root: piped answers, or a setup without a terminal, get the
-    /// refusal and install nothing, whatever they say.
+    /// `config set machine.secret_storage keyring` offers a keyring only at
+    /// a terminal: without one it is refused and installs nothing.
     #[test]
-    fn setup_offers_a_keyring_only_at_a_terminal() {
+    fn the_keyring_is_offered_only_at_a_terminal() {
         let (_d, paths) = setup(&[]);
-        crate::secrets::store::set_unreachable(true);
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
-        let (r, out) = setup_at(&paths, None, &k, "\nkeyring\ny\n\n", false);
-        let e = r.unwrap_err();
-        assert!(e.contains("run in a terminal"), "{e}");
-        assert!(!out.contains("Install it now?"), "{out}");
+        let mut out = Vec::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let e = rt
+            .block_on(offer_keyring(&paths, None, &k, None, &mut out))
+            .unwrap_err();
+        assert!(
+            e.contains("run in a terminal, offers to install one"),
+            "{e}"
+        );
+        assert!(
+            e.contains("config set machine.secret_storage keyring"),
+            "{e}"
+        );
+        assert!(!String::from_utf8_lossy(&out).contains("Install it now?"));
         assert!(k.installed.borrow().is_empty());
         assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        crate::secrets::store::set_unreachable(false);
     }
 
     /// `install --owner=root --accept-root-owner` makes root the owner;
@@ -7301,7 +8525,7 @@ mod tests {
         assert!(terminal_input(true, &mut piped).is_some());
     }
 
-    /// `center grant settings write` warns where root is the owner: the
+    /// `center settings on` warns where root is the owner: the
     /// center can make itself root by setting its own mode to user.
     #[test]
     fn the_settings_grant_warns_where_root_is_the_owner() {
@@ -7427,7 +8651,7 @@ mod tests {
             assert!(Cli::try_parse_from(["nerve-node", "setup", flag, "bob"]).is_err());
         }
         let (_d, paths) = setup(&["home"]);
-        let (r, out) = setup_with(&paths, "lab-pc\n\n\nuser\n");
+        let (r, out) = setup_with(&paths, "\nuser\n\n");
         r.unwrap();
         assert!(!out.contains("Account that commands"), "{out}");
     }
@@ -7441,38 +8665,48 @@ mod tests {
             .collect()
     }
 
-    /// Setup asks name, center and mode; Enter keeps each, and every answer
-    /// goes through the owner's path into the signed file and the audit log.
+    /// Setup asks the link, the mode, a folder with its rights, and the
+    /// network, in that order and nothing else; Enter keeps each, and every
+    /// answer goes through the owner's path into the signed file and the
+    /// audit log.
     #[test]
-    fn setup_names_the_node_and_sets_the_first_centers_mode() {
+    fn setup_asks_link_mode_folder_and_network() {
         let (d, paths) = setup(&["home"]);
         let dir = d.path().join("work");
         std::fs::create_dir(&dir).unwrap();
-        // A name, the keys where they are, no new center (the one paired is
-        // the first), folder mode with one folder.
-        let answers = format!("lab-pc\n\n\nfolder\n{}\n+r +x\n", dir.display());
+        // No new center (the one paired is the first), folder mode with one
+        // folder, and no network.
+        let answers = format!("\nfolder\n{}\nrx\noff\n", dir.display());
         let (r, out) = setup_with(&paths, &answers);
         r.unwrap();
-        assert!(out.contains("Name of this node"), "{out}");
+        let link = out.find("Pairing link").unwrap();
+        let mode = out.find("Mode for home").unwrap();
+        let folder = out.find("A folder home may use").unwrap();
+        let net = out
+            .find("Network for home's commands: on or off [on]")
+            .unwrap();
+        assert!(link < mode && mode < folder && folder < net, "{out}");
+        for gone in ["Name of this node", "Where the node keeps its keys"] {
+            assert!(!out.contains(gone), "{gone}: {out}");
+        }
         assert!(out.contains("home: mode folder"), "{out}");
         let cfg = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
-        assert_eq!(cfg.node.name.as_deref(), Some("lab-pc"));
+        assert_eq!(cfg.node.name, None);
         let c = cfg.center("home").unwrap();
         assert_eq!(c.policy.mode, Mode::Folder);
         assert_eq!(c.policy.folders.len(), 1);
         assert_eq!(c.policy.folders[0].access.to_string(), "rx");
+        assert!(c.policy.no_network);
         let a = node_audit(&paths);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0]["event"], "setup");
         assert_eq!(a[0]["steps"].as_array().unwrap().len(), 3, "{}", a[0]);
         // Again with Enter everywhere: nothing changes.
         let before = std::fs::read(paths.config_file()).unwrap();
-        let (r, _) = setup_with(&paths, "\n\n\n\n\n");
+        let (r, _) = setup_with(&paths, "\n\n\n\n");
         r.unwrap();
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
-        // A bad name or a short input stops it, and the audit log says so.
-        let (r, _) = setup_with(&paths, "Bad Name\n");
-        assert!(r.unwrap_err().contains("not a node name"));
+        // A short input stops it, and the audit log says so.
         let (r, _) = setup_with(&paths, "");
         assert!(r.unwrap_err().contains("input ended"));
         let a = node_audit(&paths);
@@ -7483,10 +8717,80 @@ mod tests {
                 .contains("input ended")
         );
         let shown = run(&paths, &["audit"]).unwrap();
-        assert!(
-            shown.contains("setup: named the node lab-pc; home: mode folder"),
-            "{shown}"
-        );
+        assert!(shown.contains("setup: home: mode folder"), "{shown}");
+    }
+
+    /// User mode with no network runs nothing: setup says so before it
+    /// saves the switch.
+    #[test]
+    fn setup_warns_that_user_mode_without_network_runs_nothing() {
+        let (_d, paths) = setup(&["home"]);
+        let (r, out) = setup_with(&paths, "\nuser\noff\n");
+        r.unwrap();
+        let warned = out
+            .find("Warning: home is in user mode, where its commands run as you: with the network off, none of them runs.")
+            .unwrap_or_else(|| panic!("{out}"));
+        let saved = out.find(NO_NETWORK_LINE).unwrap_or_else(|| panic!("{out}"));
+        assert!(warned < saved, "{out}");
+        assert!(load(&paths).centers[0].policy.no_network);
+        // In folder mode nothing of the kind.
+        let (_d, paths) = setup(&["home"]);
+        let (r, out) = setup_with(&paths, "\nfolder\n\noff\n");
+        r.unwrap();
+        assert!(!out.contains("none of them runs"), "{out}");
+    }
+
+    /// `~` at setup's folder question is the home of whoever runs it, also
+    /// through sudo, where root's own home is not meant; `install` starts
+    /// setup as that person, with their home.
+    #[test]
+    fn the_home_of_setup_is_the_person_who_ran_it() {
+        let home = Path::new("/home/alice");
+        assert_eq!(typed_folder("~/proj", home), home.join("proj"));
+        assert_eq!(typed_folder("~", home), home);
+        assert_eq!(typed_folder("/srv/x", home), Path::new("/srv/x"));
+        assert_eq!(typed_folder("~bob/x", home), Path::new("~bob/x"));
+        let root = PathBuf::from("/root");
+        let alice = || Some(PathBuf::from("/home/alice"));
+        assert_eq!(home_of_invoker(true, false, alice, root.clone()), home);
+        assert_eq!(home_of_invoker(false, false, alice, root.clone()), root);
+        assert_eq!(home_of_invoker(true, false, || None, root.clone()), root);
+        // The installed node runs setup for its owner as its own user, whose
+        // HOME is the node's folder: `~` is the owner's home still.
+        let node = PathBuf::from("/var/lib/nerve");
+        assert_eq!(home_of_invoker(false, true, alice, node), home);
+        #[cfg(unix)]
+        {
+            let account = crate::service::Account {
+                name: "alice".into(),
+                uid: 1000,
+                gid: 1000,
+                comment: String::new(),
+                home: home.to_path_buf(),
+                groups: vec![1000],
+            };
+            let run = setup_run(Path::new("/usr/local/bin/nerve-node"), &account);
+            assert_eq!(
+                run,
+                SetupRun {
+                    program: "/usr/local/bin/nerve-node".into(),
+                    uid: 1000,
+                    gid: 1000,
+                    home: home.to_path_buf(),
+                    user: "alice".into(),
+                }
+            );
+            let c = run.command();
+            let envs: Vec<_> = c.get_envs().collect();
+            assert!(
+                envs.contains(&(
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/home/alice"))
+                )),
+                "{envs:?}"
+            );
+            assert_eq!(c.get_args().collect::<Vec<_>>(), ["setup"]);
+        }
     }
 
     /// Folder mode's commands are told off where they run as the node's own
@@ -7558,7 +8862,7 @@ mod tests {
         assert!(!paths.key_file("home").exists());
         let read = crate::secrets::center_key(&paths, SecretStorage::Keyring, "home").unwrap();
         assert_eq!(read.public_key(), key.public_key());
-        run(&paths, &["center", "rm", "--center", "home"]).unwrap();
+        run(&paths, &["center", "rm", "home"]).unwrap();
         assert!(crate::secrets::center_key(&paths, SecretStorage::Keyring, "home").is_err());
         set("file").unwrap();
         assert_eq!(config_key_at(&paths), (true, false));
@@ -7568,31 +8872,6 @@ mod tests {
                 .trim(),
             "file"
         );
-    }
-
-    /// Setup asks where the keys go; `keyring` moves them there.
-    #[test]
-    fn setup_keeps_the_keys_in_the_keyring_when_asked() {
-        let (_d, paths) = setup(&[]);
-        // Name kept, keys to the keyring, no link.
-        let (r, out) = setup_with(&paths, "\nkeyring\n\n");
-        r.unwrap();
-        assert!(out.contains("Where the node keeps its keys"), "{out}");
-        assert!(out.contains("[file]"), "{out}");
-        assert!(
-            out.contains("the node's keys are in the system keyring now"),
-            "{out}"
-        );
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::Keyring);
-        assert_eq!(config_key_at(&paths), (false, true));
-        let steps = node_audit(&paths)[0]["steps"].to_string();
-        assert!(steps.contains("system keyring"), "{steps}");
-        // Asked again, the keyring is what Enter keeps.
-        let (r, out) = setup_with(&paths, "\n\n\n");
-        r.unwrap();
-        assert!(out.contains("[keyring]"), "{out}");
-        let (r, _) = setup_with(&paths, "\nwallet\n");
-        assert!(r.unwrap_err().contains("file or keyring"));
     }
 
     /// The installed node on Windows keeps its keys in files: `config set`
@@ -7661,25 +8940,31 @@ mod tests {
         assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
     }
 
-    /// Where no keyring answers, setup offers to install one: no keeps the
-    /// files, yes installs it and moves the keys.
+    /// Where no keyring answers, `config set machine.secret_storage
+    /// keyring` at a terminal offers to install one: no keeps the files,
+    /// yes installs it.
     #[test]
-    fn setup_offers_a_keyring_where_none_answers() {
+    fn config_set_offers_a_keyring_where_none_answers() {
         let (_d, paths) = setup(&[]);
-        crate::secrets::store::set_unreachable(true);
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
-        let (r, out) = setup_keyring(&paths, None, &k, "\nkeyring\nn\n");
-        let e = r.unwrap_err();
-        assert!(e.contains("no system keyring answers"), "{e}");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let offer = |answers: &str| {
+            let mut out = Vec::new();
+            let mut input = std::io::Cursor::new(answers.as_bytes().to_vec());
+            let r = rt.block_on(offer_keyring(&paths, None, &k, Some(&mut input), &mut out));
+            (r, String::from_utf8(out).unwrap())
+        };
+        let (r, out) = offer("n\n");
+        assert!(r.unwrap_err().contains("no system keyring answers"));
         assert!(out.contains("Install it now? [y/N]"), "{out}");
         assert!(k.installed.borrow().is_empty());
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        let (r, out) = setup_keyring(&paths, None, &k, "\nkeyring\ny\n\n");
+        let (r, out) = offer("y\n");
         r.unwrap();
         assert_eq!(k.installed.borrow().len(), 1);
         assert!(out.contains("the system keyring answers"), "{out}");
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::Keyring);
-        assert_eq!(config_key_at(&paths), (false, true));
     }
 
     /// A running node that found no keyring keeps that failure: after
@@ -7702,10 +8987,7 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&out).contains("restarted the node"));
         let e = restart_for_keyring(&failed, &paths, None, false, &mut out).unwrap_err();
-        assert!(
-            e.contains("restart it, then run `nerve-node setup` again"),
-            "{e}"
-        );
+        assert!(e.contains("restart it, then run this again"), "{e}");
         let sys = crate::service::tests::Fake::new();
         let fine = json!({"version": 1, "keyring_failed": false});
         restart_for_keyring(&fine, &paths, Some(&sys), false, &mut out).unwrap();
@@ -7715,7 +8997,7 @@ mod tests {
         // runs in: it says how, and to run it again.
         let e = restart_for_keyring(&failed, &paths, Some(&sys), true, &mut out).unwrap_err();
         assert!(
-            e.contains("`nerve-node service restart`, then run `nerve-node setup` again"),
+            e.contains("`nerve-node service restart`, then run this again"),
             "{e}"
         );
         assert!(sys.calls().is_empty(), "{:?}", sys.calls());
@@ -7805,7 +9087,7 @@ mod tests {
     /// answers without setup installing it, e.g. installed by hand.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_node_that_found_no_keyring_is_restarted_when_one_answers_setup() {
+    fn a_node_that_found_no_keyring_is_restarted_when_one_answers() {
         let (d, paths) = setup(&[]);
         let (ready_tx, ready) = std::sync::mpsc::channel();
         let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
@@ -7834,18 +9116,24 @@ mod tests {
             })
         };
         ready.recv().unwrap();
-        // The keyring answers setup: nothing to install.
+        // The keyring answers `config set … keyring`: nothing to install.
         let k = crate::keyring_setup::tests::FakeKeyring::new(true);
-        let (r, _) = setup_keyring(&paths, None, &k, "\nkeyring\n");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let offer = |sys: Option<&dyn crate::service::System>| {
+            let mut out = Vec::new();
+            let mut input = std::io::Cursor::new(Vec::new());
+            let r = rt.block_on(offer_keyring(&paths, sys, &k, Some(&mut input), &mut out));
+            (r, String::from_utf8(out).unwrap())
+        };
+        let (r, _) = offer(None);
         let e = r.unwrap_err();
-        assert!(
-            e.contains("restart it, then run `nerve-node setup` again"),
-            "{e}"
-        );
+        assert!(e.contains("restart it, then run this again"), "{e}");
         assert!(k.installed.borrow().is_empty());
         let sys = crate::service::tests::Fake::new();
-        // Name, the keys.
-        let (r, out) = setup_keyring(&paths, Some(&sys), &k, "\nkeyring\n");
+        let (r, out) = offer(Some(&sys));
         assert!(
             sys.calls()
                 .contains(&format!("systemctl restart {}", crate::service::UNIT_NAME)),
@@ -7891,16 +9179,16 @@ mod tests {
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
         let (r, out) = setup_keyring(&paths, None, &k, "\n");
         assert!(r.unwrap_err().contains("no system keyring answers"));
-        assert!(!out.contains("Name of this node"), "{out}");
+        assert!(!out.contains("Pairing link"), "{out}");
         assert!(run(&paths, &["status"]).is_err());
         let (r, out) = setup_keyring(&paths, None, &k, "y\n\n\n\n");
         r.unwrap();
-        assert!(out.contains("Name of this node"), "{out}");
+        assert!(out.contains("Pairing link"), "{out}");
         assert!(run(&paths, &["status"]).is_ok());
     }
 
     #[test]
-    fn setup_without_a_center_stops_after_the_name() {
+    fn setup_without_a_center_stops_after_the_link() {
         let (_d, paths) = setup(&[]);
         let (r, out) = setup_with(&paths, "\n\n\n");
         r.unwrap();
@@ -7910,7 +9198,7 @@ mod tests {
         r.unwrap();
         assert!(out.contains("Several centers are paired"), "{out}");
         // A link that does not parse pairs nothing.
-        let (r, _) = setup_with(&paths, "\n\nnot a link\n");
+        let (r, _) = setup_with(&paths, "not a link\n");
         assert!(r.unwrap_err().contains("nerve://pair"));
     }
 
@@ -8053,8 +9341,8 @@ mod tests {
 
     /// `folder sync` asks the node to walk every grant, and tells the owner
     /// what that left, or that there is nothing to sync where no ACL gives the
-    /// folders. `folder set` asks the same; `folder rm` only for the changed
-    /// grants.
+    /// folders. `folder add` of a listed folder asks the same; `folder rm`
+    /// only for the changed grants.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
     async fn folder_sync_walks_every_grant_and_tells_what_it_left() {
@@ -8094,18 +9382,18 @@ mod tests {
         assert_eq!(sync_failed("other".into()), "other");
     }
 
-    /// `folder set` walks every grant of the running node, as `folder sync`
-    /// does (what was moved into a folder gets its entries with the change);
-    /// `folder rm` only what changed.
+    /// `folder add` of a folder the center has walks every grant of the
+    /// running node, as `folder sync` does (what was moved into a folder
+    /// gets its entries with the change); `folder rm` only what changed.
     #[cfg(target_os = "linux")]
     #[test]
-    fn folder_set_asks_the_node_for_a_walk_of_every_grant() {
+    fn folder_add_again_asks_the_node_for_a_walk_of_every_grant() {
         use nerve_transport::ctl::{Reply, serve};
         let (d, paths) = setup(&["home"]);
         let folder = d.path().join("srv");
         std::fs::create_dir(&folder).unwrap();
         let folder = folder.display().to_string();
-        run(&paths, &["folder", "add", &folder, "+r"]).unwrap();
+        run(&paths, &["folder", "add", &folder, "r"]).unwrap();
         let text = std::fs::read_to_string(paths.config_file()).unwrap();
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -8133,7 +9421,7 @@ mod tests {
         while !paths.ctl_socket().exists() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        run(&paths, &["folder", "set", &folder, "+w"]).unwrap();
+        run(&paths, &["folder", "add", &folder, "rw"]).unwrap();
         run(&paths, &["folder", "rm", &folder]).unwrap();
         assert_eq!(*asked.lock().unwrap(), [json!(true), json!(false)]);
     }
@@ -8211,19 +9499,26 @@ mod tests {
     #[test]
     fn the_rm_refusal_names_the_center_it_means() {
         let (_d, paths) = setup(&["home", "work"]);
-        let made = "exec.run:exec.run:git [*]";
-        for rule in ["exec.run:git *", made] {
+        let made = "exec.run:exec.run:git log";
+        for rule in ["exec.run:git log", made] {
             let list = "center.work.policy.allow";
             run(&paths, &["config", "add", list, rule]).unwrap();
         }
-        let args = ["rule", "rm", "allow", "exec.run:git *", "--center", "work"];
+        let args = [
+            "rule",
+            "rm",
+            "allow",
+            "exec.run:git log",
+            "--center",
+            "work",
+        ];
         let e = run(&paths, &args).unwrap_err();
         assert!(
             e.contains(&format!("rule rm allow '{made}' --center work")),
             "{e}"
         );
         assert!(
-            e.contains("rule rm allow 'exec.run:git *' --center work"),
+            e.contains("rule rm allow 'exec.run:git log' --center work"),
             "{e}"
         );
         // Run as printed.
@@ -8237,23 +9532,33 @@ mod tests {
         let (_d, paths) = setup(&["home"]);
         run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
         run(&paths, &["rule", "add", "deny", "git status"]).unwrap();
-        run(&paths, &["rule", "add", "deny", "rm *", "--wildcard"]).unwrap();
+        // A trailing ` *` is the wildcard, and the command says what it
+        // covers: `rm *` is every `rm`, not the files of a folder.
+        let out = run(&paths, &["rule", "add", "deny", "rm *"]).unwrap();
+        assert!(out.contains("it forbids every `rm` command"), "{out}");
+        // A sudo command goes on the sudo list.
+        let out = run(&paths, &["rule", "add", "allow", "sudo apt *"]).unwrap();
+        assert!(out.contains("sudo allow list"), "{out}");
+        assert!(
+            out.contains("it allows every command that starts with `sudo apt`"),
+            "{out}"
+        );
         run(
             &paths,
-            &["rule", "add", "sudo", "sudo apt update", "--wildcard"],
+            &["rule", "add", "allow", "sudo systemctl restart nginx"],
         )
         .unwrap();
-        // The sudo list takes the command without the sudo as well.
-        run(&paths, &["rule", "add", "sudo", "systemctl restart nginx"]).unwrap();
         let p = load(&paths).centers[0].policy.clone();
         // Neither list loses a rule to the other; deny wins when they meet.
         assert_eq!(p.allow, ["exec.run:git status"]);
         assert_eq!(p.deny, ["exec.run:git status", "exec.run:rm *"]);
         assert_eq!(p.sudo_allow, ["sudo apt *", "sudo systemctl restart nginx"]);
         assert!(run(&paths, &["rule", "add", "allow", "  "]).is_err());
-        // A sudo command is not an allow rule.
-        let e = run(&paths, &["rule", "add", "allow", "sudo apt update"]).unwrap_err();
-        assert!(e.contains("rule add sudo"), "{e}");
+        // The sudo list is no list of its own to add to, and a `*` alone
+        // names no command.
+        assert!(run(&paths, &["rule", "add", "sudo", "apt update"]).is_err());
+        assert!(run(&paths, &["rule", "add", "allow", "*"]).is_err());
+        assert!(run(&paths, &["rule", "add", "allow", "sudo *"]).is_err());
         // The `cap.action:pattern` form is for `config add`; as a command it
         // would become a rule that never matches.
         for list in ["allow", "deny"] {
@@ -8302,21 +9607,21 @@ mod tests {
             ["exec.run:git status", "exec.run:rm *", "fs:~/private/*"]
         );
         run(&paths, &["rule", "rm", "deny", "fs:~/private/*"]).unwrap();
-        for rule in ["exec.run:git *", "exec.run:exec.run:git [*]"] {
+        for rule in ["exec.run:git log", "exec.run:exec.run:git log"] {
             let list = "center.home.policy.allow";
             run(&paths, &["config", "add", list, rule]).unwrap();
         }
-        let e = run(&paths, &["rule", "rm", "allow", "exec.run:git *"]).unwrap_err();
+        let e = run(&paths, &["rule", "rm", "allow", "exec.run:git log"]).unwrap_err();
         assert!(
-            e.contains("rule rm allow 'exec.run:exec.run:git [*]'"),
+            e.contains("rule rm allow 'exec.run:exec.run:git log'"),
             "{e}"
         );
         run(
             &paths,
-            &["rule", "rm", "allow", "exec.run:exec.run:git [*]"],
+            &["rule", "rm", "allow", "exec.run:exec.run:git log"],
         )
         .unwrap();
-        run(&paths, &["rule", "rm", "allow", "exec.run:git *"]).unwrap();
+        run(&paths, &["rule", "rm", "allow", "exec.run:git log"]).unwrap();
         // A colon in a command that is not a scope stays a command.
         run(&paths, &["rule", "add", "allow", "C:\\tools\\x.exe"]).unwrap();
         run(&paths, &["rule", "rm", "allow", "C:\\tools\\x.exe"]).unwrap();
@@ -8324,8 +9629,9 @@ mod tests {
             load(&paths).centers[0].policy.allow,
             ["exec.run:git status"]
         );
-        // A command with a glob character in it is allowed as itself.
-        run(&paths, &["rule", "add", "allow", "rm *"]).unwrap();
+        // A glob character inside a command is the character itself.
+        let out = run(&paths, &["rule", "add", "allow", "ls *.txt"]).unwrap();
+        assert!(!out.contains("it allows every"), "{out}");
         assert!(load(&paths).centers[0].policy.allow[1].contains("[*]"));
         // Rules for other actions go in through `config add` and show in `ls`.
         run(
@@ -8345,14 +9651,26 @@ mod tests {
             )
             .is_err()
         );
-        let ls = run(&paths, &["rule", "ls", "allow"]).unwrap();
+        let ls = run(&paths, &["rule", "allow"]).unwrap();
         assert_eq!(ls.lines().count(), 3, "{ls}");
         assert!(ls.contains("fs.read:~/notes/*"), "{ls}");
+        // An entry on two lists needs the list named.
+        let e = run(&paths, &["rule", "rm", "git status"]).unwrap_err();
+        assert!(
+            e.contains("on the allow and the deny list")
+                && e.contains("`nerve-node rule rm allow 'git status'`"),
+            "{e}"
+        );
         // rm takes the command like add, or an entry as ls shows it.
         run(&paths, &["rule", "rm", "allow", "git status"]).unwrap();
         run(&paths, &["rule", "rm", "allow", "fs.read:~/notes/*"]).unwrap();
-        run(&paths, &["rule", "rm", "deny", "rm *", "--wildcard"]).unwrap();
-        run(&paths, &["rule", "rm", "sudo", "apt update", "--wildcard"]).unwrap();
+        // Without a list: the one list the entry is on, the sudo list for a
+        // sudo command.
+        run(&paths, &["rule", "rm", "rm *"]).unwrap();
+        run(&paths, &["rule", "rm", "sudo apt *"]).unwrap();
+        let e = run(&paths, &["rule", "rm", "nothing here"]).unwrap_err();
+        assert!(e.contains("is on no list of home"), "{e}");
+        assert!(run(&paths, &["rule", "rm", "both", "x"]).is_err());
         let p = load(&paths).centers[0].policy.clone();
         assert_eq!(p.allow.len(), 1, "{:?}", p.allow);
         assert_eq!(p.deny, ["exec.run:git status"]);
@@ -8360,31 +9678,31 @@ mod tests {
         // Something that is not on the list is an error.
         let e = run(&paths, &["rule", "rm", "deny", "ls"]).unwrap_err();
         assert!(e.contains("not on the deny rule"), "{e}");
-        let ls = run(&paths, &["rule", "ls", "sudo"]).unwrap();
+        let ls = run(&paths, &["rule", "sudo"]).unwrap();
         assert_eq!(ls, "sudo systemctl restart nginx\n");
         // Without a list, `ls` shows all three, each line with its list.
-        let all = run(&paths, &["rule", "ls"]).unwrap();
+        let all = run(&paths, &["rule"]).unwrap();
         assert!(all.contains("deny  exec.run:git status\n"), "{all}");
         assert!(
             all.contains("sudo  sudo systemctl restart nginx\n"),
             "{all}"
         );
         run(&paths, &["rule", "rm", "sudo", "systemctl restart nginx"]).unwrap();
-        let ls = run(&paths, &["rule", "ls", "sudo"]).unwrap();
+        let ls = run(&paths, &["rule", "sudo"]).unwrap();
         assert!(ls.contains("nothing on the sudo allow list"), "{ls}");
     }
 
     #[test]
     fn caps_and_proxy_show_what_is_set() {
         let (_d, paths) = setup(&["home"]);
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         assert!(ls.contains("fs.read"), "{ls}");
         assert!(ls.contains("no program is allowed as a provider"), "{ls}");
         run(&paths, &["cap", "set", "exec", "hidden"]).unwrap();
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         let run_line = ls.lines().find(|l| l.starts_with("exec.run ")).unwrap();
         assert!(run_line.ends_with("home: hidden"), "{ls}");
-        assert_eq!(run(&paths, &["proxy", "ls"]).unwrap(), "no proxy\n");
+        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
         run(
             &paths,
             &[
@@ -8396,14 +9714,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let ls = run(&paths, &["proxy", "ls"]).unwrap();
+        let ls = run(&paths, &["proxy"]).unwrap();
         assert!(
             ls.contains("http://127.0.0.1:3128") && ls.contains("X-Key"),
             "{ls}"
         );
         assert!(!ls.contains("s3cret"), "{ls}");
-        run(&paths, &["proxy", "rm"]).unwrap();
-        assert_eq!(run(&paths, &["proxy", "ls"]).unwrap(), "no proxy\n");
+        run(&paths, &["proxy", "off"]).unwrap();
+        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
     }
 
     /// What the test keyring holds for the node at `paths`.
@@ -8517,7 +9835,7 @@ mod tests {
             "[connection]\nproxy = \"http://127.0.0.1:3128\"\nheaders = { X-Key = \"s3cret-value\" }\n",
         )
         .unwrap();
-        for args in [&["proxy", "ls"][..], &["status"]] {
+        for args in [&["proxy"][..], &["status"]] {
             let e = run(&paths, args).unwrap_err();
             assert!(e.contains("run `nerve-node proxy set` again"), "{e}");
             assert!(!e.contains("s3cret"), "{e}");
@@ -8541,11 +9859,7 @@ mod tests {
         cfg.centers.push(neighbour);
         cfg.save(&paths.config_file()).unwrap();
         let paired = load(&paths).centers;
-        let out = run(
-            &paths,
-            &["relay", "set", "0.0.0.0:7490", "--max-links", "8"],
-        )
-        .unwrap();
+        let out = run(&paths, &["relay", "on", "0.0.0.0:7490", "--max-links", "8"]).unwrap();
         let pin = load(&paths).relay.pin.expect("a pin");
         assert!(
             out.starts_with(&format!(
@@ -8563,7 +9877,7 @@ mod tests {
             &paths,
             &[
                 "relay",
-                "set",
+                "on",
                 "0.0.0.0:7491",
                 "--max-opens-per-minute",
                 "300",
@@ -8574,18 +9888,12 @@ mod tests {
         assert!(
             run(
                 &paths,
-                &[
-                    "relay",
-                    "set",
-                    "0.0.0.0:7491",
-                    "--max-opens-per-minute",
-                    "0"
-                ]
+                &["relay", "on", "0.0.0.0:7491", "--max-opens-per-minute", "0"]
             )
             .is_err()
         );
         assert_eq!(load(&paths).relay.pin.as_deref(), Some(pin.as_str()));
-        let e = run(&paths, &["relay", "set", "relay.example:7490"]).unwrap_err();
+        let e = run(&paths, &["relay", "on", "relay.example:7490"]).unwrap_err();
         assert!(e.contains("relay.listen"), "{e}");
         assert_eq!(load(&paths).relay.listen.as_deref(), Some("0.0.0.0:7491"));
 
@@ -8625,27 +9933,19 @@ mod tests {
         // A node limited to some centers; only paired ones can be named.
         // A list that splits one address is refused: the relay cannot keep
         // the two apart.
-        let e = run(&paths, &["relay", "add", "lab-2", "--center", "home"]).unwrap_err();
+        let e = run(&paths, &["relay", "add", "lab-2", "--to", "home"]).unwrap_err();
         assert!(e.contains("home and home-b share one host and port"), "{e}");
         assert!(load(&paths).relay.node("lab-2").is_none());
-        let out = run(&paths, &["relay", "add", "lab-2", "--center", "work"]).unwrap();
+        let out = run(&paths, &["relay", "add", "lab-2", "--to", "work"]).unwrap();
         assert!(out.contains("it may reach the centers work\n"), "{out}");
         assert_eq!(load(&paths).relay.node("lab-2").unwrap().centers, ["work"]);
-        let e = run(&paths, &["relay", "add", "lab-3", "--center", "elsewhere"]).unwrap_err();
+        let e = run(&paths, &["relay", "add", "lab-3", "--to", "elsewhere"]).unwrap_err();
         assert!(e.contains("no center named elsewhere"), "{e}");
         assert!(load(&paths).relay.node("lab-3").is_none());
         let out = run(
             &paths,
             &[
-                "relay",
-                "set-centers",
-                "lab-2",
-                "--center",
-                "work",
-                "--center",
-                "home",
-                "--center",
-                "home-b",
+                "relay", "set", "lab-2", "--to", "work", "--to", "home", "--to", "home-b",
             ],
         )
         .unwrap();
@@ -8653,20 +9953,14 @@ mod tests {
             out.starts_with("relay node lab-2 may reach the centers work, home, home-b\n"),
             "{out}"
         );
-        assert!(
-            run(
-                &paths,
-                &["relay", "set-centers", "nobody", "--center", "home"]
-            )
-            .is_err()
-        );
+        assert!(run(&paths, &["relay", "set", "nobody", "--to", "home"]).is_err());
 
         // A node of its own limits, for a relay behind this one.
         let out = run(
             &paths,
             &[
                 "relay",
-                "set-limits",
+                "set",
                 "lab-2",
                 "--max-links",
                 "12",
@@ -8684,22 +9978,14 @@ mod tests {
             (node.max_links, node.max_opens_per_minute),
             (Some(12), Some(300))
         );
-        // One flag sets that limit and keeps the other, as `relay set` does.
-        run(
-            &paths,
-            &["relay", "set-limits", "lab-2", "--max-links", "20"],
-        )
-        .unwrap();
+        // One flag sets that limit and keeps the other, as `relay on` does.
+        run(&paths, &["relay", "set", "lab-2", "--max-links", "20"]).unwrap();
         let node = load(&paths).relay.node("lab-2").unwrap().clone();
         assert_eq!(
             (node.max_links, node.max_opens_per_minute),
             (Some(20), Some(300))
         );
-        run(
-            &paths,
-            &["relay", "set-limits", "lab-2", "--max-links", "12"],
-        )
-        .unwrap();
+        run(&paths, &["relay", "set", "lab-2", "--max-links", "12"]).unwrap();
         // A new token keeps the node's centers and limits; the old one
         // stops working.
         let before = load(&paths).relay.node("lab-2").unwrap().clone();
@@ -8735,46 +10021,52 @@ mod tests {
                 .contains(&token2)
         );
         assert!(run(&paths, &["relay", "token", "nobody"]).is_err());
-        // The flag's help sends a chain to `set-limits`, not to the
+        // The flag's help sends a chain to `relay set`, not to the
         // relay-wide budget.
         let help = Cli::command()
             .find_subcommand_mut("relay")
             .unwrap()
-            .find_subcommand_mut("set")
+            .find_subcommand_mut("on")
             .unwrap()
             .render_long_help()
             .to_string();
-        assert!(help.contains("relay set-limits <name>"), "{help}");
+        assert!(help.contains("relay set <name>"), "{help}");
         assert!(!help.contains("more for a relay behind this one"), "{help}");
         assert_eq!(
             load(&paths).relay.max_links_per_node,
             4,
             "the relay's stays"
         );
-        assert!(
-            run(
-                &paths,
-                &["relay", "set-limits", "lab-2", "--max-links", "0"]
-            )
-            .is_err()
-        );
-        assert!(
-            run(
-                &paths,
-                &["relay", "set-limits", "nobody", "--max-links", "2"]
-            )
-            .is_err()
-        );
-        let ls = run(&paths, &["relay", "ls"]).unwrap();
+        assert!(run(&paths, &["relay", "set", "lab-2", "--max-links", "0"]).is_err());
+        assert!(run(&paths, &["relay", "set", "nobody", "--max-links", "2"]).is_err());
+        let ls = run(&paths, &["relay"]).unwrap();
         assert!(
             ls.contains("node lab-2: the centers work, home, home-b; its own limits: 12 tunnels at once, 300 opened a minute\n"),
             "{ls}"
         );
-        run(&paths, &["relay", "set-limits", "lab-2"]).unwrap();
+        // Nothing named to change is an error; `default` gives the relay's
+        // limits again, and an address names no relayed node.
+        let e = run(&paths, &["relay", "set", "lab-2"]).unwrap_err();
+        assert!(e.contains("name what to change"), "{e}");
+        let e = run(&paths, &["relay", "set", "0.0.0.0:7490"]).unwrap_err();
+        assert!(e.contains("`nerve-node relay on 0.0.0.0:7490`"), "{e}");
+        run(
+            &paths,
+            &[
+                "relay",
+                "set",
+                "lab-2",
+                "--max-links",
+                "default",
+                "--max-opens-per-minute",
+                "default",
+            ],
+        )
+        .unwrap();
         let node = load(&paths).relay.node("lab-2").unwrap().clone();
         assert_eq!((node.max_links, node.max_opens_per_minute), (None, None));
 
-        let ls = run(&paths, &["relay", "ls"]).unwrap();
+        let ls = run(&paths, &["relay"]).unwrap();
         assert!(
             ls.starts_with(&format!(
                 "relay on 0.0.0.0:7491\nat most 8 tunnels, 4 per node, 300 opened a minute per node\npin {pin}\nnode lab-pc: every https center of this node\nnode lab-2: the centers work, home, home-b\n"
@@ -8782,7 +10074,14 @@ mod tests {
             "{ls}"
         );
         assert!(!ls.contains(&token), "{ls}");
-        run(&paths, &["relay", "set-centers", "lab-2"]).unwrap();
+        assert!(
+            run(
+                &paths,
+                &["relay", "set", "lab-2", "--to", "*", "--to", "work"]
+            )
+            .is_err()
+        );
+        run(&paths, &["relay", "set", "lab-2", "--to", "*"]).unwrap();
         assert!(load(&paths).relay.node("lab-2").unwrap().centers.is_empty());
 
         // A lost TLS key: relay add makes a new certificate and says so.
@@ -8808,17 +10107,13 @@ mod tests {
         let cfg = load(&paths);
         assert_eq!(cfg.relay.listen, None);
         assert_eq!(cfg.relay.max_links, 8);
-        assert!(
-            run(&paths, &["relay", "ls"])
-                .unwrap()
-                .starts_with("relay off\n")
-        );
+        assert!(run(&paths, &["relay"]).unwrap().starts_with("relay off\n"));
     }
 
     /// The login of an https:// proxy, a relay token, is kept where the
     /// node keeps its keys: its file by default, the keyring with
     /// `keyring`, which refuses clearly when it does not answer; never in
-    /// node.toml, and `proxy rm` deletes it.
+    /// node.toml, and `proxy off` deletes it.
     #[test]
     fn an_https_proxy_login_is_kept_with_the_node_keys() {
         let pin = "A".repeat(43);
@@ -8861,9 +10156,9 @@ mod tests {
                     assert_eq!(in_file, None);
                 }
             }
-            let ls = run(&paths, &["proxy", "ls"]).unwrap();
+            let ls = run(&paths, &["proxy"]).unwrap();
             assert!(ls.contains("login lab (its password is kept"), "{ls}");
-            run(&paths, &["proxy", "rm"]).unwrap();
+            run(&paths, &["proxy", "off"]).unwrap();
             assert_eq!(crate::secrets::store::get(entry.account()).unwrap(), None);
             assert!(!paths.proxy_login_file().exists());
             assert_eq!(load(&paths).connection, Default::default());
@@ -8904,24 +10199,24 @@ mod tests {
         ];
         // With the entry: ls says the value is there, rm deletes it.
         run(&paths, &set).unwrap();
-        let ls = run(&paths, &["proxy", "ls"]).unwrap();
+        let ls = run(&paths, &["proxy"]).unwrap();
         assert_eq!(
             ls,
             "proxy http://127.0.0.1:3128\nheader X-Key (its value is in the system keyring)\n"
         );
-        let rm = run(&paths, &["proxy", "rm"]).unwrap();
+        let rm = run(&paths, &["proxy", "off"]).unwrap();
         assert!(rm.contains("deleted the header values"), "{rm}");
         assert_eq!(keyring_entry(&paths), None);
-        assert_eq!(run(&paths, &["proxy", "ls"]).unwrap(), "no proxy\n");
+        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
 
         // Without it: ls names the entry the link misses, rm still works.
         run(&paths, &set).unwrap();
         let entry = crate::secrets::Entry::proxy(&paths);
         crate::secrets::store::delete(entry.account()).unwrap();
-        let ls = run(&paths, &["proxy", "ls"]).unwrap();
+        let ls = run(&paths, &["proxy"]).unwrap();
         assert!(ls.contains("header X-Key\n"), "{ls}");
         assert!(ls.contains(&format!("no entry {entry}")), "{ls}");
-        let rm = run(&paths, &["proxy", "rm"]).unwrap();
+        let rm = run(&paths, &["proxy", "off"]).unwrap();
         assert_eq!(
             rm,
             format!("no proxy\nthe change is in node.toml; it {NEXT_START}\n")
@@ -8931,8 +10226,8 @@ mod tests {
         // A proxy without headers never needs the keyring, reachable or not.
         crate::secrets::store::set_unreachable(true);
         let plain = run(&paths, &["proxy", "set", "http://127.0.0.1:3128"]);
-        let ls = run(&paths, &["proxy", "ls"]);
-        let rm = run(&paths, &["proxy", "rm"]);
+        let ls = run(&paths, &["proxy"]);
+        let rm = run(&paths, &["proxy", "off"]);
         crate::secrets::store::set_unreachable(false);
         let next = format!("the change is in node.toml; it {NEXT_START}\n");
         assert_eq!(
@@ -9040,8 +10335,8 @@ mod tests {
         assert_eq!(keyring_entry(&paths), held);
 
         // The entry an administrator's keyring holds is not what the service
-        // reads, so `proxy ls` does not call it good.
-        let ls = run(&paths, &["proxy", "ls"]).unwrap();
+        // reads, so `proxy` does not call it good.
+        let ls = run(&paths, &["proxy"]).unwrap();
         assert!(ls.contains("header X-Old\n"), "{ls}");
         assert!(!ls.contains("its value is in the system keyring"), "{ls}");
         assert!(ls.contains("the link cannot use this proxy"), "{ls}");
@@ -9060,11 +10355,11 @@ mod tests {
         assert!(cfg.connection.headers.is_empty());
         assert_eq!(keyring_entry(&paths), None);
         assert_eq!(
-            run(&paths, &["proxy", "ls"]).unwrap(),
+            run(&paths, &["proxy"]).unwrap(),
             "proxy http://127.0.0.1:3129\n"
         );
         assert_eq!(
-            run(&paths, &["proxy", "rm"]).unwrap(),
+            run(&paths, &["proxy", "off"]).unwrap(),
             format!("no proxy\n{next}")
         );
     }
@@ -9177,34 +10472,40 @@ mod tests {
         for ok in [
             &["center", "add", "nerve://x"][..],
             &["center", "rm"],
-            &["center", "ls"],
+            &["center"],
             &["center", "pause"],
             &["center", "resume"],
-            &["center", "grant", "settings", "write"],
-            &["folder", "add", "/p", "+r"],
-            &["folder", "set", "/p", "=rwx", "-w"],
+            &["center", "settings", "on"],
+            &["folder", "add", "/p", "r"],
+            &["folder", "add", "/p", "none"],
             &["folder", "rm", "/p"],
-            &["folder", "ls"],
-            &["mode", "set", "user", "--for", "2"],
-            &["rule", "add", "allow", "ls", "--wildcard"],
+            &["folder"],
+            &["network", "off"],
+            &["mode", "user", "--for", "2"],
+            &["mode"],
+            &["rule", "add", "allow", "ls *"],
             &["rule", "rm", "deny", "ls"],
-            &["rule", "ls", "sudo"],
+            &["rule", "rm", "ls"],
+            &["relay", "on", "0.0.0.0:7490"],
+            &["relay", "set", "lab", "--to", "home"],
+            &["relay"],
+            &["rule", "sudo"],
             &["cap", "set", "fs", "on"],
-            &["cap", "ls"],
-            &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
-            &["cap", "provider", "rm", "desk"],
-            &["cap", "provider", "ls"],
+            &["cap"],
+            &["provider", "add", "desk", "/usr/bin/desk"],
+            &["provider", "rm", "desk"],
+            &["provider"],
             &["cap", "add", "a.b", "--effect", "read", "--", "true"],
             &["cap", "edit", "a.b", "--timeout", "5"],
             &["cap", "rm", "a.b"],
             &["proxy", "set", "http://p:1"],
-            &["proxy", "rm"],
-            &["proxy", "ls"],
+            &["proxy", "off"],
+            &["proxy"],
             &["config", "get", "limits"],
             &["sudo", "on"],
             &["sudo", "off"],
-            &["sudo", "status"],
-            &["audit", "--denied"],
+            &["sudo"],
+            &["audit", "--refused"],
             &["panic"],
             &["unlock"],
             &["status"],
@@ -9222,9 +10523,24 @@ mod tests {
             &["grant", "settings", "write"],
             &["allow", "ls"],
             &["deny", "ls"],
-            &["mode", "user"],
+            &["mode", "set", "user"],
             &["mode", "user", "--hours", "2"],
-            &["mode", "set", "user", "--hours", "2"],
+            &["folder", "set", "/p", "=rwx"],
+            &["folder", "network", "off"],
+            &["folder", "ls"],
+            &["center", "ls"],
+            &["center", "grant", "settings", "write"],
+            &["rule", "add", "sudo", "x"],
+            &["rule", "add", "allow", "x", "--wildcard"],
+            &["rule", "ls"],
+            &["cap", "ls"],
+            &["cap", "provider", "ls"],
+            &["sudo", "status"],
+            &["audit", "--denied"],
+            &["config", "remove", "a", "b"],
+            &["proxy", "rm"],
+            &["relay", "set-limits", "lab"],
+            &["mode", "user", "--hours", "2"],
             &["folder", "add", "/p", "--rw"],
             &["folder", "add", "/p", "--execute"],
             &["folder", "add", "/p", "--ro"],
@@ -9237,7 +10553,7 @@ mod tests {
             &["rule", "sudo", "ls"],
             &["rule", "add", "allow"],
             &["rule", "add", "bogus", "x"],
-            &["rule", "ls", "allow", "extra"],
+            &["rule", "allow", "extra"],
         ] {
             assert!(!parses(bad), "{bad:?}");
         }
@@ -9287,10 +10603,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "Install and set up",
-                "Pair and connect",
+                "Set up",
+                "Centers",
                 "What a center may do",
-                "Run and watch",
+                "Watch and stop",
+                "More",
             ]
         );
         // A noun is one card with its verbs; `rule` has the three lists as
@@ -9304,31 +10621,25 @@ mod tests {
         };
         let rule = card("rule");
         let rule_verbs: Vec<&str> = rule.verbs.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(
-            rule_verbs,
-            ["rule add", "rule rm", "rule ls", "rule edit", "rule guard"]
-        );
-        assert_eq!(rule.holds, ["rule"]);
+        assert_eq!(rule_verbs, ["rule", "rule add", "rule rm", "rule edit"]);
+        assert!(rule.holds.is_empty());
         assert!(
-            rule.verbs[0].usage.contains("<LIST>"),
+            rule.verbs[1].usage.contains("<LIST>"),
+            "{}",
+            rule.verbs[1].usage
+        );
+        assert!(
+            rule.verbs[0].usage.contains("[LIST]"),
             "{}",
             rule.verbs[0].usage
         );
-        assert!(
-            rule.verbs[2].usage.contains("[LIST]"),
-            "{}",
-            rule.verbs[2].usage
-        );
-        // `cap provider` is a noun below `cap`, with a card of its own.
-        let provider: Vec<&str> = card("cap provider")
+        // `provider` is a noun of its own: bare, it shows.
+        let provider: Vec<&str> = card("provider")
             .verbs
             .iter()
             .map(|v| v.name.as_str())
             .collect();
-        assert_eq!(
-            provider,
-            ["cap provider allow", "cap provider rm", "cap provider ls"]
-        );
+        assert_eq!(provider, ["provider", "provider add", "provider rm"]);
         assert_eq!(card("panic / unlock").verbs.len(), 2);
         assert_eq!(card("install / uninstall").verbs.len(), 2);
         assert_eq!(card("setup").verbs.len(), 1);
@@ -9343,7 +10654,7 @@ mod tests {
             assert!(cards.iter().all(|c| !c.shared_args.contains(a)));
             assert!(h.verbs().all(|v| !v.args.contains(a)));
         }
-        // `config add` and `remove` take the key of a list, the other verbs
+        // `config add` and `rm` take the key of a list, the other verbs
         // the key of any setting; each text is said once on the card.
         let key = card("config");
         let keys: Vec<&str> = key
@@ -9365,18 +10676,18 @@ mod tests {
         assert!(
             add.args
                 .iter()
-                .any(|a| a.name == "<+r|+w|+x>" && !a.about.is_empty() && !a.optional),
+                .any(|a| a.name == "<RIGHTS>" && !a.about.is_empty() && !a.optional),
             "{:?}",
             add.args
         );
         // What can be left out says so.
-        let mode = h.verbs().find(|v| v.name == "mode set").unwrap();
+        let mode = h.verbs().find(|v| v.name == "mode").unwrap();
         assert!(
             mode.args
                 .iter()
                 .any(|a| a.name == "--for <HOURS>" && a.optional)
         );
-        assert!(mode.args.iter().any(|a| a.name == "<MODE>" && !a.optional));
+        assert!(mode.args.iter().any(|a| a.name == "<MODE>" && a.optional));
         // The options every command takes are listed once, not per command.
         assert!(h.global.iter().any(|a| a.name.starts_with("--config-dir")));
         assert!(add.args.iter().all(|a| !a.name.starts_with("--config-dir")));
@@ -9390,6 +10701,187 @@ mod tests {
         let n = abouts.len();
         abouts.dedup();
         assert_eq!(abouts.len(), n, "two commands say the same");
+    }
+
+    /// One line first (plan 4.1): every command's `about` and every
+    /// argument's `help` is at most 80 characters; the rest is the long
+    /// help, shown by `--help`.
+    #[test]
+    fn every_help_line_is_short() {
+        fn walk(c: &clap::Command, at: &str, long: &mut Vec<String>) {
+            if let Some(a) = c.get_about() {
+                let a = a.to_string();
+                if a.chars().count() > 80 {
+                    long.push(format!("{at}: {a}"));
+                }
+            }
+            for arg in c.get_arguments() {
+                if let Some(h) = arg.get_help() {
+                    let h = h.to_string();
+                    if h.chars().count() > 80 {
+                        long.push(format!("{at} {}: {h}", arg.get_id()));
+                    }
+                }
+            }
+            for s in c.get_subcommands() {
+                walk(s, &format!("{at} {}", s.get_name()), long);
+            }
+        }
+        let mut long = Vec::new();
+        walk(&Cli::command(), "nerve-node", &mut long);
+        assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// The command `center rotate-key` names to end the grace is one the
+    /// CLI takes (round 1, correctness 4).
+    #[test]
+    fn the_rotate_key_hint_is_a_command_that_parses() {
+        let text = rotated_text("lab", "k");
+        let command = text.split('`').nth(1).unwrap();
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let cli = Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{command}: {e}"));
+        assert!(
+            matches!(
+                cli.cmd,
+                Cmd::Center {
+                    cmd: Some(CenterCmd::RotateKey {
+                        end_grace: true,
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            "{command}"
+        );
+    }
+
+    /// A stopped installed node whose folders the owner may not open still
+    /// says its service, so the app shows Stopped and its Start button, and
+    /// `status` names the next step, not pairing (round 1, correctness 3).
+    #[test]
+    fn a_stopped_node_says_its_service_without_its_folders() {
+        let service =
+            json!({"installed": true, "state": "stopped", "enabled": true, "version": "0.0.7"});
+        let unread = Err("cannot read /etc/nerve/node.toml: permission denied".to_string());
+        let v = json::with_service(unread, service.clone(), true).unwrap();
+        assert_eq!(v["service"], service);
+        let lines = status_lines(&v);
+        assert!(
+            lines.contains(&"service: stopped, starts with the machine, version 0.0.7".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("centers: not shown")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"next: start it: `nerve-node service start`".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("pair a center")),
+            "{lines:#?}"
+        );
+        // A running service, or none: the error is the answer. So it is
+        // where this account may open the folders (a `node.toml` that does
+        // not parse): a stopped service does not hide it (round 2).
+        let running = json!({"installed": true, "state": "running"});
+        assert!(json::with_service(Err("x".into()), running, true).is_err());
+        assert!(json::with_service(Err("x".into()), Value::Null, true).is_err());
+        assert!(json::with_service(Err("cannot parse".into()), service, false).is_err());
+    }
+
+    /// `--help` lists the commands in the four groups and More, one line
+    /// each, and names the options every command takes there only; a
+    /// command's long page ends on its guide page.
+    #[test]
+    fn the_top_help_is_in_groups_and_short() {
+        let mut cmd = help_pages(Cli::command(), "nerve-node");
+        let top = cmd.render_help().to_string();
+        let mut at = 0;
+        for g in [
+            "Set up:",
+            "Centers:",
+            "What a center may do:",
+            "Watch and stop:",
+            "More:",
+            "Options every command takes:",
+        ] {
+            let i = top[at..]
+                .find(g)
+                .unwrap_or_else(|| panic!("{g} missing or out of order:\n{top}"));
+            at += i + g.len();
+        }
+        for c in Cli::command().get_subcommands().filter(|c| visible(c)) {
+            let line = format!("  {:9}  {}", c.get_name(), about_of(c));
+            assert_eq!(top.matches(&line).count(), 1, "{line}\n{top}");
+        }
+        assert!(top.lines().all(|l| l.chars().count() <= 100), "{top}");
+        assert!(top.contains("--json"), "{top}");
+        let folder = cmd.find_subcommand_mut("folder").unwrap();
+        assert!(!folder.render_help().to_string().contains("--json"));
+        let long = folder.render_long_help().to_string();
+        assert!(
+            long.ends_with("More in the user guide: docs/user/modes.md\n"),
+            "{long}"
+        );
+        // Bare, it names the commands of every day, each one that exists.
+        let day = everyday("nerve-node");
+        for l in day.lines().filter(|l| l.starts_with("  ")) {
+            let word = l
+                .split_whitespace()
+                .find(|w| *w != "sudo" && *w != "nerve-node")
+                .unwrap();
+            assert!(Cli::command().find_subcommand(word).is_some(), "{l}");
+        }
+        assert_eq!(
+            day.lines().filter(|l| l.starts_with("  ")).count(),
+            6,
+            "{day}"
+        );
+    }
+
+    /// The help data has a line and its rest for each item, and a guide
+    /// page for each card, from the same split as `--help`.
+    #[test]
+    fn the_help_data_folds_the_rest() {
+        let h = help();
+        let mode = h.verbs().find(|v| v.name == "mode").unwrap();
+        assert_eq!(
+            mode.about,
+            "Choose how much a center may do: folder, allowlist or user mode (as you)"
+        );
+        assert!(
+            mode.more.starts_with("Show each center's mode"),
+            "{}",
+            mode.more
+        );
+        let arg = mode.args.iter().find(|a| a.name == "<MODE>").unwrap();
+        assert!(
+            arg.about.contains("reads what all accounts may"),
+            "{}",
+            arg.about
+        );
+        // The widest mode says in the first line that it runs as you (round
+        // 2, security 1).
+        assert!(arg.about.contains("`user` (as you)"), "{}", arg.about);
+        assert!(arg.more.contains("protected files aside"), "{}", arg.more);
+        for s in &h.sections {
+            for c in &s.cards {
+                assert!(c.doc.ends_with(".md"), "{}", c.name);
+                let file = format!("{}/../../docs/user/{}", env!("CARGO_MANIFEST_DIR"), c.doc);
+                assert!(
+                    std::path::Path::new(&file).exists(),
+                    "{} names {}",
+                    c.name,
+                    c.doc
+                );
+            }
+        }
+        assert!(h.options.iter().any(|o| o.name == "--json"));
+        assert!(h.options.iter().any(|o| o.name.starts_with("--center")));
+        let json = serde_json::to_value(&h).unwrap();
+        assert!(json.get("global").is_none() && json["sections"][0].get("line").is_some());
     }
 
     /// The help page calls no command not done.
@@ -9474,7 +10966,7 @@ mod tests {
         );
         assert!(lines[1].contains("curl -d @~/notes x  allowed"), "{out}");
         assert!(lines[2].contains("exec.run  ls  forbidden"), "{out}");
-        let out = run(&paths, &["audit", "--denied"]).unwrap();
+        let out = run(&paths, &["audit", "--refused"]).unwrap();
         assert_eq!(out.lines().count(), 1, "{out}");
         assert!(out.contains("ls  forbidden"), "{out}");
     }
@@ -9593,6 +11085,23 @@ mod tests {
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
     }
 
+    /// Bare `network` is a read like bare `mode`: `--json` gives each
+    /// center's switch as data, not the words of a change (round 4,
+    /// correctness 4).
+    #[test]
+    fn bare_network_prints_its_data_as_json() {
+        let (_d, paths) = setup(&["home", "work"]);
+        let v = json_of(&paths, &["network"]);
+        assert_eq!(v["networks"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(v["networks"][0]["no_network"], false, "{v}");
+        run(&paths, &["network", "off", "--center", "work"]).unwrap();
+        let v = json_of(&paths, &["network", "--center", "work"]);
+        assert_eq!(v["networks"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["networks"][0]["center"], "work", "{v}");
+        assert_eq!(v["networks"][0]["no_network"], true, "{v}");
+        assert!(v.get("messages").is_none(), "{v}");
+    }
+
     /// The read commands print their data as JSON for the desktop app,
     /// which never reads the text meant for people.
     #[test]
@@ -9602,13 +11111,13 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         run(
             &paths,
-            &["folder", "add", &work.display().to_string(), "+r", "+x"],
+            &["folder", "add", &work.display().to_string(), "rx"],
         )
         .unwrap();
         run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
-        run(&paths, &["rule", "add", "deny", "rm", "--wildcard"]).unwrap();
+        run(&paths, &["rule", "add", "deny", "rm *"]).unwrap();
         run(&paths, &["cap", "set", "fs.write", "off"]).unwrap();
-        run(&paths, &["mode", "set", "folder"]).unwrap();
+        run(&paths, &["mode", "folder"]).unwrap();
 
         let v = json_of(&paths, &["status"]);
         assert_eq!(v["daemon"], "not running", "{v}");
@@ -9619,7 +11128,7 @@ mod tests {
         assert!(v["centers"][0]["status"].is_null(), "{v}");
         assert!(v["command_limits"]["memory_mb"].is_u64(), "{v}");
 
-        let v = json_of(&paths, &["center", "ls"]);
+        let v = json_of(&paths, &["center"]);
         let c = &v["centers"][0];
         assert_eq!(
             (
@@ -9639,7 +11148,7 @@ mod tests {
             "{v}"
         );
 
-        let v = json_of(&paths, &["folder", "ls"]);
+        let v = json_of(&paths, &["folder"]);
         assert_eq!(v["center"], "home");
         let f = &v["folders"][0];
         assert_eq!(
@@ -9648,14 +11157,14 @@ mod tests {
             "{v}"
         );
 
-        let v = json_of(&paths, &["rule", "ls"]);
+        let v = json_of(&paths, &["rule"]);
         assert_eq!(v["allow"], json!(["exec.run:git status"]), "{v}");
         assert_eq!(v["deny"], json!(["exec.run:rm *"]), "{v}");
         assert_eq!(v["sudo"], json!([]), "{v}");
-        let v = json_of(&paths, &["rule", "ls", "deny"]);
+        let v = json_of(&paths, &["rule", "deny"]);
         assert!(v.get("allow").is_none() && v["deny"].is_array(), "{v}");
 
-        let v = json_of(&paths, &["cap", "ls"]);
+        let v = json_of(&paths, &["cap"]);
         assert_eq!(v["caps"], json!({"fs.write": "off"}), "{v}");
 
         let v = json_of(&paths, &["config", "get", "center.home.policy.mode"]);
@@ -9666,11 +11175,11 @@ mod tests {
         let v = json_of(&paths, &["config", "get", "center.home.policy.allow"]);
         assert_eq!(v["value"], json!(["exec.run:git status"]), "{v}");
 
-        assert_eq!(json_of(&paths, &["proxy", "ls"]), json!({"proxy": null}));
-        let v = json_of(&paths, &["relay", "ls"]);
+        assert_eq!(json_of(&paths, &["proxy"]), json!({"proxy": null}));
+        let v = json_of(&paths, &["relay"]);
         assert!(v["listen"].is_null() && v["tunnels"].is_null(), "{v}");
         assert_eq!(v["nodes"], json!([]), "{v}");
-        assert_eq!(json_of(&paths, &["sudo", "status"]), json!({"sudo": "off"}));
+        assert_eq!(json_of(&paths, &["sudo"]), json!({"sudo": "off"}));
     }
 
     /// The other commands give the lines they print, so a program can show
@@ -9678,7 +11187,7 @@ mod tests {
     #[test]
     fn a_change_with_json_gives_its_lines() {
         let (_d, paths) = setup(&["home"]);
-        let v = json_of(&paths, &["mode", "set", "user"]);
+        let v = json_of(&paths, &["mode", "user"]);
         let m = v["messages"].as_array().unwrap();
         assert_eq!(m[0], "home: mode user", "{v}");
         assert!(m[1].as_str().unwrap().contains(NEXT_START), "{v}");
@@ -9686,7 +11195,7 @@ mod tests {
         assert_eq!(v["next_start"], true, "{v}");
         assert_eq!(load(&paths).center("home").unwrap().policy.mode, Mode::User);
         // The same again changes nothing, and says no such thing.
-        let v = json_of(&paths, &["mode", "set", "user"]);
+        let v = json_of(&paths, &["mode", "user"]);
         assert!(v.get("next_start").is_none(), "{v}");
         // A change prints what others chose, such as a command a center
         // sent: the same words in it are no such thing either.
@@ -9701,7 +11210,7 @@ mod tests {
         assert!(!takes_at_next_start(v["messages"][0].as_str().unwrap()));
 
         // A relay token: the lines, and what the other node needs as data.
-        run(&paths, &["relay", "set", "0.0.0.0:7491"]).unwrap();
+        run(&paths, &["relay", "on", "0.0.0.0:7491"]).unwrap();
         let v = json_of(&paths, &["relay", "add", "lab-pc"]);
         let t = &v["token"];
         let token = t["token"].as_str().unwrap();
@@ -9798,9 +11307,9 @@ mod tests {
             (&e[0]["target"], &e[1]["decision"]),
             (&json!("/srv/a"), &json!("forbidden"))
         );
-        let v = json_of(&paths, &["audit", "--denied"]);
+        let v = json_of(&paths, &["audit", "--refused"]);
         assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
-        // The newest only, after --denied picked.
+        // The newest only, after --refused picked.
         let v = json_of(&paths, &["audit", "--last", "1"]);
         assert_eq!(v["entries"][0]["target"], "ls", "{v}");
         assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
@@ -9811,7 +11320,7 @@ mod tests {
                 + &decided(3, "fs", "read", "/c", "allowed"),
         )
         .unwrap();
-        let v = json_of(&paths, &["audit", "--denied", "--last", "1"]);
+        let v = json_of(&paths, &["audit", "--refused", "--last", "1"]);
         assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
         assert_eq!(v["entries"][0]["target"], "b", "{v}");
         let out = run(&paths, &["audit", "--last", "2"]).unwrap();
@@ -9819,76 +11328,58 @@ mod tests {
         assert!(out.contains("fs.read  /c"), "{out}");
     }
 
-    /// `rule guard` puts the guard's deny rules that a pairing lacks on its
-    /// deny list, keeps what is there, and says so when nothing is missing.
+    /// The guard is built in: `rule` shows it as one line and hides a stored
+    /// copy of its rules, which `rule rm` and `rule edit` cannot take off or
+    /// change; the node holds it whatever the list says.
     #[test]
-    fn rule_guard_adds_the_missing_deny_rules_of_the_guard() {
+    fn the_guard_is_built_in_and_cannot_be_removed() {
         let (_d, paths) = setup(&["home"]);
-        let deny = || load(&paths).centers[0].policy.deny.clone();
-        run(&paths, &["rule", "add", "deny", "rm", "--wildcard"]).unwrap();
-        run(
-            &paths,
-            &[
-                "config",
-                "add",
-                "center.home.policy.deny",
-                nerve_policy::rules::GUARD[2],
-            ],
-        )
-        .unwrap();
-        let out = run(&paths, &["rule", "guard"]).unwrap();
-        let n = nerve_policy::rules::GUARD.len() - 1;
-        assert!(out.contains(&format!("added {n} deny rules")), "{out}");
-        let d = deny();
-        assert_eq!(d.len(), n + 2, "{d:?}");
-        assert_eq!(d[0], "exec.run:rm *");
-        for g in nerve_policy::rules::GUARD {
-            assert_eq!(d.iter().filter(|r| r == g).count(), 1, "{g}: {d:?}");
-        }
-        let e = run(&paths, &["rule", "guard", "--center", "home"]).unwrap_err();
-        assert!(
-            e.contains("has every deny rule of the guard already"),
-            "{e}"
-        );
-        assert_eq!(deny(), d);
-        // The owner may take a rule of the guard off as it is listed, and
-        // `rule guard` puts it back.
-        run(&paths, &["rule", "rm", "deny", "guard:node-service"]).unwrap();
-        assert!(!deny().iter().any(|r| r == "guard:node-service"));
-        assert_eq!(deny().len(), d.len() - 1);
+        run(&paths, &["rule", "add", "deny", "rm *"]).unwrap();
+        let guard = nerve_policy::rules::GUARD[2];
+        run(&paths, &["config", "add", "center.home.policy.deny", guard]).unwrap();
+        let deny = run(&paths, &["rule", "deny"]).unwrap();
         assert_eq!(
-            nerve_policy::rules::guard_missing(&deny()),
-            ["guard:node-service"]
+            deny,
+            format!("{}\nexec.run:rm *\n", guard_line()),
+            "the stored copy is not shown"
         );
-        run(&paths, &["rule", "guard"]).unwrap();
-        assert_eq!(deny().len(), d.len());
+        assert!(guard_line().starts_with(&format!(
+            "guard: {} rules, built in",
+            nerve_policy::rules::GUARD.len()
+        )));
+        let all = run(&paths, &["rule"]).unwrap();
+        assert!(all.contains(&format!("deny  {}\n", guard_line())), "{all}");
+        let v = json_of(&paths, &["rule"]);
+        assert_eq!(v["deny"], json!(["exec.run:rm *"]), "{v}");
+        assert_eq!(v["guard"], json!(nerve_policy::rules::GUARD), "{v}");
+        for args in [
+            &["rule", "rm", "deny", guard][..],
+            &["rule", "rm", guard],
+            &["rule", "edit", "deny", guard, "ls"],
+        ] {
+            let e = run(&paths, args).unwrap_err();
+            assert!(
+                e.contains("is a rule of the guard, which is built in"),
+                "{args:?}: {e}"
+            );
+        }
+        assert!(Cli::try_parse_from(["nerve-node", "rule", "guard"]).is_err());
+        // A new pairing stores none of it: it is the node's own.
+        assert!(
+            crate::pair::new_entry_policy().deny.is_empty(),
+            "a new pairing stores no guard"
+        );
     }
 
-    /// A pairing that has every rule of the guard and also a text from
-    /// before has nothing to add, but `rule guard` still takes the text off.
+    /// A rule of the guard is no command to `rule add`; the answer says the
+    /// guard is built in.
     #[test]
-    fn rule_guard_takes_an_older_text_off_when_nothing_is_missing() {
-        let (_d, paths) = setup(&["home"]);
-        let deny = || load(&paths).centers[0].policy.deny.clone();
-        run(&paths, &["rule", "guard"]).unwrap();
-        let older = nerve_policy::rules::GUARD_OLD[0];
-        run(&paths, &["config", "add", "center.home.policy.deny", older]).unwrap();
-        assert!(deny().iter().any(|r| r == older));
-        let out = run(&paths, &["rule", "guard"]).unwrap();
-        assert!(out.contains("1 of an older text replaced"), "{out}");
-        assert!(!deny().iter().any(|r| r == older));
-        assert!(nerve_policy::rules::guard_missing(&deny()).is_empty());
-    }
-
-    /// A rule of the guard is no command to `rule add`; the answer points at
-    /// the way to put one on.
-    #[test]
-    fn rule_add_points_at_rule_guard_for_a_guard_rule() {
+    fn rule_add_says_the_guard_is_built_in() {
         let (_d, paths) = setup(&["home"]);
         let e = run(&paths, &["rule", "add", "deny", "guard:node-service"]).unwrap_err();
-        assert!(e.contains("nerve-node rule guard"), "{e}");
+        assert!(e.contains("the guard's rules are built in"), "{e}");
         let e = run(&paths, &["rule", "add", "allow", "fs.read:~/notes/*"]).unwrap_err();
-        assert!(!e.contains("nerve-node rule guard"), "{e}");
+        assert!(!e.contains("guard"), "{e}");
     }
 
     /// `rule edit` changes one entry in its place, on any list and a rule of
@@ -9909,7 +11400,7 @@ mod tests {
             ("allow", "git status"),
             ("allow", "cargo test"),
             ("allow", "ls"),
-            ("sudo", "sudo apt update"),
+            ("allow", "sudo apt update"),
         ] {
             run(&paths, &["rule", "add", list, rule]).unwrap();
         }
@@ -9968,8 +11459,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy().sudo_allow, ["sudo apt upgrade"]);
-        // A rule of the guard is edited like any other.
-        let guard = nerve_policy::rules::GUARD[0];
+        // An older text of the guard is a rule of its own, edited like any
+        // other.
+        let guard = nerve_policy::rules::GUARD_OLD[18];
         run(&paths, &["config", "add", "center.home.policy.deny", guard]).unwrap();
         run(
             &paths,
@@ -10018,7 +11510,7 @@ mod tests {
         assert_eq!(changes(), n);
     }
 
-    /// An older text of the guard holds a line break; `rule ls` writes it
+    /// An older text of the guard holds a line break; `rule` writes it
     /// `\n` so a listing keeps a line a rule, and `rule rm` and `rule edit`
     /// take the entry as `ls` printed it.
     #[test]
@@ -10030,15 +11522,16 @@ mod tests {
         for old in guard {
             run(&paths, &["config", "add", "center.home.policy.deny", old]).unwrap();
         }
-        let ls = run(&paths, &["rule", "ls", "deny"]).unwrap();
-        assert_eq!(ls.lines().count(), deny().len(), "{ls}");
-        for (line, rule) in ls.lines().zip(deny()) {
+        let ls = run(&paths, &["rule", "deny"]).unwrap();
+        // The guard's own line comes first.
+        assert_eq!(ls.lines().count(), deny().len() + 1, "{ls}");
+        for (line, rule) in ls.lines().skip(1).zip(deny()) {
             assert_eq!(line, nerve_policy::rules::escape_controls(&rule));
             assert!(!line.contains(['\t', '\r']), "{line:?}");
         }
         assert!(ls.contains("\\r\\n"), "{ls}");
-        let all = run(&paths, &["rule", "ls"]).unwrap();
-        assert_eq!(all.lines().count(), deny().len(), "{all}");
+        let all = run(&paths, &["rule"]).unwrap();
+        assert_eq!(all.lines().count(), deny().len() + 1, "{all}");
         assert!(all.lines().all(|l| l.starts_with("deny  ")), "{all}");
         // The entry as `ls` printed it is removed; the raw one too.
         let shown = nerve_policy::rules::escape_controls(guard[9]);
@@ -10070,7 +11563,7 @@ mod tests {
         ];
         for own in paths_rules {
             run(&paths, &["config", "add", "center.home.policy.deny", own]).unwrap();
-            let ls = run(&paths, &["rule", "ls", "deny"]).unwrap();
+            let ls = run(&paths, &["rule", "deny"]).unwrap();
             assert!(ls.lines().any(|l| l == own), "{ls}");
         }
         run(
@@ -10114,9 +11607,9 @@ mod tests {
                 &["config", "add", "center.home.policy.deny", &listed],
             )
             .unwrap_err();
-            assert!(e.contains("how `rule ls` writes a rule"), "{e}");
+            assert!(e.contains("how `rule` writes a rule"), "{e}");
             let e = run(&paths, &["rule", "edit", "deny", "exec.run:a\nb*", &listed]).unwrap_err();
-            assert!(e.contains("how `rule ls` writes a rule"), "{e}");
+            assert!(e.contains("how `rule` writes a rule"), "{e}");
         }
         assert_eq!(deny(), before);
         // Not there: refused, nothing changes.
@@ -10126,31 +11619,11 @@ mod tests {
         assert_eq!(deny(), now);
     }
 
-    /// `rule guard` takes the guard's older texts off when it puts the new
-    /// ones on.
-    #[test]
-    fn rule_guard_replaces_the_older_texts() {
-        let (_d, paths) = setup(&["home"]);
-        let deny = || load(&paths).centers[0].policy.deny.clone();
-        for old in nerve_policy::rules::GUARD_OLD {
-            run(&paths, &["config", "add", "center.home.policy.deny", old]).unwrap();
-        }
-        let out = run(&paths, &["rule", "guard"]).unwrap();
-        assert!(out.contains("of an older text replaced"), "{out}");
-        let d = deny();
-        for old in nerve_policy::rules::GUARD_OLD {
-            assert!(!d.iter().any(|r| r == old), "{old}");
-        }
-        for g in nerve_policy::rules::GUARD {
-            assert_eq!(d.iter().filter(|r| r == g).count(), 1, "{g}");
-        }
-    }
-
     /// A rule with conditions on an action's arguments goes on with `rule
     /// add` (and `rule edit`, `config add`), checked against the schema of
     /// what the node offers: an argument the action does not take, a value
-    /// not of its type, or an action nothing offers is refused. `--pin`
-    /// makes the audit buttons' rule. `rule ls` says which rules no longer
+    /// not of its type, or an action nothing offers is refused. `--arg`
+    /// makes the audit buttons' rule. `rule` says which rules no longer
     /// fit once their argument is gone, in text and JSON.
     #[test]
     fn rule_add_takes_typed_conditions_and_ls_flags_a_gone_argument() {
@@ -10181,7 +11654,7 @@ mod tests {
         let said = run(
             &paths,
             &[
-                "rule", "add", "allow", "", "--action", "lamp.set", "--pin", "level=20",
+                "rule", "add", "allow", "", "--action", "lamp.set", "--arg", "level=20",
             ],
         )
         .unwrap();
@@ -10229,38 +11702,28 @@ mod tests {
             ),
             (
                 &[
-                    "rule", "add", "deny", "git", "--action", "exec.run", "--pin", "a=1",
+                    "rule", "add", "deny", "git", "--action", "exec.run", "--arg", "a=1",
                 ],
                 "names its command, not an argument",
             ),
             (
                 &[
-                    "rule", "add", "deny", "", "--action", "lamp.set", "--pin", "level",
+                    "rule", "add", "deny", "", "--action", "lamp.set", "--arg", "level",
                 ],
-                "--pin takes FIELD=VALUE",
-            ),
-            (
-                &["rule", "add", "deny", "lamp.set:level=1", "--wildcard"],
-                "no wildcard form",
+                "--arg takes FIELD=VALUE",
             ),
         ] {
             let e = run(&paths, args).unwrap_err();
             assert!(e.contains(why), "{args:?}: {e}");
         }
         assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
-        // `rule rm` takes the arguments that made it.
-        run(
-            &paths,
-            &[
-                "rule", "rm", "allow", "", "--action", "lamp.set", "--pin", "level=20",
-            ],
-        )
-        .unwrap();
+        // `rule rm` takes it as `rule` shows it.
+        run(&paths, &["rule", "rm", "lamp.set:level=20"]).unwrap();
         assert_eq!(policy().allow, ["exec.signal:signal=term"]);
-        assert!(!run(&paths, &["rule", "ls"]).unwrap().contains("warning"));
-        assert_eq!(json_of(&paths, &["rule", "ls"])["stale"], json!({}));
+        assert!(!run(&paths, &["rule"]).unwrap().contains("warning"));
+        assert_eq!(json_of(&paths, &["rule"])["stale"], json!({}));
         // The capability takes no `room` now: the rule that names it stays,
-        // and `rule ls` says what it does now.
+        // and `rule` says what it does now.
         run(
             &paths,
             &[
@@ -10276,23 +11739,20 @@ mod tests {
         .unwrap();
         assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
         let warning = "warning: the deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it";
-        for args in [&["rule", "ls"][..], &["rule", "ls", "deny"]] {
+        for args in [&["rule"][..], &["rule", "deny"]] {
             let out = run(&paths, args).unwrap();
             assert!(out.lines().any(|l| l == warning), "{out}");
         }
-        assert!(
-            !run(&paths, &["rule", "ls", "allow"])
-                .unwrap()
-                .contains("warning")
-        );
+        assert!(!run(&paths, &["rule", "allow"]).unwrap().contains("warning"));
         assert_eq!(
-            json_of(&paths, &["rule", "ls"])["stale"],
+            json_of(&paths, &["rule"])["stale"],
             json!({"lamp.set:room=bedroom,level>50": "lamp.set has no argument room; it takes level"})
         );
     }
 
     /// `rule add --action` makes the rule an audit button makes for an entry
-    /// of that action, and `rule rm` takes the same arguments.
+    /// of that action, a trailing `*` its wildcard, and `rule rm` takes the
+    /// rule as `rule` shows it.
     #[test]
     fn rule_add_with_an_action_makes_the_audit_buttons_rule() {
         let (_d, paths) = setup(&["home"]);
@@ -10311,64 +11771,35 @@ mod tests {
         .unwrap();
         run(
             &paths,
-            &[
-                "rule",
-                "add",
-                "deny",
-                "/srv/data/a.txt",
-                "--action",
-                "fs.write",
-                "--wildcard",
-            ],
+            &["rule", "add", "deny", "/srv/data/*", "--action", "fs.write"],
         )
         .unwrap();
         run(
             &paths,
-            &[
-                "rule",
-                "add",
-                "allow",
-                "",
-                "--action",
-                "settings.read",
-                "--wildcard",
-            ],
+            &["rule", "add", "allow", "*", "--action", "settings.read"],
         )
         .unwrap();
         run(
             &paths,
-            &[
-                "rule",
-                "add",
-                "deny",
-                "make all",
-                "--action",
-                "exec.run",
-                "--wildcard",
-            ],
+            &["rule", "add", "deny", "make *", "--action", "exec.run"],
         )
         .unwrap();
+        // A sudo command goes on the sudo list here too.
         run(
             &paths,
-            &[
-                "rule",
-                "add",
-                "sudo",
-                "sudo apt update",
-                "--action",
-                "exec.run",
-                "--wildcard",
-            ],
+            &["rule", "add", "allow", "sudo apt *", "--action", "exec.run"],
         )
         .unwrap();
         assert_eq!(policy().allow, ["fs.read:/srv/data/a.txt", "settings"]);
         assert_eq!(policy().deny, ["fs.write:/srv/data/*", "exec.run:make *"]);
         assert_eq!(policy().sudo_allow, ["sudo apt *"]);
-        // The same as the center's buttons for the same entries.
+        // The same as the center's buttons for the same entries, the
+        // wildcard as `wildcard_target` writes the button's.
         for (list, cap, action, target, wildcard) in [
             ("allow", "fs", "read", "/srv/data/a.txt", false),
             ("deny", "fs", "write", "/srv/data/a.txt", true),
             ("deny", "exec", "run", "make all", true),
+            ("allow", "settings", "read", "", true),
         ] {
             let rule = rules::rule_for(cap, action, target, wildcard, None).unwrap();
             let l = if list == "allow" {
@@ -10377,41 +11808,32 @@ mod tests {
                 policy().deny
             };
             assert!(l.contains(&rule), "{rule}");
+            if wildcard {
+                let wide = wildcard_target(cap, action, target);
+                let made = List::Allow
+                    .action_rule(&format!("{cap}.{action}"), &wide, None, false)
+                    .unwrap();
+                assert_eq!(made, rule, "{wide}");
+            }
         }
-        run(
-            &paths,
-            &[
-                "rule",
-                "rm",
-                "deny",
-                "/srv/data/a.txt",
-                "--action",
-                "fs.write",
-                "--wildcard",
-            ],
-        )
-        .unwrap();
+        assert_eq!(
+            wildcard_target("exec", "run", "sudo -n apt install x"),
+            "sudo -n apt *"
+        );
+        assert_eq!(
+            List::Sudo
+                .action_rule("exec.run", "sudo -n apt *", None, false)
+                .unwrap(),
+            rules::sudo_rule_for("sudo -n apt install x", true).unwrap()
+        );
+        run(&paths, &["rule", "rm", "fs.write:/srv/data/*"]).unwrap();
         assert_eq!(policy().deny, ["exec.run:make *"]);
-
         let e = run(
             &paths,
-            &["rule", "add", "sudo", "/etc/x", "--action", "fs.read"],
+            &["rule", "add", "deny", "srv/*", "--action", "fs.read"],
         )
         .unwrap_err();
-        assert!(e.contains("sudo commands"), "{e}");
-        let e = run(
-            &paths,
-            &[
-                "rule",
-                "add",
-                "allow",
-                "sudo apt update",
-                "--action",
-                "exec.run",
-            ],
-        )
-        .unwrap_err();
-        assert!(e.contains("sudo list"), "{e}");
+        assert!(e.contains("not an absolute path"), "{e}");
         let e = run(&paths, &["rule", "add", "allow", "x", "--action", "read"]).unwrap_err();
         assert!(e.contains("capability and action"), "{e}");
         let cut = format!(
@@ -10426,6 +11848,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("cut"), "{e}");
+    }
+
+    /// The audit's exact buttons (`--exact`) keep a `*` at the end of the
+    /// command an agent sent: Allow on `rm -rf *` is that one command, not
+    /// every `rm -rf`, and the same on the sudo list and for a path. Without
+    /// `--exact` the trailing `*` is the wildcard, and `rule add` says so.
+    #[test]
+    fn the_exact_buttons_keep_a_trailing_star_as_it_is() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        for (list, target, action) in [
+            ("allow", "rm -rf *", "exec.run"),
+            ("allow", "sudo chown -R me *", "exec.run"),
+            ("deny", "/srv/data/*", "fs.read"),
+        ] {
+            let out = run(
+                &paths,
+                &["rule", "add", list, target, "--action", action, "--exact"],
+            )
+            .unwrap();
+            assert!(!out.contains("every"), "{out}");
+        }
+        assert_eq!(policy().allow, ["exec.run:rm -rf [*]"]);
+        assert_eq!(policy().sudo_allow, ["sudo chown -R me [*]"]);
+        assert_eq!(policy().deny, ["fs.read:/srv/data/[*]"]);
+        // `--exact` keeps the refusal of a sudo command on the allow list's
+        // own form and needs --action.
+        assert!(run(&paths, &["rule", "add", "allow", "rm *", "--exact"]).is_err());
+        let out = run(
+            &paths,
+            &["rule", "add", "allow", "git add *", "--action", "exec.run"],
+        )
+        .unwrap();
+        assert!(
+            out.contains("it allows every command that starts with `git add`"),
+            "{out}"
+        );
+        assert!(policy().allow.contains(&"exec.run:git add *".to_string()));
     }
 
     fn logged(ts: u64, level: &str, msg: &str) -> String {
@@ -10635,7 +12095,7 @@ mod tests {
         }
     }
 
-    /// `cap ls` lists every action of the node's own capabilities with its
+    /// `cap` lists every action of the node's own capabilities with its
     /// effect, where it comes from and each center's setting (`--center`:
     /// that one's), a setting for what nothing offers now, and the programs
     /// allowed; a stopped node knows no program's capabilities and says so.
@@ -10649,13 +12109,9 @@ mod tests {
         )
         .unwrap();
         run(&paths, &["cap", "set", "lamp", "on", "--center", "lab"]).unwrap();
-        run(
-            &paths,
-            &["center", "grant", "settings", "write", "--center", "lab"],
-        )
-        .unwrap();
-        run(&paths, &["cap", "provider", "allow", "desk", &desk]).unwrap();
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        run(&paths, &["center", "settings", "on", "lab"]).unwrap();
+        run(&paths, &["provider", "add", "desk", &desk]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         let line = |name: &str| {
             ls.lines()
                 .find(|l| l.split_whitespace().next() == Some(name))
@@ -10683,12 +12139,12 @@ mod tests {
             ls.contains(&format!("program desk: {desk}, the node does not run")),
             "{ls}"
         );
-        let one = run(&paths, &["cap", "ls", "--center", "lab"]).unwrap();
+        let one = run(&paths, &["cap", "--center", "lab"]).unwrap();
         assert!(!one.contains("home:"), "{one}");
         assert!(one.contains("fs.write"), "{one}");
-        assert!(run(&paths, &["cap", "ls", "--center", "nope"]).is_err());
+        assert!(run(&paths, &["cap", "--center", "nope"]).is_err());
 
-        let v = json_of(&paths, &["cap", "ls"]);
+        let v = json_of(&paths, &["cap"]);
         let write = v["capabilities"]
             .as_array()
             .unwrap()
@@ -10705,13 +12161,13 @@ mod tests {
         );
         // Two centers and none picked: no one center's switches.
         assert!(v.get("known").is_none(), "{v}");
-        let v = json_of(&paths, &["cap", "ls", "--center", "lab"]);
+        let v = json_of(&paths, &["cap", "--center", "lab"]);
         assert_eq!(v["center"], "lab");
         assert_eq!(v["caps"], json!({"lamp": "on"}));
     }
 
     /// `cap add`, `edit` and `rm` declare the owner's own capabilities in
-    /// node.toml, checked as the node checks them; `cap ls` lists them with
+    /// node.toml, checked as the node checks them; `cap` lists them with
     /// their command and account, and says where this node does not offer
     /// one.
     /// A capability of node.toml that comes to sense or actuate, added or
@@ -11067,7 +12523,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         let line = |name: &str| {
             ls.lines()
                 .find(|l| l.split_whitespace().next() == Some(name))
@@ -11092,7 +12548,7 @@ mod tests {
             ls.contains("capability win.who: whoami; windows only"),
             "{ls}"
         );
-        let v = json_of(&paths, &["cap", "ls"]);
+        let v = json_of(&paths, &["cap"]);
         assert_eq!(
             v["config"][1],
             json!({"name": "win.who", "summary": "", "effect": "read", "command": ["whoami"],
@@ -11115,14 +12571,14 @@ mod tests {
         assert!(load(&paths).capabilities.is_empty());
     }
 
-    /// `cap ls` of a running node asks it, on Windows over its pipe: it
+    /// `cap` of a running node asks it, on Windows over its pipe: it
     /// does not say the node does not run, and tells each center's state
     /// now.
     #[test]
     fn cap_ls_asks_the_running_node() {
         let (d, paths) = setup(&["home"]);
         let desk = program_path("usr/bin/desk");
-        run(&paths, &["cap", "provider", "allow", "desk", &desk]).unwrap();
+        run(&paths, &["provider", "add", "desk", &desk]).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -11133,13 +12589,13 @@ mod tests {
         // Not the rights of whoever runs the tests: an elevated run must pass.
         opts.full_rights = Some(false);
         let daemon = rt.block_on(Daemon::start(opts)).unwrap();
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         assert!(!ls.contains("does not run"), "{ls}");
         assert!(
             ls.contains(&format!("program desk: {desk}, not attached")),
             "{ls}"
         );
-        let v = json_of(&paths, &["cap", "ls"]);
+        let v = json_of(&paths, &["cap"]);
         assert_eq!(v["running"], true, "{v}");
         let read = v["capabilities"]
             .as_array()
@@ -11161,12 +12617,12 @@ mod tests {
             settings(&ls),
             "settings.set write built-in home: off (not granted)"
         );
-        run(&paths, &["center", "grant", "settings", "write"]).unwrap();
+        run(&paths, &["center", "settings", "on"]).unwrap();
         // On Windows the change goes to the file and the running node takes
         // it at its next reload (the service's reload event); on Unix the
         // node took it already, and this finds nothing newer.
         daemon.reload().unwrap();
-        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let ls = run(&paths, &["cap"]).unwrap();
         assert_eq!(
             settings(&ls),
             "settings.set write built-in home: on (granted)"
@@ -11174,21 +12630,21 @@ mod tests {
         rt.block_on(daemon.stop());
     }
 
-    /// `cap provider allow` names a program, again to replace it, `rm`
+    /// `provider add` names a program, again to replace it, `rm`
     /// takes it off, and `ls` shows them; a bad name or a relative path is
     /// refused.
     #[test]
-    fn cap_provider_allows_lists_and_removes_programs() {
+    fn provider_adds_lists_and_removes_programs() {
         let (_d, paths) = setup(&["home"]);
         let (a, b, lamp) = (
             program_path("usr/bin/a"),
             program_path("usr/bin/b"),
             program_path("opt/lamp"),
         );
-        let said = run(&paths, &["cap", "provider", "allow", "desk", &a]).unwrap();
+        let said = run(&paths, &["provider", "add", "desk", &a]).unwrap();
         // A stopped node takes it at its next start, and is told so.
         assert!(
-            said.starts_with(&format!("provider desk allowed: {a}\n")),
+            said.starts_with(&format!("provider desk added: {a}\n")),
             "{said}"
         );
         // Where no program attaches, the owner is told so.
@@ -11198,8 +12654,8 @@ mod tests {
             cfg!(not(target_os = "linux")),
             "{said}"
         );
-        run(&paths, &["cap", "provider", "allow", "desk", &b]).unwrap();
-        run(&paths, &["cap", "provider", "allow", "lamp-2", &lamp]).unwrap();
+        run(&paths, &["provider", "add", "desk", &b]).unwrap();
+        run(&paths, &["provider", "add", "lamp-2", &lamp]).unwrap();
         let cfg =
             NodeConfig::parse(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
         let allowed: Vec<(&str, &str)> = cfg
@@ -11214,54 +12670,45 @@ mod tests {
             false => format!("{elsewhere}: this node takes none\n"),
         };
         assert_eq!(
-            run(&paths, &["cap", "provider", "ls"]).unwrap(),
+            run(&paths, &["provider"]).unwrap(),
             format!(
                 "program desk: {b}, the node does not run\nprogram lamp-2: {lamp}, the node does \
                  not run\n{note}"
             )
         );
-        let v = json_of(&paths, &["cap", "provider", "ls"]);
+        let v = json_of(&paths, &["provider"]);
         assert_eq!(v["programs"][1]["name"], "lamp-2", "{v}");
         assert_eq!(v["running"], false, "{v}");
         for (bad, why) in [
             (
-                &["cap", "provider", "allow", "Desk", &a][..],
+                &["provider", "add", "Desk", &a][..],
                 "cannot name a provider",
             ),
-            (
-                &["cap", "provider", "allow", "node", &a],
-                "cannot name a provider",
-            ),
-            (
-                &["cap", "provider", "allow", "config", &a],
-                "cannot name a provider",
-            ),
-            (
-                &["cap", "provider", "allow", "desk", "bin/a"],
-                "by its full path",
-            ),
-            (&["cap", "provider", "rm", "nope"], "no provider nope"),
+            (&["provider", "add", "node", &a], "cannot name a provider"),
+            (&["provider", "add", "config", &a], "cannot name a provider"),
+            (&["provider", "add", "desk", "bin/a"], "by its full path"),
+            (&["provider", "rm", "nope"], "no provider nope"),
         ] {
             let e = run(&paths, bad).unwrap_err();
             assert!(e.contains(why), "{bad:?}: {e}");
         }
-        let said = run(&paths, &["cap", "provider", "rm", "desk"]).unwrap();
+        let said = run(&paths, &["provider", "rm", "desk"]).unwrap();
         assert!(said.starts_with("provider desk removed\n"), "{said}");
-        let v = json_of(&paths, &["cap", "provider", "ls"]);
+        let v = json_of(&paths, &["provider"]);
         assert_eq!(v["programs"].as_array().unwrap().len(), 1, "{v}");
-        run(&paths, &["cap", "provider", "rm", "lamp-2"]).unwrap();
+        run(&paths, &["provider", "rm", "lamp-2"]).unwrap();
         assert_eq!(
-            run(&paths, &["cap", "provider", "ls"]).unwrap(),
+            run(&paths, &["provider"]).unwrap(),
             "no program is allowed as a provider\n"
         );
     }
 
-    /// `cap ls --json` names what `cap set` switches, so the app need not.
+    /// `cap --json` names what `cap set` switches, so the app need not.
     #[test]
     fn cap_ls_json_names_the_switchable_capabilities() {
         let (_d, paths) = setup(&["home"]);
         run(&paths, &["cap", "set", "exec", "off"]).unwrap();
-        let v = json_of(&paths, &["cap", "ls"]);
+        let v = json_of(&paths, &["cap"]);
         let known = &v["known"];
         assert!(
             known["fs"].as_array().unwrap().contains(&json!("read")),

@@ -19,7 +19,7 @@ decides.
 1. **Blocklist.** A deterministic list of dangerous commands and paths. A match
    is refused at once, with no model call. The blocklist wins over everything
    below.
-2. **Allow rules.** Calls you saved as allowed. A match goes straight to the
+2. **Skip the model.** Rules for calls you trust. A match goes straight to the
    machine, with the model skipped. It does **not** skip the blocklist.
 3. **Decision model** (optional, off by default). A small model that answers
    whether the call is dangerous. At or above the threshold the call is
@@ -44,8 +44,8 @@ A call meets the center's lists first, then the machine's own:
 |---|---|---|---|
 | Center | Blocklist | every machine | A matching call is refused |
 | Center | Blocklist | one machine | A matching call to that machine is refused |
-| Center | Allow rules | every machine | A matching call skips the decision model |
-| Center | Allow rules | one machine | The same, for calls to that machine |
+| Center | Skip the model | every machine | A matching call skips the decision model |
+| Center | Skip the model | one machine | The same, for calls to that machine |
 | Center | Decision model | every machine | Refuses a call it judges dangerous |
 | Center | Decision model | one machine, on or off | The same, or not, for calls to that machine |
 | Machine | `deny` ([rules](rules.md)) | that machine | A matching call is refused |
@@ -242,7 +242,7 @@ The **Per machine** part of the page has a card for each paired machine. In it:
 - **Entries for every machine, switched off here.** Pick an entry of the
   blocklist for every machine (a built-in one or your own) to switch it off for
   this machine only; it stays on for the others. **Switch on again** undoes it.
-- **Allow rules for this machine only**, to remove; add them under Allow rules.
+- **Skip rules for this machine only**, to remove; add them under Skip the model.
 - **Your note on this machine**: a few words for the agent, such as "test VM;
   its databases hold throwaway data". `list()` shows it to every harness of
   this center next to the machine, as your words (not the machine's). One
@@ -259,9 +259,9 @@ the settings is listed too, with **Forget its settings**. **Remove** of the
 local model also sets a machine that had the model on for itself back to *As
 the center*, so it does not refuse every call for want of a model.
 
-## Allow rules
+## Skip the model
 
-Allow rules are the same syntax, saved for every machine or for one machine. A
+These rules are the same syntax, saved for every machine or for one machine. A
 call that matches one skips the decision model and goes to the machine. It does
 not skip the blocklist: the blocklist is a hard deny, so to let something
 through that the blocklist caught, remove or switch off the blocklist entry.
@@ -320,11 +320,11 @@ meets the rule, and nothing in the line runs inside another command:
   (`^git`): an unanchored one is still not applied to a program written
   with a folder (`/tmp/git status`).
 
-The Audit page has **Allow** and **Allow as wildcard** buttons on a model
-refusal, which save an allow rule for that machine for you. **Allow** saves
-the refused command line exactly (`exec.run:exact:git status`); **Allow as
+The Audit page has **Trust this** and **Trust as wildcard** buttons on a model
+refusal, which save a skip rule for that machine for you. **Trust this** saves
+the refused command line exactly (`exec.run:exact:git status`); **Trust as
 wildcard** saves its program and `*` (`exec.run:git *`). Where the call
-has arguments a rule may pin, it also offers them: pick one, then **Allow with
+has arguments a rule may pin, it also offers them: pick one, then **Trust with
 this value** saves `lamp.set:room=office` and the like.
 
 ## The decision model

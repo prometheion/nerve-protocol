@@ -22,8 +22,16 @@ Download the program for your machine (`nerve-node-x86_64-linux` or
 curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
+```
+
+At a terminal, `install` then asks [setup](#setup)'s questions as you (the
+account that ran `sudo`, so `~` is your home): the pairing link, the mode, a
+folder and its rights, and the network. Without a terminal it says what to
+run instead:
+
+```sh
 nerve-node center add '<pairing link>'
-nerve-node folder add ~/project +r +w +x
+nerve-node folder add ~/project rwx
 ```
 
 That is all: the pairing starts in `folder` mode, and its commands run as
@@ -54,7 +62,7 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
    service and takes `nerve-run`'s entries off every folder the earlier
    owner gave it, as `uninstall` does; the node gives the folders again for
    the new owner when it starts. Without a new owner it gives `nerve-run`
-   no folders: `folder ls` still lists them, but `folder` mode and
+   no folders: `folder` still lists them, but `folder` mode and
    `allowlist` mode reach only what every account may. Where not all
    entries come off, the owner stays as it was, its node walks every
    folder again when it starts, the service runs again where it ran, and
@@ -122,7 +130,7 @@ commands have all of root's rights. For a center in `folder` mode or plain
 A center with the [settings grant](settings-grant.md) may set its own mode,
 and so may switch itself to `user` mode: where root is the owner, its
 commands then run as root, and no password is asked. Giving that grant here
-gives the center root. `center grant settings write` warns of it, and so does
+gives the center root. `center settings on` warns of it, and so does
 the desktop app when you give the grant.
 
 `nerve` and `nerve-run` are never the owner, nor another account with uid 0,
@@ -177,7 +185,7 @@ Another user gets a message that says to use `sudo`.
 Programs of the owner's and root's that add capabilities
 ([providers](providers.md)) attach on the provider socket beside it,
 `/run/nerve-node/provider.sock`, once the owner allows them with `nerve-node
-cap provider allow`. Any other account is refused as it connects. The two
+provider add`. Any other account is refused as it connects. The two
 sockets have places of their own, so attached programs never keep the owner's
 commands out, nor the reverse.
 
@@ -194,7 +202,7 @@ A center's commands run as one of two accounts:
 | Mode | Account |
 |---|---|
 | `folder` | `nerve-run` |
-| `allowlist` | `nerve-run`, or the owner with `mode set allowlist --as-owner` |
+| `allowlist` | `nerve-run`, or the owner with `mode allowlist --as-owner` |
 | `user` | the owner (root, where [root is the owner](#root-as-the-owner)) |
 | an allowed [sudo](sudo.md) command | root: through the owner's sudo where the pairing runs as the owner, started by the node itself where it runs as `nerve-run` |
 
@@ -237,26 +245,24 @@ it runs, in every mode, so no command keeps them; a command of root as the
 
 ## Setup
 
-`nerve-node setup` asks these things, one at a time. Enter keeps what is
-in brackets. It is optional: `center add` and `folder add` do the same. The
-owner runs it without `sudo`: its one step that needs root, installing a
-keyring, takes root by the service's own rights, for that step alone, and
-only after you answer yes at a terminal.
+`nerve-node setup` asks these things, one at a time; `install` asks them at
+a terminal. Enter keeps what is in brackets. It is optional: `center add`,
+`folder add` and `network` do the same. The owner runs it without `sudo`.
 
-1. The node's name, as centers show it. The host name by default.
-2. Where the node keeps its keys: `file` or `keyring`
-   ([keys](config.md#where-the-node-keeps-its-keys)). With `keyring` and no
-   keyring that answers, it offers to install one where `nerve` has no
-   desktop, when you run it at a terminal. If the node had found none when it started, it needs a
-   restart: run as root, setup restarts it; run by the owner, it says so,
-   and you run `nerve-node service restart` and setup again. Not
-   asked on the installed node on Windows, which keeps them in files
-   ([Windows](#windows)); setup warns instead.
-3. A pairing link from the center's web UI. Enter skips it. The node shows
+1. A pairing link from the center's web UI. Enter skips it. The node shows
    the center and asks before it pairs, as `center add` does.
-4. The mode of that center: `folder`, `allowlist` or `user`
+2. The mode of that center: `folder`, `allowlist` or `user`
    ([modes](modes.md)). For `folder` it asks for one folder and its rights;
-   Enter gives `+rwx`, so that commands can work there.
+   Enter gives `rwx`, so that commands can work there. `~` is your home.
+3. The network for its commands: `on` or `off`. In `user` mode no command
+   runs while it is off, and setup says so first.
+
+The node's name stays the host name (`nerve-node config set node.name lab-pc`
+changes it), and its keys stay in files (`nerve-node config set
+machine.secret_storage keyring` moves them to the system keyring
+([keys](config.md#where-the-node-keeps-its-keys)); with no keyring that
+answers it offers, at a terminal, to install one where `nerve` has no
+desktop, taking root by the service's own rights for that step alone).
 
 Each answer is saved when you give it, through the running node, like every
 other command. You can stop setup at any point and run it again. It works on
@@ -268,7 +274,7 @@ a node that is not installed as well.
 nerve-node service stop      # the node ends its links; nothing runs
 nerve-node service start
 nerve-node service restart   # takes every change in node.toml
-nerve-node service status    # anyone may ask
+nerve-node status            # the service too; anyone may ask
 ```
 
 `service` does what `systemctl stop|start|restart nerve-node` does, and
@@ -284,9 +290,9 @@ a password from their own local session: by the rule
 no rules, by `/etc/polkit-1/localauthority/50-local.d/50-nerve-node.pkla`.
 No file lets the owner manage other units. Over SSH it needs `sudo`. Root
 as the owner needs none of these files, and `install` writes none for it. A
-stopped service starts again with the machine. `service status` says whether
+stopped service starts again with the machine. `status` says whether
 the node is installed as a service, whether it runs, whether it starts with
-the machine, and the installed program with its version.
+the machine, and the installed program's version.
 
 ## Update
 

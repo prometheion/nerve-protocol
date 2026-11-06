@@ -19,15 +19,55 @@ let lastSig = null;
 let busy = false;
 let down = false;
 let settingsRun = 0;
-const state = { overview: null, stats: null, statsNode: null, audit: null, log: null, help: null, pairing: null, settings: null, newToken: null, newPin: null, checker: null, caps: null, capsNode: null };
+const state = { paired: null, harnessToken: null, overview: null, stats: null, statsNode: null, audit: null, log: null, help: null, pairing: null, settings: null, newToken: null, newPin: null, checker: null, caps: null, capsNode: null };
 
 let helpParts = null;
+let helpKey = null;
 
 function pageHelp() {
   const h = state.help && state.help.node;
   if (!h) return [loading()];
-  if (!helpParts) helpParts = buildHelp(h);
+  // The parts are kept so a redraw does not close what is open, but the
+  // Connect a harness card follows its token and the center's MCP: a
+  // token made or hidden here shows at once.
+  const mcp = state.overview && state.overview.mcp;
+  const key = JSON.stringify([state.harnessToken, mcp || null]);
+  if (key !== helpKey) { helpParts = null; helpKey = key; }
+  if (!helpParts) helpParts = buildHelp(h, [
+    expander("Connect a harness", "plug", true, harnessCard(mcp)),
+    expander("nerve-center commands", "terminal", true, centerCommands(state.help.center)),
+    el("p", { class: "meta" }, "New here? ", el("a", { href: "#overview" }, "Get started"), " on the Overview."),
+  ]);
   return helpParts;
+}
+
+// The center's own commands, one line each with the rest folded; its
+// options after them, those under Advanced folded apart.
+function centerCommands(c) {
+  if (!c) return null;
+  const line = (x) => [el("code", {}, x.name), el("span", {}, x.line, x.more ? more(`center:${x.name}`, "More", el("p", {}, x.more)) : null)];
+  const main = c.options.filter((o) => !o.advanced);
+  const adv = c.options.filter((o) => o.advanced);
+  return el("div", {},
+    el("p", { class: "lead" }, "Run them on the center's machine; with sudo for the installed center."),
+    el("div", { class: "arg-rows" }, c.commands.flatMap(line)),
+    more("center:options", `Options (${main.length})`, el("div", { class: "arg-rows" }, main.flatMap(line))),
+    more("center:advanced", `Advanced (${adv.length})`, el("div", { class: "arg-rows" }, adv.flatMap(line))));
+}
+
+// Get started: three steps for a new center, each with its button; it goes
+// once all three are done.
+function getStarted(o) {
+  const paired = o.nodes.length > 0;
+  const folder = o.nodes.some((n) => (n.folders || 0) > 0 || n.folders === null);
+  const harness = o.sessions.length > 0;
+  if (paired && folder && harness) return null;
+  const step = (done, text, action) => el("div", { class: "card-top" },
+    itile(done ? "ok" : "info", done ? "ok" : "neutral"), el("span", { class: done ? "meta" : "name" }, text), done ? null : action);
+  return section("Get started", "Three steps; this goes once they are done.", null, el("div", { class: "card stack" },
+    step(paired, "1. Pair a machine", btn("Pair a machine", "primary push", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "start:pair")),
+    step(folder, "2. Give it a folder: nerve-node folder add ~/project rwx", btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder")),
+    step(harness, "3. Connect a harness", el("a", { class: "btn ghost push", href: "#help" }, "How"))));
 }
 
 // ---- Overview ----
@@ -42,12 +82,63 @@ function pageOverview() {
       [o.sessions.length, o.sessions.length === 1 ? "session" : "sessions"],
     ]),
     o.alerts.slice(-5).map((a) => banner("warn", "alert", `${when(a.ts)}: ${a.text}`)),
+    getStarted(o),
     section("Machines", null, btn("Pair a machine", "primary", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "pair"),
       state.pairing ? pairingCard(state.pairing) : null,
+      state.paired ? pairedCard(state.paired) : null,
       o.nodes.length ? el("div", { class: "stack" }, o.nodes.map(nodeCard)) : empty("No machines yet. Pair one to get started.", "server")),
     section("Sessions", "Harnesses that are connected to this center.", null,
-      o.sessions.length ? el("div", { class: "list" }, o.sessions.map(sessionCard)) : empty("No harness is connected.", "plug")),
+      o.sessions.length ? el("div", { class: "list" }, o.sessions.map(sessionCard)) : harnessCard(o.mcp)),
   ];
+}
+
+// Connect a harness: how this center serves MCP, and for HTTP a token made
+// here with what to paste (the JSON first, which keeps the token out of the
+// shell's history). The token is shown once, as on the Settings page.
+function harnessCard(mcp) {
+  const m = mcp || { mode: "stdio" };
+  const row = (label, value) => el("div", { class: "pair-row" },
+    el("span", { class: "pair-label" }, label),
+    el("code", { class: "pair-value mono" }, value),
+    btn("Copy", "ghost", () => copy(value), "copy", `harness:copy:${label}`));
+  const top = el("div", { class: "card-top" }, itile("plug", "accent"), el("span", { class: "name" }, "Connect a harness"));
+  if (m.mode === "off") {
+    return el("div", { class: "card", id: "harness" }, top,
+      el("p", { class: "meta" }, "This center serves no MCP (--mcp off): harnesses attach to another center on its state folder."));
+  }
+  if (m.mode === "stdio") {
+    const entry = JSON.stringify({ mcpServers: { nerve: { command: "nerve-center" } } });
+    return el("div", { class: "card", id: "harness" }, top,
+      el("p", { class: "meta" }, "A harness starts this center itself: put this entry in its MCP settings."),
+      el("div", { class: "pair-rows" }, row("JSON", entry)),
+      el("p", { class: "meta" }, "It runs as you: an agent with shell tools can read its owner token. `sudo nerve-center install` keeps it out."));
+  }
+  const token = state.harnessToken;
+  const make = act(async () => {
+    const r = await api("POST", "/api/tokens/create", { label: "harness" });
+    state.harnessToken = r.token;
+    draw(true);
+  });
+  const parts = [top,
+    el("p", { class: "meta" }, `Harnesses reach this center at ${m.url} with a harness token. It opens /mcp only, not this page.`)];
+  if (!token) {
+    parts.push(el("div", { class: "actions" }, btn("Make a token", "primary", make, "key", "harness:make")));
+  } else {
+    const header = `Authorization: Bearer ${token}`;
+    const json = JSON.stringify({ mcpServers: { nerve: { type: "http", url: m.url, headers: { Authorization: `Bearer ${token}` } } } });
+    parts.push(
+      el("p", { class: "meta" }, "Shown only now. Paste the JSON into the harness's settings; the Claude Code line puts the token in your shell's history."),
+      el("div", { class: "pair-rows" },
+        row("JSON", json),
+        row("URL", m.url),
+        row("Header", header),
+        row("Claude Code", `claude mcp add --transport http nerve ${m.url} --header "${header}"`)),
+      el("div", { class: "actions" }, btn("Hide the token", "ghost", () => { state.harnessToken = null; draw(true); }, "x", "harness:hide")));
+  }
+  if (m.fingerprint) {
+    parts.push(el("p", { class: "meta" }, "Beyond loopback the endpoint uses TLS with this center's own certificate: let the harness trust it by its pin, ", el("code", { class: "mono" }, m.fingerprint), "."));
+  }
+  return el("div", { class: "card", id: "harness" }, parts);
 }
 
 function pairingCard(p) {
@@ -67,7 +158,24 @@ function pairingCard(p) {
       row("Command", command),
       row("Link", p.link)),
     el("p", { class: "meta" }, `The code is valid until ${when(p.expires_ms)} and works for one machine.`),
+    el("p", { class: "meta" }, "Then give it a folder on that machine:"),
+    el("div", { class: "pair-rows" }, row("Then", FOLDER_STEP)),
     p.pin ? null : el("p", { class: "meta faint" }, "Plain HTTP on loopback, no certificate pin."));
+}
+
+// What a new pairing needs next: in folder mode its commands run only in a
+// folder it was given.
+const FOLDER_STEP = "nerve-node folder add ~/project rwx";
+
+// The card that follows a pairing: the machine is paired, and its next step.
+function pairedCard(node) {
+  return el("div", { class: "card", id: "paired" },
+    el("div", { class: "card-top" }, itile("ok", "ok"), el("span", { class: "name" }, `${node.name} is paired`),
+      el("button", { type: "button", class: "btn ghost icon sm push", "aria-label": "Dismiss", "data-focus": "paired:dismiss", onclick: () => { state.paired = null; draw(true); } }, icon("x", "sm"))),
+    el("p", { class: "meta" }, "Next: give it a folder, on that machine:"),
+    el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
+      el("code", { class: "pair-value mono" }, FOLDER_STEP),
+      btn("Copy", "ghost", () => copy(FOLDER_STEP), "copy", "paired:copy"))));
 }
 
 function nodeCard(n) {
@@ -404,7 +512,7 @@ function checkerAuditRow(d, k) {
   const known = d.cap && d.action && !cut && (d.target || !["exec", "fs"].includes(d.cap));
   const allow = (wildcard, pin) => act(async () => {
     const r = await api("POST", "/api/checker/allow", { cap: d.cap, action: d.action, target: d.target || "", wildcard, node_id: d.node_id, pin: pin ? pin() : null });
-    notify(`Added a checker allow rule: ${r.rule}`);
+    notify(`This now skips the model: ${r.rule}`);
   });
   const pins = pinPicker(d, auditKey);
   return el("div", { class: "card audit-row" },
@@ -414,14 +522,15 @@ function checkerAuditRow(d, k) {
       pill(k.pill, `${d.decision} by the action checker`),
       el("span", { class: "when", title: when(d.ts) }, ago(d.ts))),
     d.target ? el("code", { class: "target mono" }, d.target) : null,
-    detail ? el("p", { class: "meta" }, `${layer === "model" ? "Decision model" : layer === "allow rule" ? "Allow rule" : "Blocklist"}${whose}: ${detail}`) : null,
+    detail ? el("p", { class: "meta" }, `${layer === "model" ? "Decision model" : layer === "allow rule" ? "Skip the model" : "Blocklist"}${whose}: ${detail}`) : null,
     refused && !byBlocklist && known ? el("div", { class: "actions" },
-      btn("Allow", "", allow(false), "check", `${auditKey}:Allow`), btn("Allow as wildcard", "", allow(true), null, `${auditKey}:Allow as wildcard`)) : null,
+      btn("Trust this", "", allow(false), "check", `${auditKey}:Trust this`), btn("Trust as wildcard", "", allow(true), null, `${auditKey}:Trust as wildcard`)) : null,
     refused && !byBlocklist && known && pins ? el("div", { class: "actions pins" }, pins.root,
-      btn("Allow with this value", "", allow(false, pins.pin), null, `${auditKey}:Allow with this value`)) : null,
-    byBlocklist ? el("p", { class: "meta" }, scope === "global"
-      ? "On the blocklist for every machine (hard deny). To let it through, switch the entry off for this machine (Per machine) or for every machine on the Action checker page."
-      : "On the blocklist (hard deny). Remove or switch off the entry on the Action checker page to let it through.") : null);
+      btn("Trust with this value", "", allow(false, pins.pin), null, `${auditKey}:Trust with this value`)) : null,
+    byBlocklist ? el("p", { class: "meta" }, "On the blocklist (hard deny). ",
+      el("a", { href: "#checker", "data-focus": `${auditKey}:blocklist`, onclick: () => { checkerOpen.add(d.node_id); } },
+        scope === "global" ? "Switch this entry off for this machine" : "Change the entry"),
+      " on the Action checker page.") : null);
 }
 
 // ---- Action checker (issue #17) ----
@@ -522,14 +631,20 @@ function pageChecker() {
   if (!c) return [loading()];
   const cfg = c.cfg;
   return [
-    head("shield", "Action checker", "A gate on the center that checks each call before the machine gets it. The machine's own rules still decide; the checker can only refuse.", [
+    head("shield", "Action checker", "Checks each call before a machine gets it; it can only refuse.", [
       [cfg.blocklist_on ? "on" : "off", "blocklist", cfg.blocklist_on ? "ok" : ""],
       [cfg.model_on ? "on" : "off", "model", cfg.model_on ? "ok" : ""],
     ]),
     section("Switches", "Each part has its own switch; a change takes effect for the next call.", null, el("div", { class: "card" },
       checkerToggle("blocklist_on", "Blocklist (deterministic, on by default)", cfg.blocklist_on, (v) => { cfg.blocklist_on = v; }),
-      checkerToggle("model_on", "Decision model (off by default)", cfg.model_on, (v) => { cfg.model_on = v; }),
+      checkerToggle("model_on", "Decision model (off by default)", cfg.model_on, (v) => { cfg.model_on = v; }, modelOnAsks),
       checkerToggle("taint_on", "Taint marking (a session is tainted after a call returns content)", cfg.taint_on, (v) => { cfg.taint_on = v; }))),
+    // On but not running: every checked call is refused (fail closed), or
+    // with fail closed off goes to the machine unjudged.
+    c.meta.model_wanted && !(c.meta.local && c.meta.local.phase === "ready") && cfg.model.source === "local"
+      ? (cfg.model.fail_closed
+        ? banner("down", "alert", "The decision model is on but does not run: every call it checks is refused. The Log page says why.")
+        : banner("down", "alert", "The decision model is on but does not run, and fail closed is off: its calls pass unjudged.")) : null,
     c.meta.rejected && c.meta.rejected.length ? banner("warn", "alert", `Some rules do not parse and were left out: ${c.meta.rejected.join("; ")}`) : null,
     c.meta.unpublished && c.meta.unpublished.length ? banner("warn", "alert", `Some rules name a capability no machine offers, so they match no call now (a typo, or a capability that is gone): ${c.meta.unpublished.join("; ")}`) : null,
     staleBanner(c.meta.stale),
@@ -546,7 +661,9 @@ function pageChecker() {
 function staleBanner(stale) {
   const list = Object.entries(stale || {});
   if (!list.length) return null;
-  return banner("warn", "alert", `Some rules no longer fit what their action takes (an argument gone or of another type, a value it no longer takes): on the blocklist such a rule may refuse calls it was not meant for, as an allow rule it may not cover the calls it was meant for. Change or remove them: ${list.map(([r, why]) => `${r} (${why})`).join("; ")}`);
+  return el("div", {},
+    banner("warn", "alert", `Some rules no longer fit their action. Change or remove them: ${list.map(([r, why]) => `${r} (${why})`).join("; ")}`),
+    more("checker:stale", "Why", el("p", { class: "meta" }, "An argument is gone or of another type, or a value is no longer taken: on the blocklist such a rule may refuse calls it was not meant for, as a skip rule it may not cover the calls it was meant for.")));
 }
 
 // Under a rule field: the arguments the action typed so far takes, which a
@@ -566,9 +683,28 @@ function ruleFieldsHint(input) {
   return hint;
 }
 
-// A switch that mutates the working copy and saves at once.
-function checkerToggle(field, label, on, apply) {
-  const input = el("input", { type: "checkbox", role: "switch", "data-focus": `switch:${field}`, onchange: act(async (ev) => { apply(ev.currentTarget.checked); await saveChecker(); }) });
+// Turning the model on with no local model installed: it would refuse
+// every checked call, so the owner is asked to install it first. True to go
+// on with the switch.
+async function modelOnAsks() {
+  const meta = state.checker.meta;
+  if (state.checker.cfg.model.source !== "local" || meta.installed || !meta.platform_supported) return true;
+  const pin = meta.models[0];
+  const what = state.checker.cfg.model.fail_closed ? "every checked call is refused" : "every checked call passes unjudged (fail closed is off)";
+  const yes = await modal({ title: "No model is installed", message: `With the model on and none installed, ${what}. Install ${pin.name} (${gb(pin.bytes)}) on the CPU now?`, confirm: "Install and turn on" });
+  if (!yes) return false;
+  await api("POST", "/api/checker/install", { gpu: false, model: pin.id });
+  return true;
+}
+
+// A switch that mutates the working copy and saves at once; `asks`, when
+// given, may stop it from turning on.
+function checkerToggle(field, label, on, apply, asks) {
+  const input = el("input", { type: "checkbox", role: "switch", "data-focus": `switch:${field}`, onchange: act(async (ev) => { const to = ev.currentTarget.checked, box = ev.currentTarget;
+    if (to && asks && !(await asks())) { box.checked = false; return; }
+    apply(to);
+    await saveChecker();
+  }) });
   input.checked = !!on;
   return el("label", { class: "switch" }, input, el("span", {}, label));
 }
@@ -610,19 +746,20 @@ function blocklistCard(cfg, meta) {
     await saveChecker();
   });
   const reset = act(async () => {
-    const yes = await modal({ title: "Reset the blocklist?", message: "This replaces the whole blocklist with the built-in defaults, for every machine; your own entries (also those for one machine), entries you switched off, and entries switched off for single machines are lost.", confirm: "Reset", danger: true });
+    const yes = await modal({ title: "Reset the blocklist?", message: "Replace the blocklist with the defaults? Your own entries and what you switched off, also for single machines, are lost.", confirm: "Reset", danger: true });
     if (!yes) return;
     cfg.blocklist = meta.default_blocklist.map((e) => ({ ...e }));
     await saveChecker();
   });
-  return section("Blocklist", "Exact commands or wildcards that are refused at once, in the machine's own rule syntax (exec.run:…, fs.write:…), for every machine or for one. A re: regex form is allowed where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes. Any other action is named whole (lamp.set, or lamp for all its actions), or with conditions on its arguments (lamp.set:room=office,brightness>50); a call that gives such an argument another type, or leaves it out, is refused too. The blocklist wins over the allow rules and the model. An entry for every machine can be switched off for single machines under Per machine.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
+  return section("Blocklist", "Commands and actions that are always refused, on every machine or one.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
+    more("checker:blocklist", "More", el("p", { class: "meta" }, "Exact commands or wildcards in the machine's own rule syntax (exec.run:…, fs.write:…); a re: regex form where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes. Any other action is named whole (lamp.set, or lamp for all its actions), or with conditions on its arguments (lamp.set:room=office,brightness>50); a call that gives such an argument another type, or leaves it out, is refused too. The blocklist wins over the skip rules and the model. An entry for every machine can be switched off for single machines under Per machine.")),
     el("div", { class: "card" }, el("div", { class: "form-row" },
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Note"), noteIn),
       nodePicker.root),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "blocklist:add", onclick: add }, icon("plus", "sm"), "Add"))),
-    el("p", { class: "meta" }, "What the matcher cannot see: shell variables, aliases, a script written then run, and base64. The decision model and the machine's policy are the next lines of defence."),
-    cfg.blocklist.length ? el("div", { class: "list" }, cfg.blocklist.map((e, i) => blockRow(cfg, e, i, "all"))) : empty("The blocklist is empty.", "shield"));
+    el("p", { class: "meta" }, "It catches names, not shell variables, aliases, a script written then run, or base64.", more("checker:matcher", "Why", el("p", { class: "meta" }, "The matcher reads the call as written. The decision model and the machine's policy are the next lines of defence."))),
+    cfg.blocklist.length ? more("checker:entries", `Entries (${cfg.blocklist.length})`, el("div", { class: "list" }, cfg.blocklist.map((e, i) => blockRow(cfg, e, i, "all")))) : empty("The blocklist is empty.", "shield"));
 }
 
 // One saved allow rule, with its scope.
@@ -635,7 +772,7 @@ function allowRow(cfg, a, i, where) {
 }
 
 function allowCard(cfg) {
-  const ruleIn = el("input", { class: "input mono", placeholder: "exec.run:docker exec *", "aria-label": "New allow rule", "data-focus": "allow:rule" });
+  const ruleIn = el("input", { class: "input mono", placeholder: "exec.run:docker exec *", "aria-label": "New rule that skips the model", "data-focus": "allow:rule" });
   const nodeItems = machineItems();
   let allowNode = "";
   const nodePicker = picker({ label: "For", search: "Search machines", none: "No machine matches.", onpick: (v) => { allowNode = v; nodePicker.set(nodeItems, v); } });
@@ -647,12 +784,13 @@ function allowCard(cfg) {
     ruleIn.value = "";
     await saveChecker();
   });
-  return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist. A command rule covers a line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare *), no wrapper with words of its own (env A=B, sudo -u), and nothing run inside another command ($( ), sh -c, env -S); a re: rule covers a line of one command; exec.run:exact:… covers one line exactly.", null,
+  return section("Skip the model", "A matching call skips the decision model, never the blocklist.", null,
+    more("checker:skip", "More", el("p", { class: "meta" }, "A command rule covers a line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare *), no wrapper with words of its own (env A=B, sudo -u), and nothing run inside another command ($( ), sh -c, env -S); a re: rule covers a line of one command; exec.run:exact:… covers one line exactly. It does not allow a call: the machine's own rules still decide.")),
     el("div", { class: "card" }, el("div", { class: "form-row" },
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       nodePicker.root),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "allow:add", onclick: add }, icon("plus", "sm"), "Add"))),
-    cfg.allow_rules.length ? el("div", { class: "list" }, cfg.allow_rules.map((a, i) => allowRow(cfg, a, i, "all"))) : empty("No allow rules.", "shield"));
+    cfg.allow_rules.length ? more("checker:skips", `Rules (${cfg.allow_rules.length})`, el("div", { class: "list" }, cfg.allow_rules.map((a, i) => allowRow(cfg, a, i, "all")))) : empty("No call skips the model.", "shield"));
 }
 
 // ---- Per machine: the switches, entries, exceptions and allow rules of
@@ -678,7 +816,8 @@ function checkerMachines(cfg) {
 
 function machinesCard(cfg) {
   const machines = checkerMachines(cfg);
-  return section("Per machine", "Each machine follows the center's switches unless you set the blocklist or the model on or off for it. It can have block entries of its own, and switch single entries for every machine off for itself. A block anywhere wins: the center's blocklist, this machine's entries, or the machine's own deny list; an allow rule only skips the model.", null,
+  return section("Per machine", "Each machine follows the center's switches unless you change them here.", null,
+    more("checker:machines", "More", el("p", { class: "meta" }, "A machine can have block entries of its own, and switch single entries for every machine off for itself. A block anywhere wins: the center's blocklist, this machine's entries, or the machine's own deny list; a skip rule only skips the model.")),
     machines.length ? el("div", { class: "stack" }, machines.map((m) => machineCard(cfg, m))) : empty("No machine is paired.", "server"));
 }
 
@@ -769,7 +908,8 @@ function machineCard(cfg, m) {
       switchPicker("model", "Decision model", cfg.model_on)),
     el("p", { class: "meta" }, "The model on here uses the center's one model and its settings below. Taint is for every machine."),
     el("h4", { class: "sub-head" }, "Your note on this machine"),
-    el("p", { class: "meta" }, "A few words for the agent, such as what the machine is for. list() shows them to every harness of this center as your words, next to the machine. One line, at most 400 bytes."),
+    el("p", { class: "meta" }, "A few words for the agent about this machine (one line, 400 bytes).",
+      more(`note:${m.id}`, "More", el("p", { class: "meta" }, "Such as what the machine is for. list() shows them to every harness of this center as your words, next to the machine."))),
     el("div", { class: "form-row" }, el("label", { class: "field grow" }, el("span", { class: "label" }, "Note"), noteIn, noteLeft)),
     el("div", { class: "actions" }, btn("Save note", "primary", saveNote, null, `node:${m.id}:note:save`)),
     el("h4", { class: "sub-head" }, "Block entries for this machine only"),
@@ -843,16 +983,22 @@ function modelCard(cfg, meta) {
   const localDiv = el("div", {}, ...localInstall(meta));
   const showSource = () => { epDiv.hidden = source !== "endpoint"; localDiv.hidden = source !== "local"; };
   showSource();
-  return section("Decision model", "An optional System One model that answers, in one pass, whether a call is dangerous. At or above the threshold the call is refused. An unreachable model refuses the call (fail closed) unless you switch that off below.", null,
+  return section("Decision model", m.fail_closed ? "An optional model that refuses dangerous calls; it fails closed."
+    : "An optional model that refuses dangerous calls; fail closed is off, so a call it cannot judge runs.", null,
     el("div", { class: "card" },
       el("div", { class: "form-row" }, srcPicker.root),
+      // Off is the one setting that lets calls through unjudged, so it is
+      // not folded away while it is off.
+      m.fail_closed ? null : el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed is off: a call the model cannot judge is allowed and logged. On refuses it (recommended).")),
       epDiv,
       localDiv,
-      el("div", { class: "form-row" }, field("Threshold (0 to 1)", threshold), field("Timeout (ms)", timeout)),
-      el("div", { class: "form-row" }, scopePicker.root),
-      el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed: refuse a call when the model is unreachable (recommended). Off: allow and log it.")),
-      el("div", { class: "form-row" }, field("Question (the command text is never put here; it goes only in the state sent to the model)", instr)),
-      el("div", { class: "form-row" }, field("When true (dangerous)", critTrue), field("When false (safe)", critFalse)),
+      more("checker:advanced", "Advanced",
+        el("p", { class: "meta" }, "A System One model answers, in one pass, whether a call is dangerous; at or above the threshold the call is refused. An unreachable model refuses the call unless you switch fail closed off."),
+        el("div", { class: "form-row" }, field("Threshold (0 to 1)", threshold), field("Timeout (ms)", timeout)),
+        el("div", { class: "form-row" }, scopePicker.root),
+        m.fail_closed ? el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed: refuse a call when the model is unreachable (recommended). Off: allow and log it.")) : null,
+        el("div", { class: "form-row" }, field("Question (the command text is never put here; it goes only in the state sent to the model)", instr)),
+        el("div", { class: "form-row" }, field("When true (dangerous)", critTrue), field("When false (safe)", critFalse))),
       el("div", { class: "actions" },
         el("button", { type: "button", class: "btn primary", "data-focus": "model:save", onclick: save }, "Save"),
         btn("Reset the question", "ghost", resetQuestion, "refresh"))));
@@ -879,7 +1025,8 @@ function localInstall(meta) {
   checkerStatusEl = el("div", {});
   checkerStatusEl.replaceChildren(...localInstallParts(meta));
   return [
-    el("p", { class: "meta" }, "The center downloads and runs llama.cpp and the model itself, in its own state folder. Pick the model here; the device (CPU or GPU) is separate."),
+    el("p", { class: "meta" }, "The center downloads and runs llama.cpp and the model itself, in its own state folder.",
+      more("checker:local", "More", el("p", { class: "meta" }, "Pick the model here; the device (CPU or GPU) is separate."))),
     el("div", { class: "form-row" }, p.root),
     checkerStatusEl,
   ];
@@ -1060,7 +1207,8 @@ function pageCaps() {
   }
   return [head_, el("div", { class: "picker-row" }, capsPicker.root),
     !d.online ? banner("warn", "alert", "This machine is offline: the list is what it offered when it was last linked.") : null,
-    !d.settings_write ? banner("info", "info", "This machine does not let this center change its settings (settings grant off), so it is shown read only. Its owner gives the grant with nerve-node center grant settings write.") : null,
+    !d.settings_write ? banner("info", "info", "Read only: this machine has not let this center change its settings.") : null,
+    !d.settings_write ? more(`settings-grant:${d.id}`, "How", el("p", { class: "meta" }, "Its owner lets it with nerve-node center settings on, on that machine.")) : null,
     section("Offered", "Each unit the agent may be offered here, with what it does and where it comes from.", null,
       d.units.length ? el("div", { class: "list" }, d.units.map(capUnitRow)) : empty("This machine offers no capability to the agent now.", "plug")),
     d.broken.length ? section("Left out", "Units the center does not offer the agent, with the reason.", null,
@@ -1093,12 +1241,13 @@ function capUnitRow(u) {
 function addedSection(d) {
   const a = d.added;
   const c = state.caps;
-  const sub = "Each runs a fixed command as nerve-run, counts as execute whatever it says it does, and only the machine's owner turns on one that senses or actuates. The owner can turn any of them off or remove it.";
+  const sub = "Fixed commands that run as nerve-run; the owner turns on sensing ones.";
   if (!d.online || !a) return section("Added by this center", sub, null, el("p", { class: "meta" }, "The machine is offline; its capabilities can be changed when it is back."));
   if (a.error) return section("Added by this center", sub, null, banner("error", "alert", `The machine did not say: ${a.error}`));
   const add = a.refused ? null : btn("Add a capability", "primary", () => { c.form = { adding: true, form: blankCapForm() }; draw(true); }, "plus", "caps:add");
   const entries = a.entries || [];
   return section("Added by this center", sub, add,
+    more("caps:added", "More", el("p", { class: "meta" }, "Each counts as execute whatever it says it does, and only the machine's owner turns on one that senses or actuates. The owner can turn any of them off or remove it.")),
     a.refused ? banner("warn", "alert", `This machine takes no capability from a center: ${a.refused}.`) : null,
     c.form ? capForm(d, c.form) : null,
     entries.length ? el("div", { class: "list" }, entries.map((e) => addedRow(d, e))) : (a.refused ? null : el("p", { class: "meta" }, "None yet.")));
@@ -1115,8 +1264,10 @@ function notOffered(d, e) {
   if (e.left_out || d.units.some((u) => u.name === e.name)) return null;
   const why = e.effect === "sense" || e.effect === "actuate"
     ? `only the machine's owner turns it on, with nerve-node cap set ${e.name} on --center and this center's name on that machine.`
-    : `the machine's policy does not let the agent use it yet. Turn it on in Settings › Machines, by its full name: in folder mode with an on for it ("caps": {"${e.name}": "on"}), in allowlist mode with the allow rule ${e.name}. An off the owner set stays.`;
-  return el("p", { class: "meta" }, `Not offered now: ${why}`);
+    : null;
+  if (why) return el("p", { class: "meta" }, `Not offered now: ${why}`);
+  return el("p", { class: "meta" }, "Not offered: the machine's policy does not allow it yet.",
+    more(`caps:offer:${e.name}`, "How", el("p", { class: "meta" }, `Turn it on in Settings › Machines, by its full name: in folder mode with an on for it ("caps": {"${e.name}": "on"}), in allowlist mode with the allow rule ${e.name}. An off the owner set stays.`)));
 }
 
 function addedRow(d, e) {
@@ -1332,7 +1483,7 @@ function pageLog() {
   if (count("error")) stats.push([count("error"), "errors", "danger"]);
   if (count("warn")) stats.push([count("warn"), count("warn") === 1 ? "warning" : "warnings", "warn"]);
   logParts.head.replaceChildren(head("log", "Log",
-    `Links, pairing, changes, refused and failed calls, and errors, newest first. The center keeps the level ${l.level}; change that in Settings.`, stats));
+    `Links, pairing, changes, refused calls and errors, newest first; level ${l.level} (Settings).`, stats));
   const filtered = logFilter.level !== "debug" || logFilter.node !== null || logFilter.q.trim() !== "";
   logParts.rows.replaceChildren(l.entries.length
     ? el("div", { class: "card log-rows" }, l.entries.map(logRow))
@@ -1368,22 +1519,25 @@ function pageSettings() {
     head("settings", "Settings", "The center, the tokens harnesses use, and each machine's own settings."),
     section("Center", null, null, el("div", { class: "card" },
       el("div", { class: "form-row" },
-        el("label", { class: "field" }, el("span", { class: "label" }, "Name"), name),
-        el("label", { class: "field" }, el("span", { class: "label" }, "Keep statistics for (days)"), days),
-        el("label", { class: "field" }, el("span", { class: "label" }, "Pairing code valid for (minutes, at most 1440)"), pairMinutes)),
-      el("div", { class: "form-row" }, levelPicker.root),
-      el("p", { class: "meta" }, "Debug adds detail for tracking down a problem and makes the log file grow faster. What the log holds is on the Log page."),
-      s.center.log_level_pinned ? el("p", { class: "meta" }, `The --log option (NERVE_LOG) sets the level at every start and wins over this setting. This run keeps the level ${s.center.log_level_now}.`) : null,
+        el("label", { class: "field" }, el("span", { class: "label" }, "Name"), name)),
+      more("settings:center", "More",
+        el("div", { class: "form-row" },
+          el("label", { class: "field" }, el("span", { class: "label" }, "Keep statistics for (days)"), days),
+          el("label", { class: "field" }, el("span", { class: "label" }, "Pairing code valid for (minutes, at most 1440)"), pairMinutes)),
+        el("div", { class: "form-row" }, levelPicker.root),
+        el("p", { class: "meta" }, "Debug adds detail for tracking down a problem and makes the log file grow faster. What the log holds is on the Log page."),
+        s.center.log_level_pinned ? el("p", { class: "meta" }, `The --log option (NERVE_CENTER_LOG) sets the level at every start and wins over this setting. This run keeps the level ${s.center.log_level_now}.`) : null),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "center:save", onclick: act(async () => {
         await api("POST", "/api/center", { name: name.value, retention_days: Number(days.value), pair_code_minutes: Number(pairMinutes.value), log_level: logLevel });
         notify("Saved.");
       }) }, "Save")))),
-    section("Center key", "Machines check the center by this key's pin. Rotating it makes a new key; the old one is served for 7 more days, so the machines learn the new one when they link.", null,
+    section("Center key", "Machines check the center by this key's pin; a new key keeps the old one 7 more days.", null,
+      more("settings:key", "More", el("p", { class: "meta" }, "Rotating it makes a new key; the old one is served for 7 more days, so the machines learn the new one when they link.")),
       centerKey(s.center.key)),
-    section("Harness tokens", "A token lets an AI harness call this center over HTTP. It does not log in here: this page asks for the owner token.", null,
-      el("div", { class: "stack" }, el("div", { class: "card" }, tokenForm()), s.tokensBox)),
+    section("Harness tokens", "A token lets an AI harness call this center over HTTP; it does not log in here.", null,
+      el("div", { class: "stack" }, harnessCard(state.overview && state.overview.mcp), el("div", { class: "card" }, tokenForm()), s.tokensBox)),
     section("Machines", "Settings kept on each machine itself.", null,
-      s.nodes.length ? el("div", { class: "stack" }, s.nodes.map(nodeSettings)) : empty("No machines yet.", "server")),
+      s.nodes.length ? more("settings:machines", "Advanced: each machine's settings as JSON", el("div", { class: "stack" }, s.nodes.map(nodeSettings))) : empty("No machines yet.", "server")),
   ];
 }
 
@@ -1441,13 +1595,13 @@ function drawTokens() {
       el("button", { type: "button", class: "btn ghost sm", onclick: () => copy(state.newToken) }, icon("copy", "sm"), "Copy"),
       el("button", { type: "button", class: "btn ghost sm", "aria-label": "Hide", onclick: () => { state.newToken = null; drawTokens(); } }, icon("x", "sm"))) : null,
     s.tokens.length ? s.tokens.map((t) => t.settings
-      // The token of the settings (NERVE_HARNESS_TOKEN or --harness-token):
+      // The token of the settings (NERVE_CENTER_HARNESS_TOKEN or --harness-token):
       // only a change of the settings and a restart remove it.
       ? el("div", { class: "card" }, el("div", { class: "card-top" },
         icon("key"), el("span", { class: "name mono" }, t.label), el("span", { class: "meta push" }, "From the center's settings; remove it there")))
       : el("div", { class: "card" }, el("div", { class: "card-top" },
         icon("key"), el("span", { class: "name" }, t.label || "(no label)"), el("span", { class: "meta push" }, `Created ${ago(t.created_ms)}`),
-        btn("Delete", "danger-soft", act(async () => { await api("POST", "/api/tokens/delete", { id: t.id }); await loadTokens(); }), "trash", `token:${t.id}:delete`))))
+        btn("Remove", "danger-soft", act(async () => { await api("POST", "/api/tokens/delete", { id: t.id }); await loadTokens(); }), "trash", `token:${t.id}:delete`))))
       : el("p", { class: "meta" }, "No tokens yet.")].flat().filter(Boolean));
 }
 
@@ -1600,7 +1754,7 @@ async function closePairingWhenUsed() {
   const { open, node } = await api("POST", "/api/pair/status", { code: p.code });
   if (open || state.pairing !== p) return;
   state.pairing = null;
-  if (node) notify(`Paired ${node.name}.`);
+  if (node) { state.paired = node; notify(`Paired ${node.name}.`); }
   else notify("The pairing code is no longer valid.", "error");
 }
 

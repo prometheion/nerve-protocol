@@ -1,4 +1,4 @@
-// Capabilities: what this node offers, from `nerve-node cap ls`. Its own
+// Capabilities: what this node offers, from `nerve-node cap`. Its own
 // capabilities, those of node.toml and those of the programs the owner
 // allows, each unit with what it does and its switch for one center; and the
 // programs allowed as providers. Each change runs one `nerve-node` command.
@@ -18,7 +18,8 @@ component OfferedSection inherits Section {
     icon: @image-url("icons/plug.svg");
     title: "What this node offers";
     text: Caps.center == "" ? "Pair a center to switch them for it."
-        : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. \"Like its capability\": it has no switch of its own. None chosen: its mode decides.";
+        : "Each one's switch for " + Caps.center + "; none chosen: its mode decides.";
+    more: Caps.center == "" ? "" : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. \"Like its capability\": it has no switch of its own.";
     Reveal {
         shown: !Caps.running;
         HorizontalLayout {
@@ -27,7 +28,8 @@ component OfferedSection inherits Section {
             padding-bottom: Space.md;
             Banner {
                 tone: Tone.neutral;
-                text: "The node does not run: the programs' capabilities, and whether a center may use each one now, show while it runs.";
+                text: "The node does not run: the programs' capabilities show while it runs.";
+                more: "Whether a center may use each one now shows then, too.";
             }
         }
     }
@@ -137,7 +139,8 @@ component DeclaredSection inherits Section {
     tone: Caps.config-note != "" ? Tone.neutral : Tone.accent;
     title: "Your capabilities";
     text: Caps.config-note != "" ? Caps.config-note
-        : "Capabilities of node.toml: each runs a fixed command as nerve-run, held to the folders of the center that calls it.";
+        : "Capabilities of node.toml: each runs a fixed command as nerve-run, in the folders.";
+    more: Caps.config-note != "" ? "" : "Held to the folders of the center that calls it.";
     ScrollBox {
         rows: Caps.declared.length;
         for d[i] in Caps.declared: ListRow {
@@ -229,7 +232,8 @@ component ProgramSection inherits Section {
     icon: @image-url("icons/window.svg");
     title: "Programs";
     text: Caps.programs-note != "" ? Caps.programs-note
-        : "A program you allow adds capabilities while it runs, as a provider. The node checks that the program that attaches runs this very file.";
+        : "A program you allow adds capabilities while it runs, as a provider.";
+    more: Caps.programs-note != "" ? "" : "The node checks that the program that attaches runs this very file.";
     ScrollBox {
         rows: Caps.programs.length;
         for p[i] in Caps.programs: ListRow {

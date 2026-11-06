@@ -18,7 +18,7 @@ async fn start(dir: &std::path::Path, extra: &[&str]) -> Result<Running, String>
         "--plain-loopback",
     ];
     if !extra.contains(&"--mcp") {
-        argv.extend(["--mcp", "none"]);
+        argv.extend(["--mcp", "off"]);
     }
     argv.extend_from_slice(extra);
     let args = Args::try_parse_from(argv).unwrap();
@@ -160,8 +160,6 @@ async fn the_owner_token_does_not_open_mcp() {
             "--ui",
             "off",
             "--mcp",
-            "http",
-            "--mcp-listen",
             "127.0.0.1:0",
             "--harness-token",
             "nrv_secret-of-the-harness",
@@ -178,10 +176,14 @@ async fn the_owner_token_does_not_open_mcp() {
             ("Content-Type", "application/json"),
             ("Accept", "application/json, text/event-stream"),
         ];
-        http(addr, "POST /mcp", &headers, init).await.0
+        http(addr, "POST /mcp", &headers, init).await
     };
-    assert_eq!(post(owner_token(d.path())).await, 401);
-    assert_eq!(post("nrv_secret-of-the-harness".into()).await, 200);
+    let (status, body) = post(owner_token(d.path())).await;
+    assert_eq!(status, 401);
+    // The refusal says what to send, and where a token comes from.
+    assert!(body.contains("Authorization: Bearer"), "{body}");
+    assert!(body.contains("Connect a harness"), "{body}");
+    assert_eq!(post("nrv_secret-of-the-harness".into()).await.0, 200);
 }
 
 /// Beyond loopback the UI needs no harness token to start: it logs in with

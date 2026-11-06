@@ -86,7 +86,7 @@ pairing. When this machine still holds a key that fits the pairing, in the
 files or in the keyring (a restore on the same machine), it stays, and it
 goes where the restored node keeps its keys: a restore with `--secret-storage`
 takes it over from the other place before that place is emptied. Otherwise
-that center cannot connect: run `nerve-node center rm --center <name>`, then
+that center cannot connect: run `nerve-node center rm <name>`, then
 `nerve-node center add` with a new link. The relay's TLS key, which must fit
 `relay.pin`, is treated the same way.
 
@@ -107,9 +107,9 @@ unless you give `--include-keyring`) does not keep whatever is on this machine:
   nothing written, unless the config being replaced names the same proxy, pin
   and header names. Restore with `--without-proxy` and set the proxy again
   here; or start or unlock the keyring (on a Linux without a desktop,
-  `nerve-node setup` can install one if you answer `keyring` where it asks
-  where the keys go); or take the header values off the node you back up
-  (`nerve-node proxy rm` there) and make a new backup. A backup made with
+  `nerve-node config set machine.secret_storage keyring` at a terminal offers
+  to install one); or take the header values off the node you back up
+  (`nerve-node proxy off` there) and make a new backup. A backup made with
   `--include-keyring` does not get round this: it writes the values into the
   same keyring, and fails the same way.
 - Header values for the same proxy and names that lack one of the names are
@@ -221,7 +221,7 @@ center, a relayed node holds the pin of its relay, and a node behind an
 3. Check what belongs to the machine and not to the node: the folders in
    `center.<name>.policy.folders`, the account commands run as on Windows
    (`machine.user`), the paths of providers, the programs of your own
-   capabilities (`nerve-node cap ls`), and the address of the relay.
+   capabilities (`nerve-node cap`), and the address of the relay.
    On Linux the installed node's owner is whoever installed it there, not
    part of the backup.
    `nerve-node config get` shows each.
@@ -284,7 +284,8 @@ there.
 
 ## On a center installed as a service
 
-Name its state folder with `--state-dir /var/lib/nerve-center`. Run with
+Where the center is installed, `backup` and `restore` work on its state
+folder, `/var/lib/nerve-center`, without `--state-dir`. Run with
 `sudo`, the commands work there as the user `nerve-center`, as the node's do
 as `nerve` ([center](center.md#run-it-as-a-service)): root follows no link
 that user put in the folder, and what a restore writes stays the center's.
@@ -308,5 +309,5 @@ that user put in the folder, and what a restore writes stays the center's.
 | `… are not the same node` or `… not the same center` | The backup is of another one. `--replace` if you mean it |
 | `… is the backup of a center, not of a node` | Use the other program's `restore` |
 | `… made by a newer program` | Update this program first |
-| `cannot read the proxy's header values in the system keyring … to check whose they are` | The keyring does not answer and the backup cannot say whose the values are. `--without-proxy`, or a keyring that answers, or `proxy rm` on the old node and a new backup |
+| `cannot read the proxy's header values in the system keyring … to check whose they are` | The keyring does not answer and the backup cannot say whose the values are. `--without-proxy`, or a keyring that answers, or `proxy off` on the old node and a new backup |
 | `cannot read the keyring entry …` (in a restore) | The backup holds the proxy's header values and they go into a keyring that does not answer. `--without-proxy`, or a keyring that answers |

@@ -20,7 +20,7 @@ nerve-node ui on
 - The running node takes the change at once. `ui on` waits up to 3 seconds and
   says what the node did: `listening on 127.0.0.1:7470`, or why it cannot
   (`cannot listen on 127.0.0.1:7470: …`).
-- Open the UI after `nerve-node ui status` says `listening`. Until then
+- Open the UI after `nerve-node ui` says `listening`. Until then
   another program could hold the port.
 - On `127.0.0.1` the node holds `[::1]` at the same port too (and on `[::1]`,
   `127.0.0.1`), so `http://localhost:7470` reaches the node whichever address
@@ -44,7 +44,7 @@ turns it off: the node stops listening, and every session ends. The tokens
 and the certificate stay. Off, the node listens on nothing and does nothing
 for the UI.
 
-`nerve-node ui` (or `ui status`) shows whether it is on, where it listens, the
+`nerve-node ui` (or `ui`) shows whether it is on, where it listens, the
 node's state of it, and the labels of the tokens.
 
 A node you run by hand (`nerve-node run`) serves no web UI.
@@ -54,7 +54,7 @@ A node you run by hand (`nerve-node run`) serves no web UI.
 | Command | Does |
 |---|---|
 | `nerve-node ui token add <label>` | Makes a token and shows it once. A label is 1 to 32 of `a-z`, `0-9` and `-`, and does not start with `-` |
-| `nerve-node ui token ls` | Lists the labels and when each was made, never a token |
+| `nerve-node ui token` | Lists the labels and when each was made, never a token |
 | `nerve-node ui token rm <label>` | Revokes a token. The sessions it opened end at once |
 
 Tokens are made only at the CLI. In the UI you can revoke one
@@ -122,7 +122,7 @@ and nothing more.
 |---|---|
 | **Overview** | Status, the centers and their links, the root-as-owner warning, the warning that nothing keeps the pairings apart (the installed node without Landlock, with two or more pairings as `nerve-run`; on **Centers** too), **Panic** and **Unlock** |
 | **Centers** | Pair from a pasted link (it goes to the node as the command's input, never in a command line), pause and resume, the settings grant, a new key, remove |
-| **Permissions** | Mode (also for some hours, and as the owner), **No network for its commands** (`folder network off`, in every mode), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
+| **Permissions** | Mode (also for some hours, and as the owner), **No network for its commands** (`network off`, in every mode), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
 | **Audit** | What the node allowed and refused, refused only, Live; **Allow**, **Allow as wildcard** and **Deny** show the rule each one stores, made by the same code as `rule add`, and the list it goes to (the sudo list for a sudo command), with hidden characters written out; a wildcard is wider than the entry (`python3 *` for a `python3` call, the whole folder for a file), and the preview says so |
 | **Log** | Problems only, Live, clear |
 | **Capabilities** | A center's switches (on, off, hidden), your own capabilities (add, edit and remove, with the same checks as the desktop app's form), the programs that may add capabilities |
@@ -150,13 +150,13 @@ nerve-node ui on --listen 0.0.0.0:7470
   first time. It names the address (when it is a specific one), this
   machine's name, `localhost`, and each `--name HOST`. Giving `--name` makes a
   new one.
-- `ui on` and `ui status` print its SHA-256 fingerprint. Your browser warns
+- `ui on` and `ui` print its SHA-256 fingerprint. Your browser warns
   about the certificate the first time: compare the fingerprint it shows with
   the printed one before you sign in.
 - `--new-cert` makes a new certificate: every session ends, and the browser
   asks again.
 - Without its certificate the UI does not listen beyond loopback at all;
-  `ui status` says why.
+  `ui` says why.
 - One address has at most 16 connections at once (an IPv6 /64 counts as one
   address, and on this machine each account counts as one). A browser opens
   six to load a page. A wrong token's 300 ms hold none of them.

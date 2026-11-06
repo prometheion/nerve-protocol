@@ -244,8 +244,8 @@ async fn a_center_adds_runs_and_edits_its_own_and_the_owner_removes_it() {
     assert_eq!(audit.len(), 2, "{audit:?}");
     assert!(audit[1].to_string().contains("printf"), "{audit:?}");
 
-    // `cap ls` says who added it and how it counts.
-    let ls = cli(&paths, &["cap", "ls"]).await.unwrap();
+    // `cap` says who added it and how it counts.
+    let ls = cli(&paths, &["cap"]).await.unwrap();
     let row = ls.lines().find(|l| l.starts_with("say.back")).unwrap();
     assert!(
         row.contains("execute") && row.contains("center lab"),
@@ -519,7 +519,7 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
         .unwrap();
     let e = call(&mut conn, "cam.look", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "forbidden");
-    let ls = cli(&paths, &["cap", "ls"]).await.unwrap();
+    let ls = cli(&paths, &["cap"]).await.unwrap();
     assert!(
         ls.contains(
             "capability cam.look (added by center lab, senses: only you turn it on): echo frame"
@@ -720,7 +720,7 @@ async fn a_centers_own_switches_never_reach_what_a_program_offers_later() {
             .is_some_and(|w| w.contains("only once it removes its own")),
         "{got}"
     );
-    let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+    let ls = cli(&paths, &["cap", "--json"]).await.unwrap();
     let ls: Value = serde_json::from_str(&ls).unwrap();
     let row = ls["capabilities"]
         .as_array()
@@ -795,7 +795,7 @@ async fn the_owners_on_for_a_centers_capability_goes_with_its_last_action() {
         json!([{"id": "cam", "actions": {"snap": {"effect": "sense"}}}]),
     )
     .await;
-    let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+    let ls = cli(&paths, &["cap", "--json"]).await.unwrap();
     let ls: Value = serde_json::from_str(&ls).unwrap();
     let row = ls["capabilities"]
         .as_array()
@@ -1421,13 +1421,9 @@ async fn another_center_never_sees_what_one_added() {
     )
     .await
     .unwrap();
-    let ls = cli(&paths, &["cap", "ls", "--center", "ops"])
-        .await
-        .unwrap();
+    let ls = cli(&paths, &["cap", "--center", "ops"]).await.unwrap();
     assert!(!ls.contains("say.back"), "{ls}");
-    let ls = cli(&paths, &["cap", "ls", "--center", "lab"])
-        .await
-        .unwrap();
+    let ls = cli(&paths, &["cap", "--center", "lab"]).await.unwrap();
     assert!(ls.contains("added by center lab"), "{ls}");
     assert!(described(&mut lab_conn, "say").await.is_some());
     assert!(described(&mut ops_conn, "say").await.is_none());
@@ -1475,9 +1471,7 @@ async fn another_center_never_sees_what_one_added() {
         json!("x\n")
     );
     // Each center's view lists its own once, and not the other's.
-    let ls = cli(&paths, &["cap", "ls", "--center", "lab"])
-        .await
-        .unwrap();
+    let ls = cli(&paths, &["cap", "--center", "lab"]).await.unwrap();
     let rows: Vec<&str> = ls.lines().filter(|l| l.starts_with("say.back")).collect();
     assert_eq!(rows.len(), 1, "{ls}");
     assert!(rows[0].contains("center lab"), "{ls}");
@@ -1671,7 +1665,7 @@ async fn a_centers_switches_go_with_its_own_however_the_owner_removes_it() {
         let e = call(&mut conn, "cam.snap", json!({})).await.unwrap_err();
         assert_eq!(code_of(&e), "forbidden", "{route}: {}", e.message);
         assert!(e.message.contains("set to on"), "{route}: {}", e.message);
-        let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+        let ls = cli(&paths, &["cap", "--json"]).await.unwrap();
         let ls: Value = serde_json::from_str(&ls).unwrap();
         let row = ls["capabilities"]
             .as_array()

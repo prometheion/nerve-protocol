@@ -153,11 +153,11 @@ buttons.
 
 A decision the center's [action checker](action-checker.md) made shows here
 too, marked as the checker's and with whether the entry or switch was the one
-for every machine or this machine's own. A model refusal gets **Allow** and **Allow as
-wildcard** buttons that save a checker allow rule (center-side, so no settings
-grant is needed), and **Allow with this value** for an argument it pins.
-**Allow** saves the refused command line exactly. A blocklist refusal has none: it is a hard deny, so you
-change or remove the entry on the Action checker page. Only the center marks
+for every machine or this machine's own. A model refusal gets **Trust this** and **Trust as
+wildcard** buttons that save a skip rule (center-side, so no settings
+grant is needed), and **Trust with this value** for an argument it pins.
+**Trust this** saves the refused command line exactly. A blocklist refusal has none: it is a hard deny, so its
+**Switch this entry off for this machine** leads to the Action checker page. Only the center marks
 an entry as the checker's: a machine's own entry that claims to be one shows
 as that machine's.
 
@@ -265,15 +265,18 @@ the marked entry and **Escape** closes it.
 
 ### Help
 
-Built like the desktop app's Help: two parts that open and close on their own.
+Parts that open and close on their own:
 
-- **Keyboard shortcuts.** The keys of the web UI.
-- **Command reference.** The commands of `nerve-node`, the program on each
+- **Connect a harness.** How an AI app reaches this center, as on the Overview.
+- **nerve-center commands.** The center's own commands, one line each; its
+  options and the advanced ones fold.
+- **nerve-node commands.** The commands of `nerve-node`, the program on each
   machine. The center reads them from the node's own command definition, so
   they match `nerve-node --help` of the same build. Type in the filter to keep
   the commands whose name, explanation or arguments contain it, and list them
-  **By topic** or **A to Z**. A topic opens and closes its commands; a command
-  opens on what it does, how it is written and its arguments.
+  **By topic** or **A to Z**. A row opens on its commands, one line each, with
+  their options folded, and a link to its page of this guide.
+- **Keyboard shortcuts.** The keys of the web UI.
 
 **User guide** at the top opens these pages on GitHub.
 
@@ -294,7 +297,7 @@ Built like the desktop app's Help: two parts that open and close on their own.
   token deleted while the state file cannot be written stops at once, but
   the page says the delete is not kept yet: unless the file can be written
   before the center stops, the token works again at the next start. The
-  same holds for a removed machine. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
+  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
   `--harness-token`) is listed too, without **Delete**: remove it from the
   settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings

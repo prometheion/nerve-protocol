@@ -37,7 +37,8 @@
 #    crates/nerve-node/tests/real_root_owner.rs: root as the owner, and a
 #    program of root as a provider; each installs and uninstalls.
 # 2. The keyring path as an owner takes it: install the node (with the
-#    owner's sudo), run `setup` in a terminal and answer yes to the keyring,
+#    owner's sudo), run `config set machine.secret_storage keyring` in a terminal
+#    and answer yes to the keyring,
 #    which installs GNOME Keyring, a session for `nerve` and a login keyring
 #    (crates/nerve-node/src/keyring_setup.rs); check that the keys moved out of
 #    their files; crates/nerve-node/tests/keyring.rs as nerve, against
@@ -217,10 +218,10 @@ printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 step "2. Install the node as the owner"
 owners_sudo "$NODE" install
 as_owner status | tee "$OUT/status-files"
-grep -q 'daemon: running' "$OUT/status-files"
+grep -q 'node: running' "$OUT/status-files"
 as_owner config get machine.secret_storage | tee "$OUT/storage"
 grep -q 'file' "$OUT/storage"
-# The keys start in their files; setup moves them.
+# The keys start in their files; config set moves them.
 [ -f /var/lib/nerve/state/config.key ] || fail "no config.key before setup"
 NERVE_UID=$(id -u nerve)
 [ ! -e "/run/user/$NERVE_UID/bus" ] || fail "nerve has a session bus already"
@@ -244,17 +245,14 @@ if ! command -v secret-tool >/dev/null; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libsecret-tools >/dev/null
 fi
 
-step "3. setup at a terminal, yes to the keyring"
-# The questions: the node's name (Enter), where the keys go (keyring), the
-# offer to install a keyring (y), a pairing link (Enter).
+step "3. config set machine.secret_storage keyring at a terminal, yes to the keyring"
+# The one question: the offer to install a keyring (y). The keys move once
+# one answers.
 python3 "$HERE/pty-answers.py" \
-  'Name of this node=' \
-  'Where the node keeps its keys=keyring' \
   'Install it now=y' \
-  'Pairing link=' \
-  -- runuser -u "$OWNER" -- "$BIN" setup | tee "$OUT/setup"
-grep -q 'the system keyring answers for nerve' "$OUT/setup" || fail "setup did not install a keyring that answers"
-grep -q "the node's keys are in the system keyring now" "$OUT/setup" || fail "setup did not move the keys"
+  -- runuser -u "$OWNER" -- "$BIN" config set machine.secret_storage keyring | tee "$OUT/setup"
+grep -q 'the system keyring answers for nerve' "$OUT/setup" || fail "the command did not install a keyring that answers"
+grep -q '^saved' "$OUT/setup" || fail "the command did not move the keys"
 
 step "4. The keys are in the keyring"
 as_owner --json config get machine.secret_storage | tee "$OUT/storage"
@@ -283,11 +281,11 @@ real nerve_env TMPDIR=/tmp PATH=/usr/sbin:/usr/bin:/sbin:/bin "$KEYRING_TESTS" -
 step "5. The node starts again with the keys from the keyring"
 systemctl restart nerve-node
 for _ in $(seq 1 60); do
-  as_owner status 2>/dev/null | grep -q 'daemon: running' && break
+  as_owner status 2>/dev/null | grep -q 'node: running' && break
   sleep 1
 done
 as_owner status | tee "$OUT/status-keyring"
-grep -q 'daemon: running' "$OUT/status-keyring" || fail "the node does not come up with its keys in the keyring"
+grep -q 'node: running' "$OUT/status-keyring" || fail "the node does not come up with its keys in the keyring"
 if grep -q 'folder mode runs no command' "$OUT/status-keyring"; then fail "folder mode is refused with the keys in the keyring"; fi
 # What status says in JSON: the node found its keyring and no folder mode
 # command is held back (the refusal this job exists to keep away).
@@ -340,7 +338,7 @@ fi
 node_runs_with_keys() {
   systemctl restart nerve-node
   for _ in $(seq 1 90); do
-    as_owner status 2>/dev/null | grep -q 'daemon: running' && break
+    as_owner status 2>/dev/null | grep -q 'node: running' && break
     sleep 1
   done
   as_owner --json status | tee "$OUT/status-json2"

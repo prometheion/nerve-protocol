@@ -373,11 +373,9 @@ fn the_app_drives_the_cli_end_to_end() {
         policy.allow,
         [rule("exec", "run", "git push origin main", true)]
     );
-    // After the guard a new pairing gets.
-    let guard = nerve_policy::rules::GUARD.len();
-    assert_eq!(policy.deny[..guard], *nerve_policy::rules::GUARD);
+    // A new pairing stores no guard: it is built in.
     assert_eq!(
-        policy.deny[guard..],
+        policy.deny,
         [
             rule("fs", "write", "/srv/data/report.txt", true),
             rule("exec", "run", "git push origin main", false)
@@ -485,6 +483,9 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(perm.get_load(), Load::Ready, "{}", perm.get_error());
     // A new pairing starts in folder mode.
     assert_eq!(perm.get_mode(), "folder");
+    // From folder mode a timed user mode goes back to folder mode, and the
+    // dialog and the page say so (round 1, correctness 2).
+    assert_eq!(perm.get_user_then(), "folder");
     perm.invoke_mode_pick("user".into());
     assert!(perm.get_mode_open());
     perm.set_mode_timed(true);
@@ -496,7 +497,7 @@ fn the_app_drives_the_cli_end_to_end() {
     assert!(p.until.is_some());
     assert_eq!(perm.get_mode(), "user");
     assert!(
-        perm.get_mode_until().contains("Back to allowlist"),
+        perm.get_mode_until().contains("Back to folder mode"),
         "{}",
         perm.get_mode_until()
     );
@@ -564,7 +565,7 @@ fn the_app_drives_the_cli_end_to_end() {
         // A folder no center has any more whose access did not come off,
         // and the node's record of them that could not be read: shown on
         // this center although neither is one of its folders.
-        st["folder_grants"] = serde_json::json!({
+        st["folder_access"] = serde_json::json!({
             "errors": [
                 format!("{}: Permission denied (os error 13)", root.join("work/closed").display()),
                 "/elsewhere/proj: Permission denied (os error 13)",
@@ -710,14 +711,14 @@ fn the_app_drives_the_cli_end_to_end() {
     perm.invoke_rule_remove(0, "exec.run:cargo build --release".into());
     assert!(!allowed("exec.run:cargo build --release"));
     // A pattern for files goes in as it is, as `config add` adds it, and
-    // comes out as `rule ls` shows it.
+    // comes out as `rule` shows it.
     perm.set_allow_text("fs.read:~/notes/*".into());
     perm.invoke_rule_add(0);
     assert!(allowed("fs.read:~/notes/*"), "{}", store.get_toast());
     assert!(perm.get_allow().iter().any(|r| r == "fs.read:~/notes/*"));
     perm.invoke_rule_remove(0, "fs.read:~/notes/*".into());
     assert!(!allowed("fs.read:~/notes/*"));
-    // The text `rule ls` writes for a line break is not one: refused, with
+    // The text `rule` writes for a line break is not one: refused, with
     // the field kept. A Windows path with `\\t` or `\\n` in it is a rule.
     let listed = nerve_policy::rules::escape_controls(nerve_policy::rules::GUARD_OLD[12]);
     let before = config(&paths).centers[0].policy.deny.clone();
@@ -832,36 +833,19 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(caps.get_programs().row_count(), 0);
     store.invoke_show(Page::Policy);
 
-    // A pairing without the whole guard (the owner took a rule off) is
-    // offered it, in one click.
-    assert!(!perm.get_guard_missing());
+    // The guard is built in: a rule of it cannot be removed, and the
+    // page lists none of it.
     perm.invoke_rule_remove(1, nerve_policy::rules::GUARD[3].into());
-    assert!(perm.get_guard_missing());
-    perm.invoke_guard_add();
-    let deny = config(&paths).centers[0].policy.deny.clone();
     assert!(
-        nerve_policy::rules::guard_missing(&deny).is_empty(),
-        "{deny:?} {}",
+        store.get_toast().contains("built in"),
+        "{}",
         store.get_toast()
     );
-    assert!(!perm.get_guard_missing());
-    assert!(!perm.get_guard_older());
-    assert!(!perm.get_guard_busy());
-    // A text of the guard from before is still a rule that works, and the
-    // app says so instead of saying there is no guard; one click replaces it.
-    let older = nerve_policy::rules::GUARD_OLD[0];
-    perm.set_deny_text(older.into());
-    perm.invoke_rule_add(1);
-    assert!(perm.get_guard_older(), "{}", store.get_toast());
-    assert!(!perm.get_guard_missing());
-    perm.invoke_guard_add();
-    assert!(!perm.get_guard_older(), "{}", store.get_toast());
     assert!(
-        !config(&paths).centers[0]
-            .policy
-            .deny
+        !perm
+            .get_deny()
             .iter()
-            .any(|d| d == older)
+            .any(|r| nerve_policy::rules::is_guard(&r))
     );
 
     // Sudo takes the password on stdin; without a running node it says so
@@ -968,7 +952,7 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(prefs.get_raw_error(), "");
     assert_eq!(prefs.get_raw_shown(), "debug");
     // A list grows and shrinks by one entry, as `config add` and `config
-    // remove` change it.
+    // rm` change it.
     prefs.set_raw_key("center.home.policy.deny".into());
     prefs.set_raw_value("fs:~/private/*".into());
     prefs.invoke_raw_add();

@@ -7,7 +7,7 @@ settings. Read it on the machine, or in the center's web UI.
 
 ```sh
 nerve-node audit               # everything, oldest first
-nerve-node audit --denied      # only refused calls
+nerve-node audit --refused      # only refused calls
 nerve-node audit --follow      # keep running and print new entries
 nerve-node audit --last 50     # only the newest 50
 ```

@@ -111,7 +111,7 @@ export global Store {
 
     // Whether the node's folders are the installed service's.
     in-out property <bool> installed;
-    // The installed service, from `nerve-node service status`: "" before
+    // The installed service, from `nerve-node status --json`: "" before
     // the first answer, "none" when the node is not installed as a
     // service, else running, stopped, starting, stopping or failed.
     in-out property <string> service-state;
@@ -232,6 +232,9 @@ export global Perm {
     in-out property <string> mode-choice;
     in-out property <bool> mode-timed;
     in-out property <string> mode-hours: "8";
+    // The mode a timed user mode set now ends in (`mode user --for`):
+    // folder from a folder mode without a timer, else allowlist.
+    in-out property <string> user-then: "allowlist";
     in-out property <string> mode-error;
 
     in-out property <bool> folder-open;
@@ -245,12 +248,6 @@ export global Perm {
     in-out property <string> sudo-password;
     in-out property <string> sudo-error;
     in-out property <bool> sudo-busy;
-
-    // The deny list lacks rules of the guard (nerve_policy::rules::GUARD).
-    in-out property <bool> guard-missing;
-    // ... but the ones it has are the older text patterns, which still work.
-    in-out property <bool> guard-older;
-    in-out property <bool> guard-busy;
 
     callback pick(int);
     callback refresh();
@@ -269,11 +266,10 @@ export global Perm {
     callback sudo-ask();
     callback sudo-confirm();
     callback sudo-off();
-    callback guard-add();
 }
 
 // The Capabilities page (src/app/caps.rs): what the node offers, from
-// `cap ls`, each with its switch for one center; the capabilities of
+// `cap`, each with its switch for one center; the capabilities of
 // node.toml the owner declared; and the programs allowed as providers.
 export global Caps {
     in-out property <[string]> centers;

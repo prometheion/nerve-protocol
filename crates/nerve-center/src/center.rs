@@ -2305,6 +2305,10 @@ impl Center {
                         "summary": d.map(|d| d.summary.clone()).unwrap_or_default(),
                         "software": d.map(|d| d.node.software.version.clone()),
                         "capabilities": caps,
+                        // The folders the machine gave this center, its own
+                        // aside; none known for a machine that tells none.
+                        "folders": d.and_then(|d| d.access.as_ref())
+                            .map(|a| a.folders.iter().filter(|f| !f.own).count()),
                         // Units the center leaves out, with the reason, for
                         // the owner: the agent is not offered them.
                         "broken": n.catalog.broken,

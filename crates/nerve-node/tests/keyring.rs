@@ -98,9 +98,7 @@ async fn the_keys_move_into_the_system_keyring_and_back() {
 
     // A new key for the center (pairing again) replaces the entry, and
     // removing the center deletes it.
-    run(&paths, &["center", "rm", "--center", "lab"])
-        .await
-        .unwrap();
+    run(&paths, &["center", "rm", "lab"]).await.unwrap();
     assert!(!in_keyring(&center_key));
     let center = FakeCenter::start(false).await.unwrap();
     let link = center.link().render();

@@ -44,9 +44,12 @@ const PAIR_BODY: usize = 16 * 1024;
 
 /// Binds a TCP listener.
 pub async fn tcp(addr: &str) -> Result<TcpListener, String> {
-    TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("cannot listen on {addr}: {e}"))
+    TcpListener::bind(addr).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "cannot listen on {addr}: another program listens there; if it is a center, `nerve-center status` says so (the installed one runs as the service), else give another address (--listen, --ui, --mcp)"
+        ),
+        _ => format!("cannot listen on {addr}: {e}"),
+    })
 }
 
 /// A bound listener that hands each accepted connection, after TLS with the
@@ -404,6 +407,17 @@ mod tests {
             log_level: None,
         })
         .unwrap()
+    }
+
+    /// A port another program holds is said so, with how to tell whether it
+    /// is a center.
+    #[tokio::test]
+    async fn a_taken_port_says_what_to_check() {
+        let held = tcp("127.0.0.1:0").await.unwrap();
+        let at = held.local_addr().unwrap().to_string();
+        let e = tcp(&at).await.unwrap_err();
+        assert!(e.contains("another program listens there"), "{e}");
+        assert!(e.contains("`nerve-center status`"), "{e}");
     }
 
     /// One peer that opens more connections than the port has slots, and

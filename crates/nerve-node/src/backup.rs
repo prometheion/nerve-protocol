@@ -826,7 +826,7 @@ fn write_keys<'a>(
                 Some(_) => {}
                 None => {
                     report.notes.push(
-                        "the relay's TLS key is not in the backup and not here: the relay does not listen until `nerve-node relay set <address>` makes a new key and pin, which the nodes behind it must take".into(),
+                        "the relay's TLS key is not in the backup and not here: the relay does not listen until `nerve-node relay on <address>` makes a new key and pin, which the nodes behind it must take".into(),
                     );
                     report.fix("relay", None);
                 }
@@ -945,9 +945,9 @@ fn write_keys<'a>(
             secrets::store::get(account.account()).ok().flatten()
         } else {
             secrets::store::get(account.account()).map_err(|e| {
-                let how = "start or unlock the keyring (on a Linux without a desktop, `nerve-node setup` can install one if you answer `keyring` where it asks where the keys go)";
+                let how = "start or unlock the keyring (on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install one)";
                 format!(
-                    "cannot read the proxy's header values in the system keyring (entry {account}) to check whose they are: {e}. Restore with --without-proxy and set the proxy again on this machine; or {how}; or take the proxy's header values off the node you back up (`nerve-node proxy rm` there, then back it up again)"
+                    "cannot read the proxy's header values in the system keyring (entry {account}) to check whose they are: {e}. Restore with --without-proxy and set the proxy again on this machine; or {how}; or take the proxy's header values off the node you back up (`nerve-node proxy off` there, then back it up again)"
                 )
             })?
         };
@@ -1035,7 +1035,7 @@ fn ui_note(at: &str, tokens: usize, key_here: bool) -> String {
             format!("its {tokens} tokens")
         };
         format!(
-            "{on}, and {tokens} from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
+            "{on}, and {tokens} from the backup log in to it: `nerve-node ui token` lists them, `nerve-node ui off` turns it off"
         )
     } else {
         format!(
@@ -1162,7 +1162,7 @@ pub fn print_restore(r: &RestoreReport, b: &Parsed, out: &mut dyn std::io::Write
     for c in &r.no_key {
         let _ = writeln!(
             out,
-            "  no node key for {c}: it was not in the backup. Pair it again: `nerve-node center rm --center {c}`, then `nerve-node center add`"
+            "  no node key for {c}: it was not in the backup. Pair it again: `nerve-node center rm {c}`, then `nerve-node center add`"
         );
     }
     for n in &r.notes {
@@ -2213,7 +2213,7 @@ mod tests {
             assert_eq!(
                 r.notes,
                 [
-                    "the restored config turns the web UI on at 0.0.0.0:7470, and its token from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
+                    "the restored config turns the web UI on at 0.0.0.0:7470, and its token from the backup log in to it: `nerve-node ui token` lists them, `nerve-node ui off` turns it off"
                 ]
             );
             assert_eq!(elsewhere.notes.len(), 1, "{elsewhere:?}");
@@ -2587,7 +2587,7 @@ mod tests {
         let err = err.err().unwrap();
         assert!(
             err.contains("to check whose they are")
-                && err.contains("nerve-node setup")
+                && err.contains("config set machine.secret_storage keyring` at a terminal")
                 && err.contains("--without-proxy"),
             "{err}"
         );
@@ -2885,7 +2885,7 @@ mod tests {
         let r = restore(&to, &parsed, &RestoreOpts::default()).unwrap();
         let notes = r.notes.join("\n");
         assert!(
-            notes.contains("relay's TLS key") && notes.contains("relay set"),
+            notes.contains("relay's TLS key") && notes.contains("relay on"),
             "{notes}"
         );
         assert!(notes.contains("proxy's password"), "{notes}");

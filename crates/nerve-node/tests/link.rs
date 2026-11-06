@@ -1295,7 +1295,8 @@ async fn a_new_pairing_refuses_commands_that_drive_the_node_itself() {
     let mut center = FakeCenter::start(false).await.unwrap();
 
     let node = paired_node_with(dir.path(), &center, |p| {
-        assert_eq!(p.deny, nerve_policy::rules::GUARD.to_vec());
+        // The guard is built in: the pairing stores none of it.
+        assert!(p.deny.is_empty(), "{:?}", p.deny);
         p.mode = nerve_policy::Mode::User;
     })
     .await;
@@ -2005,6 +2006,15 @@ async fn a_welcome_without_features_or_resume_is_refused() {
             inc.conn.ends_within(WAIT).await.as_deref(),
             Some("protocol_error"),
             "{field}"
+        );
+        // `status` says what to do: update the center first.
+        let said = node.status()["centers"][0]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            said.starts_with("the center is older than this node: update it first"),
+            "{field}: {said}"
         );
     }
     node.stop().await;

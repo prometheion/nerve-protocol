@@ -29,7 +29,7 @@ pub fn answer(r: Result<Value, String>, windows: bool) -> Result<Value, String> 
             if let Some(p) = v.pointer_mut("/proxy/problem") {
                 reword_value(p);
             }
-            // `relay ls` carries the relay's status as free text.
+            // `relay` carries the relay's status as free text.
             if let Some(p) = v.pointer_mut("/status") {
                 reword_value(p);
             }

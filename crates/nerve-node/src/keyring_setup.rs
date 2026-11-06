@@ -192,7 +192,7 @@ pub fn ensure(
     }
     let Some(input) = input else {
         return Err(format!(
-            "{refusal}; `nerve-node setup`, run in a terminal, offers to install one"
+            "{refusal}; `nerve-node config set machine.secret_storage keyring`, run in a terminal, offers to install one"
         ));
     };
     let store = who.home.join(".local/share/keyrings");

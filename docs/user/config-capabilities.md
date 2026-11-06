@@ -49,12 +49,12 @@ What follows `--` is the command: the program first (a name looked up in
 A summary is at most 2048 bytes, and each word of the command at most 4096
 bytes. This holds for what you write into `node.toml` too.
 
-`--params-stdin` and `--result-stdin` read the schema from stdin instead, for
+`--params -` and `--result -` read the schema from stdin instead, for
 one too long for the command line. Only one of them can come from stdin: add
 the capability with one and `cap edit` the other.
 
 ```sh
-nerve-node cap add logs.tail --effect read --params-stdin -- tail -n 50 -- {path} < tail.json
+nerve-node cap add logs.tail --effect read --params - -- tail -n 50 -- {path} < tail.json
 ```
 
 The node never opens a file of yours for it.
@@ -138,7 +138,7 @@ allow](providers.md), which runs as you and whose paths count only in the
 folders you grant. An entry with an `account` line, from an earlier version,
 is refused: remove the line.
 
-A node you run yourself has no `nerve-run`, so it offers none: `cap ls` shows
+A node you run yourself has no `nerve-run`, so it offers none: `cap` shows
 each one as left out, and why.
 
 Each run counts towards `limits.max_running`, runs in a cgroup of its own
@@ -186,7 +186,7 @@ changes one to, it switches that action off for every center such a switch
 or rule covers, and says which; turn it on for those you mean. `nerve-node
 config accept` does the same for what you wrote into `node.toml` yourself,
 while the node runs; a node that is stopped cannot see what the file had
-before, so take such a change while it runs, or check `cap ls` after. A
+before, so take such a change while it runs, or check `cap` after. A
 switch you set stays when you remove a capability.
 
 A center cannot turn on a capability of yours that has an action that senses
@@ -258,7 +258,7 @@ these limits:
   that center's `on` and allow rules for it out in the same edit. Once the
   entry is gone, `cap rm --center` finds nothing to remove; then switch it
   off with `cap set NAME off --center <name>` and take the rule away with
-  `nerve-node config remove center.<name>.policy.allow 'NAME'` (and the same
+  `nerve-node config rm center.<name>.policy.allow 'NAME'` (and the same
   for the capability as a whole, see next). When it was the last
   one the center keeps under its capability, the `on` and allow rules for
   the capability as a whole (`cap set cam on --center <name>`, the rule
@@ -304,7 +304,7 @@ these limits:
 - **Only the grant stops a center.** An `off` holds for that name only: the
   center may add the same command under another name, with nothing of yours
   to undo. To stop a center from
-  adding commands, take the grant back (`center grant settings off`). That
+  adding commands, take the grant back (`center settings off`). That
   leaves what it added; remove it too if you want it gone.
 
 The installed Linux node takes them. Windows takes none yet (issue
@@ -312,8 +312,8 @@ The installed Linux node takes them. Windows takes none yet (issue
 you run yourself has no `nerve-run`: either refuses the center's add and
 says why.
 
-`cap ls` lists them with the source `center <name>`, and each one's
-command after yours; `cap ls --center <name>` only that center's:
+`cap` lists them with the source `center <name>`, and each one's
+command after yours; `cap --center <name>` only that center's:
 
 ```
 say.back  execute  center lab  lab: on
@@ -324,7 +324,7 @@ capability cam.look (added by center lab, senses: only you turn it on): cam-snap
 
 ## See what is there
 
-`nerve-node cap ls` lists them with the source `config`, each with its
+`nerve-node cap` lists them with the source `config`, each with its
 command:
 
 ```
@@ -342,7 +342,7 @@ in double quotes, with that character written as an escape such as
 `\u202e`, so the line reads as what runs. The audit writes a command the
 same way.
 
-A capability this node does not offer says why. `nerve-node cap ls --json`
+A capability this node does not offer says why. `nerve-node cap --json`
 gives each one as declared under `config`, and those the centers added under
 `added`, each with its `center`.
 

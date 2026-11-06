@@ -442,6 +442,21 @@ const HELP_KEYS = [
 ];
 const GUIDE = "https://github.com/prometheion/nerve-protocol/tree/main/docs/user";
 
+// The folds that are open, by key, so a redraw of the page keeps them so.
+const openFolds = new Set();
+
+// The rest of a short text, folded under `summary` ("More" when empty): the
+// line before it says what counts, a limit included; this holds the why and
+// the detail. `key` names it across redraws.
+function more(key, summary, ...body) {
+  const d = el("details", { class: "more", "data-focus": `more:${key}` },
+    el("summary", {}, el("span", {}, summary || "More"), icon("chev", "sm chev")),
+    el("div", { class: "body" }, body));
+  d.open = openFolds.has(key);
+  d.addEventListener("toggle", () => { if (d.open) openFolds.add(key); else openFolds.delete(key); });
+  return d;
+}
+
 // A part that opens on a click, as the app's Expander: its head stays.
 function expander(title, ic, open, ...body) {
   const d = el("details", { class: "card exp" },
@@ -483,38 +498,43 @@ function segmented(label, options, current, onchoose) {
   return box;
 }
 
-function buildHelp(h) {
+// The command reference: `h` is the CLI's help data (`line`, `more` and
+// `doc` for each card, verb and option); `first` are parts that come before
+// it (the center's Connect a harness and its own commands).
+function buildHelp(h, first) {
   // The lines start after `nerve-node`, which the page says once.
   const words = (usage) => usage.replace(/^nerve-node /, "").replace(" [OPTIONS]", "");
-  const argText = (a) => (a.optional ? "Optional. " : "") + a.about;
-  const args = (list) => el("div", { class: "arg-rows" }, list.map((a) => [el("code", {}, a.name), el("span", {}, argText(a))]));
+  const argRow = (a) => [el("code", {}, a.name), el("span", {}, (a.optional ? "Optional. " : "") + a.line, a.more ? more(`arg:${a.name}:${a.line}`, "More", el("p", {}, a.more)) : null)];
+  const args = (list) => el("div", { class: "arg-rows" }, list.flatMap(argRow));
   const view = { q: "", byName: false };
+  const docLink = (doc) => doc ? el("p", { class: "meta" }, "More in the user guide: ",
+    el("a", { href: `${GUIDE}/${doc}`, target: "_blank", rel: "noopener noreferrer" }, doc)) : null;
 
-  // One row for each card of the CLI definition: a noun with its verbs, or a
-  // command that stands alone, whose own line is the row.
+  // One row for each card of the CLI definition, one line; it opens on a
+  // line per verb, with its options and its long text folded.
   const row = (c, topic) => {
     const alone = c.verbs.length === 1 && c.verbs[0].name === c.name ? c.verbs[0] : null;
-    const line = c.about || (alone ? alone.about : c.verbs.map((v) => v.name).join(", "));
+    const line = c.line || (alone ? alone.line : c.verbs.map((v) => v.name).join(", "));
+    const own = (v) => v.args.concat(c.shared_args || []);
     const verb = (v) => el("div", { class: "verb" },
       el("code", { class: "code" }, words(v.usage)),
-      el("p", {}, v.about),
-      v.args.length ? args(v.args) : null);
+      el("p", {}, v.line),
+      v.more ? more(`verb:${v.name}`, "More", el("p", {}, v.more)) : null,
+      own(v).length ? more(`opts:${v.name}`, `Options (${own(v).length})`, args(own(v))) : null);
     const tag = pill("", topic);
     const d = el("details", { class: "cmd", id: "cmd-" + c.name.replace(/[^\w]+/g, "-") },
       el("summary", {}, el("span", { class: "cmd-name" }, c.name), el("span", { class: "cmd-line" }, line), tag, icon("chev", "sm chev")),
       el("div", { class: "body" },
-        alone
-          ? [el("p", {}, alone.about), words(alone.usage) === c.name ? null : el("code", { class: "code" }, words(alone.usage)), alone.args.length ? args(alone.args) : null]
-          : [c.about ? el("p", {}, c.about) : null, c.verbs.map(verb)],
-        c.shared_args.length ? el("div", {}, el("p", { class: "cap" }, "Several of these take:"), args(c.shared_args)) : null));
-    const text = [c.name, c.about, ...c.verbs.flatMap((v) => [v.name, v.about, ...v.args.map((a) => `${a.name} ${a.about}`)]),
-      ...c.shared_args.map((a) => `${a.name} ${a.about}`)].join("\n").toLowerCase();
+        c.more ? el("p", {}, c.more) : null,
+        alone && words(alone.usage) === c.name && !own(alone).length && !alone.more ? null : c.verbs.map(verb),
+        docLink(c.doc)));
+    const text = [c.name, c.line, c.more, ...c.verbs.flatMap((v) => [v.name, v.line, v.more, ...own(v).map((a) => `${a.name} ${a.line} ${a.more}`)])].join("\n").toLowerCase();
     return { c, d, tag, text };
   };
   const groups = h.sections.map((s) => {
     const rows = s.cards.map((c) => row(c, s.name));
     const count = pill("accent", String(rows.length));
-    const about = s.about ? el("p", { class: "ref-about" }, s.about) : null;
+    const about = s.line ? el("p", { class: "ref-about" }, s.line) : null;
     const body = el("div", { class: "body" });
     const g = el("details", { class: "ref-group" }, el("summary", {}, icon("chev", "sm chev"), s.name, count), body);
     g.open = true;
@@ -527,7 +547,8 @@ function buildHelp(h) {
   function render() {
     const q = view.q.trim().toLowerCase();
     const hit = (r) => !q || r.text.includes(q);
-    for (const r of rows) r.tag.hidden = !view.byName;
+    // A match inside a row opens it, so the hit is in sight.
+    for (const r of rows) { r.tag.hidden = !view.byName; if (q && hit(r)) r.d.open = true; }
     if (view.byName) {
       const shown = rows.filter(hit).sort((a, b) => a.c.name.localeCompare(b.c.name));
       list.replaceChildren(el("div", { class: "ref-flat" }, shown.map((r) => r.d)));
@@ -549,20 +570,19 @@ function buildHelp(h) {
   });
   render();
 
-  const takes = (title, list) => list.length ? el("div", { class: "ref-args" }, el("p", { class: "cap" }, title), args(list)) : null;
   return [
     head("help", "Help", null, null,
       el("a", { class: "btn ghost", href: GUIDE, target: "_blank", rel: "noopener noreferrer" }, icon("external"), "User guide")),
     el("div", { class: "help" },
-      expander("Keyboard shortcuts", "keyboard", false,
-        el("div", { class: "keys" }, HELP_KEYS.map(([k, does]) => el("div", { class: "key-row" }, el("kbd", {}, k), el("span", {}, does))))),
-      expander("Command reference", "terminal", true,
-        el("p", { class: "lead" }, "The commands of nerve-node, the program that links a machine to its centers. Run them in a shell on that machine, and write nerve-node before each line."),
+      ...(first || []),
+      expander("nerve-node commands", "terminal", true,
+        el("p", { class: "lead" }, "Commands of nerve-node. Run them on the machine itself."),
         el("div", { class: "ref-bar" }, filter,
           segmented("Order", ["By topic", "A to Z"], 0, (i) => { view.byName = i === 1; render(); })),
-        takes("Every command takes", h.global),
-        takes("Commands that work on one center also take", h.common),
-        none, list)),
+        none, list,
+        h.options && h.options.length ? more("help:options", `Shared options (${h.options.length})`, args(h.options)) : null),
+      expander("Keyboard shortcuts", "keyboard", false,
+        el("div", { class: "keys" }, HELP_KEYS.map(([k, does]) => el("div", { class: "key-row" }, el("kbd", {}, k), el("span", {}, does)))))),
   ];
 }
 

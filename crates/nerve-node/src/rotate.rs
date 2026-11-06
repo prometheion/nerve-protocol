@@ -70,7 +70,7 @@ pub(crate) async fn end_grace(shared: &Arc<Shared>, center: &str) -> Result<Valu
     let (current, next) = keys(shared, storage, center).await?;
     if next.is_some() {
         return Err(format!(
-            "the rotation of the key for center {center} has not heard back from the center yet; run `nerve-node center rotate-key --center {center}` first, which sends it again"
+            "the rotation of the key for center {center} has not heard back from the center yet; run `nerve-node center rotate-key {center}` first, which sends it again"
         ));
     }
     let retire = KeyRetire {
@@ -138,7 +138,7 @@ fn entry(shared: &Shared, center: &str) -> Result<(SecretStorage, CenterEntry), 
     let e = cfg
         .center(center)
         .cloned()
-        .ok_or_else(|| format!("no center named {center}"))?;
+        .ok_or_else(|| crate::folder_change::no_center_named(&cfg, center))?;
     Ok((cfg.machine.secret_storage, e))
 }
 

@@ -591,9 +591,10 @@ pub fn run(
         | Cmd::Update { .. }
         | Cmd::Uninstall { .. }
         | Cmd::OwnerToken { .. }
+        | Cmd::Status
         | Cmd::ServiceFiles => {
             return Err(
-                "install, update, uninstall, owner-token and service-files are not backup commands"
+                "install, update, uninstall, owner-token, status and service-files are not backup commands"
                     .into(),
             );
         }

@@ -1287,7 +1287,7 @@ mod tests {
         for text in [
             "a harness token was made",
             "no harness token yet: the HTTP endpoint refuses every client",
-            "NERVE_HARNESS_TOKEN or --harness-token",
+            "NERVE_CENTER_HARNESS_TOKEN or --harness-token",
             "exit code: 2 after 5 s",
             "fs.read refused (forbidden): no allow rule matches /etc/hostname",
             "the pin is PIN and the center https://lab.example:7443/x",
@@ -1296,7 +1296,7 @@ mod tests {
             "tokens: 3, passwords are never logged",
             // A flag named like a secret in prose, or with a file or a
             // placeholder for its value, holds no secret.
-            "set --harness-token (NERVE_HARNESS_TOKEN) or use --ui 127.0.0.1:<port>",
+            "set --harness-token (NERVE_CENTER_HARNESS_TOKEN) or use --ui 127.0.0.1:<port>",
             "mysql --password-file /etc/mysql/pw db",
             "usage: tool --token <value> --password $PASS",
             "über ünïcode — täxt with 日本語",

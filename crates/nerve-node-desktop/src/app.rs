@@ -146,7 +146,7 @@ pub struct Ctl {
     /// Which reading of the Permissions page is the latest: an answer for
     /// an earlier one (another center picked meanwhile) is dropped.
     perm_asked: Cell<u64>,
-    /// The same for the Capabilities page, and what `cap ls` said last:
+    /// The same for the Capabilities page, and what `cap` said last:
     /// the entries of node.toml its dialog edits.
     caps_asked: Cell<u64>,
     /// The node's `limits.max_timeout_secs` as the page last read it: the
@@ -159,7 +159,7 @@ pub struct Ctl {
     /// then show as errors until it closes.
     cap_tried: Cell<bool>,
     caps_listing: RefCell<Value>,
-    /// `cap ls` as the Permissions page last read it for its center: the
+    /// `cap` as the Permissions page last read it for its center: the
     /// arguments its rule fields offer (view::rule_hint).
     rule_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
@@ -183,10 +183,10 @@ pub struct Ctl {
     /// and screenshots, which draw without motion.
     motion_source: Cell<Option<MotionSource>>,
     /// Every command of the CLI, for the Help page's reference.
-    reference: Vec<crate::reference::Command>,
+    reference: Vec<crate::reference::Card>,
     /// The commands and topics of the reference the owner opened or closed.
     ref_opened: RefCell<crate::reference::Opened>,
-    /// Where a new relay link says this machine is, as `relay ls` guessed.
+    /// Where a new relay link says this machine is, as `relay` guessed.
     relay_address: RefCell<String>,
 }
 
@@ -820,6 +820,17 @@ impl Ctl {
     /// Shows the node's answer to `status`: the pages that follow it too
     /// (Permissions' mode and account).
     pub fn show_status(self: &Rc<Self>, answer: Result<Value, String>) {
+        // A stopped installed node whose folders this account may not open
+        // answers with its service and why the rest is not shown, no
+        // centers: they are not known, not none (so no first-run steps, and
+        // the pages keep the centers they have).
+        let answer = match answer {
+            Ok(v) if v["unread"].is_string() => Err(format!(
+                "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
+                v["unread"].as_str().unwrap_or_default()
+            )),
+            other => other,
+        };
         match answer {
             Ok(v) => {
                 let (status, centers) = view::status(&v, now_ms());
@@ -1000,20 +1011,20 @@ impl Ctl {
         } else {
             format!("{name} is resumed.")
         };
-        let args = vec!["center".into(), verb.into(), format!("--center={name}")];
+        let args = vec!["center".into(), verb.into(), "--".into(), name.into()];
         self.change(name, args, said);
     }
 
     fn center_grant(self: &Rc<Self>, name: &str, on: bool) {
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
         let said = view::settings_grant_said(name, on, root);
-        let value = if on { "write" } else { "off" };
+        let value = if on { "on" } else { "off" };
         let args = vec![
             "center".into(),
-            "grant".into(),
             "settings".into(),
             value.into(),
-            format!("--center={name}"),
+            "--".into(),
+            name.into(),
         ];
         self.change(name, args, said);
     }
@@ -1084,7 +1095,7 @@ impl Ctl {
         };
         match p {
             Pending::Unpair(name) => {
-                let args = vec!["center".into(), "rm".into(), format!("--center={name}")];
+                let args = vec!["center".into(), "rm".into(), "--".into(), name.clone()];
                 self.change(&name, args, format!("Unpaired {name}."));
             }
             Pending::RotateKey(name) => {
@@ -1096,7 +1107,7 @@ impl Ctl {
                     if end {
                         a.push("--end-grace".into());
                     }
-                    a.push(format!("--center={name}"));
+                    a.extend(["--".into(), name.clone()]);
                     a
                 };
                 let end_grace = args(true);

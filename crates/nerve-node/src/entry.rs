@@ -40,13 +40,20 @@ pub fn main() -> i32 {
     // Events go to stderr. The daemon adds the log file in the state folder and
     // takes its level from `node.toml`.
     nerve_transport::log::install(nerve_transport::log::Level::Info, true);
+    // A folder named by an old variable would be dropped without a word.
+    if let Err(e) = crate::paths::refuse_old_names(|k| std::env::var_os(k)) {
+        eprintln!("{}: {e}", crate::edition::get().program);
+        return 1;
+    }
     // Named after this program, so `--version` and the usage say which one
     // it is (crate::edition).
     let program = crate::edition::get().program;
-    let matches = crate::cli::Cli::command()
-        .name(program)
-        .bin_name(program)
-        .get_matches();
+    // Bare, it shows the commands of every day; `--help` all of them.
+    if std::env::args_os().len() == 1 {
+        println!("{}", crate::cli::everyday(program));
+        return 2;
+    }
+    let matches = crate::cli::help_pages(crate::cli::Cli::command(), program).get_matches();
     let cli = crate::cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // An owner of the installed node, who may not open its folders, has
     // the running node run the command (crate::owner).

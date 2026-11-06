@@ -29,38 +29,29 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
                 Ok(l) => l,
                 Err(e) => return Some(Err(e)),
             };
-            command(ctx, &["center", "add", "--link-stdin"], Some(&link)).await
+            command(ctx, &["center", "add", "-"], Some(&link)).await
         }
         ("POST", "/api/centers/pair") => {
             let link = match link(b) {
                 Ok(l) => l,
                 Err(e) => return Some(Err(e)),
             };
-            let mut args = vec![
-                "center".to_string(),
-                "add".into(),
-                "--link-stdin".into(),
-                "--yes".into(),
-            ];
+            let mut args = vec!["center".to_string(), "add".into(), "--yes".into()];
             if let Some(n) = b["name"].as_str().filter(|n| !n.trim().is_empty()) {
                 args.push(format!("--name={}", n.trim()));
             }
+            args.extend(["--".into(), "-".into()]);
             run(ctx, args, Some(&link)).await
         }
-        ("POST", "/api/centers/pause") => on_center(ctx, b, &["center", "pause"]).await,
-        ("POST", "/api/centers/resume") => on_center(ctx, b, &["center", "resume"]).await,
-        ("POST", "/api/centers/remove") => on_center(ctx, b, &["center", "rm"]).await,
-        ("POST", "/api/centers/rotate") => on_center(ctx, b, &["center", "rotate-key"]).await,
-        ("POST", "/api/centers/grant") => match (center(b), word(b, "what"), word(b, "value")) {
-            (Ok(c), Ok(what), Ok(value)) => {
-                run(
-                    ctx,
-                    args(&["center", "grant"], &[("center", c)], &[what, value]),
-                    None,
-                )
-                .await
+        ("POST", "/api/centers/pause") => named_center(ctx, b, &["center", "pause"]).await,
+        ("POST", "/api/centers/resume") => named_center(ctx, b, &["center", "resume"]).await,
+        ("POST", "/api/centers/remove") => named_center(ctx, b, &["center", "rm"]).await,
+        ("POST", "/api/centers/rotate") => named_center(ctx, b, &["center", "rotate-key"]).await,
+        ("POST", "/api/centers/settings") => match (center(b), word(b, "state")) {
+            (Ok(c), Ok(state)) => {
+                run(ctx, args(&["center", "settings"], &[], &[state, c]), None).await
             }
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+            (Err(e), _) | (_, Err(e)) => Err(e),
         },
         // ---- Permissions ----
         ("GET", "/api/perm") => perm(ctx, query).await,
@@ -73,7 +64,7 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             if let Some(h) = b["hours"].as_u64().filter(|h| *h > 0) {
                 opts.push(("for", h.to_string()));
             }
-            let mut a = vec!["mode".to_string(), "set".into()];
+            let mut a = vec!["mode".to_string()];
             a.extend(opts.iter().map(|(k, v)| format!("--{k}={v}")));
             if b["as_owner"] == true {
                 a.push("--as-owner".into());
@@ -86,43 +77,19 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
         ("POST", "/api/network") => match center(b) {
             Ok(c) => {
                 let state = if b["off"] == true { "off" } else { "on" };
-                run(
-                    ctx,
-                    args(&["folder", "network"], &[("center", c)], &[state]),
-                    None,
-                )
-                .await
+                run(ctx, args(&["network"], &[("center", c)], &[state]), None).await
             }
             Err(e) => Err(e),
         },
         ("POST", "/api/folders/add") => match (center(b), folder(b)) {
             (Ok(c), Ok(p)) => {
-                let mut rights: Vec<&str> = Vec::new();
-                for (key, r) in [("read", "+r"), ("write", "+w"), ("execute", "+x")] {
-                    if b[key] == true {
-                        rights.push(r);
-                    }
-                }
+                let rights = rights(b["read"] == true, b["write"] == true, b["execute"] == true);
                 if rights.is_empty() {
                     return Some(Err((400, "a folder needs at least one right".into())));
                 }
-                let mut values = vec![p];
-                values.extend(rights);
                 run(
                     ctx,
-                    args(&["folder", "add"], &[("center", c)], &values),
-                    None,
-                )
-                .await
-            }
-            (Err(e), _) | (_, Err(e)) => Err(e),
-        },
-        ("POST", "/api/folders/set") => match (center(b), folder(b)) {
-            (Ok(c), Ok(p)) => {
-                let rights = rights(b["read"] == true, b["write"] == true, b["execute"] == true);
-                run(
-                    ctx,
-                    args(&["folder", "set"], &[("center", c)], &[p, &rights]),
+                    args(&["folder", "add"], &[("center", c)], &[p, &rights]),
                     None,
                 )
                 .await
@@ -143,7 +110,6 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
         },
-        ("POST", "/api/rules/guard") => on_center(ctx, b, &["rule", "guard"]).await,
         ("POST", "/api/sudo/off") => command(ctx, &["sudo", "off"], None).await,
         // ---- Audit ----
         ("GET", "/api/audit") => {
@@ -166,10 +132,10 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             Some(c) if !nerve_policy::config::valid_center_name(&c) => {
                 Err((400, format!("{c:?} is not a center name")))
             }
-            Some(c) => command(ctx, &["cap", "ls", &format!("--center={c}")], None)
+            Some(c) => command(ctx, &["cap", &format!("--center={c}")], None)
                 .await
                 .map(with_forms),
-            None => command(ctx, &["cap", "ls"], None).await.map(with_forms),
+            None => command(ctx, &["cap"], None).await.map(with_forms),
         },
         ("POST", "/api/caps/set") => match (center(b), name(b, "cap"), word(b, "setting")) {
             (Ok(c), Ok(cap), Ok(setting)) => {
@@ -214,32 +180,25 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             Err(e) => Err(e),
         },
         ("POST", "/api/programs/allow") => match (name(b, "name"), folder_like(b, "exe")) {
-            (Ok(n), Ok(exe)) => {
-                run(
-                    ctx,
-                    args(&["cap", "provider", "allow"], &[], &[n, exe]),
-                    None,
-                )
-                .await
-            }
+            (Ok(n), Ok(exe)) => run(ctx, args(&["provider", "add"], &[], &[n, exe]), None).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
         ("POST", "/api/programs/remove") => match name(b, "name") {
-            Ok(n) => run(ctx, args(&["cap", "provider", "rm"], &[], &[n]), None).await,
+            Ok(n) => run(ctx, args(&["provider", "rm"], &[], &[n]), None).await,
             Err(e) => Err(e),
         },
         // ---- Relay ----
         ("GET", "/api/relay") => {
-            let relay = match command(ctx, &["relay", "ls"], None).await {
+            let relay = match command(ctx, &["relay"], None).await {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            command(ctx, &["proxy", "ls"], None)
+            command(ctx, &["proxy"], None)
                 .await
                 .map(|proxy| json!({ "relay": relay, "proxy": proxy }))
         }
         ("POST", "/api/relay/set") => match address(b) {
-            Ok(a) => run(ctx, args(&["relay", "set"], &[], &[a]), None).await,
+            Ok(a) => run(ctx, args(&["relay", "on"], &[], &[a]), None).await,
             Err(e) => Err(e),
         },
         ("POST", "/api/relay/off") => command(ctx, &["relay", "off"], None).await,
@@ -273,17 +232,21 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             if let Some(p) = b["pin"].as_str().filter(|p| !p.is_empty()) {
                 opts.push(("pin", p));
             }
-            // The password goes on the input, never in a command line.
+            // The password goes on the input, never in a command line: the
+            // node reads it for a URL with a user name and no password.
             let password = b["password"].as_str().filter(|p| !p.is_empty());
-            let mut a = args(&["proxy", "set"], &opts, &[]);
-            if password.is_some() {
-                a.push("--password-stdin".into());
+            if password.is_some() && !crate::cli::proxy_wants_password(url) {
+                return Some(Err((
+                    400,
+                    "a password goes with a URL that names the user and no password: http://user@host:port".into(),
+                )));
             }
+            let mut a = args(&["proxy", "set"], &opts, &[]);
             a.extend(["--".to_string(), url.to_string()]);
             let input = password.map(|p| format!("{p}\n"));
             run(ctx, a, input.as_deref()).await
         }
-        ("POST", "/api/proxy/remove") => command(ctx, &["proxy", "rm"], None).await,
+        ("POST", "/api/proxy/remove") => command(ctx, &["proxy", "off"], None).await,
         // ---- Settings ----
         ("GET", "/api/settings") => Ok(settings(&ctx.shared.config())),
         ("POST", "/api/settings/set") => match (setting_key(b), b["value"].as_str()) {
@@ -300,7 +263,7 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
     })
 }
 
-/// `cap ls` with the form each capability of your own fills when it is edited.
+/// `cap` with the form each capability of your own fills when it is edited.
 fn with_forms(mut listing: Value) -> Value {
     if let Some(own) = listing["config"].as_array_mut() {
         for entry in own {
@@ -332,10 +295,10 @@ pub(super) fn args(words: &[&str], opts: &[(&str, &str)], values: &[&str]) -> Ve
     a
 }
 
-/// A command on one center of the body's.
-async fn on_center(ctx: &Call<'_>, b: &Value, words: &[&str]) -> ApiResult {
+/// A `center` verb, which takes the center's name as its argument.
+async fn named_center(ctx: &Call<'_>, b: &Value, words: &[&str]) -> ApiResult {
     let c = center(b)?;
-    run(ctx, args(words, &[("center", c)], &[]), None).await
+    run(ctx, args(words, &[], &[c]), None).await
 }
 
 fn center(b: &Value) -> Result<&str, (u16, String)> {
@@ -473,9 +436,10 @@ fn link(b: &Value) -> Result<String, (u16, String)> {
     Ok(format!("{l}\n"))
 }
 
-/// The rights `folder set` takes: `=rwx`, the letters that are on.
+/// The rights `folder add` takes: one word of the letters that are on
+/// (`rwx`); empty for none, which the page does not add.
 fn rights(read: bool, write: bool, execute: bool) -> String {
-    let mut r = String::from("=");
+    let mut r = String::new();
     for (on, c) in [(read, 'r'), (write, 'w'), (execute, 'x')] {
         if on {
             r.push(c);
@@ -495,17 +459,28 @@ fn pattern_rule(text: &str) -> bool {
 }
 
 /// The command that adds `rule` to `list` of center `c`: a pattern goes
-/// into the list as it is, as `config add` puts it there.
+/// into the list as it is, as `config add` puts it there. A command for the
+/// sudo list goes on it as a sudo command of the allow list; the wildcard
+/// covers every command of its program, as the trailing `*` that `rule add`
+/// reads.
 pub(super) fn rule_add(c: &str, list: &str, rule: &str, wildcard: bool) -> Vec<String> {
     if list != "sudo" && pattern_rule(rule) {
         let key = format!("center.{c}.policy.{list}");
         return args(&["config", "add"], &[], &[&key, rule]);
     }
+    let (list, rule) = match list {
+        "sudo" if nerve_policy::sudo_command(rule.trim()).is_none() => {
+            ("allow", format!("sudo {}", rule.trim()))
+        }
+        "sudo" => ("allow", rule.to_string()),
+        l => (l, rule.to_string()),
+    };
+    let rule = match wildcard {
+        true => crate::cli::wildcard_target("exec", "run", &rule),
+        false => rule,
+    };
     let mut a = args(&["rule", "add"], &[("center", c)], &[]);
-    if wildcard {
-        a.push("--wildcard".into());
-    }
-    a.extend(["--".to_string(), list.to_string(), rule.to_string()]);
+    a.extend(["--".to_string(), list.to_string(), rule]);
     a
 }
 
@@ -517,9 +492,9 @@ async fn perm(ctx: &Call<'_>, q: &Request) -> ApiResult {
         return Err((400, "center is missing".into()));
     }
     let at = format!("--center={c}");
-    let rules = command(ctx, &["rule", "ls", &at], None).await?;
-    let folders = command(ctx, &["folder", "ls", &at], None).await?;
-    let sudo = command(ctx, &["sudo", "status"], None).await?;
+    let rules = command(ctx, &["rule", &at], None).await?;
+    let folders = command(ctx, &["folder", &at], None).await?;
+    let sudo = command(ctx, &["sudo"], None).await?;
     Ok(json!({ "rules": rules, "folders": folders, "sudo": sudo }))
 }
 
@@ -638,7 +613,7 @@ fn from_end(
     Ok(())
 }
 
-/// The rule an audit entry's buttons add, as `rule ls` will show it: none
+/// The rule an audit entry's buttons add, as `rule` will show it: none
 /// for an entry no rule can name.
 fn rule_preview(e: &Value) -> Option<String> {
     let (cap, action, target) = (
@@ -667,7 +642,11 @@ fn rules_of(e: &Value) -> Value {
     );
     let one = |deny: bool, wildcard: bool| {
         let list = list_of(cap, action, target, deny);
-        match list.action_rule(&format!("{cap}.{action}"), target, wildcard, None) {
+        let target = match wildcard {
+            true => crate::cli::wildcard_target(cap, action, target),
+            false => target.to_string(),
+        };
+        match list.action_rule(&format!("{cap}.{action}"), &target, None, !wildcard) {
             Ok(rule) => json!({ "list": list_word(list), "rule": visible(&rule) }),
             Err(why) => json!({ "error": why }),
         }
@@ -700,7 +679,7 @@ fn list_word(list: List) -> &'static str {
 }
 
 /// `text` with every character that would hide what it says written out:
-/// tabs and line breaks as `rule ls` writes them, any other control or
+/// tabs and line breaks as `rule` writes them, any other control or
 /// direction mark as `\u{…}`.
 fn visible(text: &str) -> String {
     nerve_policy::rules::escape_controls(text)
@@ -733,7 +712,11 @@ fn audit_rule(b: &Value) -> Result<Vec<String>, (u16, String)> {
             "the target was cut to its start, so no rule can name it".into(),
         ));
     }
-    let list = list_word(list_of(cap, action, target, b["list"] == "deny"));
+    // A sudo command goes on the sudo list by itself.
+    let list = match list_of(cap, action, target, b["list"] == "deny") {
+        List::Deny => "deny",
+        List::Allow | List::Sudo => "allow",
+    };
     let scope = format!("{cap}.{action}");
     let mut opts = vec![("action", scope.as_str()), ("center", c)];
     let pin = b["pin"].as_str().filter(|p| !p.is_empty());
@@ -741,13 +724,20 @@ fn audit_rule(b: &Value) -> Result<Vec<String>, (u16, String)> {
         if !p.contains('=') {
             return Err((400, "pin is FIELD=VALUE".into()));
         }
-        opts.push(("pin", p));
+        opts.push(("arg", p));
     }
+    // The exact buttons take the agent's command as it is: its `rm -rf *`
+    // is not the wildcard the owner types.
+    let wildcard = b["wildcard"] == true;
+    let target = match wildcard {
+        true => crate::cli::wildcard_target(cap, action, target),
+        false => target.to_string(),
+    };
     let mut a = args(&["rule", "add"], &opts, &[]);
-    if b["wildcard"] == true {
-        a.push("--wildcard".into());
+    if !wildcard {
+        a.push("--exact".into());
     }
-    a.extend(["--".to_string(), list.to_string(), target.to_string()]);
+    a.extend(["--".to_string(), list.to_string(), target]);
     Ok(a)
 }
 
@@ -779,15 +769,16 @@ mod tests {
         );
         assert_eq!(
             rule_add("home", "allow", "git status", true),
-            [
-                "rule",
-                "add",
-                "--center=home",
-                "--wildcard",
-                "--",
-                "allow",
-                "git status"
-            ]
+            ["rule", "add", "--center=home", "--", "allow", "git *"]
+        );
+        // A command for the sudo list is a sudo command of the allow list.
+        assert_eq!(
+            rule_add("home", "sudo", "apt update", false)[4..],
+            ["allow", "sudo apt update"]
+        );
+        assert_eq!(
+            rule_add("home", "sudo", "sudo apt update", true)[4..],
+            ["allow", "sudo apt *"]
         );
         // A pattern goes into the list as `config add` puts it there.
         assert_eq!(
@@ -835,6 +826,7 @@ mod tests {
                 "add",
                 "--action=exec.run",
                 "--center=home",
+                "--exact",
                 "--",
                 "allow",
                 "git\tlog"
@@ -846,10 +838,10 @@ mod tests {
             audit_rule(&sudo).unwrap().last().unwrap(),
             "sudo apt update"
         );
-        assert!(audit_rule(&sudo).unwrap().contains(&"sudo".to_string()));
+        assert!(audit_rule(&sudo).unwrap().contains(&"allow".to_string()));
         let pinned = json!({"center": "home", "cap": "lamp", "action": "set", "target": "x", "list": "deny", "pin": "room=office"});
         let a = audit_rule(&pinned).unwrap();
-        assert!(a.contains(&"--pin=room=office".to_string()), "{a:?}");
+        assert!(a.contains(&"--arg=room=office".to_string()), "{a:?}");
         assert!(a.contains(&"deny".to_string()));
         assert_eq!(
             rule_preview(&json!({"cap": "fs", "action": "read", "target": "/etc/\u{202e}x\u{7}"}))
@@ -886,6 +878,13 @@ mod tests {
         assert_eq!(r["wildcard"]["list"], "sudo");
         assert_eq!(r["wildcard"]["rule"], "sudo -n apt *");
         assert_eq!(r["deny"]["list"], "deny");
+        // The exact buttons keep a `*` the agent's command ends in.
+        let r = entry("exec", "run", "rm -rf *");
+        assert_eq!(r["allow"]["rule"], "exec.run:rm -rf [*]");
+        assert_eq!(r["deny"]["rule"], "exec.run:rm -rf [*]");
+        assert_eq!(r["wildcard"]["rule"], "exec.run:rm *");
+        let r = entry("exec", "run", "sudo chown -R me *");
+        assert_eq!(r["allow"]["rule"], "sudo chown -R me [*]");
         // A rule that cannot be made says why, and has no rule to show.
         let r = entry("fs", "read", "relative/path");
         assert!(r["allow"]["error"].is_string(), "{r}");

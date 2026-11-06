@@ -15,7 +15,7 @@ starts with the machine.
     "nerve": {
       "command": "nerve-center",
       "env": {
-        "NERVE_NAME": "lab"
+        "NERVE_CENTER_NAME": "lab"
       }
     }
   }
@@ -41,17 +41,16 @@ cat ~/.local/state/nerve-center/owner-token
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--name` | `NERVE_NAME` | `nerve-center` | Name shown to nodes and in the web UI |
-| `--state-dir` | `NERVE_STATE_DIR` | see [install](install.md#where-files-live) | Identity, paired machines, statistics |
-| `--listen` | `NERVE_LISTEN` | `0.0.0.0:7443` | Where nodes connect |
-| `--public-url` | `NERVE_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links |
-| `--plain-loopback` | `NERVE_PLAIN_LOOPBACK` | off | Plain HTTP for nodes; only with a loopback `--listen` |
-| `--ui` | `NERVE_UI` | `127.0.0.1:7480` | Web UI address, or `off` |
-| `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http` or `none` |
-| `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | Address of the HTTP MCP endpoint |
-| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | A [harness token](harness.md#tokens) for the HTTP MCP endpoint; it does not log in to the web UI |
-| `--call-wait` | `NERVE_CALL_WAIT` | `20s` | How long a call may run before `execute` answers with a job instead ([long calls](harness.md#long-calls-become-jobs)): `20`, `20s` or `500ms`, 10 ms to 600 s. Keep it below the time your harness gives a tool call |
-| `--log` | `NERVE_LOG` | the level set in the web UI, `info` at first | `error`, `warn`, `info` or `debug`; wins over the stored level for this run. The [log](logs.md) goes to stderr and to `log.jsonl` |
+| `--name` | `NERVE_CENTER_NAME` | `nerve-center` | Name shown to nodes and in the web UI |
+| `--state-dir` | `NERVE_CENTER_STATE_DIR` | see [install](install.md#where-files-live) | Identity, paired machines, statistics |
+| `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | Where nodes connect |
+| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links |
+| `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | Plain HTTP for nodes; only with a loopback `--listen` |
+| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | Web UI address, or `off` |
+| `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off`, `http` (HTTP MCP at `127.0.0.1:7481`) or the address of the HTTP MCP endpoint |
+| `--harness-token` | `NERVE_CENTER_HARNESS_TOKEN` | none | A [harness token](harness.md#tokens) for the HTTP MCP endpoint; it does not log in to the web UI |
+| `--call-wait` | `NERVE_CENTER_CALL_WAIT` | `20s` | How long a call may run before `execute` answers with a job instead ([long calls](harness.md#long-calls-become-jobs)): `20`, `20s` or `500ms`, 10 ms to 600 s. Keep it below the time your harness gives a tool call |
+| `--log` | `NERVE_CENTER_LOG` | the level set in the web UI, `info` at first | `error`, `warn`, `info` or `debug`; wins over the stored level for this run. The [log](logs.md) goes to stderr and to `log.jsonl` |
 
 `nerve-center --help` prints the same list.
 
@@ -125,7 +124,7 @@ center running on its own, pick another mode:
 
 ```sh
 nerve-center --mcp http --harness-token "$TOKEN"   # MCP over HTTP
-nerve-center --mcp none                            # nodes and web UI only
+nerve-center --mcp off                             # nodes and web UI only
 ```
 
 On Linux with systemd, let it [run as a service](#run-it-as-a-service).
@@ -137,7 +136,7 @@ The first `nerve-center` on a state folder runs the center. A second one with
 one center, each with its own session. The first one keeps running until the
 attached harnesses have ended too.
 
-A second one with `--mcp http` or `--mcp none` refuses to start. On Windows a
+A second one with `--mcp http` or `--mcp off` refuses to start. On Windows a
 second instance cannot attach and fails.
 
 ## Back it up
@@ -213,12 +212,12 @@ and log in with it. To see it again, or to make a new one:
 
 ```sh
 sudo cat /var/lib/nerve-center/owner-token
-sudo nerve-center --state-dir /var/lib/nerve-center owner-token --new
+sudo nerve-center owner-token --new
 ```
 
 Harnesses on this machine use the HTTP MCP endpoint,
 `http://127.0.0.1:7481/mcp`, with the harness token of the settings file
-(`sudo grep NERVE_HARNESS_TOKEN /etc/nerve-center/center.env`) or one made
+(`sudo grep NERVE_CENTER_HARNESS_TOKEN /etc/nerve-center/center.env`) or one made
 in the web UI ([harness](harness.md)). A harness cannot start its own
 `nerve-center` on this machine while the service runs: the node port is
 taken.
@@ -238,10 +237,8 @@ into it, with its pairings, [back it up](backup.md#the-center) and restore
 it into the service's state folder while the service is stopped:
 
 ```sh
-nerve-center backup ~/nerve-center.bak     # as you, on the center you ran
-sudo systemctl stop nerve-center
-sudo nerve-center --state-dir /var/lib/nerve-center restore ~/nerve-center.bak --replace
-sudo systemctl start nerve-center
+nerve-center --state-dir ~/.local/state/nerve-center backup ~/nerve-center.bak   # as you, on the center you ran
+sudo nerve-center restore ~/nerve-center.bak --replace   # stops the service and starts it again
 ```
 
 Stop the center you ran yourself for good: the service has its key now.
@@ -256,7 +253,7 @@ sudo nano /etc/nerve-center/center.env
 sudo systemctl restart nerve-center
 ```
 
-The service runs with `--mcp http` unless the file sets `NERVE_MCP`;
+The service runs with `--mcp http` unless the file sets `NERVE_CENTER_MCP`;
 `stdio` does not work there, as no harness gives it an input. The state
 folder is fixed. The settings file belongs to root, so the center cannot
 change how it is started.
@@ -269,7 +266,7 @@ unit also keeps it from the kernel interfaces a center never needs: it may
 not make namespaces, open other sockets than IPv4, IPv6 and Unix ones, or
 make system calls outside systemd's `@system-service` set, and it cannot
 see other processes or change kernel settings, the clock or the host name.
-A `NERVE_LISTEN` on a port below 1024 fails; use a higher port, or forward
+A `NERVE_CENTER_LISTEN` on a port below 1024 fails; use a higher port, or forward
 one to it.
 
 ### Update

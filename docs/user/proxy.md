@@ -5,8 +5,8 @@ for the whole node, for every center.
 
 ```sh
 nerve-node proxy set http://proxy.example:3128
-nerve-node proxy ls
-nerve-node proxy rm
+nerve-node proxy
+nerve-node proxy off
 ```
 
 The node opens the TLS link to the center inside a `CONNECT` tunnel. The
@@ -35,7 +35,7 @@ as an option after a space.
 Without `--pin` the proxy's certificate must be one this machine trusts. The
 user name and password of an `https://` proxy are kept with the node's own
 keys, where `machine.secret_storage` says: a file in the config folder by
-default, or the system keyring ([config](config.md)). `proxy ls` shows the
+default, or the system keyring ([config](config.md)). `proxy` shows the
 pin and the user name, never the password.
 
 ## A proxy that wants a login
@@ -57,14 +57,14 @@ stdin, and the headers after it, one a line (the desktop app does this):
 
 ```sh
 printf '%s\n' "$PASSWORD" 'X-Proxy-Token: abc' |
-  nerve-node proxy set http://user@proxy.example:3128 --password-stdin --headers-stdin
+  nerve-node proxy set http://user@proxy.example:3128 --header -
 ```
 
 The values are secrets. The node keeps them in the system keyring (Keychain,
 Credential Manager, Secret Service), in one entry named `proxy:<config folder>`
 under the service `nerve`. `node.toml` keeps the URL without the login and the
 header names. The values never reach a file, the audit log, a log line or an
-error. `proxy ls` prints header names only.
+error. `proxy` prints header names only.
 
 A user name and password in the URL become a `Proxy-Authorization: Basic`
 header. Do not give that header yourself in the same call.
@@ -102,7 +102,7 @@ The node does not fall back to a direct connection. If the proxy is down, the
 link stays down. If a keyring entry is missing or unreadable, the link stays
 down and `nerve-node status` shows `bad proxy:` with the reason (on Windows the
 app's **Overview**, which asks the node over its
-[control pipe](platforms.md#the-control-pipe)). `proxy ls` and
+[control pipe](platforms.md#the-control-pipe)). `proxy` and
 the node's [log](logs.md) have the reason too.
 
 On a Linux machine with no Secret Service (no desktop session), `proxy set`

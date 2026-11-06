@@ -486,10 +486,10 @@ async fn listen(
     let id = tokio::task::spawn_blocking(move || crate::secrets::relay_tls(&paths, storage))
         .await
         .map_err(|e| format!("the key read stopped: {e}"))??
-        .ok_or("the relay has no TLS certificate; `nerve-node relay set <address>` makes one")?;
+        .ok_or("the relay has no TLS certificate; `nerve-node relay on <address>` makes one")?;
     if cfg.relay.pin.as_deref() != Some(id.pin().as_str()) {
         return Err(
-            "the relay's TLS key is not the one relay.pin names; `nerve-node relay set <address>` makes a new one"
+            "the relay's TLS key is not the one relay.pin names; `nerve-node relay on <address>` makes a new one"
                 .into(),
         );
     }
@@ -586,7 +586,7 @@ const TOO_OFTEN: Refusal = Refusal {
 /// in the clear, and nothing is tunnelled.
 const PLAIN: Refusal = Refusal {
     status: 400,
-    why: "the relay speaks TLS only: set it as an https:// proxy with its pin (`nerve-node relay ls` on the relay shows the pin)",
+    why: "the relay speaks TLS only: set it as an https:// proxy with its pin (`nerve-node relay` on the relay shows the pin)",
 };
 
 /// A `CONNECT` the relay grants: whose it is and where it goes.
@@ -2143,7 +2143,7 @@ mod tests {
         for l in [&work, &nowhere] {
             assert!(tokio::time::timeout(QUIET, l.accept()).await.is_err());
         }
-        // `relay set-centers` takes home away: its tunnel ends.
+        // `relay set --to` takes home away: its tunnel ends.
         j.daemon
             .owner_edit(|c| c.relay.nodes[0].centers = vec!["work".into()]);
         assert!(
@@ -2544,7 +2544,7 @@ mod tests {
         j.daemon.stop().await;
     }
 
-    /// `relay ls` asks the running node (its socket, on Windows its pipe)
+    /// `relay` asks the running node (its socket, on Windows its pipe)
     /// and names the tunnels; `relay token` and `relay rm` say when the old
     /// token stops working and the tunnels end: at once where the node took
     /// the change, else at its next start (Windows), and the relay does as
@@ -2582,7 +2582,7 @@ mod tests {
         let (_, _, t) = connect(j.addr, &j.pin, &home_at, Some(&lab)).await;
         let mut t = t.unwrap();
         round_trip(&mut t, b"up").await;
-        let ls = cli(&["relay", "ls"]).await;
+        let ls = cli(&["relay"]).await;
         assert!(
             ls.contains("tunnel lab from 127.0.0.1:") && ls.contains(" to center home for "),
             "{ls}"

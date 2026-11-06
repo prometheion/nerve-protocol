@@ -87,25 +87,43 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     )));
 
     let mut ui = None;
+    let mut page = None;
     if let Some(a) = ui_addr {
         let tls = !is_loopback(&a);
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
-        tasks.push(tokio::spawn(
-            Ui::new(&center, token.as_deref(), !tls).serve(server),
-        ));
+        let u = Ui::new(&center, token.as_deref(), !tls);
+        page = Some(u.clone());
+        tasks.push(tokio::spawn(u.serve(server)));
     }
 
     let mut mcp = None;
-    if args.mcp == McpMode::Http {
-        let tls = !is_loopback(&args.mcp_listen);
-        let server = Server::bind(&args.mcp_listen, &center, !tls).await?;
+    let told = |mode: &str, url: Option<String>, pin: Option<String>| {
+        if let Some(p) = &page {
+            p.set_mcp(mode, url, pin);
+        }
+    };
+    match &args.mcp {
+        McpMode::Stdio => told("stdio", None, None),
+        McpMode::Off => told("off", None, None),
+        McpMode::Http(_) => {}
+    }
+    if let McpMode::Http(at) = &args.mcp {
+        let tls = !is_loopback(at);
+        let server = Server::bind(at, &center, !tls).await?;
         mcp = Some(server.local_addr());
+        // The URL a harness on this machine uses, or the address it was
+        // given beyond it, with the certificate's pin to trust.
+        let url = match tls {
+            true => format!("{}/mcp", crate::config::address_url(at)),
+            false => format!("http://{}/mcp", server.local_addr()),
+        };
+        told("http", Some(url), tls.then(|| center.pin()).flatten());
         if !has_token {
             center.log().record(
                 Level::Warn,
                 None,
-                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI or set with NERVE_HARNESS_TOKEN",
+                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI (Settings, Harness tokens) or set with NERVE_CENTER_HARNESS_TOKEN",
             );
         }
         tasks.push(tokio::spawn(HttpMcp::new(&center, token).serve(server)));
@@ -274,7 +292,7 @@ pub async fn run(args: Args) -> Result<(), String> {
                 }
             }
         }
-        McpMode::Http | McpMode::None => signal().await,
+        McpMode::Http(_) | McpMode::Off => signal().await,
     }
     running.stop().await;
     Ok(())

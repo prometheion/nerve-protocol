@@ -220,7 +220,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let link = center.link().render();
     let (ok, said) = sh(Command::new(BIN).args(["center", "add", &link, "--yes"]));
     assert!(ok, "{said}");
-    let (ok, said) = sh(Command::new(BIN).args(["mode", "set", "user"]));
+    let (ok, said) = sh(Command::new(BIN).args(["mode", "user"]));
     assert!(ok, "{said}");
     let mut conn = linked(&mut center).await;
     let e = run(&mut conn, work, "id -u").await.unwrap_err();
@@ -255,9 +255,9 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(text.contains("mode user, as root"), "{text}");
     // The settings grant gives a center root here, and says so.
     let warning = "Warning: root is the owner of this node, so";
-    let (ok, said) = sh(Command::new(BIN).args(["center", "grant", "settings", "write"]));
+    let (ok, said) = sh(Command::new(BIN).args(["center", "settings", "on"]));
     assert!(ok && said.contains(warning), "{said}");
-    assert!(sh(Command::new(BIN).args(["center", "grant", "settings", "off"])).0);
+    assert!(sh(Command::new(BIN).args(["center", "settings", "off"])).0);
 
     // User mode runs as root, with root's home.
     let mut conn = linked(&mut center).await;
@@ -274,17 +274,17 @@ async fn root_is_the_owner_only_when_it_says_so() {
 
     // Allowlist mode as the owner runs as root too, as nerve-run without.
     assert!(sh(Command::new(BIN).args(["rule", "add", "allow", "id -u"])).0);
-    assert!(sh(Command::new(BIN).args(["mode", "set", "allowlist", "--as-owner"])).0);
+    assert!(sh(Command::new(BIN).args(["mode", "allowlist", "--as-owner"])).0);
     let r = run(&mut conn, work, "id -u").await.unwrap();
     assert_eq!(out(&r), "0\n", "{r}");
-    assert!(sh(Command::new(BIN).args(["mode", "set", "allowlist"])).0);
+    assert!(sh(Command::new(BIN).args(["mode", "allowlist"])).0);
     let run_uid = sh(Command::new("id").args(["-u", "nerve-run"])).1;
     let r = run(&mut conn, Path::new("/tmp"), "id -u").await.unwrap();
     assert_eq!(out(&r), run_uid, "{r}");
 
     // Folder mode runs as nerve-run, in the folder root gives it.
-    assert!(sh(Command::new(BIN).args(["mode", "set", "folder"])).0);
-    let (ok, said) = sh(Command::new(BIN).args(["folder", "add", "/srv/nrv151", "+rwx"]));
+    assert!(sh(Command::new(BIN).args(["mode", "folder"])).0);
+    let (ok, said) = sh(Command::new(BIN).args(["folder", "add", "/srv/nrv151", "rwx"]));
     assert!(ok, "{said}");
     let r = run(&mut conn, work, "id -un").await.unwrap();
     assert_eq!(out(&r), "nerve-run\n", "{r}");
@@ -326,7 +326,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_is_root"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("daemon: not running")
+        text.contains("node: not running")
             && text.contains("owner: root is the owner: commands of user mode"),
         "{text}"
     );
@@ -391,7 +391,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let (ok, said) = sh(Command::new(BIN)
         .args(["folder", "add"])
         .arg(&proj)
-        .arg("+rwx"));
+        .arg("rwx"));
     assert!(ok, "{said}");
     let mut conn = linked(&mut center).await;
     let r = run(&mut conn, &proj, "cat a.txt").await.unwrap();
@@ -400,7 +400,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(has_entry(&a, &run_uid), "{}", acl(&a));
     // On alice's node the settings grant warns of nothing, but root, made
     // the owner, is told that the center has it.
-    let (ok, said) = sh(Command::new(BIN).args(["center", "grant", "settings", "write"]));
+    let (ok, said) = sh(Command::new(BIN).args(["center", "settings", "on"]));
     assert!(ok && !said.contains(warning), "{said}");
     let (ok, said) =
         sh(Command::new(&exe).args(["install", "--owner=root", "--accept-root-owner"]));
@@ -411,7 +411,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
         ),
         "{said}"
     );
-    assert!(sh(Command::new(BIN).args(["center", "grant", "settings", "off"])).0);
+    assert!(sh(Command::new(BIN).args(["center", "settings", "off"])).0);
     assert!(
         said.contains("the owner of the node changes, so took nerve-run's access"),
         "{said}"
@@ -563,8 +563,8 @@ async fn a_program_of_root_attaches_as_a_provider() {
     let link = center.link().render();
     let (ok, said) = sh(Command::new(BIN).args(["center", "add", &link, "--yes"]));
     assert!(ok, "{said}");
-    assert!(sh(Command::new(BIN).args(["mode", "set", "user"])).0);
-    let (ok, said) = sh(Command::new(BIN).args(["cap", "provider", "allow", "rootprov", &python]));
+    assert!(sh(Command::new(BIN).args(["mode", "user"])).0);
+    let (ok, said) = sh(Command::new(BIN).args(["provider", "add", "rootprov", &python]));
     assert!(ok, "{said}");
     let mut conn = linked(&mut center).await;
 

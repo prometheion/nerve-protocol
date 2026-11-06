@@ -7,13 +7,13 @@ change it for you. `nerve-node config` reaches any setting by its name.
 ## Read and change by name
 
 A name is a dotted path. A center's settings are under `center.<name>`, where
-`<name>` is the name from `nerve-node center ls`.
+`<name>` is the name from `nerve-node center`.
 
 ```sh
 nerve-node config get center.lab.policy.mode
 nerve-node config set center.lab.policy.mode folder
 nerve-node config add center.lab.policy.allow 'fs.read:~/notes/*'
-nerve-node config remove center.lab.policy.allow 'fs.read:~/notes/*'
+nerve-node config rm center.lab.policy.allow 'fs.read:~/notes/*'
 nerve-node config unset limits.max_running
 nerve-node config get center.lab          # a whole table
 ```
@@ -24,7 +24,7 @@ nerve-node config get center.lab          # a whole table
 | `config set <key> <value>` | Change a setting |
 | `config unset <key>` | Remove it, so its default applies |
 | `config add <key> <value>` | Append to a list |
-| `config remove <key> <value>` | Remove a value from a list |
+| `config rm <key> <value>` | Remove a value from a list |
 | `config accept` | Take a file you edited by hand |
 
 A value that does not fit the setting is refused, and nothing changes.
@@ -71,8 +71,8 @@ max_opens_per_minute = 30   # tunnels one relayed node may open a minute
 name = "lab-pc"
 token_sha256 = "…"          # the hash of its token; the token is in no file
 centers = ["home"]          # optional: the centers it may reach; every one without it
-max_links = 12              # optional, `relay set-limits`: its own tunnels at once
-max_opens_per_minute = 300  # optional, `relay set-limits`: its own opens a minute
+max_links = 12              # optional, `relay set`: its own tunnels at once
+max_opens_per_minute = 300  # optional, `relay set`: its own opens a minute
 
 [ui]                        # the node's web UI, set with `nerve-node ui`; off without listen
 listen = "127.0.0.1:7470"
@@ -127,7 +127,7 @@ The file also holds its `format` (1; a newer version's file is refused, see
 a `version` that grows with every write, `locked`
 (set by `panic`), and per center the `url`, `pin`, `center_id` and `node_id`
 the pairing filled in, and the capabilities that center added with the
-settings grant (`[[center.capability]]`; `cap ls` lists them, `cap rm NAME
+settings grant (`[[center.capability]]`; `cap` lists them, `cap rm NAME
 --center NAME` removes one). Unknown keys are refused. `places` is the node's
 record of the folders `folder add` stored ([modes](modes.md#a-folder-keeps-the-place-you-added)).
 
@@ -290,7 +290,7 @@ kind of rule as one for a shell script that reads your files. Confining
 `allowlist` commands for the keyring's sake would also stop programs a rule
 is there to run when they need your session (`ssh` with its agent, `git` with a
 credential helper), and it would still leave an allowed interpreter free to
-read what you read. Look at what you allow with `nerve-node rule ls allow`.
+read what you read. Look at what you allow with `nerve-node rule allow`.
 
 With `keyring`, the node needs a keyring that answers. Without one it does
 not start, and `status` and the other commands that read the settings say:
@@ -300,13 +300,15 @@ machine.secret_storage is "keyring", but the system keyring cannot be reached (e
 ```
 
 The node never falls back to the files. Start the keyring, or on a Linux
-without a desktop, let `setup` install one.
+without a desktop, `nerve-node config set machine.secret_storage keyring`
+offers to install one.
 
 ### A keyring on a Linux without a desktop
 
-A server without a desktop usually has no keyring. When you choose `keyring`
-in `nerve-node setup` (on the installed node too, without `sudo`), or
-the settings say `keyring` and no keyring answers, setup asks:
+A server without a desktop usually has no keyring. When you set
+`nerve-node config set machine.secret_storage keyring` (on the installed node
+too, without `sudo`), or the settings already say `keyring` and `nerve-node
+setup` finds no keyring answering, it asks:
 
 ```
 No system keyring answers for nerve: ….
@@ -360,6 +362,6 @@ node, the command says:
 the change is in node.toml; it takes effect at the next start of the node
 ```
 
-On Windows a running node takes `folder add`, `folder set` and `folder rm`
+On Windows a running node takes `folder add` and `folder rm`
 at once ([the control pipe](platforms.md#the-control-pipe)); every other
 change it takes at its next start.

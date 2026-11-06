@@ -25,8 +25,8 @@
 //! the installed node with its keys in the system keyring pairs a center,
 //! starts again with the key it keeps there, and still runs a folder mode
 //! command as `nerve-run`, which reaches neither the node's session bus nor
-//! its keyring folder. It expects the node installed and `setup` done with the
-//! keyring (`.github/scripts/keyring-end-to-end.sh` does both): `NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=<the owner>
+//! its keyring folder. It expects the node installed and its keys moved into the
+//! keyring (`config set machine.secret_storage keyring`) (`.github/scripts/keyring-end-to-end.sh` does both): `NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=<the owner>
 //! ... --ignored --exact the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run`.
 
 #![cfg(target_os = "linux")]
@@ -208,9 +208,11 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains(told), "{st}");
     // The owner's setup, without sudo, gets the answers typed into it.
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-142\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     assert!(said.contains("No center is paired"), "{said}");
+    let (ok, said) = as_owner(&owner, &["config", "set", "node.name", "real-142"]);
+    assert!(ok, "{said}");
     let (_, name) = as_owner(&owner, &["config", "get", "node.name"]);
     assert!(name.contains("real-142"), "{name}");
     let (ok, id) = sh(Command::new("id").arg("nerve-run"));
@@ -278,7 +280,7 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
         r#"import json, socket
 s = socket.socket(socket.AF_UNIX)
 s.connect("/run/" + "nerve-node/owner.sock")
-s.sendall((json.dumps({"method": "cli", "params": {"args": ["mode", "set", "user"], "cwd": "/"}}) + "\n").encode())
+s.sendall((json.dumps({"method": "cli", "params": {"args": ["mode", "user"], "cwd": "/"}}) + "\n").encode())
 print(s.makefile().readline())
 "#,
     )
@@ -321,7 +323,7 @@ except OSError as e:
     let link = center.link().render();
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rwx"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "rwx"]);
     assert!(ok, "{said}");
     assert!(
         said.contains("warning: nerve-run did not get every folder"),
@@ -343,12 +345,12 @@ except OSError as e:
     // Opened, the grant is tried again with the next change.
     chmod(&shut, "755");
     let p = proj.to_str().unwrap();
-    assert!(as_owner(&owner, &["folder", "set", p, "-x"]).0);
-    let (ok, said) = as_owner(&owner, &["folder", "set", p, "+x"]);
+    assert!(as_owner(&owner, &["folder", "add", p, "rw"]).0);
+    let (ok, said) = as_owner(&owner, &["folder", "add", p, "rwx"]);
     assert!(ok && !said.contains("warning"), "{said}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains("did not get every folder"), "{st}");
-    let (_, ls) = as_owner(&owner, &["--json", "center", "ls"]);
+    let (_, ls) = as_owner(&owner, &["--json", "center"]);
     let ls: Value = serde_json::from_str(ls.trim()).unwrap();
     assert_eq!(ls["centers"][0]["mode"], "folder", "{ls}");
     // A folder named like a word of the command, given by a relative path,
@@ -357,7 +359,7 @@ except OSError as e:
     std::fs::create_dir_all(&named).unwrap();
     chown(&named);
     for args in [
-        &["folder", "add", "folder", "+r"][..],
+        &["folder", "add", "folder", "r"][..],
         &["folder", "rm", "folder"],
     ] {
         let (ok, said) = sh(Command::new("runuser")
@@ -410,12 +412,7 @@ except OSError as e:
     assert_eq!(out(&r), "from-the-unit|none|none|path\n", "{r}");
     let (ok, said) = as_owner(
         &owner,
-        &[
-            "config",
-            "remove",
-            "machine.command_env",
-            "NERVE_REAL_SECRET",
-        ],
+        &["config", "rm", "machine.command_env", "NERVE_REAL_SECRET"],
     );
     assert!(ok, "{said}");
     // Its folder, /tmp and its home: read and write.
@@ -584,7 +581,7 @@ except OSError as e:
     // The owner socket refuses it: it is not the owner.
     let r = run(&mut conn, &proj, "python3 ask.py").await.unwrap();
     assert!(out(&r).contains("not the owner"), "{r}");
-    let (_, ls) = as_owner(&owner, &["--json", "center", "ls"]);
+    let (_, ls) = as_owner(&owner, &["--json", "center"]);
     let ls: Value = serde_json::from_str(ls.trim()).unwrap();
     assert_eq!(ls["centers"][0]["mode"], "folder", "{ls}");
 
@@ -595,15 +592,15 @@ except OSError as e:
     // list does not name is refused.
     let (ok, said) = typing(Command::new(BIN).args(["sudo", "on"]), "first-pass-142\n");
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "id -un"]);
+    let (ok, said) = as_owner(&owner, &["rule", "add", "allow", "sudo id -un"]);
     assert!(ok, "{said}");
     pw("second-pass-142");
     let r = run(&mut conn, &proj, "sudo id -un").await.unwrap();
     assert_eq!(out(&r), "root\n", "{r}");
     // A leading `-n` goes; another option of sudo is refused with the
     // reason, also where the sudo list names the line.
-    for line in ["-n id -un", "-E id -un"] {
-        let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "--", line]);
+    for line in ["sudo -n id -un", "sudo -E id -un"] {
+        let (ok, said) = as_owner(&owner, &["rule", "add", "allow", "--", line]);
         assert!(ok, "{said}");
     }
     let r = run(&mut conn, &proj, "sudo -n id -un").await.unwrap();
@@ -620,7 +617,7 @@ except OSError as e:
     std::fs::create_dir(&odd).unwrap();
     chown(&odd);
     chmod(&odd, "700");
-    let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "pwd -P"]);
+    let (ok, said) = as_owner(&owner, &["rule", "add", "allow", "sudo pwd -P"]);
     assert!(ok, "{said}");
     let r = run(&mut conn, &odd, "sudo pwd -P").await.unwrap();
     assert_eq!(out(&r), format!("{}\n", odd.display()), "{r}");
@@ -666,7 +663,7 @@ except OSError as e:
         "{shown}"
     );
     // Given again, for uninstall to take off; `x` to run a command there.
-    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rx"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "rx"]);
     assert!(ok, "{said}");
     let r = run(&mut conn, &proj, "cat given.txt").await.unwrap();
     assert_eq!(out(&r), "given\n", "{r}");
@@ -690,16 +687,16 @@ except OSError as e:
     let other = base.join("other");
     std::fs::create_dir_all(&other).unwrap();
     chown(&other);
-    assert!(as_owner(&owner, &["mode", "set", "allowlist"]).0);
-    let (ok, said) = as_owner(&owner, &["folder", "add", other.to_str().unwrap(), "+r"]);
+    assert!(as_owner(&owner, &["mode", "allowlist"]).0);
+    let (ok, said) = as_owner(&owner, &["folder", "add", other.to_str().unwrap(), "r"]);
     assert!(ok && !said.contains("do not count"), "{said}");
     assert!(
         getfacl(&other).contains(&format!("\nuser:{run_uid}:r-x")),
         "{}",
         getfacl(&other)
     );
-    assert!(as_owner(&owner, &["mode", "set", "allowlist", "--as-owner"]).0);
-    let (ok, said) = as_owner(&owner, &["folder", "set", other.to_str().unwrap(), "+x"]);
+    assert!(as_owner(&owner, &["mode", "allowlist", "--as-owner"]).0);
+    let (ok, said) = as_owner(&owner, &["folder", "add", other.to_str().unwrap(), "rx"]);
     assert!(ok, "{said}");
     for p in [&proj, &other] {
         assert!(
@@ -711,9 +708,9 @@ except OSError as e:
     let third = base.join("third");
     std::fs::create_dir_all(&third).unwrap();
     chown(&third);
-    let (ok, said) = as_owner(&owner, &["folder", "add", third.to_str().unwrap(), "+r"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", third.to_str().unwrap(), "r"]);
     assert!(ok && said.contains("do not count"), "{said}");
-    assert!(as_owner(&owner, &["mode", "set", "folder"]).0);
+    assert!(as_owner(&owner, &["mode", "folder"]).0);
     let r = run(&mut conn, &proj, "cat given.txt").await.unwrap();
     assert_eq!(out(&r), "given\n", "{r}");
     drop(conn);
@@ -978,7 +975,7 @@ async fn the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as
     let link = center.link().render();
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", base.to_str().unwrap(), "+rwx"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", base.to_str().unwrap(), "rwx"]);
     assert!(ok, "{said}");
     no_key_files("after pairing");
     let paired = center.paired().expect("paired");
@@ -1166,7 +1163,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
     chmod(&home, "750");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-b4\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
 
     // The owner's files: a folder to give, with a subfolder only the owner
@@ -1204,13 +1201,13 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let link = center.link().render();
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rw"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "rw"]);
     assert!(ok, "{said}");
     // The owner closes the subfolder to everyone but itself after the grant:
     // nerve-run may not look into it, the owner's program may.
     chmod(&shut, "700");
     assert!(sh(Command::new("setfacl").arg("-b").arg(&shut)).0);
-    let (ok, said) = as_owner(&owner, &["cap", "provider", "allow", "pathprov", &python]);
+    let (ok, said) = as_owner(&owner, &["provider", "add", "pathprov", &python]);
     assert!(ok, "{said}");
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
@@ -1249,7 +1246,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     assert!(first.contains("\"ok\""), "{first}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(st.contains("provider pathprov attached: files"), "{st}");
-    let (_, ls) = as_owner(&owner, &["cap", "ls"]);
+    let (_, ls) = as_owner(&owner, &["cap"]);
     assert!(
         ls.contains(&format!("program pathprov: {python}, attached")),
         "{ls}"
@@ -1341,7 +1338,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let _ = std::fs::remove_file(linked.join("to"));
     std::os::unix::fs::symlink(other, linked.join("to")).unwrap();
     chmod(linked, "755");
-    let (ok, said) = as_owner(&owner, &["folder", "add", "/var/lib", "+r"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", "/var/lib", "r"]);
     assert!(ok, "{said}");
     let e = files_call(&mut conn, "open", &other.join("x"))
         .await
@@ -1368,7 +1365,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     // call all the same (the program would follow it), one that stays in
     // the folder does not.
     for args in [
-        &["mode", "set", "allowlist"][..],
+        &["mode", "allowlist"][..],
         // The rule an audit entry's button makes for the capability.
         &["rule", "add", "allow", "", "--action", "files.open"],
     ] {
@@ -1392,8 +1389,8 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     // refused, though it runs the allowed program, and the name is free:
     // the owner lets the attached one go first.
     for args in [
-        &["cap", "provider", "rm", "pathprov"][..],
-        &["cap", "provider", "allow", "pathprov", &python],
+        &["provider", "rm", "pathprov"][..],
+        &["provider", "add", "pathprov", &python],
     ] {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{said}");
@@ -1406,7 +1403,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
         assert!(gone.elapsed() < WAIT, "the provider stays attached");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(as_owner(&owner, &["mode", "set", "user"]).0);
+    assert!(as_owner(&owner, &["mode", "user"]).0);
     let hello = format!("{python} {script} - /dev/null");
     let r = run(&mut conn, &proj, &hello).await.unwrap();
     assert!(
@@ -1484,7 +1481,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
     chmod(&home, "750");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-b5\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
 
     // The owner's files: a folder to give, a file only the owner may read
@@ -1522,9 +1519,9 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let link = center.link().render();
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rw"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "rw"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", shared.to_str().unwrap(), "+r"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", shared.to_str().unwrap(), "r"]);
     assert!(ok, "{said}");
     let path_params = r#"{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}"#;
     let word_params = r#"{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]}"#;
@@ -1602,7 +1599,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         let (ok, said) = as_owner(&owner, &["cap", "set", cap, "on"]);
         assert!(ok, "{said}");
     }
-    let (_, ls) = as_owner(&owner, &["cap", "ls"]);
+    let (_, ls) = as_owner(&owner, &["cap"]);
     assert!(
         ls.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
             == ["files.show", "read", "config", "conformance-center:", "on"]),
@@ -1744,7 +1741,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     // A pairing whose commands run as the owner: its commands run as the
     // owner once the node took the change, the capability still as
     // nerve-run.
-    assert!(as_owner(&owner, &["mode", "set", "user"]).0);
+    assert!(as_owner(&owner, &["mode", "user"]).0);
     let mut as_the_owner = false;
     for _ in 0..100 {
         if let Ok(r) = run(&mut conn, &home, "id -un").await
@@ -1824,7 +1821,7 @@ async fn as_account(conn: &mut Conn<TcpStream>, name: &str) -> Value {
 /// each call is decided as the rule says (a deny pin wins over any allow, an
 /// allow pin in allowlist mode covers its values only), the audit log keeps
 /// the decision with the arguments, a rule naming an argument the action does
-/// not take is refused, and `rule ls` says which rule no longer fits once the
+/// not take is refused, and `rule` says which rule no longer fits once the
 /// capability changes. For a test machine only, as root: it installs the node
 /// and removes it again.
 ///
@@ -1844,7 +1841,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-c1\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     let mut center = FakeCenter::start(false).await.unwrap();
     let link = center.link().render();
@@ -1861,7 +1858,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert!(ok, "{said}");
     // User mode: the deny pin refuses its room, every other one runs.
     for args in [
-        &["mode", "set", "user"][..],
+        &["mode", "user"][..],
         &["rule", "add", "deny", "lamp.set:room=bedroom"],
     ] {
         let (ok, said) = as_owner(&owner, args);
@@ -1899,7 +1896,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     // Allowlist mode: the allow pins cover their values only, and the deny
     // pin wins over an allow rule that covers its call.
     for args in [
-        &["mode", "set", "allowlist"][..],
+        &["mode", "allowlist"][..],
         &["rule", "add", "allow", "lamp.set:level<=5"],
         &[
             "rule",
@@ -1908,14 +1905,14 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
             "",
             "--action",
             "lamp.set",
-            "--pin",
+            "--arg",
             "room=kitchen",
         ],
     ] {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{args:?}: {said}");
     }
-    let (_, ls) = as_owner(&owner, &["rule", "ls"]);
+    let (_, ls) = as_owner(&owner, &["rule"]);
     for line in [
         "allow  lamp.set:level<=5",
         "allow  lamp.set:room=kitchen",
@@ -1985,7 +1982,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     );
 
     // The capability takes no room now: the rules that name it stay, and
-    // `rule ls` says what they do.
+    // `rule` says what they do.
     let (ok, said) = as_owner(
         &owner,
         &[
@@ -2001,7 +1998,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
         ],
     );
     assert!(ok, "{said}");
-    let (_, ls) = as_owner(&owner, &["rule", "ls"]);
+    let (_, ls) = as_owner(&owner, &["rule"]);
     assert!(
         ls.contains("warning: the deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it"),
         "{ls}"
@@ -2043,7 +2040,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-limits\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     // `status` says the service's cgroup holds all three.
     let (_, st) = as_owner(&owner, &["--json", "status"]);
@@ -2072,7 +2069,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     let link = center.link().render();
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
-    let (ok, said) = as_owner(&owner, &["folder", "add", work.to_str().unwrap(), "+rwx"]);
+    let (ok, said) = as_owner(&owner, &["folder", "add", work.to_str().unwrap(), "rwx"]);
     assert!(ok, "{said}");
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
@@ -2215,7 +2212,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     assert!(sh(Command::new("usermod").args(["-aG", "sudo", &owner])).0);
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-167\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     let run_home = Path::new("/var/lib/nerve-run");
     // What an earlier version's command left under a center's name: never
@@ -2258,12 +2255,12 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
             "{name}: {said}"
         );
         for args in [
-            &["mode", "set", "folder", "--center", name][..],
+            &["mode", "folder", "--center", name][..],
             &[
                 "folder",
                 "add",
                 work.to_str().unwrap(),
-                "+rwx",
+                "rwx",
                 "--center",
                 name,
             ],
@@ -2394,7 +2391,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     // pairing's folders: the grant is cut around it.
     let (ok, said) = as_owner(
         &owner,
-        &["folder", "add", "/var/lib", "+r", "--center", "home"],
+        &["folder", "add", "/var/lib", "r", "--center", "home"],
     );
     assert!(ok, "{said}");
     let e = fs_call(
@@ -2427,7 +2424,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     // every pairing's folders, so they stay closed to the call all the same,
     // whatever the rules say; its own home is open.
     for args in [
-        &["mode", "set", "allowlist", "--center", "home"][..],
+        &["mode", "allowlist", "--center", "home"][..],
         &["config", "add", "center.home.policy.allow", "fs"],
     ] {
         let (ok, said) = as_owner(&owner, args);
@@ -2477,8 +2474,8 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     .unwrap();
     assert_eq!(r["paths"].as_array().map(Vec::len), Some(1), "{r}");
     for args in [
-        &["config", "remove", "center.home.policy.allow", "fs"][..],
-        &["mode", "set", "folder", "--center", "home"],
+        &["config", "rm", "center.home.policy.allow", "fs"][..],
+        &["mode", "folder", "--center", "home"],
     ] {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{args:?}: {said}");
@@ -2506,7 +2503,10 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     let (ok, said) = typing(Command::new(BIN).args(["sudo", "on"]), "pass-167\n");
     assert!(ok, "{said}");
     for name in ["lab", "home"] {
-        let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "id -un", "--center", name]);
+        let (ok, said) = as_owner(
+            &owner,
+            &["rule", "add", "allow", "sudo id -un", "--center", name],
+        );
         assert!(ok, "{said}");
     }
 
@@ -2514,14 +2514,14 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     // Landlock, so its commands run but open no TCP or UDP socket, which the
     // other pairing's still do, and no command of its sudo list runs. Without
     // the filter none of its commands runs, and the node says why.
-    let (ok, said) = as_owner(&owner, &["folder", "network", "off", "--center", "lab"]);
+    let (ok, said) = as_owner(&owner, &["network", "off", "--center", "lab"]);
     assert!(ok, "{said}");
     assert_eq!(
         said.contains("warning: the owner turned the network off"),
         !filter,
         "{said}"
     );
-    let (_, ls) = as_owner(&owner, &["folder", "ls", "--center", "lab"]);
+    let (_, ls) = as_owner(&owner, &["folder", "--center", "lab"]);
     assert!(ls.contains("its commands have no network"), "{ls}");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -2575,7 +2575,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
 
     // The pairing goes, and its folders with what they hold; the other's
     // stay.
-    let (ok, said) = as_owner(&owner, &["center", "rm", "--center", "home"]);
+    let (ok, said) = as_owner(&owner, &["center", "rm", "home"]);
     assert!(ok, "{said}");
     until("the home pairing's folders go", || {
         !run_home.join("home").exists()

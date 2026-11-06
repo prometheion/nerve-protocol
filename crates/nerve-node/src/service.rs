@@ -883,15 +883,20 @@ pub fn install_asking(
         done: Vec::new(),
         out,
     };
+    // At a terminal (`input`) setup's questions follow (crate::cli), else
+    // what to run.
+    let terminal = input.is_some();
     let r = install_steps(layout, sys, keyring, input, root, exe, invoker, &mut steps);
     audit(&layout.paths, "install", &steps.done, &r, steps.out);
     r?;
-    let _ = writeln!(steps.out, "{NEXT}");
+    if !terminal {
+        let _ = writeln!(steps.out, "{NEXT}");
+    }
     Ok(())
 }
 
 /// What `install` says to do next: the headless way to a working pairing.
-const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> +rwx` gives it a folder to read, write and run commands in.";
+pub(crate) const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
 
 #[allow(clippy::too_many_arguments)]
 fn install_steps(
@@ -1917,7 +1922,7 @@ impl ServiceAction {
     }
 }
 
-/// The installed service, as `service status` says it.
+/// The installed service, as `status` says it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceState {
     /// running, stopped, starting, stopping or failed.
@@ -1953,7 +1958,7 @@ fn unit_state_of(shown: &str) -> ServiceState {
     }
 }
 
-/// `service status`: whether the node is installed as a service here, its
+/// `status`'s `service`: whether the node is installed as a service here, its
 /// state (`None`: not installed), and the program it runs with its version.
 /// Anyone may ask; the program says its version as the one who asks.
 pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_json::Value {
@@ -4657,17 +4662,14 @@ pub(crate) mod tests {
     /// run in: folder mode needs `x` on a command's working folder.
     #[test]
     fn the_folder_install_suggests_lets_commands_run() {
-        let rights: Vec<String> = NEXT
+        let rights = NEXT
             .split("folder add <folder> ")
             .nth(1)
             .unwrap()
             .split('`')
             .next()
-            .unwrap()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        let a = crate::folder_change::FolderChange::new_rights(&rights).unwrap();
+            .unwrap();
+        let a = crate::folder_change::FolderChange::new_rights(rights).unwrap();
         assert!(a.read && a.write && a.execute, "{a:?}");
     }
 }

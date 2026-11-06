@@ -608,7 +608,7 @@ async fn a_command_in_flight_does_not_undo_a_panic() {
     daemon.stop().await;
 }
 
-/// A port that is taken is said by `ui on` and `ui status`, and the node
+/// A port that is taken is said by `ui on` and `ui`, and the node
 /// listens once it is free.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_taken_port_is_told() {
@@ -621,7 +621,7 @@ async fn a_taken_port_is_told() {
     let (out, code) = cli(&at, &["ui", "on", "--listen", &listen]).await;
     assert_eq!(code, 0, "{out}");
     assert!(out.contains(&format!("cannot listen on {listen}")), "{out}");
-    let (out, _) = cli(&at, &["ui", "status"]).await;
+    let (out, _) = cli(&at, &["ui"]).await;
     assert!(out.contains("cannot listen"), "{out}");
     assert!(out.contains("tokens: first"), "{out}");
     // Free again, the node listens there at its next try.
@@ -738,7 +738,7 @@ async fn beyond_loopback_the_ui_is_tls_with_its_own_certificate() {
             "on",
             "--listen",
             "0.0.0.0:0",
-            "--name",
+            "--host",
             "node.example",
         ],
     )
@@ -761,7 +761,7 @@ async fn beyond_loopback_the_ui_is_tls_with_its_own_certificate() {
     assert_eq!(printed, nerve_node::cli::ui::fingerprint(&id.cert_der));
     let pin = daemon.config().ui.pin.clone().unwrap();
     assert_eq!(pin, id.pin());
-    let (out, _) = cli(&at, &["ui", "status"]).await;
+    let (out, _) = cli(&at, &["ui"]).await;
     assert!(out.contains(&printed), "{out}");
 
     let port = ui_address(&daemon).unwrap().port();
@@ -958,7 +958,7 @@ fn a_command_from_the_web_may_not_change_the_web_ui() {
     }
     let (code, out) = run(&web, &["ui", "token", "rm", "laptop"]);
     assert_eq!(code, 0, "{out}");
-    let (code, out) = run(&web, &["ui", "token", "ls"]);
+    let (code, out) = run(&web, &["ui", "token"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("phone") && !out.contains("laptop"), "{out}");
     // Root as owner has the owner's rights here, not root's.
@@ -1031,8 +1031,8 @@ async fn the_centers_page_pairs_and_manages_a_center() {
     change(
         addr,
         &s,
-        "/api/centers/grant",
-        json!({"center": "lab", "what": "settings", "value": "write"}),
+        "/api/centers/settings",
+        json!({"center": "lab", "state": "on"}),
     )
     .await;
     assert_eq!(
@@ -1042,9 +1042,9 @@ async fn the_centers_page_pairs_and_manages_a_center() {
     // What the command refuses comes back as its error.
     let a = post(
         addr,
-        "/api/centers/grant",
+        "/api/centers/settings",
         &s,
-        json!({"center": "lab", "what": "all", "value": "write"}),
+        json!({"center": "lab", "state": "write"}),
     )
     .await;
     assert_eq!(a.status, 400, "{}", a.body);
@@ -1127,7 +1127,7 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
     change(
         addr,
         &s,
-        "/api/folders/set",
+        "/api/folders/add",
         json!({"center": "lab", "path": path, "read": true, "write": true}),
     )
     .await;
@@ -1233,7 +1233,7 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
     daemon.stop().await;
 }
 
-/// `center add --link-stdin` takes the link from the first line of its
+/// `center add -` takes the link from the first line of its
 /// input, as the web UI passes it, and only then.
 #[test]
 fn the_pairing_link_comes_from_stdin_when_asked() {
@@ -1258,16 +1258,16 @@ fn the_pairing_link_comes_from_stdin_when_asked() {
             String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr),
         )
     };
-    let (code, out) = run(&["center", "add", "--link-stdin", "--yes"], "\n");
+    let (code, out) = run(&["center", "add", "-", "--yes"], "\n");
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("first line of stdin is empty"), "{out}");
     // The line is the link, read as one.
-    let (code, out) = run(&["center", "add", "--link-stdin", "--yes"], "not-a-link\n");
+    let (code, out) = run(&["center", "add", "-", "--yes"], "not-a-link\n");
     assert_eq!(code, 1, "{out}");
     assert!(!out.contains("stdin is empty"), "{out}");
     let (code, out) = run(&["center", "add"], "");
-    assert_eq!(code, 2, "a link or --link-stdin: {out}");
-    let (code, out) = run(&["center", "add", "nerve://pair?x", "--link-stdin"], "");
+    assert_eq!(code, 2, "a link or -: {out}");
+    let (code, out) = run(&["center", "add", "nerve://pair?x", "-"], "");
     assert_eq!(code, 2, "not both: {out}");
 }
 
@@ -1324,7 +1324,7 @@ async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_comm
     assert!(daemon.config().connection.proxy.is_some());
     let said = std::fs::read_to_string(&log).unwrap();
     let line = said.lines().find(|l| l.contains("proxy set")).unwrap();
-    assert!(line.contains("--password-stdin"), "{line}");
+    assert!(line.ends_with("-- https://alice@127.0.0.1:3128"), "{line}");
     assert!(!said.contains("pw-0123456789"), "{said}");
     assert_eq!(std::fs::read_to_string(&input).unwrap(), "pw-0123456789\n");
     let a = post(addr, "/api/proxy/set", &s, json!({"url": "--pin=x"})).await;
@@ -1367,37 +1367,19 @@ async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_comm
         400
     );
 
-    // A center's guard: a pairing has it, and the page puts back a rule that
-    // was taken away.
-    let guard_rule = daemon.config().center("lab").unwrap().policy.deny[0].clone();
+    // The guard is built in: the page has no route to put it on, and a
+    // rule of it cannot be removed.
     let a = post(addr, "/api/rules/guard", &s, json!({"center": "lab"})).await;
-    assert_eq!(a.status, 400, "the guard is there already: {}", a.body);
-    change(
+    assert_eq!(a.status, 404, "{}", a.body);
+    let a = post(
         addr,
-        &s,
         "/api/rules/remove",
-        json!({"center": "lab", "list": "deny", "rule": guard_rule}),
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": nerve_policy::rules::GUARD[0]}),
     )
     .await;
-    assert!(
-        !daemon
-            .config()
-            .center("lab")
-            .unwrap()
-            .policy
-            .deny
-            .contains(&guard_rule)
-    );
-    change(addr, &s, "/api/rules/guard", json!({"center": "lab"})).await;
-    assert!(
-        daemon
-            .config()
-            .center("lab")
-            .unwrap()
-            .policy
-            .deny
-            .contains(&guard_rule)
-    );
+    assert_eq!(a.status, 400, "{}", a.body);
+    assert!(a.body.contains("built in"), "{}", a.body);
     // The sudo list is closed, a setting taken away, a key rotated.
     change(addr, &s, "/api/sudo/off", json!({})).await;
     assert!(
@@ -1421,7 +1403,7 @@ async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_comm
     let a = post(addr, "/api/centers/rotate", &s, json!({"center": "lab"})).await;
     let said = std::fs::read_to_string(&log).unwrap();
     assert!(
-        said.contains("center rotate-key --center=lab") || said.contains("center rotate-key lab"),
+        said.contains("center rotate-key -- lab"),
         "{said}\n{}",
         a.body
     );

@@ -255,9 +255,9 @@ switches are on [Capabilities](#capabilities).
 
 On **Permissions**, the **Mode** names who runs the commands: in folder
 mode `nerve-run`, in user mode you; in allowlist mode **Run them as you**
-switches between `nerve-run` and you (`mode set allowlist --as-owner`). In
+switches between `nerve-run` and you (`mode allowlist --as-owner`). In
 every mode **No network for its commands** keeps them off the network
-(`folder network off`); in a mode where they run as you, or on a machine
+(`network off`); in a mode where they run as you, or on a machine
 where the node cannot keep them off it, the page then says that none of
 that center's commands runs, and it says that no command of its sudo list
 runs meanwhile. On **Centers**, a banner says when nothing keeps the
@@ -284,11 +284,8 @@ your home** when your home is open to other accounts or a folder you gave
 lies in it ([modes](modes.md#your-home-and-other-accounts)). With Landlock
 neither shows.
 
-On **Permissions**, a center that lacks the guard against changing the node
-(you took a rule of it off) shows **Add the guard**, and one that still holds
-the guard's older text patterns, which keep working, shows **Update the
-guard**. Both run `rule guard`
-([rules](rules.md#the-guard-against-changing-the-node)).
+The guard against changing the node is built in on **Permissions** as on
+the CLI ([rules](rules.md#the-guard-against-changing-the-node)).
 
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
@@ -298,7 +295,7 @@ installed node keeps its keys in files ([Windows](service.md#windows)).
 
 ## Capabilities
 
-**Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap ls`
+**Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap`
 does: its own capabilities, the [capabilities of your
 `node.toml`](config-capabilities.md) and those of the programs you allow
 ([providers](providers.md)). Each action, and each state key, event or
@@ -315,7 +312,7 @@ center [added itself](config-capabilities.md#capabilities-a-center-adds)
 shows with the source `center <name>`, its switches and the whole command
 it runs, over as many lines as it takes, and only while that center is
 chosen: its line for the agent is the center's own words, so read the
-command before you turn on one that senses or acts (`nerve-node cap ls
+command before you turn on one that senses or acts (`nerve-node cap
 --center <name>` prints it too). Remove it with `nerve-node cap rm NAME --center <name>`.
 A stopped node shows its own capabilities and those of `node.toml`; the
 programs' show while it runs.
@@ -335,7 +332,7 @@ read it, stays in the form with its reason. Removing one
 (`cap rm`) asks first.
 
 **Programs** lists the programs allowed as providers, whether each is
-attached, and a row to allow one by its name and its file (`cap provider
+attached, and a row to allow one by its name and its file (`provider
 allow`), which **Choose…** picks.
 
 A node run by hand offers no capabilities of `node.toml` (they run as
@@ -478,9 +475,11 @@ A click on the page that is open reads nothing again; **Refresh** does.
 ## Help
 
 **Help** lists these keys and, on Linux, has the command reference: every
-`nerve-node` command by topic or from A to Z, with a filter. A command opens
-on its arguments, an example, and a button to the place in the app that does
-the same. The keys, the reference, each topic and each command open and close
+`nerve-node` command by topic or from A to Z, with a filter, one row per
+command card as on the web UI. A row opens on its commands, each with its
+line, an example and a button to the place in the app that does the same; its
+options fold under **Options**, and the row ends on its page of this guide.
+The keys, the reference, each topic, each row and each fold open and close
 on their own. On Windows Help has the keys and no command reference: there
 the app is the only way to the node, and every page it would point to is in
 the sidebar.

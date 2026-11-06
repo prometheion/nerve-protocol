@@ -23,26 +23,22 @@ impl Ctl {
         Some(self.runner().run(&["service", "restart"]).map(|_| ()))
     }
 
-    /// The installed service's state, from `service status`, which needs no
-    /// rights; asked only for the node of the service's folders.
+    /// The installed service's state, from `status`, which needs no rights;
+    /// asked only for the node of the service's folders.
     pub(super) fn refresh_service(self: &Rc<Self>) {
         if !self.service.get() || self.asking_service.replace(true) {
             return;
         }
-        self.command(
-            vec!["service".into(), "status".into()],
-            None,
-            |c, answer| {
-                c.asking_service.set(false);
-                if let Ok(v) = answer {
-                    let state = v["state"].as_str().unwrap_or("none").to_string();
-                    c.with_store(|s| {
-                        s.set_service_state(state.into());
-                        s.set_service_enabled(v["enabled"] == true);
-                    });
-                }
-            },
-        );
+        self.command(vec!["status".into()], None, |c, answer| {
+            c.asking_service.set(false);
+            if let Ok(v) = answer.map(|v| v["service"].clone()) {
+                let state = v["state"].as_str().unwrap_or("none").to_string();
+                c.with_store(|s| {
+                    s.set_service_state(state.into());
+                    s.set_service_enabled(v["enabled"] == true);
+                });
+            }
+        });
     }
 
     /// Restarts the installed service for the changes that wait for it
@@ -271,12 +267,7 @@ impl Ctl {
             2 if pair_step == 2 => self.setup_go(3),
             2 => self.pair(&link, &pair_name, pair_step == 1),
             3 => {
-                let args = vec![
-                    "mode".into(),
-                    "set".into(),
-                    mode,
-                    format!("--center={center}"),
-                ];
+                let args = vec!["mode".into(), mode, format!("--center={center}")];
                 self.setup_run(args, 4, false);
             }
             _ => {

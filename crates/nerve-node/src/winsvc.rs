@@ -58,7 +58,7 @@ pub trait WinSystem {
     fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String>;
     /// The service: `None` when it is not registered, else whether it runs.
     fn service(&self) -> Result<Option<bool>, String>;
-    /// The service's state for `service status`; `None` when it is not
+    /// The service's state for `status`; `None` when it is not
     /// registered.
     fn service_state(&self) -> Result<Option<ServiceState>, String>;
     /// Registers the service, or changes it: `layout.bin` with the folders,

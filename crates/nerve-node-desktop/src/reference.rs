@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use slint::{Model, ModelRc, SharedString, VecModel};
 
-use crate::{HelpArg, Page, RefGroup, RefRow};
+use crate::{HelpArg, Page, RefGroup, RefRow, RefVerb};
 
 /// Where in the app a command's work is done: the page, the tab of
 /// Settings (-1 for none), and its name in words; no page when the app
@@ -46,11 +46,6 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Overview), -1, "Overview › Restart"),
     ),
     (
-        "service status",
-        "nerve-node service status",
-        (Some(Page::Overview), -1, "Overview"),
-    ),
-    (
         "setup",
         "nerve-node setup",
         (
@@ -81,32 +76,32 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "center rm",
-        "nerve-node center rm --center lab",
+        "nerve-node center rm lab",
         (Some(Page::Centers), -1, "Centers › Unpair"),
     ),
     (
-        "center ls",
-        "nerve-node center ls",
+        "center",
+        "nerve-node center",
         (Some(Page::Centers), -1, "Centers"),
     ),
     (
         "center pause",
-        "nerve-node center pause --center lab",
+        "nerve-node center pause lab",
         (Some(Page::Centers), -1, "Centers › Pause"),
     ),
     (
         "center resume",
-        "nerve-node center resume --center lab",
+        "nerve-node center resume lab",
         (Some(Page::Centers), -1, "Centers › Resume"),
     ),
     (
         "center rotate-key",
-        "nerve-node center rotate-key --center lab",
+        "nerve-node center rotate-key lab",
         (Some(Page::Centers), -1, "Centers › New key"),
     ),
     (
-        "center grant",
-        "nerve-node center grant settings write --center lab",
+        "center settings",
+        "nerve-node center settings on lab",
         (Some(Page::Centers), -1, "Centers › Settings grant"),
     ),
     (
@@ -115,18 +110,18 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "proxy rm",
-        "nerve-node proxy rm",
+        "proxy off",
+        "nerve-node proxy off",
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "proxy ls",
-        "nerve-node proxy ls",
+        "proxy",
+        "nerve-node proxy",
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "relay set",
-        "nerve-node relay set 0.0.0.0:7490",
+        "relay on",
+        "nerve-node relay on 0.0.0.0:7490",
         (Some(Page::Relay), -1, "Relay › Turn on"),
     ),
     (
@@ -140,13 +135,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Relay), -1, "Relay › Add a node"),
     ),
     (
-        "relay set-centers",
-        "nerve-node relay set-centers lab-pc --center home",
-        (Some(Page::Relay), -1, "Relay › Centers and limits"),
-    ),
-    (
-        "relay set-limits",
-        "nerve-node relay set-limits lab-pc --max-links 12",
+        "relay set",
+        "nerve-node relay set lab-pc --to home --max-links 12",
         (Some(Page::Relay), -1, "Relay › Centers and limits"),
     ),
     (
@@ -160,27 +150,26 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Relay), -1, "Relay › Remove"),
     ),
     (
-        "relay ls",
-        "nerve-node relay ls",
+        "relay",
+        "nerve-node relay",
         (Some(Page::Relay), -1, "Relay"),
     ),
     // The web UI is the node's other way in from a browser; the app does
     // not switch it.
     ("ui", "nerve-node ui", NOT_HERE),
-    ("ui status", "nerve-node ui status", NOT_HERE),
     ("ui on", "nerve-node ui on", NOT_HERE),
     ("ui off", "nerve-node ui off", NOT_HERE),
     ("ui token add", "nerve-node ui token add laptop", NOT_HERE),
-    ("ui token ls", "nerve-node ui token ls", NOT_HERE),
+    ("ui token", "nerve-node ui token", NOT_HERE),
     ("ui token rm", "nerve-node ui token rm laptop", NOT_HERE),
     (
-        "mode set",
-        "nerve-node mode set folder --center lab",
+        "mode",
+        "nerve-node mode folder --center lab",
         (Some(Page::Policy), -1, "Permissions › Mode"),
     ),
     (
         "folder add",
-        "nerve-node folder add ~/projects +r +w --center lab",
+        "nerve-node folder add ~/projects rw --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -188,26 +177,21 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "folder set",
-        "nerve-node folder set ~/projects -w --center lab",
-        (Some(Page::Policy), -1, "Permissions › Folders"),
-    ),
-    (
         "folder rm",
         "nerve-node folder rm ~/projects --center lab",
         (Some(Page::Policy), -1, "Permissions › Folders"),
     ),
     (
-        "folder ls",
-        "nerve-node folder ls --center lab",
+        "folder",
+        "nerve-node folder --center lab",
         (Some(Page::Policy), -1, "Permissions › Folders"),
     ),
     // The pass over every grant is for the installed Linux node's accounts;
     // the app has no such account.
     ("folder sync", "nerve-node folder sync", NOT_HERE),
     (
-        "folder network",
-        "nerve-node folder network off --center lab",
+        "network",
+        "nerve-node network off --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -225,7 +209,7 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "rule rm",
-        "nerve-node rule rm allow 'git status' --center lab",
+        "nerve-node rule rm 'git status' --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -242,21 +226,12 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "rule ls",
-        "nerve-node rule ls --center lab",
+        "rule",
+        "nerve-node rule --center lab",
         (
             Some(Page::Policy),
             -1,
             "Permissions › Allowed commands / Forbidden commands",
-        ),
-    ),
-    (
-        "rule guard",
-        "nerve-node rule guard --center lab",
-        (
-            Some(Page::Policy),
-            -1,
-            "Permissions › Add the guard / Update the guard",
         ),
     ),
     (
@@ -269,8 +244,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap ls",
-        "nerve-node cap ls --center lab",
+        "cap",
+        "nerve-node cap --center lab",
         (Some(Page::Capabilities), -1, "Capabilities"),
     ),
     (
@@ -301,8 +276,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider allow",
-        "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
+        "provider add",
+        "nerve-node provider add desk /usr/lib/nerve-desktop/nerve-desktop",
         (
             Some(Page::Capabilities),
             -1,
@@ -310,8 +285,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider rm",
-        "nerve-node cap provider rm desk",
+        "provider rm",
+        "nerve-node provider rm desk",
         (
             Some(Page::Capabilities),
             -1,
@@ -319,8 +294,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider ls",
-        "nerve-node cap provider ls",
+        "provider",
+        "nerve-node provider",
         (Some(Page::Capabilities), -1, "Capabilities › Programs"),
     ),
     (
@@ -334,8 +309,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Policy), -1, "Permissions › Sudo › Turn off"),
     ),
     (
-        "sudo status",
-        "nerve-node sudo status",
+        "sudo",
+        "nerve-node sudo",
         (Some(Page::Policy), -1, "Permissions › Sudo"),
     ),
     (
@@ -359,8 +334,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Settings), 6, "Settings › Advanced › Add"),
     ),
     (
-        "config remove",
-        "nerve-node config remove center.lab.policy.allow 'fs.read:~/notes/*'",
+        "config rm",
+        "nerve-node config rm center.lab.policy.allow 'fs.read:~/notes/*'",
         (Some(Page::Settings), 6, "Settings › Advanced › Remove"),
     ),
     (
@@ -380,7 +355,7 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "audit",
-        "nerve-node audit --denied --last 20",
+        "nerve-node audit --refused --last 20",
         (Some(Page::Audit), -1, "Audit"),
     ),
     (
@@ -424,93 +399,122 @@ pub fn command_of(words: &str) -> Option<(&'static str, Place)> {
 /// names where they have one.
 fn topic(section: &str) -> String {
     match section {
-        "Install and set up" => "Install".into(),
+        "Set up" => "Install".into(),
         "What a center may do" => "Permissions".into(),
         other => other.into(),
     }
 }
 
-/// The first sentence of `about`, to stand beside the command's name.
-fn first_line(about: &str) -> String {
-    let end = [". ", "; "]
-        .iter()
-        .filter_map(|s| about.find(s))
-        .min()
-        .unwrap_or(about.len());
-    about[..end].trim_end_matches('.').to_string()
-}
-
-/// One command as the reference shows it.
+/// One command as the reference shows it, inside its card.
 #[derive(Debug, Clone)]
 pub struct Command {
-    pub topic: String,
     pub name: String,
+    /// Its one line, and the rest of what it does.
     pub about: String,
+    pub more: String,
     pub usage: String,
     pub args: Vec<(String, String)>,
     pub example: String,
     pub place: Place,
 }
 
-impl Command {
-    /// Whether it matches `filter`: words of its name, explanation, usage
-    /// or arguments, in any case, every word somewhere.
+/// A row of the reference: a noun with its commands, or a command that
+/// stands alone, as on the web UI's Help page.
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub topic: String,
+    pub name: String,
+    /// Its one line, and the rest of what it is for.
+    pub line: String,
+    pub more: String,
+    /// Its page of the user guide (docs/user/<doc>).
+    pub doc: String,
+    pub verbs: Vec<Command>,
+}
+
+impl Card {
+    /// Whether it matches `filter`: words of its name, its line, or of its
+    /// commands' names, explanations, usage or arguments, in any case,
+    /// every word somewhere.
     pub fn matches(&self, filter: &str) -> bool {
-        let text = format!(
-            "{} {} {} {} {}",
-            self.topic,
-            self.name,
-            self.about,
-            self.usage,
-            self.args
-                .iter()
-                .map(|(n, a)| format!("{n} {a}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-        .to_lowercase();
+        let mut text = format!("{} {} {} {}", self.topic, self.name, self.line, self.more);
+        for v in &self.verbs {
+            text.push_str(&format!(" {} {} {} {}", v.name, v.about, v.more, v.usage));
+            for (n, a) in &v.args {
+                text.push_str(&format!(" {n} {a}"));
+            }
+        }
+        let text = text.to_lowercase();
         filter
             .split_whitespace()
             .all(|w| text.contains(&w.to_lowercase()))
     }
 }
 
-/// Every command of the CLI, by topic in the help's order.
-pub fn commands(h: &nerve_node::cli::Help) -> Vec<Command> {
+/// Every card of the CLI, by topic in the help's order.
+pub fn commands(h: &nerve_node::cli::Help) -> Vec<Card> {
     let mut out = Vec::new();
     for s in &h.sections {
         for c in &s.cards {
-            for v in &c.verbs {
-                let (example, place) = COMMANDS
+            let verbs: Vec<Command> = c
+                .verbs
+                .iter()
+                .map(|v| {
+                    let (example, place) = COMMANDS
+                        .iter()
+                        .find(|(n, _, _)| *n == v.name)
+                        .map(|(_, e, p)| (e.to_string(), *p))
+                        .unwrap_or((format!("nerve-node {}", v.name), NOT_HERE));
+                    // Each command stands alone: what it takes, not what its
+                    // card's other commands take.
+                    let args = v
+                        .takes
+                        .iter()
+                        .map(|a| (a.name.clone(), a.about.clone()))
+                        .collect();
+                    Command {
+                        name: v.name.clone(),
+                        about: v.about.clone(),
+                        more: v.more.clone(),
+                        usage: v.usage.clone(),
+                        args,
+                        example,
+                        place,
+                    }
+                })
+                .collect();
+            // A card of one command says that command's line.
+            let line = match (&c.about, verbs.as_slice()) {
+                (l, _) if !l.is_empty() => l.clone(),
+                (_, [one]) => one.about.clone(),
+                _ => verbs
                     .iter()
-                    .find(|(n, _, _)| *n == v.name)
-                    .map(|(_, e, p)| (e.to_string(), *p))
-                    .unwrap_or((format!("nerve-node {}", v.name), NOT_HERE));
-                // Each row stands alone: what this command takes, not what
-                // its card's other commands take.
-                let args = v
-                    .takes
-                    .iter()
-                    .map(|a| (a.name.clone(), a.about.clone()))
-                    .collect();
-                out.push(Command {
-                    topic: topic(&s.name),
-                    name: v.name.clone(),
-                    about: v.about.clone(),
-                    usage: v.usage.clone(),
-                    args,
-                    example,
-                    place,
-                });
-            }
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            out.push(Card {
+                topic: topic(&s.name),
+                name: c.name.clone(),
+                line,
+                more: c.more.clone(),
+                doc: c.doc.clone(),
+                verbs,
+            });
         }
     }
     out
 }
 
-/// What of the reference the owner opened: commands by name, and the topics
-/// they closed (a topic is open until then). Each opens and closes on its
-/// own, and a new filter or order keeps them.
+/// The key of a command's fold of its arguments, apart from its card's.
+pub fn fold_key(command: &str) -> String {
+    format!("options:{command}")
+}
+
+/// What of the reference the owner opened: cards and the folds of their
+/// commands by name, and the topics they closed (a topic is open until
+/// then). Each opens and closes on its own, and a new filter or order
+/// keeps them.
 #[derive(Debug, Default)]
 pub struct Opened {
     pub commands: BTreeSet<String>,
@@ -518,7 +522,7 @@ pub struct Opened {
 }
 
 impl Opened {
-    /// Opens a shut command, or shuts an open one, also where `shown`
+    /// Opens a shut card or fold, or shuts an open one, also where `shown`
     /// shows it now: in place, so the rest of the page stays as it is.
     pub fn toggle_command(&mut self, shown: &ModelRc<RefGroup>, name: &str) {
         let open = !self.commands.remove(name);
@@ -527,10 +531,19 @@ impl Opened {
         }
         for g in shown.iter() {
             for (i, mut r) in g.rows.iter().enumerate() {
+                let mut verbs: Vec<RefVerb> = r.verbs.iter().collect();
+                let fold = verbs.iter_mut().find(|v| fold_key(&v.name) == name);
                 if r.name == name {
                     r.open = open;
-                    g.rows.set_row_data(i, r);
+                } else if let Some(v) = fold {
+                    // A change inside the row's own list does not reach the
+                    // page: the row gets a new list.
+                    v.open = open;
+                    r.verbs = ModelRc::new(VecModel::from(verbs));
+                } else {
+                    continue;
                 }
+                g.rows.set_row_data(i, r);
             }
         }
     }
@@ -553,21 +566,15 @@ impl Opened {
 /// What the reference shows for `filter`: by topic, or with `by_name` one
 /// list from A to Z; topics with no match left out; open what `opened`
 /// says.
-pub fn groups(all: &[Command], filter: &str, by_name: bool, opened: &Opened) -> Vec<RefGroup> {
-    let picked: Vec<&Command> = all.iter().filter(|c| c.matches(filter)).collect();
-    let row = |c: &Command| RefRow {
-        topic: c.topic.as_str().into(),
-        name: c.name.as_str().into(),
-        line: first_line(&c.about).into(),
-        // Only what the line beside the name does not say already.
-        about: if first_line(&c.about) == c.about.trim_end_matches('.') {
-            SharedString::new()
-        } else {
-            c.about.as_str().into()
-        },
-        usage: c.usage.as_str().into(),
+pub fn groups(all: &[Card], filter: &str, by_name: bool, opened: &Opened) -> Vec<RefGroup> {
+    let picked: Vec<&Card> = all.iter().filter(|c| c.matches(filter)).collect();
+    let verb = |v: &Command| RefVerb {
+        name: v.name.as_str().into(),
+        line: v.about.as_str().into(),
+        more: v.more.as_str().into(),
+        usage: v.usage.as_str().into(),
         args: ModelRc::new(VecModel::from(
-            c.args
+            v.args
                 .iter()
                 .map(|(n, a)| HelpArg {
                     name: n.as_str().into(),
@@ -575,14 +582,23 @@ pub fn groups(all: &[Command], filter: &str, by_name: bool, opened: &Opened) -> 
                 })
                 .collect::<Vec<_>>(),
         )),
-        example: c.example.as_str().into(),
-        in_app: c.place.0.is_some(),
-        page: c.place.0.unwrap_or(Page::Help),
-        tab: c.place.1,
-        place: SharedString::from(c.place.2),
+        example: v.example.as_str().into(),
+        in_app: v.place.0.is_some(),
+        page: v.place.0.unwrap_or(Page::Help),
+        tab: v.place.1,
+        place: SharedString::from(v.place.2),
+        open: opened.commands.contains(&fold_key(&v.name)),
+    };
+    let row = |c: &Card| RefRow {
+        topic: c.topic.as_str().into(),
+        name: c.name.as_str().into(),
+        line: c.line.as_str().into(),
+        more: c.more.as_str().into(),
+        doc: c.doc.as_str().into(),
+        verbs: ModelRc::new(VecModel::from(c.verbs.iter().map(verb).collect::<Vec<_>>())),
         open: opened.commands.contains(&c.name),
     };
-    let group = |name: &str, rows: Vec<&Command>| RefGroup {
+    let group = |name: &str, rows: Vec<&Card>| RefGroup {
         name: name.into(),
         open: name.is_empty() || !opened.shut_topics.contains(name),
         rows: ModelRc::new(VecModel::from(
@@ -635,16 +651,17 @@ mod tests {
         }
     }
 
-    /// A row lists what its command takes, once each: not what the other
+    /// A command lists what it takes, once each: not what the other
     /// commands of its card take.
     #[test]
     fn a_row_has_the_arguments_of_its_command() {
         let all = commands(&nerve_node::cli::help());
+        let verbs: Vec<&Command> = all.iter().flat_map(|c| &c.verbs).collect();
         let args = |name: &str| -> Vec<String> {
-            let c = all.iter().find(|c| c.name == name).unwrap();
+            let c = verbs.iter().find(|c| c.name == name).unwrap();
             c.args.iter().map(|(n, _)| n.clone()).collect()
         };
-        for c in &all {
+        for c in &verbs {
             let mut names: Vec<&str> = c.args.iter().map(|(n, _)| n.as_str()).collect();
             names.sort();
             let n = names.len();
@@ -663,20 +680,20 @@ mod tests {
                 }
             }
         }
-        assert!(!args("relay ls").contains(&"<NAME>".to_string()));
-        assert!(!args("folder ls").contains(&"<PATH>".to_string()));
-        assert_eq!(args("rule ls").iter().filter(|a| *a == "<LIST>").count(), 1);
+        assert!(!args("relay").contains(&"<NAME>".to_string()));
+        assert!(!args("folder").contains(&"<PATH>".to_string()));
+        assert_eq!(args("rule").iter().filter(|a| *a == "<LIST>").count(), 1);
         assert!(args("folder add").contains(&"<PATH>".to_string()));
         // What many commands take is said on the row of each, too.
-        assert!(args("mode set").contains(&"--center <CENTER>".to_string()));
-        // The search finds what a command takes, and only that.
-        let found = groups(&all, "the folder.", false, &Opened::default());
-        assert!(
-            found
-                .iter()
-                .flat_map(|g| g.rows.iter().collect::<Vec<_>>())
-                .all(|r| r.name != "folder ls")
-        );
+        assert!(args("mode").contains(&"--center <CENTER>".to_string()));
+        // The search finds the card whose command takes it.
+        let found = groups(&all, "end-grace", false, &Opened::default());
+        let names: Vec<String> = found
+            .iter()
+            .flat_map(|g| g.rows.iter().collect::<Vec<_>>())
+            .map(|r| r.name.to_string())
+            .collect();
+        assert_eq!(names, ["center"]);
     }
 
     /// The texts of the app's pages, the string literals of ui/*.slint.
@@ -763,29 +780,13 @@ mod tests {
     fn the_capability_commands_are_on_their_page() {
         let caps: Vec<_> = COMMANDS
             .iter()
-            .filter(|(c, _, _)| c.starts_with("cap "))
+            .filter(|(c, _, _)| *c == "cap" || c.starts_with("cap ") || c.starts_with("provider"))
             .collect();
         assert_eq!(caps.len(), 8);
         for (name, _, (page, tab, place)) in caps {
             assert_eq!(*page, Some(Page::Capabilities), "`{name}`");
             assert_eq!(*tab, -1, "`{name}`");
             assert!(place.starts_with("Capabilities"), "`{name}`: {place}");
-        }
-    }
-
-    /// `rule guard` runs from two buttons of one banner: one for a pairing
-    /// without the guard, one for a pairing that holds its older texts.
-    #[test]
-    fn the_guard_row_names_both_of_its_buttons() {
-        let (_, _, (_, _, place)) = COMMANDS
-            .iter()
-            .find(|(c, _, _)| *c == "rule guard")
-            .unwrap();
-        for button in ["Add the guard", "Update the guard"] {
-            assert!(
-                place.contains(button),
-                "`rule guard` does not name \"{button}\""
-            );
         }
     }
 
@@ -798,26 +799,37 @@ mod tests {
             names,
             [
                 "Install",
-                "Pair and connect",
+                "Centers",
                 "Permissions",
-                "Run and watch"
+                "Watch and stop",
+                "More"
             ]
         );
+        // One row per card, as on the web: about 30, not one per command.
+        let rows: usize = topics.iter().map(|g| g.rows.row_count()).sum();
+        assert!((20..=40).contains(&rows), "{rows} rows");
         let pair = &topics[1];
-        let add = pair.rows.iter().find(|r| r.name == "center add").unwrap();
+        let center = pair.rows.iter().find(|r| r.name == "center").unwrap();
+        assert_eq!(center.doc, "pairing.md");
+        let add = center
+            .verbs
+            .iter()
+            .find(|v| v.name == "center add")
+            .unwrap();
         assert_eq!(add.page, Page::Centers);
         assert!(add.in_app);
         assert_eq!(
             add.line,
             "Pair this machine with a center, using the pairing link it showed"
         );
-        assert_eq!(add.about, "", "the line says it all");
-        let rotate = pair
-            .rows
+        assert_eq!(add.more, "", "the line says it all");
+        let rotate = center
+            .verbs
             .iter()
-            .find(|r| r.name == "center rotate-key")
+            .find(|v| v.name == "center rotate-key")
             .unwrap();
-        assert!(rotate.about.contains("7 more days"), "{}", rotate.about);
+        assert!(!rotate.line.contains("7 more days"), "{}", rotate.line);
+        assert!(rotate.more.contains("7 more days"), "{}", rotate.more);
         // A filter: every word somewhere, in any case; the topics without a
         // match go.
         let found = groups(&all, "PIN relay", false, &Opened::default());
@@ -827,7 +839,7 @@ mod tests {
             "{:?}",
             found.iter().map(|g| g.name.to_string()).collect::<Vec<_>>()
         );
-        assert!(found[0].rows.iter().any(|r| r.name == "proxy set"));
+        assert!(found[0].rows.iter().any(|r| r.name == "proxy"));
         assert!(groups(&all, "no-such-thing", false, &Opened::default()).is_empty());
         // From A to Z: one list.
         let az = groups(&all, "center", true, &Opened::default());
@@ -836,12 +848,11 @@ mod tests {
         let mut sorted = n.clone();
         sorted.sort();
         assert_eq!(n, sorted);
-        assert!(n.contains(&"center add".to_string()));
-        assert_eq!(first_line("Give a key; then more. And more."), "Give a key");
+        assert!(n.contains(&"center".to_string()));
     }
 
-    /// Commands and topics open and close each on their own, in place, and
-    /// stay so across a new filter or order.
+    /// Cards, the folds of their commands, and topics open and close each
+    /// on their own, in place, and stay so across a new filter or order.
     #[test]
     fn commands_and_topics_open_each_on_their_own() {
         let all = commands(&nerve_node::cli::help());
@@ -854,30 +865,41 @@ mod tests {
                 .find(|r| r.name == name)
                 .unwrap()
         };
+        let fold = |shown: &ModelRc<RefGroup>, name: &str| {
+            shown
+                .iter()
+                .flat_map(|g| g.rows.iter().collect::<Vec<_>>())
+                .flat_map(|r| r.verbs.iter().collect::<Vec<_>>())
+                .find(|v| v.name == name)
+                .unwrap()
+                .open
+        };
         let topic =
             |shown: &ModelRc<RefGroup>, name: &str| shown.iter().find(|g| g.name == name).unwrap();
         assert!(shown.iter().all(|g| g.open), "topics start open");
-        assert!(!row(&shown, "center add").open);
-        opened.toggle_command(&shown, "center add");
-        opened.toggle_command(&shown, "relay add");
-        assert!(row(&shown, "relay add").open);
-        assert!(
-            row(&shown, "center add").open,
-            "a second one closed the first"
-        );
+        assert!(!row(&shown, "center").open);
+        assert!(!fold(&shown, "center add"), "a command's fold starts shut");
+        opened.toggle_command(&shown, "center");
+        opened.toggle_command(&shown, "relay");
+        assert!(row(&shown, "relay").open);
+        assert!(row(&shown, "center").open, "a second one closed the first");
+        opened.toggle_command(&shown, &fold_key("center add"));
+        assert!(fold(&shown, "center add"));
+        assert!(!fold(&shown, "center rm"));
         opened.toggle_topic(&shown, "Install");
         assert!(!topic(&shown, "Install").open);
         assert!(topic(&shown, "Permissions").open);
         // A new filter, and A to Z, keep what is open.
         let again = ModelRc::new(VecModel::from(groups(&all, "add", false, &opened)));
-        assert!(row(&again, "center add").open && row(&again, "relay add").open);
-        assert!(!row(&again, "folder add").open);
+        assert!(row(&again, "center").open && row(&again, "relay").open);
+        assert!(fold(&again, "center add"));
+        assert!(!row(&again, "folder").open);
         let az = ModelRc::new(VecModel::from(groups(&all, "", true, &opened)));
         assert!(az.row_data(0).unwrap().open, "the list from A to Z is open");
-        assert!(row(&az, "center add").open);
-        opened.toggle_command(&shown, "center add");
-        assert!(!row(&shown, "center add").open);
-        assert!(row(&shown, "relay add").open);
+        assert!(row(&az, "center").open);
+        opened.toggle_command(&shown, "center");
+        assert!(!row(&shown, "center").open);
+        assert!(row(&shown, "relay").open);
         opened.toggle_topic(&shown, "Install");
         assert!(topic(&shown, "Install").open);
     }

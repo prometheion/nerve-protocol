@@ -113,10 +113,10 @@ fn nerve_center_and_nerve_node_work_together() {
     let link = mcp.pair_link();
     let out = node.ok(&["center", "add", &link, "--yes"]);
     assert!(out.contains("e2e-center"), "{out}");
-    assert!(node.ok(&["center", "ls"]).contains("e2e-center"));
+    assert!(node.ok(&["center"]).contains("e2e-center"));
     // A new pairing is in folder mode; the steps below start from allowlist.
-    assert!(node.ok(&["center", "ls"]).contains("folder"));
-    node.ok(&["mode", "set", "allowlist"]);
+    assert!(node.ok(&["center"]).contains("folder"));
+    node.ok(&["mode", "allowlist"]);
     node.use_fake_sudo(SUDO_PW);
     node.start();
     let ov = mcp.wait_overview("the node comes online", |v| {
@@ -140,7 +140,7 @@ fn nerve_center_and_nerve_node_work_together() {
     );
 
     // The settings grant, given on the node, reaches the center.
-    node.ok(&["center", "grant", "settings", "write"]);
+    node.ok(&["center", "settings", "on"]);
     mcp.wait_overview("the settings grant reaches the center", |v| {
         v["nodes"][0]["settings_write"] == json!(true)
     });
@@ -187,14 +187,14 @@ fn nerve_center_and_nerve_node_work_together() {
         Value::Null,
     );
     assert_eq!(v["sudo"], "on", "{v}");
-    assert!(node.ok(&["sudo", "status"]).contains("on"));
+    assert!(node.ok(&["sudo"]).contains("on"));
     let (status, v) = mcp.api(
         "POST",
         "/api/nodes/sudo",
         json!({"id": node_id, "on": false}),
     );
     assert_eq!((status, &v["sudo"]), (200, &json!("off")), "{v}");
-    assert!(node.ok(&["sudo", "status"]).contains("off"));
+    assert!(node.ok(&["sudo"]).contains("off"));
     // Neither the center's files nor the node's hold the password.
     assert_no_file_holds(root.path(), SUDO_PW);
 
@@ -344,10 +344,10 @@ fn nerve_center_and_nerve_node_work_together() {
     assert!(text_of(&r).contains("forbidden"), "{r}");
 
     // A folder counts in folder mode only: in default deny it allows nothing.
-    node.ok(&["folder", "add", &node.home.to_string_lossy(), "+r"]);
+    node.ok(&["folder", "add", &node.home.to_string_lossy(), "r"]);
     let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(true), "{r}");
-    node.ok(&["mode", "set", "folder"]);
+    node.ok(&["mode", "folder"]);
     // The mode changes the folder note of `fs.read`, so a `list` that the
     // center answered before the new descriptor reached it is stale: wait
     // until it tells folder mode.
@@ -385,7 +385,7 @@ fn nerve_center_and_nerve_node_work_together() {
         audit.contains("fs.read") && audit.contains("forbidden"),
         "{audit}"
     );
-    let denied = node.ok(&["audit", "--denied"]);
+    let denied = node.ok(&["audit", "--refused"]);
     assert!(!denied.contains("exec.run"), "{denied}");
 
     // The center's statistics count the calls; nothing of their content.
@@ -448,7 +448,7 @@ fn a_cancelled_call_and_an_ended_session_stop_their_command() {
     let mut mcp = Mcp::start(&root.path().join("center"), false, &[]);
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
-    node.ok(&["mode", "set", "user"]);
+    node.ok(&["mode", "user"]);
     node.start();
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
@@ -517,11 +517,11 @@ fn a_long_command_becomes_a_job_that_exec_signal_and_job_cancel_end() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_CALL_WAIT", "1")],
+        &[("NERVE_CENTER_CALL_WAIT", "1")],
     );
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
-    node.ok(&["mode", "set", "user"]);
+    node.ok(&["mode", "user"]);
     // `exec.signal` actuates: the owner turns it on.
     node.ok(&["cap", "set", "exec.signal", "on"]);
     node.start();
@@ -620,11 +620,11 @@ fn a_jobs_command_streams_its_lines_before_it_ends() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_CALL_WAIT", "1")],
+        &[("NERVE_CENTER_CALL_WAIT", "1")],
     );
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
-    node.ok(&["mode", "set", "user"]);
+    node.ok(&["mode", "user"]);
     node.start();
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
@@ -757,12 +757,12 @@ fn a_command_survives_a_dropped_link() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_PUBLIC_URL", &url)],
+        &[("NERVE_CENTER_PUBLIC_URL", &url)],
     );
     *relay.target.lock().unwrap() = mcp.node_port;
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
-    node.ok(&["mode", "set", "user"]);
+    node.ok(&["mode", "user"]);
     node.start();
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
@@ -820,7 +820,7 @@ fn node_part_passes_against_nerve_node() {
             }
             // The profile checks write the policy through settings.set and
             // try one wrong sudo password: on a fake sudo, not this machine's.
-            let (ok, out, err) = node.cli(&["center", "grant", "settings", "write"]);
+            let (ok, out, err) = node.cli(&["center", "settings", "on"]);
             if !ok {
                 return Err(format!("grant failed: {out}{err}"));
             }
@@ -863,13 +863,13 @@ fn provider_part_passes_against_nerve_node() {
             if !ok {
                 return Err(format!("pair failed: {out}{err}"));
             }
-            let (ok, out, err) = node.cli(&["center", "grant", "settings", "write"]);
+            let (ok, out, err) = node.cli(&["center", "settings", "on"]);
             if !ok {
                 return Err(format!("grant failed: {out}{err}"));
             }
             let exe = std::env::current_exe().unwrap();
             let exe = exe.display().to_string();
-            let (ok, out, err) = node.cli(&["cap", "provider", "allow", "conformance", &exe]);
+            let (ok, out, err) = node.cli(&["provider", "add", "conformance", &exe]);
             if !ok {
                 return Err(format!("allowing the provider failed: {out}{err}"));
             }
@@ -977,9 +977,9 @@ fn a_programs_state_events_and_stream_reach_the_agent() {
     let mut mcp = Mcp::start(&root.path().join("center"), false, &[]);
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
-    node.ok(&["mode", "set", "user"]);
+    node.ok(&["mode", "user"]);
     let exe = std::env::current_exe().unwrap().display().to_string();
-    node.ok(&["cap", "provider", "allow", "board", &exe]);
+    node.ok(&["provider", "add", "board", &exe]);
     node.start();
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)

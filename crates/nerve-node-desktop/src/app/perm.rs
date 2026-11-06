@@ -1,5 +1,5 @@
-//! The Permissions page: what one center may do, read with `folder ls`,
-//! `rule ls` and `sudo status`, changed with their siblings. Its capability
+//! The Permissions page: what one center may do, read with `folder`,
+//! `rule` and `sudo`, changed with their siblings. Its capability
 //! switches are on the Capabilities page (src/app/caps.rs).
 
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use crate::{Load, Perm, Tone, view};
 
 const LISTS: [&str; 3] = ["allow", "deny", "sudo"];
 
-/// What `folder ls`, `rule ls` and `sudo status` answered for the page's
+/// What `folder`, `rule` and `sudo` answered for the page's
 /// center.
 pub type PermAnswers = (
     Result<Value, String>,
@@ -102,8 +102,8 @@ impl Ctl {
                 .map(String::from)
                 .collect()
         };
-        let errors = texts(&st["folder_grants"]["errors"]);
-        let stale = texts(&st["folder_grants"]["stale"]);
+        let errors = texts(&st["folder_access"]["errors"]);
+        let stale = texts(&st["folder_access"]["stale"]);
         let (stale, errors) = view::stale_grants(&stale, &errors);
         let folders: Vec<String> = self
             .with_perm(|p| p.get_folders().iter().map(|f| f.path.to_string()).collect())
@@ -119,6 +119,7 @@ impl Ctl {
         self.with_perm(|p| {
             p.set_mode(c["mode"].as_str().unwrap_or_default().into());
             p.set_mode_until(view::mode_until(&c, now_ms()).into());
+            p.set_user_then(view::timed_user_then(&c, now_ms()).into());
             p.set_separate(separate);
             p.set_account(account.as_str().into());
             p.set_as_owner(c["as_owner"] == true);
@@ -141,11 +142,11 @@ impl Ctl {
         });
     }
 
-    /// Allowlist mode as the owner (`mode set allowlist --as-owner`), or as
+    /// Allowlist mode as the owner (`mode allowlist --as-owner`), or as
     /// nerve-run again.
     fn as_owner_set(self: &Rc<Self>, on: bool) {
         let center = self.perm_center();
-        let mut args = vec!["mode".into(), "set".into(), "allowlist".into()];
+        let mut args = vec!["mode".into(), "allowlist".into()];
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
         let said = if on {
             args.push("--as-owner".into());
@@ -157,15 +158,11 @@ impl Ctl {
         self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
     }
 
-    /// The center's commands off the network (`folder network off`), or on
+    /// The center's commands off the network (`network off`), or on
     /// it again.
     fn no_network_set(self: &Rc<Self>, off: bool) {
         let center = self.perm_center();
-        let args = vec![
-            "folder".into(),
-            "network".into(),
-            if off { "off" } else { "on" }.into(),
-        ];
+        let args = vec!["network".into(), if off { "off" } else { "on" }.into()];
         let said = if off {
             format!("{center}'s commands have no network.")
         } else {
@@ -190,19 +187,15 @@ impl Ctl {
                 let center = format!("--center={center}");
                 let c = [center.as_str()];
                 let ask = |what: &[&str]| r.run(&[what, &c[..]].concat());
-                (
-                    ask(&["folder", "ls"]),
-                    ask(&["rule", "ls"]),
-                    r.run(&["sudo", "status"]),
-                )
+                (ask(&["folder"]), ask(&["rule"]), r.run(&["sudo"]))
             },
             move |c, answers| c.perm_loaded(asked, answers),
         );
         // What the rule fields offer: the arguments of the actions the node
-        // offers this center (`cap ls`), read beside the page.
+        // offers this center (`cap`), read beside the page.
         let center = self.perm_center();
         self.job(
-            move |r| r.run(&["cap", "ls", &format!("--center={center}")]),
+            move |r| r.run(&["cap", &format!("--center={center}")]),
             move |c, answer| {
                 if asked != c.perm_asked.get() {
                     return;
@@ -248,8 +241,6 @@ impl Ctl {
                     p.set_deny_unfit(ModelRc::new(VecModel::from(view::rule_unfit_of(
                         &r, "deny",
                     ))));
-                    p.set_guard_missing(view::guard_missing(&r));
-                    p.set_guard_older(view::guard_older(&r));
                     p.set_sudo_list(ModelRc::new(VecModel::from(view::rule_list_of(&r, "sudo"))));
                     p.set_sudo_on(s["sudo"] == "on");
                     p.set_read(true);
@@ -306,7 +297,7 @@ impl Ctl {
             }
             let center = self.perm_center();
             self.perm_change(
-                vec!["mode".into(), "set".into(), "allowlist".into()],
+                vec!["mode".into(), "allowlist".into()],
                 None,
                 format!("{center} is in allowlist mode."),
                 |_| {},
@@ -332,7 +323,7 @@ impl Ctl {
         }) else {
             return;
         };
-        let mut args = vec!["mode".into(), "set".into(), mode.clone()];
+        let mut args = vec!["mode".into(), mode.clone()];
         if timed {
             args.push(format!("--for={hours}"));
         }
@@ -387,12 +378,18 @@ impl Ctl {
         }) else {
             return;
         };
-        let mut args = vec!["folder".into(), "add".into(), path.clone()];
-        for (on, right) in [(r, "+r"), (w, "+w"), (x, "+x")] {
-            if on {
-                args.push(right.into());
-            }
+        // A new folder gets some right; `none` is for closing one inside
+        // another, which a folder's row does.
+        if !(r || w || x) {
+            self.with_perm(|p| p.set_folder_error("Choose at least one right.".into()));
+            return;
         }
+        let args = vec![
+            "folder".into(),
+            "add".into(),
+            path.clone(),
+            view::rights(r, w, x),
+        ];
         self.perm_change(
             args,
             None,
@@ -408,7 +405,7 @@ impl Ctl {
 
     fn folder_set(self: &Rc<Self>, path: &str, r: bool, w: bool, x: bool) {
         let rights = view::rights(r, w, x);
-        let args = vec!["folder".into(), "set".into(), path.into(), rights];
+        let args = vec!["folder".into(), "add".into(), path.into(), rights];
         self.perm_change(
             args,
             None,
@@ -473,7 +470,7 @@ impl Ctl {
         };
         // A pattern for files or another action goes into the list as it
         // is, as `config add` puts it there; `rule remove` takes it out
-        // again as `rule ls` shows it.
+        // again as `rule` shows it.
         if word != "sudo" && view::pattern_rule(&text) {
             let key = format!("center.{}.policy.{word}", self.perm_center());
             let args = vec!["config".into(), "add".into(), "--".into(), key, text];
@@ -490,10 +487,21 @@ impl Ctl {
             });
             return;
         }
-        let mut args = vec!["rule".into(), "add".into(), word.into(), text.clone()];
-        if wildcard {
-            args.push("--wildcard".into());
-        }
+        // The sudo list's commands go on it as sudo commands of the allow
+        // list; the wildcard covers every command of the program, as the
+        // trailing `*` that `rule add` reads.
+        let (list, line) = match word {
+            "sudo" if nerve_policy::sudo_command(&text).is_none() => {
+                ("allow", format!("sudo {text}"))
+            }
+            "sudo" => ("allow", text.clone()),
+            w => (w, text.clone()),
+        };
+        let line = match wildcard {
+            true => nerve_node::cli::wildcard_target("exec", "run", &line),
+            false => line,
+        };
+        let args = vec!["rule".into(), "add".into(), list.into(), line];
         self.perm_change(
             args,
             None,
@@ -555,7 +563,7 @@ impl Ctl {
 
     /// What the rule field of `list` (3: the rule being edited) says under
     /// it for `text`, typed so far ([`view::rule_hint`]): from the node's
-    /// `cap ls` as this page last read it.
+    /// `cap` as this page last read it.
     fn rule_typed(&self, list: i32, text: &str) {
         let center = self.perm_center();
         let (hint, error) = view::rule_hint(text, &self.rule_listing.borrow(), &center);
@@ -615,23 +623,6 @@ impl Ctl {
                     }
                 }
                 c.perm_load();
-            },
-        );
-    }
-
-    /// Puts the guard's deny rules the page's center lacks on its list.
-    fn guard_add(self: &Rc<Self>) {
-        self.with_perm(|p| p.set_guard_busy(true));
-        self.perm_change(
-            vec!["rule".into(), "guard".into()],
-            None,
-            String::new(),
-            |c| {
-                c.with_perm(|p| p.set_guard_busy(false));
-            },
-            |c, e| {
-                c.with_perm(|p| p.set_guard_busy(false));
-                c.toast(e, Tone::Danger);
             },
         );
     }
@@ -703,6 +694,4 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_sudo_confirm(move || c.sudo_confirm());
     let c = ctl.clone();
     p.on_sudo_off(move || c.sudo_off());
-    let c = ctl.clone();
-    p.on_guard_add(move || c.guard_add());
 }

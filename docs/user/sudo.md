@@ -15,11 +15,12 @@ for it.
 
 ## Turn it on
 
-1. Put the commands on the sudo list. `sudo` in front is optional:
+1. Put the commands on the sudo list: a rule that starts with `sudo` goes
+   there.
 
    ```sh
-   nerve-node rule add sudo 'apt update'
-   nerve-node rule add sudo 'apt update' --wildcard   # sudo apt, and anything after it
+   nerve-node rule add allow 'sudo apt update'
+   nerve-node rule add allow 'sudo apt *'   # sudo apt, and anything after it
    ```
 
 2. Switch sudo on. The node must be running. It asks for your own sudo
@@ -48,7 +49,7 @@ for it.
 3. Look or turn it off:
 
    ```sh
-   nerve-node sudo status
+   nerve-node sudo
    nerve-node sudo off
    ```
 
@@ -71,13 +72,13 @@ On Linux (Windows differs, see [sudo on Windows](#sudo-on-windows)):
   node refuses it and says why, and `list` tells the agent.
 - A sudo command must be one simple command. One with `; & | $ ` ( ) < >` or a
   line break is refused. This holds on Windows too.
-- A `--wildcard` entry covers plain commands only, as a [wildcard allow
+- A wildcard entry (a trailing ` *`) covers plain commands only, as a [wildcard allow
   rule](rules.md#what-a-wildcard-covers) does. A line with `@ { } % ' " # , \`
   or a word that starts another command, such as `start`, `sh`, `powershell`,
   `cmd`, `iex` or `-Command`, runs only when an entry names the whole line.
   So `sudo systemctl *` does not cover `sudo systemctl start nginx`, and
   `sudo net *` does not cover `sudo net start spooler`: add
-  `nerve-node rule add sudo 'systemctl start nginx'` without `--wildcard`.
+  `nerve-node rule add allow 'sudo systemctl start nginx'` without the `*`.
   The refusal names the character or word. This holds on Windows too.
 - For a pairing whose commands run as you, it starts the command as you, as
   `sudo -S -k -p <prompt> …`, so sudo raises it from your account. It runs

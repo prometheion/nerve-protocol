@@ -83,7 +83,7 @@ until_up() {
   fail "the center does not answer on $MCP"
 }
 
-token() { sed -n 's/^NERVE_HARNESS_TOKEN=//p' "$ENV_FILE"; }
+token() { sed -n 's/^NERVE_CENTER_HARNESS_TOKEN=//p' "$ENV_FILE"; }
 
 [ ! -e "$UNIT" ] || fail "the center is installed here already"
 

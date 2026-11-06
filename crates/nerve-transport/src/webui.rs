@@ -317,6 +317,83 @@ pub fn html_sinks(js: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The short texts of a page's script that are longer than `max`
+/// characters: a section's or a page head's subtitle, a banner, and a
+/// `meta` or `lead` paragraph that is not inside a `more()` fold, each as
+/// written (`${…}` counts as nothing). They say one line; the rest folds.
+pub fn long_subtitles(js: &str, max: usize) -> Vec<String> {
+    // Where the text is: after the call's name, the literals to skip first.
+    const AT: [(&str, usize); 5] = [
+        ("section(", 1),
+        ("head(", 2),
+        ("banner(", 2),
+        ("class: \"meta\" }, ", 0),
+        ("class: \"lead\" }, ", 0),
+    ];
+    let mut out = Vec::new();
+    for (at, skip) in AT {
+        for (i, _) in js.match_indices(at) {
+            // A word that ends in the name (`pageHead(`) is another call.
+            if js[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.') {
+                continue;
+            }
+            let before = &js[i.saturating_sub(60)..i];
+            if skip == 0 && before.contains("more(") {
+                continue;
+            }
+            let mut rest = &js[i + at.len()..];
+            let mut text = None;
+            for n in 0..=skip {
+                let Some((lit, after)) = literal(rest.trim_start()) else {
+                    break;
+                };
+                rest = after.trim_start();
+                if n == skip {
+                    text = Some(lit);
+                } else if let Some(r) = rest.strip_prefix(',') {
+                    rest = r;
+                } else {
+                    break;
+                }
+            }
+            if let Some(t) = text
+                && t.chars().count() > max
+            {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// A string literal at the start of `s` ("…" or `…`, its `${…}` left out)
+/// and what follows it.
+fn literal(s: &str) -> Option<(String, &str)> {
+    let quote = s.chars().next().filter(|c| *c == '"' || *c == '`')?;
+    let mut text = String::new();
+    let mut depth = 0;
+    let mut chars = s.char_indices().skip(1).peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' if depth == 0 => {
+                if let Some((_, e)) = chars.next() {
+                    text.push(e);
+                }
+            }
+            '$' if quote == '`' && depth == 0 && chars.peek().map(|p| p.1) == Some('{') => {
+                chars.next();
+                depth = 1;
+            }
+            '{' if depth > 0 => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            c if c == quote => return Some((text, &s[i + 1..])),
+            c => text.push(c),
+        }
+    }
+    None
+}
+
 /// Whether `path` is an API call's, which needs a session.
 pub fn is_api(path: &str) -> bool {
     path.starts_with("/api/")
@@ -453,6 +530,24 @@ mod tests {
             vec!["  s.innerHTML = ICONS[name] || \"\";"]
         );
         assert_eq!(html_sinks(LOGIN_JS), Vec::<&str>::new());
+    }
+
+    /// The scanner of short texts finds a long subtitle, a long banner and a
+    /// long note, and leaves a fold's body and a short line alone.
+    #[test]
+    fn long_subtitles_finds_the_walls() {
+        let wall = "x".repeat(130);
+        let js = format!(
+            "section(\"T\", \"{wall}\", null);\nhead(\"i\", \"T\", `${{a}}{wall}`);\nbanner(\"warn\", \"alert\", \"{wall}\");\nel(\"p\", {{ class: \"meta\" }}, \"{wall}\");\nmore(\"k\", \"More\", el(\"p\", {{ class: \"meta\" }}, \"{wall}\"));\nsection(\"T\", \"short\");\npageHead(\"a\", \"b\", \"{wall}\");"
+        );
+        assert_eq!(
+            long_subtitles(&js, 120).len(),
+            4,
+            "{:?}",
+            long_subtitles(&js, 120)
+        );
+        assert_eq!(long_subtitles(&js, 200), Vec::<String>::new());
+        assert_eq!(long_subtitles(KIT_JS, 120), Vec::<String>::new());
     }
 
     #[test]

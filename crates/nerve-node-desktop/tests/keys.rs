@@ -139,9 +139,7 @@ fn the_keyboard_drives_the_app_and_the_open_tab_stays() {
     press(Key::Return.into());
     assert!(!store.get_confirm_open(), "Enter left the question open");
     assert!(
-        started(&log)
-            .iter()
-            .any(|l| l.contains("center rm --center=lab")),
+        started(&log).iter().any(|l| l.contains("center rm -- lab")),
         "Enter did not unpair: {:?}",
         started(&log)
     );

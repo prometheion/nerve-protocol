@@ -24,7 +24,7 @@ curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
 nerve-node center add '<pairing link>'
-nerve-node folder add ~/project +r +w +x
+nerve-node folder add ~/project rwx
 ```
 
 `install` puts the program at `/usr/local/bin/nerve-node` and starts it as a
@@ -91,7 +91,7 @@ Get the programs from
    account may read). Give it one:
 
    ```sh
-   nerve-node folder add ~/project +r +w +x
+   nerve-node folder add ~/project rwx
    ```
 
 ## The action checker

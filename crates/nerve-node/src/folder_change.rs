@@ -1,4 +1,4 @@
-//! A change to a center's folders: `nerve-node folder add`, `set` and `rm`.
+//! A change to a center's folders: `nerve-node folder add` and `rm`.
 //! The CLI makes it on the config itself, or, on Windows while a node runs,
 //! hands it to that node over its control pipe (crate::pipe), which reads it
 //! back with [`FolderChange::from_request`] and makes it with the same
@@ -16,12 +16,9 @@ use nerve_policy::{CenterEntry, Mode, NodeConfig};
 /// The longest path a request may name: Windows' longest path in bytes.
 const PATH_BYTES: usize = 32 * 1024 * 3;
 
-/// The most changes one `set` takes.
-const CHANGES_MAX: usize = 64;
-
 /// One change to a center's folders. `path` is the folder resolved by the
 /// CLI (links followed), `given` the folder as typed: an entry is found by
-/// either, so one saved before it was resolved can still be changed.
+/// either, so one saved before it was resolved can still be removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderChange {
     /// Adds the folder with these rights, or replaces the rights it had.
@@ -32,13 +29,6 @@ pub enum FolderChange {
         path: String,
         access: Access,
         recorded: bool,
-    },
-    /// Changes the rights of a folder the center has, left to right (`=rwx`,
-    /// `+x`, `-w`).
-    Set {
-        path: String,
-        given: String,
-        changes: Vec<String>,
     },
     /// Takes a folder away from the center.
     Rm { path: String, given: String },
@@ -69,28 +59,21 @@ struct Params {
     access: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recorded: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    changes: Option<Vec<String>>,
 }
 
 impl FolderChange {
-    /// The rights of `folder add`: each starts with `+`, and at least one
-    /// is named. A folder that grants nothing is never what was meant.
-    pub fn new_rights(rights: &[String]) -> Result<Access, String> {
-        let access = rights.iter().try_fold(Access::NONE, |a, r| {
-            if r.starts_with('+') {
-                a.change(r)
-            } else {
-                Err(format!("{r:?}: a new folder takes +r, +w or +x"))
-            }
-        })?;
-        if access.is_none() {
-            return Err(
-                "name what the center may do in the folder: +r (read), +w (write), +x (run commands)"
-                    .into(),
-            );
+    /// The rights of `folder add`, one word: the letters `r`, `w` and `x`
+    /// (`rw`), or `none`, which closes a folder inside one the center may
+    /// use. An empty word is refused: a folder that grants nothing is said
+    /// so, never given by a slip.
+    pub fn new_rights(rights: &str) -> Result<Access, String> {
+        const NAME: &str =
+            "name the rights: r (read), w (write), x (run commands), as one word like rw, or none";
+        match rights.trim() {
+            "none" => Ok(Access::NONE),
+            "" => Err(NAME.into()),
+            r => Access::parse(r).map_err(|e| format!("{e}; {NAME}")),
         }
-        Ok(access)
     }
 
     /// The control pipe's method for this change (the CLI's call on
@@ -99,7 +82,6 @@ impl FolderChange {
     pub fn method(&self) -> &'static str {
         match self {
             FolderChange::Add { .. } => "folder.add",
-            FolderChange::Set { .. } => "folder.set",
             FolderChange::Rm { .. } => "folder.rm",
         }
     }
@@ -114,7 +96,6 @@ impl FolderChange {
             given: None,
             access: None,
             recorded: None,
-            changes: None,
         };
         match self {
             FolderChange::Add {
@@ -126,15 +107,6 @@ impl FolderChange {
                 p.access = Some(access.to_string());
                 p.recorded = Some(*recorded);
             }
-            FolderChange::Set {
-                path,
-                given,
-                changes,
-            } => {
-                p.path = path.clone();
-                p.given = Some(given.clone());
-                p.changes = Some(changes.clone());
-            }
             FolderChange::Rm { path, given } => {
                 p.path = path.clone();
                 p.given = Some(given.clone());
@@ -144,9 +116,9 @@ impl FolderChange {
     }
 
     /// The change a pipe request asks for, and the center it names. It is
-    /// checked as the CLI checks what it was given: an `add` names some
-    /// right, a `set` some change, each a change [`Access::change`] takes;
-    /// nothing is left out and nothing else is given.
+    /// checked as the CLI checks what it was given: an `add` names rights
+    /// [`Access::parse`] takes (none closes a folder); nothing is left out
+    /// and nothing else is given.
     pub fn from_request(
         method: &str,
         params: Value,
@@ -163,40 +135,17 @@ impl FolderChange {
         if let Some(g) = &p.given {
             check("given", g)?;
         }
-        let change = match (method, p.given, p.access, p.recorded, p.changes) {
-            ("folder.add", None, Some(access), recorded, None) => {
-                let access = Access::parse(&access)?;
-                if access.is_none() {
-                    return Err("a new folder grants some right: r, w or x".into());
-                }
-                FolderChange::Add {
-                    path: p.path,
-                    access,
-                    recorded: recorded.unwrap_or(false),
-                }
-            }
-            ("folder.set", Some(given), None, None, Some(changes)) => {
-                if changes.is_empty() {
-                    return Err("name what to change: =rwx, +x or -w".into());
-                }
-                if changes.len() > CHANGES_MAX {
-                    return Err(format!(
-                        "at most {CHANGES_MAX} changes at once; =rwx sets the rights in one"
-                    ));
-                }
-                // Each is checked here, before the config is touched.
-                changes.iter().try_fold(Access::NONE, |a, c| a.change(c))?;
-                FolderChange::Set {
-                    path: p.path,
-                    given,
-                    changes,
-                }
-            }
-            ("folder.rm", Some(given), None, None, None) => FolderChange::Rm {
+        let change = match (method, p.given, p.access, p.recorded) {
+            ("folder.add", None, Some(access), recorded) => FolderChange::Add {
+                path: p.path,
+                access: Access::parse(&access)?,
+                recorded: recorded.unwrap_or(false),
+            },
+            ("folder.rm", Some(given), None, None) => FolderChange::Rm {
                 path: p.path,
                 given,
             },
-            ("folder.add" | "folder.set" | "folder.rm", ..) => {
+            ("folder.add" | "folder.rm", ..) => {
                 return Err(format!("bad parameters for {method}"));
             }
             (other, ..) => return Err(format!("unknown method {other}")),
@@ -225,20 +174,6 @@ impl FolderChange {
                 }
                 Ok(Some(*access))
             }
-            FolderChange::Set {
-                path,
-                given,
-                changes,
-            } => {
-                let f = e
-                    .policy
-                    .folders
-                    .iter_mut()
-                    .find(|f| f.path == *path || f.path == *given)
-                    .ok_or_else(|| format!("{path} is not a folder of this center"))?;
-                f.access = changes.iter().try_fold(f.access, |a, c| a.change(c))?;
-                Ok(Some(f.access))
-            }
             FolderChange::Rm { path, given } => {
                 let before = e.policy.folders.len();
                 e.policy
@@ -254,11 +189,25 @@ impl FolderChange {
 
     fn path(&self) -> &str {
         match self {
-            FolderChange::Add { path, .. }
-            | FolderChange::Set { path, .. }
-            | FolderChange::Rm { path, .. } => path,
+            FolderChange::Add { path, .. } | FolderChange::Rm { path, .. } => path,
         }
     }
+}
+
+/// The listed folder `folder add` changes in place: the one of center `e`
+/// written as `given`, when `access` takes rights from it and gives none.
+/// Narrowing needs no look at where the path leads now: the entry stays the
+/// one it was, with less, also where its path became a link that a fresh
+/// look would follow elsewhere or refuse. Its place stays recorded as it
+/// was. The same rights again are looked at, which records a folder that
+/// was not.
+pub fn narrowed(e: &CenterEntry, given: &str, access: Access) -> Option<(String, bool)> {
+    let f = e.policy.folders.iter().find(|f| f.path == given)?;
+    let had = f.access;
+    let within = (!access.read || had.read)
+        && (!access.write || had.write)
+        && (!access.execute || had.execute);
+    (within && access != had).then(|| (f.path.clone(), e.policy.is_placed(&f.path)))
 }
 
 /// The most folders named in the hint when none of them lies beside the path.
@@ -268,8 +217,8 @@ const HINT_MAX: usize = 3;
 /// even look at the path (the installed node's CLI runs as `nerve`, which
 /// cannot read the account's home, so a link there was kept as typed and
 /// not resolved), the folder may be listed under the path the link leads
-/// to: the message names the folders `folder ls` shows that could be it,
-/// the ones beside the path first, or, with none to name, that `folder ls`
+/// to: the message names the folders `folder` shows that could be it,
+/// the ones beside the path first, or, with none to name, that `folder`
 /// shows it. The lookup itself is `stored_folder`'s, in the CLI.
 pub fn not_a_folder(path: &str, folders: &[Folder]) -> String {
     let plain = format!("{path} is not a folder of this center");
@@ -295,7 +244,7 @@ pub fn not_a_folder(path: &str, folders: &[Folder]) -> String {
         beside
     };
     let hint = format!(
-        "{plain}; this account cannot look into it, so if it is a link, use the path `nerve-node folder ls` shows for the folder"
+        "{plain}; this account cannot look into it, so if it is a link, use the path `nerve-node folder` shows for the folder"
     );
     match named.is_empty() {
         true => hint,
@@ -310,16 +259,36 @@ fn same_place(a: &str, b: &str) -> bool {
     within(a, b) && within(b, a)
 }
 
+/// What a command that needs a pairing says when there is none: how to
+/// make one.
+pub const NO_CENTER_PAIRED: &str =
+    "no center is paired; pair one: `nerve-node center add '<link>'`";
+
+/// The error for a center `name` this node has not paired: the names it
+/// has, or how to pair one.
+pub fn no_center_named(cfg: &NodeConfig, name: &str) -> String {
+    match cfg.centers.as_slice() {
+        [] => format!("no center named {name}: {NO_CENTER_PAIRED}"),
+        many => format!(
+            "no center named {name}; paired: {}",
+            many.iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// The center a per-center command means: the one named, or the only one.
 pub fn pick_center(cfg: &NodeConfig, given: Option<&str>) -> Result<String, String> {
     if let Some(n) = given {
         return cfg
             .center(n)
             .map(|c| c.name.clone())
-            .ok_or_else(|| format!("no center named {n}"));
+            .ok_or_else(|| no_center_named(cfg, n));
     }
     match cfg.centers.as_slice() {
-        [] => Err("no center is paired".into()),
+        [] => Err(NO_CENTER_PAIRED.into()),
         [one] => Ok(one.name.clone()),
         many => Err(format!(
             "several centers are paired; pick one with --center ({})",
@@ -338,9 +307,8 @@ pub fn apply_to(
     change: &FolderChange,
 ) -> Result<Applied, String> {
     let name = pick_center(cfg, center)?;
-    let e = cfg
-        .center_mut(&name)
-        .ok_or_else(|| format!("no center named {name}"))?;
+    let missing = no_center_named(cfg, &name);
+    let e = cfg.center_mut(&name).ok_or(missing)?;
     let access = change.apply(e)?;
     Ok(Applied {
         mode: e.policy.mode,
@@ -388,18 +356,18 @@ mod tests {
         let changes = [
             FolderChange::Add {
                 path: "/srv/a".into(),
-                access: FolderChange::new_rights(&["+r".into(), "+x".into()]).unwrap(),
+                access: FolderChange::new_rights("rx").unwrap(),
                 recorded: false,
             },
             FolderChange::Add {
                 path: "/srv/a".into(),
-                access: FolderChange::new_rights(&["+w".into()]).unwrap(),
+                access: FolderChange::new_rights("w").unwrap(),
                 recorded: true,
             },
-            FolderChange::Set {
-                path: "/srv/a".into(),
-                given: "a".into(),
-                changes: vec!["=rw".into(), "-w".into()],
+            FolderChange::Add {
+                path: "/srv/a/secret".into(),
+                access: FolderChange::new_rights("none").unwrap(),
+                recorded: true,
             },
             FolderChange::Rm {
                 path: "/srv/a".into(),
@@ -439,28 +407,16 @@ mod tests {
         let refused = |method: &str, params: Value| {
             FolderChange::from_request(method, params).expect_err("taken")
         };
-        // No right, an unknown one, or one given twice.
-        let e = refused("folder.add", json!({"path": "/srv/a", "access": ""}));
-        assert!(e.contains("grants some right"), "{e}");
+        // An unknown right, or one given twice; there is no other method
+        // than `folder.add` and `folder.rm`.
         let e = refused("folder.add", json!({"path": "/srv/a", "access": "rq"}));
         assert!(e.contains("not a folder flag"), "{e}");
         refused("folder.add", json!({"path": "/srv/a", "access": "rr"}));
-        // A change that is none, or too many of them.
         let e = refused(
             "folder.set",
-            json!({"path": "/srv/a", "given": "a", "changes": []}),
+            json!({"path": "/srv/a", "given": "a", "changes": ["=rw"]}),
         );
-        assert!(e.contains("name what to change"), "{e}");
-        let e = refused(
-            "folder.set",
-            json!({"path": "/srv/a", "given": "a", "changes": ["x"]}),
-        );
-        assert!(e.contains("start with =, + or -"), "{e}");
-        let e = refused(
-            "folder.set",
-            json!({"path": "/srv/a", "given": "a", "changes": vec!["+r"; CHANGES_MAX + 1]}),
-        );
-        assert!(e.starts_with("at most 64 changes"), "{e}");
+        assert!(e.contains("unknown field"), "{e}");
         // What another method takes, a field the node does not know, a
         // field missing, or no path.
         let e = refused(
@@ -542,14 +498,20 @@ mod tests {
             recorded: false,
         };
         apply_to(&mut one, Some("home"), &again).unwrap();
-        // A folder saved as typed is found by that spelling.
-        let set = FolderChange::Set {
-            path: "/elsewhere".into(),
-            given: "/srv/a".into(),
-            changes: vec!["+r".into(), "-x".into()],
+        // A folder with no rights closes a place inside another.
+        let closed = FolderChange::Add {
+            path: "/srv/a/secret".into(),
+            access: Access::NONE,
+            recorded: false,
         };
-        let a = apply_to(&mut one, None, &set).unwrap();
-        assert_eq!(a.access.unwrap().to_chmod(), "r--");
+        let a = apply_to(&mut one, None, &closed).unwrap();
+        assert_eq!(a.access.unwrap().to_chmod(), "---");
+        // A folder saved as typed is found by that spelling.
+        let rm_closed = FolderChange::Rm {
+            path: "/elsewhere".into(),
+            given: "/srv/a/secret".into(),
+        };
+        apply_to(&mut one, None, &rm_closed).unwrap();
         let rm = FolderChange::Rm {
             path: "/srv/a".into(),
             given: "/srv/a".into(),
@@ -558,7 +520,7 @@ mod tests {
         assert!(one.center("home").unwrap().policy.folders.is_empty());
         let e = apply_to(&mut one, None, &rm).unwrap_err();
         assert_eq!(e, "/srv/a is not a folder of this center");
-        let e = apply_to(&mut one, None, &set).unwrap_err();
+        let e = apply_to(&mut one, None, &rm_closed).unwrap_err();
         assert_eq!(e, "/elsewhere is not a folder of this center");
         // The center: the one named, or the only one.
         let mut two = config(&["home", "work"]);
@@ -566,35 +528,32 @@ mod tests {
         assert!(e.starts_with("several centers are paired"), "{e}");
         assert_eq!(
             apply_to(&mut two, Some("lab"), &add).unwrap_err(),
-            "no center named lab"
+            "no center named lab; paired: home, work"
         );
         assert_eq!(
             apply_to(&mut config(&[]), None, &add).unwrap_err(),
-            "no center is paired"
+            NO_CENTER_PAIRED
         );
         apply_to(&mut two, Some("work"), &add).unwrap();
         assert!(two.center("home").unwrap().policy.folders.is_empty());
         assert_eq!(two.center("work").unwrap().policy.folders.len(), 1);
     }
 
-    /// `folder add` takes rights that each start with `+`, and some right.
+    /// `folder add` takes its rights as one word, or `none`, and an empty
+    /// word is refused.
     #[test]
     fn a_new_folder_names_its_rights() {
-        let rights = |r: &[&str]| {
-            FolderChange::new_rights(&r.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-        };
-        assert_eq!(rights(&["+r", "+x"]).unwrap().to_chmod(), "r-x");
-        assert!(rights(&["=rw"]).unwrap_err().contains("takes +r, +w or +x"));
-        assert!(rights(&["-r"]).unwrap_err().contains("takes +r, +w or +x"));
-        assert!(
-            rights(&[])
-                .unwrap_err()
-                .contains("name what the center may do")
-        );
+        let rights = FolderChange::new_rights;
+        assert_eq!(rights("rx").unwrap().to_chmod(), "r-x");
+        assert_eq!(rights("xwr").unwrap().to_chmod(), "rwx");
+        assert_eq!(rights("none").unwrap(), Access::NONE);
+        assert!(rights("+r").unwrap_err().contains("name the rights"));
+        assert!(rights("=rw").unwrap_err().contains("not a folder flag"));
+        assert!(rights("").unwrap_err().contains("name the rights"));
     }
 
     /// A path the node's account may not look into may be a link to a listed
-    /// folder: the error then names the folders `folder ls` shows, the ones
+    /// folder: the error then names the folders `folder` shows, the ones
     /// beside the path first, and says what to look for when none is named.
     #[cfg(unix)]
     #[test]
@@ -614,7 +573,7 @@ mod tests {
         let beside = format!("{}/proj", home.display());
         let plain = format!("{link} is not a folder of this center");
         let hint = format!(
-            "{plain}; this account cannot look into it, so if it is a link, use the path `nerve-node folder ls` shows for the folder"
+            "{plain}; this account cannot look into it, so if it is a link, use the path `nerve-node folder` shows for the folder"
         );
         let few = [folder(&beside), folder("/srv/a")];
         let many: Vec<Folder> = ["/srv/a", "/srv/b", "/srv/c", "/data/work"]

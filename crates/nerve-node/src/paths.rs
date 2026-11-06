@@ -26,6 +26,29 @@ pub struct NodePaths {
     pub state_dir: PathBuf,
 }
 
+/// The node's folders by variable (`--config-dir`, `--state-dir`).
+pub const CONFIG_DIR_VAR: &str = "NERVE_NODE_CONFIG_DIR";
+pub const STATE_DIR_VAR: &str = "NERVE_NODE_STATE_DIR";
+
+/// The node's variables before they had a prefix of their own, and their
+/// names now: the node does not start while an old one is set
+/// ([`refuse_old_names`]), so a folder is never taken from it without a word.
+pub const OLD_NAMES: &[(&str, &str)] = &[
+    ("NERVE_CONFIG_DIR", CONFIG_DIR_VAR),
+    ("NERVE_STATE_DIR", STATE_DIR_VAR),
+];
+
+/// Refuses an old name of [`OLD_NAMES`] that `var` finds set, with its new
+/// name and where it is set.
+pub fn refuse_old_names(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<(), String> {
+    match OLD_NAMES.iter().find(|(old, _)| var(old).is_some()) {
+        None => Ok(()),
+        Some((old, new)) => Err(format!(
+            "rename {old} to {new} where you set it (your shell, a script, a unit's Environment=); the node does not start while the old name is set"
+        )),
+    }
+}
+
 impl NodePaths {
     pub fn new(config_dir: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> NodePaths {
         NodePaths {
@@ -34,15 +57,16 @@ impl NodePaths {
         }
     }
 
-    /// `--config-dir`/`NERVE_CONFIG_DIR`, else `~/.config/nerve`; likewise
-    /// `--state-dir`/`NERVE_STATE_DIR`, else `~/.local/state/nerve`. When
+    /// `--config-dir`/`NERVE_NODE_CONFIG_DIR`, else `~/.config/nerve`;
+    /// likewise `--state-dir`/`NERVE_NODE_STATE_DIR`, else
+    /// `~/.local/state/nerve`. When
     /// neither folder is named and `nerve-node install` put the node on this
     /// machine as a service, both are the installed node's
     /// ([`crate::service::Layout`]): the commands then reach the node that
     /// runs.
     pub fn from_args(config_dir: Option<PathBuf>, state_dir: Option<PathBuf>) -> NodePaths {
-        let config_dir = config_dir.or_else(|| env_dir("NERVE_CONFIG_DIR"));
-        let state_dir = state_dir.or_else(|| env_dir("NERVE_STATE_DIR"));
+        let config_dir = config_dir.or_else(|| env_dir(CONFIG_DIR_VAR));
+        let state_dir = state_dir.or_else(|| env_dir(STATE_DIR_VAR));
         if config_dir.is_none() && state_dir.is_none() {
             let layout = crate::service::Layout::system();
             if layout.installed() {
@@ -56,7 +80,7 @@ impl NodePaths {
     /// [`NodePaths::from_args`] with none given, also once a service is
     /// installed.
     pub fn by_hand() -> NodePaths {
-        Self::by_hand_or(env_dir("NERVE_CONFIG_DIR"), env_dir("NERVE_STATE_DIR"))
+        Self::by_hand_or(env_dir(CONFIG_DIR_VAR), env_dir(STATE_DIR_VAR))
     }
 
     fn by_hand_or(config_dir: Option<PathBuf>, state_dir: Option<PathBuf>) -> NodePaths {
@@ -365,6 +389,27 @@ pub fn windows_folders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The node does not start while an old variable name is set, and says
+    /// the new one; the new names pass.
+    #[test]
+    fn an_old_variable_name_is_refused() {
+        let only = |names: &'static [&'static str]| {
+            move |k: &str| names.contains(&k).then(|| std::ffi::OsString::from("/x"))
+        };
+        assert!(refuse_old_names(only(&[])).is_ok());
+        assert!(refuse_old_names(only(&["NERVE_NODE_STATE_DIR"])).is_ok());
+        let e = refuse_old_names(only(&["NERVE_STATE_DIR"])).unwrap_err();
+        assert!(
+            e.starts_with("rename NERVE_STATE_DIR to NERVE_NODE_STATE_DIR"),
+            "{e}"
+        );
+        let e = refuse_old_names(only(&["NERVE_CONFIG_DIR"])).unwrap_err();
+        assert!(
+            e.starts_with("rename NERVE_CONFIG_DIR to NERVE_NODE_CONFIG_DIR"),
+            "{e}"
+        );
+    }
 
     /// One pipe per state folder, the same for every spelling of it.
     #[test]

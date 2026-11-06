@@ -19,28 +19,27 @@ and `uninstall`, which run the center as a systemd service on Linux
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--state-dir` | `NERVE_STATE_DIR` | `$XDG_STATE_HOME/nerve-center`, `~/.local/state/nerve-center`, `%LOCALAPPDATA%\nerve-center` | identity, paired nodes, statistics |
-| `--name` | `NERVE_NAME` | `nerve-center` | center name shown to nodes |
-| `--listen` | `NERVE_LISTEN` | `0.0.0.0:7443` | where nodes connect |
-| `--public-url` | `NERVE_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links |
-| `--plain-loopback` | `NERVE_PLAIN_LOOPBACK` | off | plain HTTP for nodes, only on a loopback `--listen` |
-| `--ui` | `NERVE_UI` | `127.0.0.1:7480` | web UI address, or `off` |
-| `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http`, or `none` (center only) |
-| `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | HTTP MCP address |
-| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | a harness token: a bearer token for HTTP MCP (more can be made in the UI); it does not log in to the UI |
-| `--call-wait` | `NERVE_CALL_WAIT` | `20s` | how long `execute` waits for a result before the call becomes a job (§4.4): `20` or `20s`, or `500ms`; 10 ms to 600 s |
-| `--log` | `NERVE_LOG` | the stored level, `info` at first | log level; wins over the stored one for this run. The log goes to stderr and `log.jsonl`, never to stdout |
+| `--state-dir` | `NERVE_CENTER_STATE_DIR` | `$XDG_STATE_HOME/nerve-center`, `~/.local/state/nerve-center`, `%LOCALAPPDATA%\nerve-center` | identity, paired nodes, statistics |
+| `--name` | `NERVE_CENTER_NAME` | `nerve-center` | center name shown to nodes |
+| `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | where nodes connect |
+| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links |
+| `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | plain HTTP for nodes, only on a loopback `--listen` |
+| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | web UI address, or `off` |
+| `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off` (center only), `http` (HTTP MCP at `127.0.0.1:7481`) or an HTTP MCP address |
+| `--harness-token` | `NERVE_CENTER_HARNESS_TOKEN` | none | a harness token: a bearer token for HTTP MCP (more can be made in the UI); it does not log in to the UI |
+| `--call-wait` | `NERVE_CENTER_CALL_WAIT` | `20s` | how long `execute` waits for a result before the call becomes a job (§4.4): `20` or `20s`, or `500ms`; 10 ms to 600 s |
+| `--log` | `NERVE_CENTER_LOG` | the stored level, `info` at first | log level; wins over the stored one for this run. The log goes to stderr and `log.jsonl`, never to stdout |
 
 Example entry:
 
 ```json
-{"mcpServers": {"nerve": {"command": "nerve-center", "env": {"NERVE_NAME": "lab"}}}}
+{"mcpServers": {"nerve": {"command": "nerve-center", "env": {"NERVE_CENTER_NAME": "lab"}}}}
 ```
 
 Every listener uses TLS with the center's self-signed certificate when it is
 bound beyond loopback; nodes pin it through the pairing link. On loopback the
 web UI and the HTTP MCP endpoint are plain HTTP. HTTP MCP beyond loopback
-works (`--mcp-listen 0.0.0.0:7481`), always with the bearer token.
+works (`--mcp 0.0.0.0:7481`), always with the bearer token.
 
 ## 2. One center per state folder
 
@@ -50,7 +49,7 @@ it relays its stdio over `<state>/run/harness.sock` (mode 0600 in a 0700
 folder; the owner also checks the peer's uid) and each harness gets its own
 session. When the owner's own harness goes, the owner keeps running until the
 attached harnesses have ended too. A second instance with `--mcp http` or
-`none` refuses to start. Windows has no attach: the second instance
+`off` refuses to start. Windows has no attach: the second instance
 fails when it cannot bind the node port.
 
 ## 3. MCP
@@ -681,7 +680,7 @@ naming what refused it; such a call never reaches the node. The checker can
 only refuse, and a call it lets through goes to its node, whose policy
 decides: what no mode and no rule allows is refused at once with
 `error forbidden: <reasons>`, and nothing is run. The owner allows more on the
-node (`nerve-node rule add allow`, `mode set`, `folder add`) or, with the
+node (`nerve-node rule add allow`, `mode `, `folder add`) or, with the
 settings grant, from the audit tab; a checker refusal is changed on the
 center's action checker tab.
 

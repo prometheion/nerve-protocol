@@ -694,11 +694,7 @@ mod tests {
         ("fs", "write", "/etc/crontab"),
         ("fs", "write", "/etc/cron.d/job"),
         ("exec", "run", "nerve-node status"),
-        (
-            "exec",
-            "run",
-            "/usr/local/bin/nerve-node-desktop mode set user",
-        ),
+        ("exec", "run", "/usr/local/bin/nerve-node-desktop mode user"),
         ("exec", "run", "ls /run/nerve-node"),
         ("exec", "run", "cat /etc/nerve/node.toml"),
         ("fs", "write", "/home/a/.config/nerve/node.toml"),
@@ -1766,8 +1762,8 @@ mod tests {
     fn the_node_itself_is_refused() {
         for cmd in [
             "nerve-node config set machine.user root",
-            "sudo /usr/local/bin/nerve-node rule rm deny 'rm' --wildcard",
-            "./target/release/nerve-node-desktop mode set user",
+            "sudo /usr/local/bin/nerve-node rule rm deny 'rm *'",
+            "./target/release/nerve-node-desktop mode user",
             "cd /tmp && nerve-node status",
             r"& 'C:\Program Files\Nerve\nerve-node-desktop.exe' config set node.name x",
             "socat - UNIX-CONNECT:/run/nerve-node/owner.sock",

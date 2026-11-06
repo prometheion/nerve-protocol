@@ -37,7 +37,7 @@ async fn center(dir: &std::path::Path, tls: bool) -> Running {
         "--ui",
         "off",
         "--mcp",
-        "none",
+        "off",
     ];
     if !tls {
         argv.push("--plain-loopback");

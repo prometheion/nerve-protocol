@@ -45,7 +45,7 @@ async fn center_with(dir: &std::path::Path, more: &[&str]) -> Running {
             "--ui",
             "127.0.0.1:0",
             "--mcp",
-            "none",
+            "off",
         ]
         .iter()
         .chain(more),

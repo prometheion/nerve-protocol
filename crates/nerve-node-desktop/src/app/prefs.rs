@@ -205,8 +205,8 @@ impl Ctl {
                     (
                         r.run(&["config", "get", "node.name"]),
                         r.run(&["config", "get", "machine.secret_storage"]),
-                        r.run(&["proxy", "ls"]),
-                        r.run(&["relay", "ls"]),
+                        r.run(&["proxy"]),
+                        r.run(&["relay"]),
                         r.run(&["config", "get", "machine.user"]),
                     ),
                     (
@@ -411,9 +411,9 @@ impl Ctl {
             "proxy".into(),
             "set".into(),
             format!("https://{}@{}", l.node, l.address),
-            // `=`: a pin starting with `-` is no flag to the CLI then.
+            // `=`: a pin starting with `-` is no flag to the CLI then. A
+            // user name without a password: the token comes on stdin.
             format!("--pin={}", l.pin),
-            "--password-stdin".into(),
         ];
         self.with_prefs(|p| {
             p.set_connect_busy(true);
@@ -445,7 +445,7 @@ impl Ctl {
 
     /// Opens the dialog that makes a node's link: a new node, or with
     /// `token_for` a new link for that one. The address is the relay's
-    /// guess (`relay ls`), which the owner may change.
+    /// guess (`relay`), which the owner may change.
     fn relay_add_start(&self, token_for: &str) {
         let address = self.relay_address.borrow().clone();
         self.with_prefs(|p| {
@@ -568,6 +568,15 @@ impl Ctl {
         // The password and the header values go on stdin, never as
         // arguments, which every process of the machine can read.
         let (url, password) = view::proxy_login(&url, &password);
+        if password.is_some() && !nerve_node::cli::proxy_wants_password(&url) {
+            self.with_prefs(|p| {
+                p.set_proxy_error(
+                    "A password needs the user's name in the address: http://user@host:port."
+                        .into(),
+                )
+            });
+            return;
+        }
         let mut args = vec!["proxy".into(), "set".into(), url];
         if !pin.is_empty() {
             args.push(format!("--pin={pin}"));
@@ -577,13 +586,14 @@ impl Ctl {
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .collect();
+        // The CLI reads the password of a URL with a user name and no
+        // password, and the headers of `--header -` after it.
         let mut input = Vec::new();
         if let Some(pw) = password {
-            args.push("--password-stdin".into());
             input.push(pw);
         }
         if !headers.is_empty() {
-            args.push("--headers-stdin".into());
+            args.push("--header=-".into());
             input.extend(headers.iter().map(|h| h.to_string()));
         }
         let input = (!input.is_empty()).then(|| input.join("\n"));
@@ -650,7 +660,7 @@ impl Ctl {
         });
     }
 
-    /// `relay set-centers`, then `relay set-limits`: its own limits, or the
+    /// `relay set`: the centers it may reach, and its own limits or the
     /// relay's again.
     fn relay_edit_save(self: &Rc<Self>) {
         let Some((name, centers, own, links, opens)) = self.with_prefs(|p| {
@@ -670,19 +680,22 @@ impl Ctl {
         };
         // The flags come first and the name behind `--`, so the name is
         // never read as a flag.
-        let mut set_centers = vec!["relay".into(), "set-centers".into()];
+        let mut set = vec!["relay".to_string(), "set".into()];
+        if centers.is_empty() {
+            set.push("--to=*".into());
+        }
         for c in centers {
-            set_centers.push(format!("--center={c}"));
+            set.push(format!("--to={c}"));
         }
-        set_centers.extend(["--".into(), name.clone()]);
-        let mut set_limits = vec!["relay".into(), "set-limits".into()];
-        if own {
-            set_limits.extend([
-                format!("--max-links={links}"),
-                format!("--max-opens-per-minute={opens}"),
-            ]);
-        }
-        set_limits.extend(["--".into(), name.clone()]);
+        let (links, opens) = match own {
+            true => (links, opens),
+            false => ("default".into(), "default".into()),
+        };
+        set.extend([
+            format!("--max-links={links}"),
+            format!("--max-opens-per-minute={opens}"),
+        ]);
+        set.extend(["--".into(), name.clone()]);
         let failed = |c: &Rc<Ctl>, e: String| {
             c.with_prefs(|p| {
                 p.set_relay_edit_busy(false);
@@ -694,18 +707,15 @@ impl Ctl {
             p.set_relay_edit_busy(true);
             p.set_relay_edit_error(SharedString::new());
         });
-        self.command(set_centers, None, move |c, answer| match answer {
-            Ok(_) => c.command(set_limits, None, move |c, answer| match answer {
-                Ok(v) => {
-                    c.with_prefs(|p| {
-                        p.set_relay_edit_busy(false);
-                        p.set_relay_edit_open(false);
-                    });
-                    c.done(&v, format!("{name}'s centers and limits are saved."));
-                    c.prefs_load();
-                }
-                Err(e) => failed(c, e),
-            }),
+        self.command(set, None, move |c, answer| match answer {
+            Ok(v) => {
+                c.with_prefs(|p| {
+                    p.set_relay_edit_busy(false);
+                    p.set_relay_edit_open(false);
+                });
+                c.done(&v, format!("{name}'s centers and limits are saved."));
+                c.prefs_load();
+            }
             Err(e) => failed(c, e),
         });
     }
@@ -1212,7 +1222,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_proxy_set(move || c.proxy_set());
     let c = ctl.clone();
     p.on_proxy_remove(move || {
-        c.prefs_change(vec!["proxy".into(), "rm".into()], None, String::new())
+        c.prefs_change(vec!["proxy".into(), "off".into()], None, String::new())
     });
     let c = ctl.clone();
     p.on_relay_on(move || {
@@ -1220,7 +1230,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
             .with_prefs(|p| p.get_relay_address().trim().to_string())
             .unwrap_or_default();
         c.prefs_change(
-            vec!["relay".into(), "set".into(), address],
+            vec!["relay".into(), "on".into(), address],
             None,
             String::new(),
         );
@@ -1242,7 +1252,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     p.on_disconnect(move || {
         c.prefs_change(
-            vec!["proxy".into(), "rm".into()],
+            vec!["proxy".into(), "off".into()],
             None,
             "This node reaches its centers directly again.".into(),
         )
@@ -1280,7 +1290,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     p.on_account_password_save(move || c.account_password_save());
     let c = ctl.clone();
-    p.on_raw_remove(move || c.raw_change("remove"));
+    p.on_raw_remove(move || c.raw_change("rm"));
     let c = ctl.clone();
     p.on_accept_file(move || {
         c.confirm(
@@ -1306,7 +1316,7 @@ mod tests {
 
     #[test]
     fn a_limit_shows_in_the_fields_unit_and_its_default_when_unset() {
-        // As `config get limits` and `relay ls` answer on a new node, with
+        // As `config get limits` and `relay` answer on a new node, with
         // one limit set.
         let set = json!({
             "limits": {"max_running": 16, "output_cap_bytes": 16777216, "max_timeout_secs": 5400},
