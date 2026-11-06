@@ -154,7 +154,10 @@ pub(super) async fn command(
             let (cfg, _) = read_config(paths).await?;
             let name = pick_center(&cfg, &center)?;
             let mut policy = cfg.center(&name).expect("picked").policy.clone();
-            let mut v = json!({ "center": name });
+            // The guard is built in: its rules apart, and no stored copy of
+            // them on the deny list.
+            policy.deny.retain(|r| !rules::is_guard(r));
+            let mut v = json!({ "center": name, "guard": rules::GUARD });
             let lists = match list {
                 Some(l) => vec![l],
                 None => vec![List::Allow, List::Deny, List::Sudo],

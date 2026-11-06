@@ -155,6 +155,16 @@ pub async fn check(paths: &NodePaths, link: &PairLink) -> Result<Check, String> 
     })
 }
 
+/// The policy a new pairing starts with: folder mode, with no folder yet.
+/// The guard against an agent that drives the node itself is built in
+/// (nerve_policy::rules::GUARD), so the deny list starts empty.
+pub(crate) fn new_entry_policy() -> CenterPolicy {
+    CenterPolicy {
+        mode: nerve_policy::Mode::Folder,
+        ..CenterPolicy::default()
+    }
+}
+
 /// Pairs with the center in `link` and stores the result: the node key
 /// (a 0600 file `keys/<name>.key`, or the system keyring with
 /// `machine.secret_storage = "keyring"`) and a `[[center]]` entry with the
@@ -233,17 +243,7 @@ pub async fn pair(
         key_rotations: 0,
         pin_rotations: 0,
         old_pin: None,
-        // A new pairing starts in folder mode, with no folder yet, and with
-        // the guard against an agent that drives the node itself
-        // (nerve_policy::rules::GUARD).
-        policy: CenterPolicy {
-            mode: nerve_policy::Mode::Folder,
-            deny: nerve_policy::rules::GUARD
-                .iter()
-                .map(|g| g.to_string())
-                .collect(),
-            ..CenterPolicy::default()
-        },
+        policy: new_entry_policy(),
         capabilities: Vec::new(),
     };
 

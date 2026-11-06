@@ -373,11 +373,9 @@ fn the_app_drives_the_cli_end_to_end() {
         policy.allow,
         [rule("exec", "run", "git push origin main", true)]
     );
-    // After the guard a new pairing gets.
-    let guard = nerve_policy::rules::GUARD.len();
-    assert_eq!(policy.deny[..guard], *nerve_policy::rules::GUARD);
+    // A new pairing stores no guard: it is built in.
     assert_eq!(
-        policy.deny[guard..],
+        policy.deny,
         [
             rule("fs", "write", "/srv/data/report.txt", true),
             rule("exec", "run", "git push origin main", false)
@@ -832,36 +830,19 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(caps.get_programs().row_count(), 0);
     store.invoke_show(Page::Policy);
 
-    // A pairing without the whole guard (the owner took a rule off) is
-    // offered it, in one click.
-    assert!(!perm.get_guard_missing());
+    // The guard is built in: a rule of it cannot be removed, and the
+    // page lists none of it.
     perm.invoke_rule_remove(1, nerve_policy::rules::GUARD[3].into());
-    assert!(perm.get_guard_missing());
-    perm.invoke_guard_add();
-    let deny = config(&paths).centers[0].policy.deny.clone();
     assert!(
-        nerve_policy::rules::guard_missing(&deny).is_empty(),
-        "{deny:?} {}",
+        store.get_toast().contains("built in"),
+        "{}",
         store.get_toast()
     );
-    assert!(!perm.get_guard_missing());
-    assert!(!perm.get_guard_older());
-    assert!(!perm.get_guard_busy());
-    // A text of the guard from before is still a rule that works, and the
-    // app says so instead of saying there is no guard; one click replaces it.
-    let older = nerve_policy::rules::GUARD_OLD[0];
-    perm.set_deny_text(older.into());
-    perm.invoke_rule_add(1);
-    assert!(perm.get_guard_older(), "{}", store.get_toast());
-    assert!(!perm.get_guard_missing());
-    perm.invoke_guard_add();
-    assert!(!perm.get_guard_older(), "{}", store.get_toast());
     assert!(
-        !config(&paths).centers[0]
-            .policy
-            .deny
+        !perm
+            .get_deny()
             .iter()
-            .any(|d| d == older)
+            .any(|r| nerve_policy::rules::is_guard(&r))
     );
 
     // Sudo takes the password on stdin; without a running node it says so

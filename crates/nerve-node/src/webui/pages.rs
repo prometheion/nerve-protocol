@@ -110,7 +110,6 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
         },
-        ("POST", "/api/rules/guard") => on_center(ctx, b, &["rule", "guard"]).await,
         ("POST", "/api/sudo/off") => command(ctx, &["sudo", "off"], None).await,
         // ---- Audit ----
         ("GET", "/api/audit") => {
@@ -294,12 +293,6 @@ pub(super) fn args(words: &[&str], opts: &[(&str, &str)], values: &[&str]) -> Ve
         a.extend(values.iter().map(|v| v.to_string()));
     }
     a
-}
-
-/// A command on one center of the body's.
-async fn on_center(ctx: &Call<'_>, b: &Value, words: &[&str]) -> ApiResult {
-    let c = center(b)?;
-    run(ctx, args(words, &[("center", c)], &[]), None).await
 }
 
 /// A `center` verb, which takes the center's name as its argument.

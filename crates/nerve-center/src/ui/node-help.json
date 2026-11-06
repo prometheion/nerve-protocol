@@ -464,12 +464,6 @@
               ],
               "name": "rule edit",
               "usage": "nerve-node rule edit [OPTIONS] <LIST> <ENTRY> <NEW>"
-            },
-            {
-              "about": "Put the deny rules that keep a center's commands off this node itself (its programs, service, socket and folders) on the deny list, as a new pairing has them, in place of their older texts. They catch mistakes, not someone who hides the name",
-              "args": [],
-              "name": "rule guard",
-              "usage": "nerve-node rule guard [OPTIONS]"
             }
           ]
         },

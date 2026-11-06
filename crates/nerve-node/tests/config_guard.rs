@@ -441,12 +441,15 @@ async fn folder_node(dir: &Path) -> Option<(FakeCenter, NodeOptions)> {
 /// The command line of the CLI as a command would run it: it finds the
 /// node's folders where they are by default, below `HOME`. A path to them in
 /// the command line itself would be refused before any rule.
+/// The program is reached under another name: the built-in guard refuses
+/// `nerve-node` by its name (a mistake guard), and these tests check what
+/// holds when a command runs the program anyway.
 fn nerve(o: &NodeOptions, args: &str) -> String {
-    format!(
-        "HOME={} {} {args}",
-        o.home.display(),
-        o.exe.as_ref().unwrap().display(),
-    )
+    let alias = o.home.parent().unwrap().join("nrv");
+    if !alias.exists() {
+        std::os::unix::fs::symlink(o.exe.as_ref().unwrap(), &alias).unwrap();
+    }
+    format!("HOME={} {} {args}", o.home.display(), alias.display())
 }
 
 async fn run_command(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> Value {

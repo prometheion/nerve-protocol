@@ -508,7 +508,10 @@ struct Rules<'a> {
 impl<'a> Rules<'a> {
     fn new(policy: &'a CenterPolicy, env: &Env<'a>) -> Rules<'a> {
         Rules {
-            deny: RuleSet::new(&policy.deny, env.home).with_shell(env.shell),
+            // The guard is built in: it holds whatever the stored deny list
+            // says (crate::rules::GUARD).
+            deny: RuleSet::new(&crate::rules::with_guard(&policy.deny), env.home)
+                .with_shell(env.shell),
             allow: std::cell::OnceCell::new(),
             policy,
             home: env.home,
@@ -1070,9 +1073,11 @@ mod tests {
         let t = T::new();
         let env = t.env(true);
         let mut p = policy(Mode::User);
+        // The guard is built in, so its own rules name the refusal, also
+        // where the older texts are on the list.
         for (deny, names) in [
             (crate::rules::GUARD, "is denied (guard:node-"),
-            (crate::rules::GUARD_OLD, "is denied (exec.run:"),
+            (crate::rules::GUARD_OLD, "is denied (guard:node-"),
         ] {
             p.deny = deny.iter().map(|g| g.to_string()).collect();
             for c in [
@@ -1088,6 +1093,27 @@ mod tests {
                 assert!(why.contains(names), "{why}");
                 assert!(!why.contains(['\n', '\r', '\t']), "{why:?}");
             }
+        }
+    }
+
+    /// The guard is built in: a pairing whose deny list holds none of it is
+    /// held by it all the same, in every mode.
+    #[test]
+    fn the_guard_holds_without_a_stored_rule() {
+        let t = T::new();
+        let env = t.env(true);
+        for mode in [Mode::User, Mode::Folder, Mode::Allowlist] {
+            let mut p = policy(mode);
+            p.deny.clear();
+            p.allow = vec!["exec.run:nerve-node *".into()];
+            let Decision::Forbidden(why) = decide(
+                &p,
+                &env,
+                &call(Effect::Execute, &[], Some("nerve-node mode user")),
+            ) else {
+                panic!("{mode:?}: the guard did not hold");
+            };
+            assert!(why.contains("is denied (guard:node-programs)"), "{why}");
         }
     }
 

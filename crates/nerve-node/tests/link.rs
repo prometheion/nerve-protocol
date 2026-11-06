@@ -1295,7 +1295,8 @@ async fn a_new_pairing_refuses_commands_that_drive_the_node_itself() {
     let mut center = FakeCenter::start(false).await.unwrap();
 
     let node = paired_node_with(dir.path(), &center, |p| {
-        assert_eq!(p.deny, nerve_policy::rules::GUARD.to_vec());
+        // The guard is built in: the pairing stores none of it.
+        assert!(p.deny.is_empty(), "{:?}", p.deny);
         p.mode = nerve_policy::Mode::User;
     })
     .await;

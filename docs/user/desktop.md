@@ -284,11 +284,8 @@ your home** when your home is open to other accounts or a folder you gave
 lies in it ([modes](modes.md#your-home-and-other-accounts)). With Landlock
 neither shows.
 
-On **Permissions**, a center that lacks the guard against changing the node
-(you took a rule of it off) shows **Add the guard**, and one that still holds
-the guard's older text patterns, which keep working, shows **Update the
-guard**. Both run `rule guard`
-([rules](rules.md#the-guard-against-changing-the-node)).
+The guard against changing the node is built in on **Permissions** as on
+the CLI ([rules](rules.md#the-guard-against-changing-the-node)).
 
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use nerve_policy::command::Shell;
 use nerve_policy::guard::Guard;
-use nerve_policy::rules::{GUARD, GUARD_OLD, RuleSet, guard_missing, validate};
+use nerve_policy::rules::{GUARD, GUARD_OLD, RuleSet, validate, with_guard};
 
 const SH: &[Shell] = &[Shell::Sh];
 const PS: &[Shell] = &[Shell::PowerShell];
@@ -2225,8 +2225,11 @@ fn the_guard_rules_are_known_rules() {
         validate(old).unwrap();
         assert!(!GUARD.contains(old), "{old} is current");
     }
+    // Built in: on top of a pairing's own deny rules, once.
     let have = vec![GUARD[0].to_string(), "exec.run:rm *".to_string()];
-    assert_eq!(guard_missing(&have), GUARD[1..].to_vec());
+    let all = with_guard(&have);
+    assert_eq!(all[..GUARD.len()], *GUARD);
+    assert_eq!(all[GUARD.len()..], ["exec.run:rm *"]);
 }
 
 /// A command wrapped in more than the guard unwraps is a line it does not

@@ -240,8 +240,6 @@ impl Ctl {
                     p.set_deny_unfit(ModelRc::new(VecModel::from(view::rule_unfit_of(
                         &r, "deny",
                     ))));
-                    p.set_guard_missing(view::guard_missing(&r));
-                    p.set_guard_older(view::guard_older(&r));
                     p.set_sudo_list(ModelRc::new(VecModel::from(view::rule_list_of(&r, "sudo"))));
                     p.set_sudo_on(s["sudo"] == "on");
                     p.set_read(true);
@@ -628,23 +626,6 @@ impl Ctl {
         );
     }
 
-    /// Puts the guard's deny rules the page's center lacks on its list.
-    fn guard_add(self: &Rc<Self>) {
-        self.with_perm(|p| p.set_guard_busy(true));
-        self.perm_change(
-            vec!["rule".into(), "guard".into()],
-            None,
-            String::new(),
-            |c| {
-                c.with_perm(|p| p.set_guard_busy(false));
-            },
-            |c, e| {
-                c.with_perm(|p| p.set_guard_busy(false));
-                c.toast(e, Tone::Danger);
-            },
-        );
-    }
-
     fn sudo_off(self: &Rc<Self>) {
         self.command(vec!["sudo".into(), "off".into()], None, |c, answer| {
             match answer {
@@ -712,6 +693,4 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_sudo_confirm(move || c.sudo_confirm());
     let c = ctl.clone();
     p.on_sudo_off(move || c.sudo_off());
-    let c = ctl.clone();
-    p.on_guard_add(move || c.guard_add());
 }

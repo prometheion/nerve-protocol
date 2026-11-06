@@ -1367,37 +1367,19 @@ async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_comm
         400
     );
 
-    // A center's guard: a pairing has it, and the page puts back a rule that
-    // was taken away.
-    let guard_rule = daemon.config().center("lab").unwrap().policy.deny[0].clone();
+    // The guard is built in: the page has no route to put it on, and a
+    // rule of it cannot be removed.
     let a = post(addr, "/api/rules/guard", &s, json!({"center": "lab"})).await;
-    assert_eq!(a.status, 400, "the guard is there already: {}", a.body);
-    change(
+    assert_eq!(a.status, 404, "{}", a.body);
+    let a = post(
         addr,
-        &s,
         "/api/rules/remove",
-        json!({"center": "lab", "list": "deny", "rule": guard_rule}),
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": nerve_policy::rules::GUARD[0]}),
     )
     .await;
-    assert!(
-        !daemon
-            .config()
-            .center("lab")
-            .unwrap()
-            .policy
-            .deny
-            .contains(&guard_rule)
-    );
-    change(addr, &s, "/api/rules/guard", json!({"center": "lab"})).await;
-    assert!(
-        daemon
-            .config()
-            .center("lab")
-            .unwrap()
-            .policy
-            .deny
-            .contains(&guard_rule)
-    );
+    assert_eq!(a.status, 400, "{}", a.body);
+    assert!(a.body.contains("built in"), "{}", a.body);
     // The sudo list is closed, a setting taken away, a key rotated.
     change(addr, &s, "/api/sudo/off", json!({})).await;
     assert!(

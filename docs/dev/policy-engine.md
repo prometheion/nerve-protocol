@@ -155,8 +155,9 @@ before it (`Unparsed::read`, nested as the line nests them), and each
 `guard:` rule then checks those as a parsed line and also matches the whole
 line with its share of the text patterns of 0.0.6 (`rules::TEXTS`), so it
 refuses at least what they refused. Those texts are
-also in `GUARD_OLD`, which `rule guard` takes off a deny list when it puts the
-three rules on. A `guard:` rule on the allow list is refused by the config
+also in `GUARD_OLD`; a pairing that still holds them keeps them as deny rules
+of its own. The guard itself is built in: `rules::with_guard` puts its rules on
+top of every pairing's deny list, and the node stores none of them. A `guard:` rule on the allow list is refused by the config
 check. The center's action checker has its own splitter
 (`checker/normalize.rs`); it is meant to move onto this parser.
 

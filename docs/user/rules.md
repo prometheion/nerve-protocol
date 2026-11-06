@@ -13,8 +13,8 @@ In `folder` and `user` mode, allow rules do nothing. The mode decides.
 
 The commands below are the CLI's, on Linux. On Windows the
 [desktop app](desktop.md)'s **Permissions** page adds, edits and removes the
-rules (**Allowed commands**, **Forbidden commands**, the sudo list), and puts
-the guard on (**Add the guard**).
+rules (**Allowed commands**, **Forbidden commands**, the sudo list); the
+guard is built in.
 
 ## Allow a command
 
@@ -140,18 +140,12 @@ straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
 part of the name (`pkill nerve`, which matches the node too), and `reg import` or `regedit` of a file that holds the service's key.
 
 A rule of the guard is written `guard:<name>`, and only these three exist.
-They belong on the deny list; the allow list refuses them.
-
-```sh
-nerve-node rule guard --center lab   # puts back the ones a pairing lacks
-```
-
-A pairing that lacks some of them (you removed them) gets them back with
-`rule guard`, and the desktop app offers it on **Permissions**. A pairing
-made before the guard read commands holds its rules as text patterns. They
-work on as they did, and the app says so (**The guard still reads commands as
-text**), until `rule guard` (or **Update the guard**) takes them off and puts
-the three rules in their place. Those older patterns hold tabs and
+The guard is built in: every pairing has its rules on top of its own deny
+rules, the node keeps them current, and none can be removed. `rule` shows it
+as one line (`guard: 8 rules, built in`). A pairing made before the guard
+read commands may still hold its rules as text patterns: they are deny rules
+of its own now, beside the guard, and `rule rm` takes them off. Those older
+patterns hold tabs and
 line breaks: `rule` and the app's rule lists write them as `\t`, `\r` and
 `\n`, so a rule stays one line, and `rule rm` and `rule edit` take the entry
 as it is listed there (the new entry of `rule edit` too). `config add` and
