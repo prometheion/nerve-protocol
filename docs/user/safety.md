@@ -18,10 +18,13 @@ leads to the detail.
 - Commands on the sudo list run as root, outside the folders. With the
   network off they do not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
-- While sudo is on, a center with the settings grant can list commands for
-  root itself. Keep sudo off while a center you would not give root has the
-  grant ([the grant](../dev/settings-and-config.md#the-settings-grant)).
-- Taking the grant back leaves what the center added, still on
+- A center with the settings grant can list commands for root itself. They
+  run whenever sudo is on, also after you take the grant back. Before
+  `sudo on`, check each center's sudo list with `nerve-node rule` and
+  `rule rm` what you did not add
+  ([the grant](../dev/settings-and-config.md#the-settings-grant)).
+- Taking the grant back leaves what the center changed, still on: its mode,
+  rules, sudo list and capabilities
   ([the grant](../dev/settings-and-config.md#without-the-grant)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust it, run `sudo nerve-node sudo on` on the
@@ -119,6 +122,11 @@ leads to the detail.
   ([backup](../dev/backup.md#what-is-not-in-a-backup)).
 - A restored backup brings its own pairings, modes and rules: restore only
   one you made yourself ([restore](../dev/backup.md#restore)).
+- While `center add` asks, the link is in the process list: use
+  `center add -` ([pair](pair.md)).
+- The relay link holds the relay token, and the `claude mcp add` line holds
+  the harness token. Delete them from your shell's history
+  ([pair](pair.md), [center](center.md)).
 - A relay token reaches the relay's centers' host and port, and the other
   sites a reverse proxy serves there
   ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).

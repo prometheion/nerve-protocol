@@ -23,7 +23,7 @@ const BUDGETS: &[(&str, usize)] = &[
     ("docs/user/watch-and-stop.md", 900),
     ("docs/user/troubleshooting.md", 1500),
     ("docs/user/commands.md", 600),
-    ("docs/user/safety.md", 850),
+    ("docs/user/safety.md", 950),
 ];
 
 /// The most words a table cell may have.
@@ -170,7 +170,10 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "the homes, the folders and the running commands of the others, with their network",
         ),
         // Taking the grant back leaves what the center added.
-        ("docs/user/rules.md", "That leaves what it added"),
+        (
+            "docs/user/rules.md",
+            "That leaves what it changed, still on: its mode",
+        ),
         // A stop leaves a command's own leftovers when it ran as you.
         (
             "docs/user/watch-and-stop.md",
@@ -207,19 +210,19 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         // of the task pages, and the link in the process list.
         (
             "docs/user/rules.md",
-            "put commands on its own sudo list, which run as root",
+            "which run as root whenever sudo is on, also\n  after you take the grant back",
         ),
         (
             "docs/user/rules.md",
-            "a center with the grant can still list commands for root",
+            "A center with the grant can still list commands for root",
         ),
         (
             "docs/user/safety.md",
-            "a center with the settings grant can list commands for root itself",
+            "A center with the settings grant can list commands for root itself",
         ),
         (
             "docs/user/safety.md",
-            "Taking the grant back leaves what the center added",
+            "Taking the grant back leaves what the center changed, still on: its mode,\n  rules, sudo list and capabilities",
         ),
         (
             "docs/user/safety.md",
@@ -246,6 +249,28 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         (
             "docs/user/pair.md",
             "the link is in the process list, which any account can read",
+        ),
+        // The round 5 limits: the sudo list outlives the grant, and the
+        // secrets that land in the process list or the shell's history.
+        (
+            "docs/user/safety.md",
+            "They run whenever sudo is on, also after you take the grant back",
+        ),
+        (
+            "docs/user/safety.md",
+            "check each center's sudo list with `nerve-node rule`",
+        ),
+        (
+            "docs/user/safety.md",
+            "the link is in the process list: use `center add -`",
+        ),
+        (
+            "docs/user/safety.md",
+            "the `claude mcp add` line holds the harness token",
+        ),
+        (
+            "docs/user/rules.md",
+            "check each center's sudo list with\n  `nerve-node rule --center <name>`",
         ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),

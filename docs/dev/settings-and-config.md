@@ -142,8 +142,10 @@ entry and changes none, and an entry goes only with its folder.
 Because the grant lets a center widen its rules up to `user` mode, a center
 with the grant is as strong as `user` mode on that machine. It also writes its
 own `policy.sudo_allow` (its Audit page does, `client_only` has no check on
-it), and the sudo switch is one for the machine: while it is on, those commands
-run as root in every mode. With the grant and sudo on, a center reaches root.
+it, and nothing removes the entries when the grant goes), and the sudo switch
+is one for the machine: while it is on, those commands run as root in every
+mode. With sudo on, a center that has or had the grant reaches root through
+the entries it wrote.
 
 ## The node's own folders
 
@@ -683,10 +685,11 @@ Each change is checked, then saved. A change is audited on the machine with the
 old and the new value and the name of the center.
 
 A center with the grant can widen its own rights up to `user` mode. A center
-that is taken over is then as strong as `user` mode on that machine, and while
-sudo is on it can list commands for root in its own `policy.sudo_allow`. Give
-the grant only to a center you would also give a shell, and keep sudo off while
-a center you would not give root has it.
+that is taken over is then as strong as `user` mode on that machine, and it
+can list commands for root in its own `policy.sudo_allow`, which run whenever
+sudo is on, also after the grant is taken back. Give the grant only to a center
+you would also give a shell, and check each center's sudo list (`rule`) before
+`sudo on`.
 
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 `user` mode runs commands as root. A center with the grant can switch itself
@@ -749,8 +752,10 @@ value there changes nothing; an entry goes only with its folder.
 
 Everything is still possible on the machine, with [`nerve-node`](../user/commands.md).
 The web UI shows such a machine as keeping its settings to itself, its Audit
-buttons stay off, and its Capabilities page is read only. What a center added
-while it had the grant stays offered to it until you remove it.
+buttons stay off, and its Capabilities page is read only. Taking the grant back
+changes only the grant: what a center set while it had it stays in force. That
+is its mode, `as_owner`, rules, sudo list and the capabilities it added, which
+stay offered to it until you remove them.
 
 ## Where files live
 
