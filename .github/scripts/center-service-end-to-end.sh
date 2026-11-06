@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The center installed as a service on a real Linux (docs/user/center.md, "Run
-# it as a service"): `install` makes the user nerve-center, its state folder,
+# The center installed as a service on a real Linux (docs/user/install.md, "The
+# center as a service"): `install` makes the user nerve-center, its state folder,
 # the settings file with a harness token, the program and the unit, and starts
 # it; a harness reaches MCP over HTTP with that token and with no other; the
 # unit holds the center as the page says; `install` again keeps the token; an
