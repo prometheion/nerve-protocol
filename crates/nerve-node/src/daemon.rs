@@ -1882,7 +1882,7 @@ pub const NETWORK_SUDO: &str = "the owner turned the network off for this center
 /// whether this is the installed node, `account` the account they run as.
 /// Where Landlock is missing, `nerve-run` is held to its folders by its own
 /// account and the ACLs alone, and the installed Linux node runs its
-/// commands without it (docs/user/modes.md). `account` is asked only when
+/// commands without it (docs/dev/sandbox-linux.md). `account` is asked only when
 /// the answer depends on it.
 pub fn folder_refusal(
     sandbox: bool,

@@ -1,4 +1,4 @@
-//! The node as a Windows service (docs/user/service.md): `install`, `update`
+//! The node as a Windows service (docs/dev/windows.md): `install`, `update`
 //! and `uninstall`, as the Linux ones in [`crate::service`] are. The service
 //! `nerve-node` runs `nerve-node run` as a local account of its own, `nerve`,
 //! which with SYSTEM and the administrators alone may open the node's config,

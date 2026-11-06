@@ -1,5 +1,5 @@
 //! Capabilities a center adds itself (`settings.cap-add`, `cap-edit`,
-//! `cap-rm`; docs/user/config-capabilities.md) on a real node daemon, in
+//! `cap-rm`; docs/dev/capabilities.md) on a real node daemon, in
 //! process: a center with the settings grant `write` adds them to its own
 //! entry, they are offered to it alone, counted as `execute`, and run as
 //! `nerve-run`, which a node run by hand does not have; here the node by

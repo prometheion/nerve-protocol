@@ -1,6 +1,6 @@
 //! Runs `nerve-node` for the app: this same program with arguments, which
 //! behaves as `nerve-node` (src/main.rs), with `--json`, and reads its
-//! answer (docs/user/commands.md). The app never parses text meant for
+//! answer (docs/dev/settings-and-config.md). The app never parses text meant for
 //! people, and has the CLI's checks because it runs the CLI. On a node
 //! installed as a service the CLI of the owner has the running node run the
 //! command (nerve_node::owner); a command that needs an administrator, or

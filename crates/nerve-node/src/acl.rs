@@ -1,5 +1,5 @@
 //! The folder grants of the installed Linux node as POSIX ACLs
-//! (docs/user/modes.md). Its commands of `folder` and `allowlist` mode run as
+//! (docs/dev/sandbox-linux.md). Its commands of `folder` and `allowlist` mode run as
 //! `nerve-run` (crate::account), which reaches the owner's files only through
 //! the entries this module puts on the folders the owner gives a center:
 //! an access entry `user:nerve-run` on the folder and on everything below it

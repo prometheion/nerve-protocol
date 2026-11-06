@@ -240,7 +240,7 @@ impl PairLink {
 /// `nerve://relay?address=<host:port>&node=<name>&token=<token>&pin=<pin>`:
 /// all a node needs to reach its centers through a relay, as `relay add`
 /// and `relay token` on the relay show it, in one piece to paste
-/// (docs/user/relay.md).
+/// (docs/dev/node-link.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayLink {
     /// Where the relayed node reaches the relay: a host name or address and

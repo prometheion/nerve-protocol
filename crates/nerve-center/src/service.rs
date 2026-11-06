@@ -1,4 +1,4 @@
-//! The center as a service (docs/user/center.md, "Run it as a service"):
+//! The center as a service (docs/dev/service.md, "The center as a service"):
 //! `install`, `update` and `uninstall`, on Linux with systemd, as the node
 //! has them: what both do the same way, `update` among it, is
 //! [`nerve_service`]'s. The service runs `nerve-center` with

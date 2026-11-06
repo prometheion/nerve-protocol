@@ -1,5 +1,5 @@
 //! One-click install of the local decision model (addendum 2026-10-18,
-//! docs/user/action-checker.md).
+//! docs/dev/action-checker.md).
 //!
 //! The center downloads a prebuilt `llama-server` from llama.cpp's GitHub
 //! release and the pinned d1-2B model from Hugging Face into its own state

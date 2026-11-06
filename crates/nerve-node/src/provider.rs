@@ -1237,7 +1237,7 @@ async fn check(
     })
 }
 
-/// What `cap` shows (docs/user/commands.md): every action of the node's
+/// What `cap` shows (docs/dev/settings-and-config.md): every action of the node's
 /// own capabilities and of the attached programs', each with its effect,
 /// where it comes from and how each center has it set (`cap set`: `on`,
 /// `off`, `hidden`, or `default` where the mode alone decides; for

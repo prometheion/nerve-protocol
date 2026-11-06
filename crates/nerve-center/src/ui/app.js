@@ -1141,7 +1141,7 @@ async function pollCheckerLocal() {
 // ---- Capabilities ----
 
 // What a machine offers the agent and where each unit comes from, and the
-// capabilities this center added there itself (docs/user/web-ui.md). A
+// capabilities this center added there itself (docs/dev/web-uis.md). A
 // machine that gave this center the settings grant (write) takes changes:
 // add, edit, remove. One without it is shown read only.
 const CAP_EFFECTS = ["read", "write", "execute", "sense", "actuate"];
@@ -1541,7 +1541,7 @@ function pageSettings() {
   ];
 }
 
-// The center's TLS key (docs/user/center.md#rotate-the-key). The new pin is
+// The center's TLS key (docs/dev/identity-and-pairing.md). The new pin is
 // shown once, when the rotation is made, as a pairing shows its code.
 function centerKey(k) {
   const rotate = act(async () => {

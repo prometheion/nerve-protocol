@@ -1,5 +1,5 @@
 //! What the pages show, made from the CLI's JSON answers
-//! (docs/user/commands.md): the words, their tones, and the arguments of the
+//! (docs/dev/settings-and-config.md): the words, their tones, and the arguments of the
 //! commands the buttons run. Nothing here decides anything about the node;
 //! it only says what the node said, for people.
 

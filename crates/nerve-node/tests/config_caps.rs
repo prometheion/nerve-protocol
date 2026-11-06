@@ -1,4 +1,4 @@
-//! Capabilities of the config (`[[capability]]`, docs/user/config-capabilities.md)
+//! Capabilities of the config (`[[capability]]`, docs/dev/capabilities.md)
 //! on a real node daemon, in process: the node offers them by its platform
 //! and by the effect table, decides and audits each call like any other, and
 //! runs the owner's command itself with the call's arguments as whole

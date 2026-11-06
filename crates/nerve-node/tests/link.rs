@@ -1521,7 +1521,7 @@ async fn folder_mode_says_nothing_of_the_links_that_were_there_before() {
 /// A folder mode command gets no controlling terminal. On a node run by hand
 /// in a terminal that is the owner's, which the command must not reach
 /// through `/dev/tty`, nor read the pty by its name under `/dev/pts`
-/// (docs/user/modes.md). The test runs itself again in a session of
+/// (docs/dev/sandbox-linux.md). The test runs itself again in a session of
 /// its own whose controlling terminal is a new pty, as a node started in a
 /// terminal has.
 #[cfg(target_os = "linux")]

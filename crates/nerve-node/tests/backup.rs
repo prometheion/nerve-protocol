@@ -120,7 +120,7 @@ async fn a_node_moves_to_another_machine_and_the_center_knows_it() {
     assert_eq!(now.trim().trim_matches('"'), was.centers[0].url);
 
     // The address a moved center answers under is changed on the node by
-    // name (docs/user/backup.md); the pin and the key stay.
+    // name (docs/dev/backup.md); the pin and the key stay.
     cli(
         &new,
         &[

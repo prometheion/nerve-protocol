@@ -494,7 +494,7 @@ pub enum CapCmd {
 }
 
 /// What `cap add` and `cap edit` set of a capability of node.toml
-/// (docs/user/config-capabilities.md). The schemas come inline or on stdin
+/// (docs/dev/capabilities.md). The schemas come inline or on stdin
 /// (`-`), never from a file the node would open.
 #[derive(Debug, Args, Clone, Default)]
 pub struct CapSpec {
@@ -2650,7 +2650,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     ),
                 );
                 // Which `nerve.*` profile is this pairing's: the others
-                // belong to other nodes or are left over (docs/user/modes.md).
+                // belong to other nodes or are left over (docs/dev/windows.md).
                 if cfg!(windows) {
                     w(
                         out,
@@ -5461,7 +5461,7 @@ fn clear_log(paths: &NodePaths, who: &str) -> Result<(), String> {
     .map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// `log`: the node's log file, the moved-aside one first (docs/user/logs.md).
+/// `log`: the node's log file, the moved-aside one first (docs/dev/logging.md).
 /// `--follow` looks again every 500 ms and reads what was added to the file,
 /// or the new file from its start once the old one was moved aside. With
 /// `json` the lines are as the file holds them: one list, or with `follow`
@@ -5871,7 +5871,7 @@ async fn proxy_cmd(
                 return Err("no password given: the first line of stdin is empty".into());
             }
             // A relay's link holds the proxy URL with this node's login and
-            // the pin: one paste (docs/user/relay.md).
+            // the pin: one paste (docs/dev/node-link.md).
             let (url, pin) =
                 if nerve_proto::link::strip_prefix_ci(url.trim(), "nerve://relay").is_some() {
                     let link = nerve_proto::link::RelayLink::parse(&url)?;
@@ -6589,7 +6589,7 @@ fn relay_pin(
 }
 
 /// The port a relay link names when the relay has no address to listen on
-/// yet: the one docs/user/relay.md uses.
+/// yet: the one docs/dev/node-link.md uses.
 const RELAY_PORT: u16 = 7490;
 
 /// Where a relayed node finds the relay, for its link: `given` (with the

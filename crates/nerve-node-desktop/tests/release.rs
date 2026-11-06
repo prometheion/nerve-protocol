@@ -1,6 +1,6 @@
 //! What the release gives Windows: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
-//! (docs/user/install.md); what the released app keeps for the licence it
+//! (docs/dev/windows.md); what the released app keeps for the licence it
 //! uses Slint under; and that the Linux programs are installed and tested
 //! where the docs say before they are published; and that the security
 //! policy names a way in that needs no repository setting.

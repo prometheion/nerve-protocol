@@ -1,5 +1,5 @@
 //! The accounts a center's commands run as on a node installed as a service
-//! (docs/user/service.md). The service runs as `nerve`, which owns the
+//! (docs/dev/service.md). The service runs as `nerve`, which owns the
 //! node's config, keys and state; no command runs as it. On Linux a command
 //! of `folder` mode, and of `allowlist` mode unless the pairing says
 //! otherwise, runs as [`RUN_USER`], an account of its own that `install`

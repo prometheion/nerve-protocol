@@ -641,7 +641,7 @@ impl Center {
         &self.dir
     }
 
-    /// The log (docs/user/logs.md): what the web UI shows and the file holds.
+    /// The log (docs/dev/logging.md): what the web UI shows and the file holds.
     pub fn log(&self) -> &Arc<Log> {
         &self.log
     }

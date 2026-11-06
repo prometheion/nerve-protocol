@@ -2,7 +2,7 @@
 //! state folder and a window of the latest entries in memory for the center's
 //! web UI. It is not the audit log: that one records every decision about a
 //! call, here go links, pairing, changes, refused and failed calls, errors,
-//! start and stop (docs/user/logs.md).
+//! start and stop (docs/dev/logging.md).
 //!
 //! Events reach a [`Log`] in two ways. The `tracing` macros do, through the
 //! [`LogLayer`] that [`install`] sets up for the process; the center also calls

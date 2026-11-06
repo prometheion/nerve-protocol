@@ -1,5 +1,5 @@
 //! A system keyring for a node that keeps its keys there
-//! (`machine.secret_storage = "keyring"`, docs/user/config.md).
+//! (`machine.secret_storage = "keyring"`, docs/dev/settings-and-config.md).
 //!
 //! The node never falls back to files: where no keyring answers, it refuses.
 //! On a Linux without a desktop there is usually none, so `setup` (and

@@ -1,4 +1,4 @@
-//! Backup and restore of the center (docs/dev/backup.md, docs/user/backup.md).
+//! Backup and restore of the center (docs/dev/backup.md).
 //!
 //! The center keeps two files in its state folder that a move or a rebuilt
 //! machine must not lose: `tls.pem`, its certificate and private key, whose

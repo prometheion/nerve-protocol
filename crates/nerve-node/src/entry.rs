@@ -23,7 +23,7 @@ pub fn main() -> i32 {
         return crate::win_stop::helper_main();
     }
     // So is the keyring probe that setup and install start
-    // (docs/user/config.md): it answers whether the system keyring of the
+    // (docs/dev/settings-and-config.md): it answers whether the system keyring of the
     // user it runs as works.
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(crate::keyring_setup::PROBE_ARG))

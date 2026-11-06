@@ -1,5 +1,5 @@
 //! The owner of the installed node and the owner's way in without root
-//! (docs/user/service.md, "Who may change the node").
+//! (docs/dev/service.md, root as the owner).
 //!
 //! The owner is the account that ran `install` (on Linux through sudo or
 //! pkexec): the unit names it ([`OWNER_VAR`]), and only `install` writes
@@ -28,7 +28,7 @@
 //! A command of `user` mode runs as the owner, and so is the owner, by the
 //! owner's choice of mode; the checks of the caller's process (not below a
 //! command of the node, no `no_new_privs`) catch the simple cases of such a
-//! command changing the node, nothing more (docs/user/modes.md).
+//! command changing the node, nothing more (docs/dev/policy-engine.md).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

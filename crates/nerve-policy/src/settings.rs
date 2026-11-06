@@ -846,7 +846,7 @@ fn client_only(
             ));
         }
     }
-    // The owner turns off what a center added (docs/user/config-capabilities.md),
+    // The owner turns off what a center added (docs/dev/capabilities.md),
     // and that center does not turn it on again: an `off` or `hidden` of a
     // capability it added, or of one of its actions, stays until the owner
     // changes it, whoever set it.
@@ -888,7 +888,7 @@ fn client_only(
         );
     }
     // A folder a command may write also opens the unix sockets in it while
-    // the network is off (docs/user/modes.md), and a program that answers on
+    // the network is off (docs/dev/sandbox-linux.md), and a program that answers on
     // one may reach the network for the command. So while the switch is on,
     // a center gets no place to write that its old folders did not give
     // (judged by the deepest folder at each place, as the protected check

@@ -1,4 +1,4 @@
-//! The node as a service (docs/user/service.md): `install`, `update` and
+//! The node as a service (docs/dev/service.md): `install`, `update` and
 //! `uninstall`, on Linux with systemd. The service runs `nerve-node run`
 //! under a user of its own, `nerve`, which owns the node's config and state
 //! folders. The owner's commands reach that node with `sudo nerve-node …`:

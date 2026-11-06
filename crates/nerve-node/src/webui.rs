@@ -1,4 +1,4 @@
-//! The node's web UI (docs/user/node-web-ui.md): a page like the desktop
+//! The node's web UI (docs/dev/web-uis.md): a page like the desktop
 //! app's, served by the installed node on Linux while `ui.listen` is set
 //! (`nerve-node ui on`). Off, the task only waits for a change of the config:
 //! no listener, no timer, no file.

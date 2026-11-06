@@ -50,7 +50,7 @@ pub struct Store {
     pub pair_code_minutes: u32,
     #[serde(default)]
     pub stats: BTreeMap<String, NodeStats>,
-    /// What the center logs (docs/user/logs.md); the `--log` flag overrides
+    /// What the center logs (docs/dev/logging.md); the `--log` flag overrides
     /// it for one run.
     #[serde(default)]
     pub log_level: Level,

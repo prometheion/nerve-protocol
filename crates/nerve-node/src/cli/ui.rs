@@ -1,4 +1,4 @@
-//! `nerve-node ui`: the node's web UI (crate::webui, docs/user/node-web-ui.md).
+//! `nerve-node ui`: the node's web UI (crate::webui, docs/dev/web-uis.md).
 //! It is part of the installed node on Linux and off by default; these
 //! commands turn it on and off and make, list and revoke the tokens that log
 //! in to it. The running node takes each change at once, as it takes the

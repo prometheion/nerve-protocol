@@ -1,4 +1,4 @@
-//! Backup and restore of a node (docs/dev/backup.md, docs/user/backup.md).
+//! Backup and restore of a node (docs/dev/backup.md).
 //!
 //! A backup holds `node.toml` as the node reads it, the node's keys (one per
 //! center, the relay's TLS key, the password of an `https://` proxy) and the

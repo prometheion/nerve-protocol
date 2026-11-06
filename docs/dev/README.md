@@ -13,11 +13,17 @@ pages explain the design and link to the spec for detail.
 | [node-link.md](node-link.md) | The link: dial, handshake, liveness, reconnect, limits |
 | [capabilities.md](capabilities.md) | Descriptor, capabilities, effects, profiles, messages |
 | [mcp-surface.md](mcp-surface.md) | The two MCP tools, `list` and `execute`, and how the center offers capabilities through them |
-| [policy-engine.md](policy-engine.md) | How the node decides a call, and the sandbox |
+| [policy-engine.md](policy-engine.md) | How the node decides a call: modes, folders, rules, protected paths, sudo |
+| [sandbox-linux.md](sandbox-linux.md) | `nerve-run`, access lists, homes per pairing, Landlock, the network switch, limits per command |
 | [action-checker.md](action-checker.md) | The center's action checker: blocklist, allow rules, decision model |
 | [settings-and-config.md](settings-and-config.md) | `node.toml`, the settings API, the control socket |
 | [logging.md](logging.md) | The log of the center and the node: levels, redaction, the file, the web UI's data |
 | [backup.md](backup.md) | The backup file: format, encryption, what a restore does |
+| [service.md](service.md) | The installed node and center: install, root as the owner, update, uninstall |
+| [web-uis.md](web-uis.md) | The center's and the node's web UI: login, sessions, TLS, the pages |
+| [desktop.md](desktop.md) | The desktop app: installer, rights, settings, what it needs |
+| [messages.md](messages.md) | The messages Nerve shows, with their causes and fixes |
+| [windows.md](windows.md) | Windows, until it comes back with 0.1.0 |
 
 ## Build and release
 

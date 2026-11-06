@@ -1,5 +1,5 @@
 //! The owner's network switch for a pairing's folder-mode commands
-//! (`network off`, docs/user/modes.md) on a real node daemon, in
+//! (`network off`, docs/dev/sandbox-linux.md) on a real node daemon, in
 //! process and run by hand: a command of that pairing, and a capability of
 //! the config it calls, opens no TCP connection and no UDP socket, which it
 //! opens without the switch, held by the node's seccomp filter whether or
