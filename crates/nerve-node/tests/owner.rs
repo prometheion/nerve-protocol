@@ -195,14 +195,11 @@ async fn an_owner_changes_the_node_through_it_and_is_audited() {
     assert!(err.contains("machine.allow_root decides"), "{err}");
     assert!(!daemon.config().machine.allow_root);
     // Setup runs for the owner, one question at a time, with the input the
-    // owner's own program passes it; its one step that needs root (a
-    // keyring) takes it by the service's rights.
-    let (out, code) = as_the_cli(&at, &["setup"], false, "lab-1\nfile\n\n")
-        .await
-        .unwrap();
+    // owner's own program passes it.
+    let (out, code) = as_the_cli(&at, &["setup"], false, "\n").await.unwrap();
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Set up this node"), "{out}");
-    assert_eq!(daemon.config().node.name.as_deref(), Some("lab-1"));
+    assert!(out.contains("Pairing link"), "{out}");
     for args in [
         &["sudo", "on"][..],
         &["install"],

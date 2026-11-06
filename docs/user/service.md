@@ -22,6 +22,14 @@ Download the program for your machine (`nerve-node-x86_64-linux` or
 curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
+```
+
+At a terminal, `install` then asks [setup](#setup)'s questions as you (the
+account that ran `sudo`, so `~` is your home): the pairing link, the mode, a
+folder and its rights, and the network. Without a terminal it says what to
+run instead:
+
+```sh
 nerve-node center add '<pairing link>'
 nerve-node folder add ~/project rwx
 ```
@@ -237,26 +245,24 @@ it runs, in every mode, so no command keeps them; a command of root as the
 
 ## Setup
 
-`nerve-node setup` asks these things, one at a time. Enter keeps what is
-in brackets. It is optional: `center add` and `folder add` do the same. The
-owner runs it without `sudo`: its one step that needs root, installing a
-keyring, takes root by the service's own rights, for that step alone, and
-only after you answer yes at a terminal.
+`nerve-node setup` asks these things, one at a time; `install` asks them at
+a terminal. Enter keeps what is in brackets. It is optional: `center add`,
+`folder add` and `network` do the same. The owner runs it without `sudo`.
 
-1. The node's name, as centers show it. The host name by default.
-2. Where the node keeps its keys: `file` or `keyring`
-   ([keys](config.md#where-the-node-keeps-its-keys)). With `keyring` and no
-   keyring that answers, it offers to install one where `nerve` has no
-   desktop, when you run it at a terminal. If the node had found none when it started, it needs a
-   restart: run as root, setup restarts it; run by the owner, it says so,
-   and you run `nerve-node service restart` and setup again. Not
-   asked on the installed node on Windows, which keeps them in files
-   ([Windows](#windows)); setup warns instead.
-3. A pairing link from the center's web UI. Enter skips it. The node shows
+1. A pairing link from the center's web UI. Enter skips it. The node shows
    the center and asks before it pairs, as `center add` does.
-4. The mode of that center: `folder`, `allowlist` or `user`
+2. The mode of that center: `folder`, `allowlist` or `user`
    ([modes](modes.md)). For `folder` it asks for one folder and its rights;
-   Enter gives `rwx`, so that commands can work there.
+   Enter gives `rwx`, so that commands can work there. `~` is your home.
+3. The network for its commands: `on` or `off`. In `user` mode no command
+   runs while it is off, and setup says so first.
+
+The node's name stays the host name (`nerve-node config set node.name lab-pc`
+changes it), and its keys stay in files (`nerve-node config set
+machine.secret_storage keyring` moves them to the system keyring
+([keys](config.md#where-the-node-keeps-its-keys)); with no keyring that
+answers it offers, at a terminal, to install one where `nerve` has no
+desktop, taking root by the service's own rights for that step alone).
 
 Each answer is saved when you give it, through the running node, like every
 other command. You can stop setup at any point and run it again. It works on

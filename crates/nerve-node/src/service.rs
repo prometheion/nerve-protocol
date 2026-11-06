@@ -883,15 +883,20 @@ pub fn install_asking(
         done: Vec::new(),
         out,
     };
+    // At a terminal (`input`) setup's questions follow (crate::cli), else
+    // what to run.
+    let terminal = input.is_some();
     let r = install_steps(layout, sys, keyring, input, root, exe, invoker, &mut steps);
     audit(&layout.paths, "install", &steps.done, &r, steps.out);
     r?;
-    let _ = writeln!(steps.out, "{NEXT}");
+    if !terminal {
+        let _ = writeln!(steps.out, "{NEXT}");
+    }
     Ok(())
 }
 
 /// What `install` says to do next: the headless way to a working pairing.
-const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
+pub(crate) const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
 
 #[allow(clippy::too_many_arguments)]
 fn install_steps(

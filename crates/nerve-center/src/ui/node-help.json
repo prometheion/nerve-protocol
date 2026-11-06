@@ -72,7 +72,7 @@
           "shared_args": [],
           "verbs": [
             {
-              "about": "Name the node, choose where it keeps its keys, pair the first center and choose its mode and folder, one question at a time",
+              "about": "Pair a first center and give it a folder, step by step: the link, the mode, a folder and its rights, the network",
               "args": [],
               "name": "setup",
               "usage": "nerve-node setup [OPTIONS]"

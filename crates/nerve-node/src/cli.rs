@@ -81,7 +81,7 @@ pub enum Cmd {
         #[arg(long)]
         accept_root_owner: bool,
     },
-    /// Name the node, choose where it keeps its keys, pair the first center and choose its mode and folder, one question at a time.
+    /// Pair a first center and give it a folder, step by step: the link, the mode, a folder and its rights, the network.
     Setup,
     /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay.
     Update {
@@ -2899,23 +2899,20 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     &exe,
                     &invoker,
                     out,
-                )
+                )?;
+                // One first run: at a terminal setup's questions follow.
+                if terminal {
+                    setup_after_install(&layout, &invoker, out);
+                }
+                Ok(())
             }
         }
         Cmd::Setup => {
             owner_check(&[&paths]).await?;
             let mut input = std::io::BufReader::new(std::io::stdin());
-            let layout = Layout::system();
-            let machine = (!cfg!(windows) && layout.installed() && paths == layout.paths)
-                .then_some(&Host as &dyn crate::service::System);
             // The installed program, which the node's user can run, asks
             // its keyring.
-            let keyring = match machine {
-                Some(_) => crate::keyring_setup::HostKeyring {
-                    exe: layout.bin.clone(),
-                },
-                None => crate::keyring_setup::HostKeyring::this_program(),
-            };
+            let (machine, keyring) = keyring_of(&paths);
             // Asked whether to install a keyring as root only at a
             // terminal: the owner's own, for a setup the node runs for its
             // owner (crate::owner).
@@ -3338,6 +3335,50 @@ pub async fn setup(
     r
 }
 
+/// The service manager and the keyring program of the node at `paths`: the
+/// installed program for the installed node on Linux, which the node's user
+/// can run, else this one.
+fn keyring_of(
+    paths: &NodePaths,
+) -> (
+    Option<&'static dyn crate::service::System>,
+    crate::keyring_setup::HostKeyring,
+) {
+    let layout = Layout::system();
+    let machine = (!cfg!(windows) && layout.installed() && *paths == layout.paths)
+        .then_some(&Host as &dyn crate::service::System);
+    let keyring = match machine {
+        Some(_) => crate::keyring_setup::HostKeyring {
+            exe: layout.bin.clone(),
+        },
+        None => crate::keyring_setup::HostKeyring::this_program(),
+    };
+    (machine, keyring)
+}
+
+/// `config set machine.secret_storage keyring` at a terminal (`input`):
+/// where no keyring answers for the node's keys, offers to install one, and
+/// a node that found none before is restarted once it answers. Nothing for
+/// keys that are there already, or where they may not be (the installed
+/// node on Windows, which `config set` refuses).
+async fn offer_keyring(
+    paths: &NodePaths,
+    machine: Option<&dyn crate::service::System>,
+    keyring: &dyn crate::keyring_setup::Keyring,
+    input: Option<&mut dyn BufRead>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let (now, _) = read_config(paths).await?;
+    if now.machine.secret_storage == SecretStorage::Keyring
+        || crate::secrets::no_keyring(paths).is_some()
+    {
+        return Ok(());
+    }
+    let me = crate::keyring_setup::me()?;
+    crate::keyring_setup::ensure(keyring, &me, input, out)?;
+    after_keyring_answers(paths, machine, out).await
+}
+
 /// Once the keyring answers setup, whether setup installed it or it came some
 /// other way: a node that runs and found none before does not look again
 /// (`keyring_failed` in its status, [`crate::secrets::store::failed`]), so it
@@ -3384,10 +3425,10 @@ fn restart_for_keyring(
     // Run by the node for its owner, setup would end with the node it runs
     // in.
     if for_owner {
-        return Err("the system keyring answers now, but the node found none when it started and does not look again until it is restarted; `nerve-node service restart`, then run `nerve-node setup` again".into());
+        return Err("the system keyring answers now, but the node found none when it started and does not look again until it is restarted; `nerve-node service restart`, then run this again".into());
     }
     let Some(sys) = machine else {
-        return Err("the system keyring answers now, but the node that runs for this folder found none before and does not look again until it is restarted; restart it, then run `nerve-node setup` again".into());
+        return Err("the system keyring answers now, but the node that runs for this folder found none before and does not look again until it is restarted; restart it, then run this again".into());
     };
     sys.systemctl(&["restart", crate::service::UNIT_NAME])?;
     sys.wait_running(paths)?;
@@ -3419,68 +3460,28 @@ async fn setup_steps(
         crate::keyring_setup::ensure(keyring, &me, terminal.then_some(&mut *input), out)?;
         after_keyring_answers(paths, machine, out).await?;
     }
-    let (cfg, _) = read_config(paths).await?;
-    let _ = writeln!(out, "Set up this node. Enter keeps what is in [brackets].");
-    let current = crate::descriptor::node_name(&cfg);
-    let name = ask(
-        input,
-        out,
-        &format!("Name of this node, as centers show it [{current}]: "),
-    )?;
-    if !name.is_empty() && name != current {
-        if !nerve_proto::valid_node_name(&name) {
-            return Err(format!(
-                "{name:?} is not a node name: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit"
-            ));
-        }
-        edit(paths, |c| {
-            c.node.name = Some(name.clone());
-            Ok(())
-        })
-        .await?;
-        steps.push(format!("named the node {name}"));
-    }
-
-    // Where the keys go, before pairing makes one. Where they may not be in
-    // the keyring (the installed node on Windows), setup does not ask; it
-    // says why.
-    let now = read_config(paths).await?.0.machine.secret_storage;
-    let storage = if let Some(n) = no_keyring {
+    // Where the keys may not be in the keyring (the installed node on
+    // Windows), keys left there go into files.
+    if let Some(n) = no_keyring
+        && read_config(paths).await?.0.machine.secret_storage == SecretStorage::Keyring
+    {
         let _ = writeln!(out, "Warning: {}.", n.why());
-        SecretStorage::File
-    } else {
-        let answer = ask(
-            input,
-            out,
-            &format!(
-                "Where the node keeps its keys: file (files only the node's user can read) or keyring (the system keyring) [{}]: ",
-                enum_str(&now)
-            ),
-        )?;
-        match answer.as_str() {
-            "" => now,
-            a => parse_enum::<SecretStorage>(a, "file or keyring")?,
-        }
-    };
-    if storage != now {
-        if storage == SecretStorage::Keyring {
-            let me = crate::keyring_setup::me()?;
-            crate::keyring_setup::ensure(keyring, &me, terminal.then_some(&mut *input), out)?;
-            after_keyring_answers(paths, machine, out).await?;
-        }
-        let cfg = edit(paths, |c| {
-            c.machine.secret_storage = storage;
+        edit(paths, |c| {
+            c.machine.secret_storage = SecretStorage::File;
             Ok(())
         })
         .await?;
-        let step = format!("the node's keys are in {} now", storage_place(storage));
+        let step = format!(
+            "the node's keys are in {} now",
+            storage_place(SecretStorage::File)
+        );
         let _ = writeln!(out, "{step}");
         steps.push(step);
-        if storage == SecretStorage::Keyring {
-            tell_folder_commands(paths, &cfg, out).await;
-        }
     }
-
+    // The node's name and where its keys go keep their defaults: `config
+    // set node.name` and `config set machine.secret_storage` change them.
+    // The question that matters comes first.
+    let _ = writeln!(out, "Set up this node. Enter keeps what is in [brackets].");
     let link = ask(
         input,
         out,
@@ -3547,6 +3548,9 @@ async fn setup_steps(
             out,
             &format!("A folder {center} may use (Enter to skip): "),
         )?;
+        // `~` is the home of whoever runs setup, also through sudo.
+        let folder = typed_folder(&folder, &invoker_home());
+        let folder = folder.display().to_string();
         if !folder.is_empty() {
             let rights = ask(
                 input,
@@ -3564,11 +3568,150 @@ async fn setup_steps(
             steps.push(format!("{center}: folder {folder} {rights}"));
         }
     }
+    // The network switch: in user mode, and in allowlist mode as you, no
+    // command runs while it is off, which is said before it is saved.
+    let (cfg, _) = read_config(paths).await?;
+    let policy = cfg.center(&center).expect("picked above").policy.clone();
+    let now = if policy.no_network { "off" } else { "on" };
+    let net = ask(
+        input,
+        out,
+        &format!("Network for {center}'s commands: on or off [{now}]: "),
+    )?;
+    let net = if net.is_empty() { now.to_string() } else { net };
+    if net != now {
+        if net == "off" && policy.runs_as_owner(crate::now_ms()) {
+            let _ = writeln!(
+                out,
+                "Warning: {center} is in {} mode, where its commands run as you: with the network off, none of them runs.",
+                policy.mode_at(crate::now_ms()).as_str()
+            );
+        }
+        set_network(paths, &net, &which, out).await?;
+        steps.push(format!("{center}: network {net}"));
+    }
     let _ = writeln!(
         out,
-        "Done. `nerve-node folder add <folder> rwx` gives a folder, `nerve-node rule add allow '<command>'` allows a command in allowlist mode; `nerve-node --help` lists the rest."
+        "Done. `nerve-node status` shows the node and what to do next; `nerve-node --help` lists the commands."
     );
     Ok(())
+}
+
+/// What `install` runs at a terminal once the service runs: setup's
+/// questions, as the person who ran sudo or pkexec, so that `~` is their
+/// home and the answers go the way their own commands go (crate::owner).
+/// Setup that does not finish leaves the install as it is, and says what
+/// to run.
+#[cfg(unix)]
+fn setup_after_install(layout: &Layout, invoker: &str, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "Now pair a first center and give it a folder; Enter skips a question."
+    );
+    let _ = out.flush();
+    let ran = match crate::account::lookup(invoker) {
+        Ok(Some(a)) => setup_run(&layout.bin, &a)
+            .command()
+            .status()
+            .map_err(|e| format!("cannot start {}: {e}", layout.bin.display()))
+            .and_then(|s| match s.success() {
+                true => Ok(()),
+                false => Err(format!("it ended with {s}")),
+            }),
+        Ok(None) => Err(format!("no account {invoker}")),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = ran {
+        let _ = writeln!(
+            out,
+            "setup did not finish ({e}); `nerve-node setup` asks again.\n{}",
+            crate::service::NEXT
+        );
+    }
+}
+
+/// How `install` starts setup: the installed program, as `account`, with
+/// its home and names.
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+struct SetupRun {
+    program: PathBuf,
+    uid: u32,
+    gid: u32,
+    home: PathBuf,
+    user: String,
+}
+
+#[cfg(unix)]
+fn setup_run(bin: &Path, account: &crate::service::Account) -> SetupRun {
+    SetupRun {
+        program: bin.to_path_buf(),
+        uid: account.uid,
+        gid: account.gid,
+        home: account.home.clone(),
+        user: account.name.clone(),
+    }
+}
+
+#[cfg(unix)]
+impl SetupRun {
+    fn command(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new(&self.program);
+        c.arg("setup")
+            .env("HOME", &self.home)
+            .env("USER", &self.user)
+            .env("LOGNAME", &self.user)
+            .current_dir(&self.home);
+        // Dropped from root to the account (std clears root's other
+        // groups); root itself stays root.
+        if self.uid != 0 {
+            c.gid(self.gid).uid(self.uid);
+        }
+        c
+    }
+}
+
+/// A folder as typed at setup's question: `~` and `~/…` are in `home`,
+/// the rest as typed.
+fn typed_folder(text: &str, home: &Path) -> PathBuf {
+    match text.strip_prefix('~') {
+        Some("") => home.to_path_buf(),
+        Some(rest) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(text),
+    }
+}
+
+/// The home of the person who runs this command: through sudo or pkexec
+/// the home of the account that ran it, not root's.
+pub(crate) fn invoker_home() -> PathBuf {
+    #[cfg(unix)]
+    let root = nerve_transport::net::euid() == 0;
+    #[cfg(not(unix))]
+    let root = false;
+    home_of_invoker(
+        root,
+        || {
+            crate::account::lookup(&invoker())
+                .ok()
+                .flatten()
+                .map(|a| a.home)
+        },
+        crate::paths::home_dir(),
+    )
+}
+
+/// [`invoker_home`] with what it reads given: whether this runs as root,
+/// the home of the account that ran it, and `HOME`.
+fn home_of_invoker(
+    root: bool,
+    account_home: impl FnOnce() -> Option<PathBuf>,
+    home: PathBuf,
+) -> PathBuf {
+    match root {
+        true => account_home().unwrap_or(home),
+        false => home,
+    }
 }
 
 /// How setup names where the keys are.
@@ -5143,6 +5286,17 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
         && key == "machine.user"
     {
         return Err(NO_ACCOUNT_TO_CHOOSE.into());
+    }
+    // Keys into the keyring: at a terminal, where none answers, the owner
+    // is offered one (as root for the node's user) before anything moves.
+    if let ConfigCmd::Set { key, value } = &c
+        && key == "machine.secret_storage"
+        && literal(value).as_str() == Some("keyring")
+        && crate::owner::at_terminal()
+    {
+        let (machine, keyring) = keyring_of(paths);
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        offer_keyring(paths, machine, &keyring, Some(&mut input), out).await?;
     }
     let before = std::cell::Cell::new(SecretStorage::File);
     let cfg = edit(paths, |cfg| {
@@ -7830,7 +7984,7 @@ mod tests {
         let (d, paths) = setup(&["home"]);
         let work = d.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let (r, out) = setup_with(&paths, &format!("\n\n\nfolder\n{}\n\n", work.display()));
+        let (r, out) = setup_with(&paths, &format!("\nfolder\n{}\n\n\n", work.display()));
         r.unwrap();
         assert!(out.contains("[rwx]: "), "{out}");
         let folders = &load(&paths).centers[0].policy.folders;
@@ -7838,21 +7992,31 @@ mod tests {
         assert_eq!(folders[0].access, Access::parse("rwx").unwrap());
     }
 
-    /// Only at a terminal is the owner asked whether to install a keyring
-    /// as root: piped answers, or a setup without a terminal, get the
-    /// refusal and install nothing, whatever they say.
+    /// `config set machine.secret_storage keyring` offers a keyring only at
+    /// a terminal: without one it is refused and installs nothing.
     #[test]
-    fn setup_offers_a_keyring_only_at_a_terminal() {
+    fn the_keyring_is_offered_only_at_a_terminal() {
         let (_d, paths) = setup(&[]);
-        crate::secrets::store::set_unreachable(true);
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
-        let (r, out) = setup_at(&paths, None, &k, "\nkeyring\ny\n\n", false);
-        let e = r.unwrap_err();
-        assert!(e.contains("run in a terminal"), "{e}");
-        assert!(!out.contains("Install it now?"), "{out}");
+        let mut out = Vec::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let e = rt
+            .block_on(offer_keyring(&paths, None, &k, None, &mut out))
+            .unwrap_err();
+        assert!(
+            e.contains("run in a terminal, offers to install one"),
+            "{e}"
+        );
+        assert!(
+            e.contains("config set machine.secret_storage keyring"),
+            "{e}"
+        );
+        assert!(!String::from_utf8_lossy(&out).contains("Install it now?"));
         assert!(k.installed.borrow().is_empty());
         assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        crate::secrets::store::set_unreachable(false);
     }
 
     /// `install --owner=root --accept-root-owner` makes root the owner;
@@ -8019,7 +8183,7 @@ mod tests {
             assert!(Cli::try_parse_from(["nerve-node", "setup", flag, "bob"]).is_err());
         }
         let (_d, paths) = setup(&["home"]);
-        let (r, out) = setup_with(&paths, "lab-pc\n\n\nuser\n");
+        let (r, out) = setup_with(&paths, "\nuser\n\n");
         r.unwrap();
         assert!(!out.contains("Account that commands"), "{out}");
     }
@@ -8033,38 +8197,48 @@ mod tests {
             .collect()
     }
 
-    /// Setup asks name, center and mode; Enter keeps each, and every answer
-    /// goes through the owner's path into the signed file and the audit log.
+    /// Setup asks the link, the mode, a folder with its rights, and the
+    /// network, in that order and nothing else; Enter keeps each, and every
+    /// answer goes through the owner's path into the signed file and the
+    /// audit log.
     #[test]
-    fn setup_names_the_node_and_sets_the_first_centers_mode() {
+    fn setup_asks_link_mode_folder_and_network() {
         let (d, paths) = setup(&["home"]);
         let dir = d.path().join("work");
         std::fs::create_dir(&dir).unwrap();
-        // A name, the keys where they are, no new center (the one paired is
-        // the first), folder mode with one folder.
-        let answers = format!("lab-pc\n\n\nfolder\n{}\nrx\n", dir.display());
+        // No new center (the one paired is the first), folder mode with one
+        // folder, and no network.
+        let answers = format!("\nfolder\n{}\nrx\noff\n", dir.display());
         let (r, out) = setup_with(&paths, &answers);
         r.unwrap();
-        assert!(out.contains("Name of this node"), "{out}");
+        let link = out.find("Pairing link").unwrap();
+        let mode = out.find("Mode for home").unwrap();
+        let folder = out.find("A folder home may use").unwrap();
+        let net = out
+            .find("Network for home's commands: on or off [on]")
+            .unwrap();
+        assert!(link < mode && mode < folder && folder < net, "{out}");
+        for gone in ["Name of this node", "Where the node keeps its keys"] {
+            assert!(!out.contains(gone), "{gone}: {out}");
+        }
         assert!(out.contains("home: mode folder"), "{out}");
         let cfg = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
-        assert_eq!(cfg.node.name.as_deref(), Some("lab-pc"));
+        assert_eq!(cfg.node.name, None);
         let c = cfg.center("home").unwrap();
         assert_eq!(c.policy.mode, Mode::Folder);
         assert_eq!(c.policy.folders.len(), 1);
         assert_eq!(c.policy.folders[0].access.to_string(), "rx");
+        assert!(c.policy.no_network);
         let a = node_audit(&paths);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0]["event"], "setup");
         assert_eq!(a[0]["steps"].as_array().unwrap().len(), 3, "{}", a[0]);
         // Again with Enter everywhere: nothing changes.
         let before = std::fs::read(paths.config_file()).unwrap();
-        let (r, _) = setup_with(&paths, "\n\n\n\n\n");
+        let (r, _) = setup_with(&paths, "\n\n\n\n");
         r.unwrap();
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
-        // A bad name or a short input stops it, and the audit log says so.
-        let (r, _) = setup_with(&paths, "Bad Name\n");
-        assert!(r.unwrap_err().contains("not a node name"));
+        // A short input stops it, and the audit log says so.
         let (r, _) = setup_with(&paths, "");
         assert!(r.unwrap_err().contains("input ended"));
         let a = node_audit(&paths);
@@ -8075,10 +8249,76 @@ mod tests {
                 .contains("input ended")
         );
         let shown = run(&paths, &["audit"]).unwrap();
-        assert!(
-            shown.contains("setup: named the node lab-pc; home: mode folder"),
-            "{shown}"
-        );
+        assert!(shown.contains("setup: home: mode folder"), "{shown}");
+    }
+
+    /// User mode with no network runs nothing: setup says so before it
+    /// saves the switch.
+    #[test]
+    fn setup_warns_that_user_mode_without_network_runs_nothing() {
+        let (_d, paths) = setup(&["home"]);
+        let (r, out) = setup_with(&paths, "\nuser\noff\n");
+        r.unwrap();
+        let warned = out
+            .find("Warning: home is in user mode, where its commands run as you: with the network off, none of them runs.")
+            .unwrap_or_else(|| panic!("{out}"));
+        let saved = out.find(NO_NETWORK_LINE).unwrap_or_else(|| panic!("{out}"));
+        assert!(warned < saved, "{out}");
+        assert!(load(&paths).centers[0].policy.no_network);
+        // In folder mode nothing of the kind.
+        let (_d, paths) = setup(&["home"]);
+        let (r, out) = setup_with(&paths, "\nfolder\n\noff\n");
+        r.unwrap();
+        assert!(!out.contains("none of them runs"), "{out}");
+    }
+
+    /// `~` at setup's folder question is the home of whoever runs it, also
+    /// through sudo, where root's own home is not meant; `install` starts
+    /// setup as that person, with their home.
+    #[test]
+    fn the_home_of_setup_is_the_person_who_ran_it() {
+        let home = Path::new("/home/alice");
+        assert_eq!(typed_folder("~/proj", home), home.join("proj"));
+        assert_eq!(typed_folder("~", home), home);
+        assert_eq!(typed_folder("/srv/x", home), Path::new("/srv/x"));
+        assert_eq!(typed_folder("~bob/x", home), Path::new("~bob/x"));
+        let root = PathBuf::from("/root");
+        let alice = || Some(PathBuf::from("/home/alice"));
+        assert_eq!(home_of_invoker(true, alice, root.clone()), home);
+        assert_eq!(home_of_invoker(false, alice, root.clone()), root);
+        assert_eq!(home_of_invoker(true, || None, root.clone()), root);
+        #[cfg(unix)]
+        {
+            let account = crate::service::Account {
+                name: "alice".into(),
+                uid: 1000,
+                gid: 1000,
+                comment: String::new(),
+                home: home.to_path_buf(),
+                groups: vec![1000],
+            };
+            let run = setup_run(Path::new("/usr/local/bin/nerve-node"), &account);
+            assert_eq!(
+                run,
+                SetupRun {
+                    program: "/usr/local/bin/nerve-node".into(),
+                    uid: 1000,
+                    gid: 1000,
+                    home: home.to_path_buf(),
+                    user: "alice".into(),
+                }
+            );
+            let c = run.command();
+            let envs: Vec<_> = c.get_envs().collect();
+            assert!(
+                envs.contains(&(
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/home/alice"))
+                )),
+                "{envs:?}"
+            );
+            assert_eq!(c.get_args().collect::<Vec<_>>(), ["setup"]);
+        }
     }
 
     /// Folder mode's commands are told off where they run as the node's own
@@ -8162,31 +8402,6 @@ mod tests {
         );
     }
 
-    /// Setup asks where the keys go; `keyring` moves them there.
-    #[test]
-    fn setup_keeps_the_keys_in_the_keyring_when_asked() {
-        let (_d, paths) = setup(&[]);
-        // Name kept, keys to the keyring, no link.
-        let (r, out) = setup_with(&paths, "\nkeyring\n\n");
-        r.unwrap();
-        assert!(out.contains("Where the node keeps its keys"), "{out}");
-        assert!(out.contains("[file]"), "{out}");
-        assert!(
-            out.contains("the node's keys are in the system keyring now"),
-            "{out}"
-        );
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::Keyring);
-        assert_eq!(config_key_at(&paths), (false, true));
-        let steps = node_audit(&paths)[0]["steps"].to_string();
-        assert!(steps.contains("system keyring"), "{steps}");
-        // Asked again, the keyring is what Enter keeps.
-        let (r, out) = setup_with(&paths, "\n\n\n");
-        r.unwrap();
-        assert!(out.contains("[keyring]"), "{out}");
-        let (r, _) = setup_with(&paths, "\nwallet\n");
-        assert!(r.unwrap_err().contains("file or keyring"));
-    }
-
     /// The installed node on Windows keeps its keys in files: `config set`
     /// refuses the keyring and changes nothing, and setup does not ask
     /// where the keys go but takes keys left in the keyring into files.
@@ -8253,25 +8468,31 @@ mod tests {
         assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
     }
 
-    /// Where no keyring answers, setup offers to install one: no keeps the
-    /// files, yes installs it and moves the keys.
+    /// Where no keyring answers, `config set machine.secret_storage
+    /// keyring` at a terminal offers to install one: no keeps the files,
+    /// yes installs it.
     #[test]
-    fn setup_offers_a_keyring_where_none_answers() {
+    fn config_set_offers_a_keyring_where_none_answers() {
         let (_d, paths) = setup(&[]);
-        crate::secrets::store::set_unreachable(true);
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
-        let (r, out) = setup_keyring(&paths, None, &k, "\nkeyring\nn\n");
-        let e = r.unwrap_err();
-        assert!(e.contains("no system keyring answers"), "{e}");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let offer = |answers: &str| {
+            let mut out = Vec::new();
+            let mut input = std::io::Cursor::new(answers.as_bytes().to_vec());
+            let r = rt.block_on(offer_keyring(&paths, None, &k, Some(&mut input), &mut out));
+            (r, String::from_utf8(out).unwrap())
+        };
+        let (r, out) = offer("n\n");
+        assert!(r.unwrap_err().contains("no system keyring answers"));
         assert!(out.contains("Install it now? [y/N]"), "{out}");
         assert!(k.installed.borrow().is_empty());
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        let (r, out) = setup_keyring(&paths, None, &k, "\nkeyring\ny\n\n");
+        let (r, out) = offer("y\n");
         r.unwrap();
         assert_eq!(k.installed.borrow().len(), 1);
         assert!(out.contains("the system keyring answers"), "{out}");
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::Keyring);
-        assert_eq!(config_key_at(&paths), (false, true));
     }
 
     /// A running node that found no keyring keeps that failure: after
@@ -8294,10 +8515,7 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&out).contains("restarted the node"));
         let e = restart_for_keyring(&failed, &paths, None, false, &mut out).unwrap_err();
-        assert!(
-            e.contains("restart it, then run `nerve-node setup` again"),
-            "{e}"
-        );
+        assert!(e.contains("restart it, then run this again"), "{e}");
         let sys = crate::service::tests::Fake::new();
         let fine = json!({"version": 1, "keyring_failed": false});
         restart_for_keyring(&fine, &paths, Some(&sys), false, &mut out).unwrap();
@@ -8307,7 +8525,7 @@ mod tests {
         // runs in: it says how, and to run it again.
         let e = restart_for_keyring(&failed, &paths, Some(&sys), true, &mut out).unwrap_err();
         assert!(
-            e.contains("`nerve-node service restart`, then run `nerve-node setup` again"),
+            e.contains("`nerve-node service restart`, then run this again"),
             "{e}"
         );
         assert!(sys.calls().is_empty(), "{:?}", sys.calls());
@@ -8397,7 +8615,7 @@ mod tests {
     /// answers without setup installing it, e.g. installed by hand.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_node_that_found_no_keyring_is_restarted_when_one_answers_setup() {
+    fn a_node_that_found_no_keyring_is_restarted_when_one_answers() {
         let (d, paths) = setup(&[]);
         let (ready_tx, ready) = std::sync::mpsc::channel();
         let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
@@ -8426,18 +8644,24 @@ mod tests {
             })
         };
         ready.recv().unwrap();
-        // The keyring answers setup: nothing to install.
+        // The keyring answers `config set … keyring`: nothing to install.
         let k = crate::keyring_setup::tests::FakeKeyring::new(true);
-        let (r, _) = setup_keyring(&paths, None, &k, "\nkeyring\n");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let offer = |sys: Option<&dyn crate::service::System>| {
+            let mut out = Vec::new();
+            let mut input = std::io::Cursor::new(Vec::new());
+            let r = rt.block_on(offer_keyring(&paths, sys, &k, Some(&mut input), &mut out));
+            (r, String::from_utf8(out).unwrap())
+        };
+        let (r, _) = offer(None);
         let e = r.unwrap_err();
-        assert!(
-            e.contains("restart it, then run `nerve-node setup` again"),
-            "{e}"
-        );
+        assert!(e.contains("restart it, then run this again"), "{e}");
         assert!(k.installed.borrow().is_empty());
         let sys = crate::service::tests::Fake::new();
-        // Name, the keys.
-        let (r, out) = setup_keyring(&paths, Some(&sys), &k, "\nkeyring\n");
+        let (r, out) = offer(Some(&sys));
         assert!(
             sys.calls()
                 .contains(&format!("systemctl restart {}", crate::service::UNIT_NAME)),
@@ -8483,16 +8707,16 @@ mod tests {
         let k = crate::keyring_setup::tests::FakeKeyring::new(false);
         let (r, out) = setup_keyring(&paths, None, &k, "\n");
         assert!(r.unwrap_err().contains("no system keyring answers"));
-        assert!(!out.contains("Name of this node"), "{out}");
+        assert!(!out.contains("Pairing link"), "{out}");
         assert!(run(&paths, &["status"]).is_err());
         let (r, out) = setup_keyring(&paths, None, &k, "y\n\n\n\n");
         r.unwrap();
-        assert!(out.contains("Name of this node"), "{out}");
+        assert!(out.contains("Pairing link"), "{out}");
         assert!(run(&paths, &["status"]).is_ok());
     }
 
     #[test]
-    fn setup_without_a_center_stops_after_the_name() {
+    fn setup_without_a_center_stops_after_the_link() {
         let (_d, paths) = setup(&[]);
         let (r, out) = setup_with(&paths, "\n\n\n");
         r.unwrap();
@@ -8502,7 +8726,7 @@ mod tests {
         r.unwrap();
         assert!(out.contains("Several centers are paired"), "{out}");
         // A link that does not parse pairs nothing.
-        let (r, _) = setup_with(&paths, "\n\nnot a link\n");
+        let (r, _) = setup_with(&paths, "not a link\n");
         assert!(r.unwrap_err().contains("nerve://pair"));
     }
 
