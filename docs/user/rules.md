@@ -153,8 +153,10 @@ or acts waits for your `on`. To stop it changing things, take the grant back.
 That leaves what it changed, still on: its mode (`nerve-node mode`), folders
 (`nerve-node folder --center <name>`), rules and sudo list
 (`nerve-node rule --center <name>`), capability switches and capabilities
-(`nerve-node cap --center <name>`). Set them again; `cap rm NAME --center
-<name>` removes a capability
+(`nerve-node cap --center <name>`). Set them again; set the mode again
+(`nerve-node mode <mode> --center <name>`) even if it looks right, as a
+timer on it may end in `allowlist` as you. `cap rm NAME --center <name>`
+removes a capability
 ([the grant](../dev/settings-and-config.md#without-the-grant)).
 
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`

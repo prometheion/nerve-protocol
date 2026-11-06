@@ -754,9 +754,12 @@ Everything is still possible on the machine, with [`nerve-node`](../user/command
 The web UI shows such a machine as keeping its settings to itself, its Audit
 buttons stay off, and its Capabilities page is read only. Taking the grant back
 changes only the grant: what a center set while it had it stays in force. That
-is its mode, `as_owner`, folders (`r` and `x` ones always, `w` ones while its
-network is on), rules, sudo list, capability switches and the capabilities it
-added, which stay offered to it until you remove them.
+is its mode, `as_owner`, folders (the `r` and `x` ones it added, and the `w`
+ones it added while its network was on; `network off` does not remove them),
+rules, sudo list, capability switches and the capabilities it added, which stay offered to it until you remove them. A timed `folder` mode it
+saved with `as_owner` set ends in `allowlist` as you, and `mode` shows the
+", as you" only once that mode is in force; `nerve-node mode <mode> --center
+<name>` clears it.
 
 ## Where files live
 

@@ -287,6 +287,15 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/safety.md",
             "Put no secret in a command or a capability's line",
         ),
+        // A timer on a mode a center left may end in allowlist as you.
+        (
+            "docs/user/rules.md",
+            "set the mode again (`nerve-node mode <mode> --center <name>`) even if it looks right",
+        ),
+        (
+            "docs/dev/settings-and-config.md",
+            "`network off` does not remove them",
+        ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
     ];
