@@ -27,6 +27,7 @@ ignore = [
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained: Slint's winit decorations (sctk-adwaita) take it; no maintained version to move to" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant is now part of zbus: the keyring's and Slint's accessibility D-Bus take it; no release of theirs without it yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is now part of zbus, as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained: Slint takes it through spin_on (its Skia renderer, its macros, its build script), in the desktop app only; no release of spin_on without it yet" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is now part of zbus, as RUSTSEC-2026-0370" },
 ]
 
