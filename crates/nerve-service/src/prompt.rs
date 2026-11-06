@@ -155,16 +155,6 @@ fn hidden_line(out: &mut dyn Write, prompt: &str) -> Result<(String, bool), Stri
     Ok((trim_eol(&line), console.is_some()))
 }
 
-#[cfg(not(any(unix, windows)))]
-fn hidden_line(_out: &mut dyn Write, _prompt: &str) -> Result<(String, bool), String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    Ok((trim_eol(&line), false))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

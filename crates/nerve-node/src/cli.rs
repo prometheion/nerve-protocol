@@ -1483,11 +1483,6 @@ async fn rotate_key(
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "center.rotate-key", params).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "center.rotate-key", params).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = params;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     let v = match r {
         Ok(v) => v,
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
@@ -2433,11 +2428,6 @@ async fn daemon_answers(paths: &NodePaths, folders: bool) -> bool {
     {
         folders && crate::pipe::call(paths, "status", json!({})).await.is_ok()
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (paths, folders);
-        false
-    }
 }
 
 /// What `status` says of the limits per command (crate::cgroup::status):
@@ -2500,11 +2490,6 @@ async fn live_status(paths: &NodePaths) -> Result<Option<Value>, String> {
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "status", json!({})).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = paths;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     match r {
         Ok(v) => Ok(Some(v)),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(None),
@@ -4710,11 +4695,6 @@ async fn sudo_cmd(
             SudoCmd::Off => crate::winsudo::off(paths, &WinHost, out).await,
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (paths, out, w, c);
-        Err("the sudo switch works on Linux and Windows only".into())
-    }
 }
 
 /// Whether sudo is on: the running node holds the password (on Windows the
@@ -4732,11 +4712,6 @@ async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
     #[cfg(windows)]
     {
         crate::winsudo::status(paths)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = paths;
-        Ok(false)
     }
 }
 
@@ -4808,11 +4783,6 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "caps.list", json!({})).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "caps.list", json!({})).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = paths;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     match r {
         Ok(v) => Ok(v),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(
@@ -6078,16 +6048,6 @@ pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
         "proxy password: ",
         out,
     );
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = out;
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| format!("cannot read stdin: {e}"))?;
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
-    }
 }
 
 /// `relay`, `relay on|off|add|set|token|rm` (crate::relay). A token is
@@ -6437,8 +6397,6 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
         Err(e) => return Err(format!("cannot ask the running node: {e}")),
     };
-    #[cfg(not(any(unix, windows)))]
-    let live: Option<Value> = None;
     match (&r.listen, &live) {
         (None, _) => w(out, "relay off".into()),
         (Some(l), Some(v)) => w(

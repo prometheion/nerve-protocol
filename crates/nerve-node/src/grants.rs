@@ -660,10 +660,6 @@ impl RecordLock {
                 }
             }
         }
-        #[cfg(not(any(unix, windows)))]
-        Ok(RecordLock {
-            _file: opts.open(&path)?,
-        })
     }
 }
 

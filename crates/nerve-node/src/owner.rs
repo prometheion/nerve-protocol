@@ -345,8 +345,6 @@ pub fn is_owner_here() -> bool {
             .and_then(|s| crate::win_host::sid_text(&s).ok());
         me.is_some_and(|me| crate::win_host::owners().is_ok_and(|o| o.contains(&me)))
     }
-    #[cfg(not(any(unix, windows)))]
-    false
 }
 
 /// Whether the CLI sends `cli`'s command to the owner endpoint: the node is
@@ -1105,11 +1103,6 @@ async fn connect(
     paths: &NodePaths,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
     win::connect(paths).await
-}
-
-#[cfg(not(any(unix, windows)))]
-async fn connect(_paths: &NodePaths) -> Result<tokio::io::DuplexStream, String> {
-    Err(nerve_transport::ctl::NOT_RUNNING.into())
 }
 
 /// Who is an owner.

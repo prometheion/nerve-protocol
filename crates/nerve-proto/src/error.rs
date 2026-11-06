@@ -103,14 +103,6 @@ impl ErrorCode {
             _ => true,
         }
     }
-
-    /// Whether a harness may simply try again.
-    pub fn retryable(&self) -> bool {
-        matches!(
-            self,
-            ErrorCode::ConnectionLost | ErrorCode::Busy | ErrorCode::Unavailable
-        )
-    }
 }
 
 /// The `error` member of a JSON-RPC response.
@@ -196,7 +188,5 @@ mod tests {
         assert!(ErrorCode::Other("io".into()).is_protocol());
         assert!(ErrorCode::Forbidden.is_protocol());
         assert!(!ErrorCode::Other("list_first".into()).is_protocol());
-        assert!(ErrorCode::ConnectionLost.retryable());
-        assert!(!ErrorCode::Forbidden.retryable());
     }
 }

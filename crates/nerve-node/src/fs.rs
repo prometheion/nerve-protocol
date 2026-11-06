@@ -785,11 +785,6 @@ fn list(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcErr
     Ok(json!({ "entries": entries }))
 }
 
-/// The hex SHA-256 of a file's bytes.
-pub fn etag_of(path: &Path) -> std::io::Result<String> {
-    digest(&mut std::fs::File::open(path)?)
-}
-
 /// The hex SHA-256 of what `r` reads.
 fn digest(r: &mut impl Read) -> std::io::Result<String> {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);

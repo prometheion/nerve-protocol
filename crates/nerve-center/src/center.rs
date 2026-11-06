@@ -2246,10 +2246,6 @@ impl Center {
         })
     }
 
-    pub fn node_id_by_name(&self, name: &str) -> Option<String> {
-        self.read(|s| s.node_by_name(name).map(|n| n.id.clone()))
-    }
-
     pub fn audit(&self) -> Vec<Value> {
         self.audit.lock().unwrap().list()
     }

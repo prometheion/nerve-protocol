@@ -404,14 +404,9 @@ pub fn is_service_node(paths: &NodePaths) -> bool {
     if *paths == Layout::system().paths {
         return true;
     }
-    #[cfg(any(unix, windows))]
-    {
-        let me = crate::account::own_uid();
-        me != 0
-            && matches!(crate::account::lookup(USER), Ok(Some(a)) if a.uid == me && a.comment == USER_MARK)
-    }
-    #[cfg(not(any(unix, windows)))]
-    false
+    let me = crate::account::own_uid();
+    me != 0
+        && matches!(crate::account::lookup(USER), Ok(Some(a)) if a.uid == me && a.comment == USER_MARK)
 }
 
 /// What install, update and uninstall do to the machine besides writing the
@@ -1881,11 +1876,6 @@ fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
 #[cfg(unix)]
 fn symlink(target: &Path, at: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, at)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("the link is made on Linux only"))
 }
 
 /// Removes the link [`link_node`] made, and no other.

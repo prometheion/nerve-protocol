@@ -1662,8 +1662,6 @@ impl Ender {
         }
         #[cfg(unix)]
         kill_group(self.pid, sig, self.uid);
-        #[cfg(not(any(unix, windows)))]
-        kill_group(self.pid, sig);
     }
 
     /// Windows, on a timeout: asks the command's processes to end and gives
@@ -1692,11 +1690,6 @@ impl Group {
     #[cfg(unix)]
     fn start(pid: Option<u32>, uid: Option<u32>) -> Group {
         Group(pid.map(|pid| Ender { pid, uid }))
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn start(pid: Option<u32>) -> Group {
-        Group(pid.map(|pid| Ender { pid }))
     }
 
     /// `job` is the shell's job; without one the processes below the shell
@@ -1765,9 +1758,6 @@ fn kill_group(pid: u32, sig: Sig, uid: Option<u32>) {
         libc::kill(-(pid as libc::pid_t), s);
     }
 }
-
-#[cfg(not(any(unix, windows)))]
-fn kill_group(_pid: u32, _sig: Sig) {}
 
 /// Reads up to `cap` bytes and drains the rest, so the command never blocks
 /// on a full pipe. Returns the bytes and whether some were dropped. All of
@@ -2148,8 +2138,6 @@ pub async fn run(
     let group = Group::start(child.id(), job);
     #[cfg(unix)]
     let group = Group::start(child.id(), opts.account.as_ref().map(|a| a.uid));
-    #[cfg(not(any(unix, windows)))]
-    let group = Group::start(child.id());
     let mut sudo_stdin = None;
     if let Some(spec) = shim {
         let mut stdin = child.stdin.take().expect("piped");

@@ -2325,11 +2325,6 @@ impl Daemon {
                 let _ = tx.send(Event::Stop);
             });
         }
-        #[cfg(not(any(unix, windows)))]
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = tx.send(Event::Stop);
-        });
         Daemon::run_until(opts, events).await
     }
 
@@ -2496,11 +2491,6 @@ async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-async fn start_ctl(_shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
-    Ok(tokio::spawn(async {}))
-}
-
 /// What [`Shared::add_folder`] stored.
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
@@ -2572,7 +2562,7 @@ pub(crate) async fn pipe_control(
             shared.config_caps,
         )),
         "center.rotate-key" => rotate_key(shared, &params).await,
-        "folder.add" | "folder.set" | "folder.rm" => {
+        "folder.add" | "folder.rm" => {
             let (center, change) =
                 match crate::folder_change::FolderChange::from_request(method, params) {
                     Ok(r) => r,
