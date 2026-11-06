@@ -6,8 +6,9 @@
 # is only noted. One line per test: <job> <test name as cargo prints it> <why>.
 #
 # Jobs: linux (ci.yml, the runner's account), linux-root (the same runner,
-# the tests that need root run as root), windows (ci.yml). The other jobs
-# run their tests one by one and fail on their own.
+# the tests that need root run as root), linux-userns (the same runner and
+# account with user namespaces open: tests/own_proc.rs), windows (ci.yml).
+# The other jobs run their tests one by one and fail on their own.
 
 # Root, or root of a user namespace that may change owners and mount: the
 # runner's account is neither, and ubuntu-24.04 restricts user namespaces
@@ -18,6 +19,18 @@ linux acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale needs
 linux acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale needs a mount namespace; runs as root in the next step
 linux the_backup_file_is_opened_as_the_user_who_asked needs root or a user namespace; runs as root in the next step
 linux root_starts_in_a_folder_only_its_owner_may_enter needs root or a user namespace; runs as root in the next step
+linux a_root_node_keeps_its_rights_over_other_accounts_files needs root; runs as root in the next step
+linux-userns a_root_node_keeps_its_rights_over_other_accounts_files needs root; runs as root in the step before
+
+# A command's own /proc: the shim makes a user namespace as the runner's
+# account, which ubuntu-24.04's AppArmor holds back from it
+# (apparmor_restrict_unprivileged_userns). Root makes none, so they cannot
+# run as root either. They run in the linux-userns step, with the
+# restriction lifted.
+linux a_command_in_its_own_namespace_ends_as_it_would_without needs a user namespace, which AppArmor holds back; runs in the linux-userns step
+linux a_capability_a_center_added_has_a_proc_of_its_own needs a user namespace, which AppArmor holds back; runs in the linux-userns step
+linux a_command_of_one_pairing_does_not_see_a_running_command_of_another needs a user namespace, which AppArmor holds back; runs in the linux-userns step
+linux the_cgroup_has_room_for_the_shim_and_the_init needs a user namespace, which AppArmor holds back; runs in the linux-userns step
 
 # Landlock ABI 9 (Linux 7.1), which keeps unix sockets by path to the
 # pairing's folders while the network switch is off: the runner's kernel has

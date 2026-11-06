@@ -2087,7 +2087,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
 
     // Its own cgroup, with what the call asked for. The cgroup's files are
     // the node's, so the test reads them while the command waits.
-    let wait = "cut -d: -f3 /proc/self/cgroup > cgroup.txt; i=0; \
+    let wait = "echo $$ > pid.txt; cut -d: -f3 /proc/self/cgroup > cgroup.txt; i=0; \
                 while [ ! -e release ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done";
     let call = conn
         .request(
@@ -2118,7 +2118,21 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     };
     assert_eq!(file("memory.max"), (64u64 << 20).to_string());
     assert_eq!(file("cpu.max"), "50000 100000");
-    assert_eq!(file("pids.max"), "32");
+    // With a /proc of its own (nerve_sandbox::own_proc) the shell is the
+    // namespace's second process, after its init, and the cgroup holds the
+    // shim and the init besides the 32 processes the call asked for
+    // (exec::room_for_shim). Where the shim gets no namespace (user
+    // namespaces held back and no AppArmor profile, as in CI's Debian 12
+    // container) the command has the 32 alone, and with Landlock `status`
+    // warns of that.
+    let own_proc = std::fs::read_to_string(work.join("pid.txt"))
+        .unwrap()
+        .trim()
+        == "2";
+    if nerve_sandbox::Confinement::detect().landlock_abi.is_some() {
+        assert_eq!(st["processes_warning"].is_null(), own_proc, "{st}");
+    }
+    assert_eq!(file("pids.max"), if own_proc { "34" } else { "32" });
     std::fs::write(work.join("release"), b"").unwrap();
     let r = conn
         .answer(call, WAIT, &mut Vec::new())

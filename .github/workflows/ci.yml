@@ -131,11 +131,13 @@ jobs:
       # The tests that need root, which the run above skips: root's backup and
       # restore on a node of another user open the file as the user who asked
       # (crates/nerve-node/src/caller_file.rs), root starts in a folder only
-      # its owner may enter, and the ACL walk of uninstall and of revoked
-      # grants on files of other uids and on another file system. They run as
-      # root of a user namespace where the machine gives one that may change
-      # owners and mount; ubuntu-24.04 restricts those with AppArmor. Here
-      # only the test programs run as root, not cargo.
+      # its owner may enter, the ACL walk of uninstall and of revoked
+      # grants on files of other uids and on another file system, and a node
+      # that runs as root keeps its rights over other accounts' files, as it
+      # gives its commands no namespace (crates/nerve-node/tests/own_proc.rs).
+      # They run as root of a user namespace where the machine gives one that
+      # may change owners and mount; ubuntu-24.04 restricts those with
+      # AppArmor. Here only the test programs run as root, not cargo.
       - name: Tests that need root, as root
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
@@ -147,10 +149,28 @@ jobs:
               acl::tests::remove_all_gives_no_file_with_a_second_name \
               acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale \
               acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale
+            cargo test --locked -p nerve-node --test own_proc -- --show-output --exact \
+              a_root_node_keeps_its_rights_over_other_accounts_files
           } 2>&1 | tee "$RUNNER_TEMP/root.log"
       - name: Skipped tests, as root
         if: success() || failure()
         run: python3 .github/scripts/skips.py --job linux-root "$RUNNER_TEMP/root.log"
+      # A command's own /proc (crates/nerve-node/tests/own_proc.rs): the shim
+      # makes a user namespace as the runner's account, which ubuntu-24.04's
+      # AppArmor holds back from a program without a profile that allows it
+      # (`kernel.apparmor_restrict_unprivileged_userns`). The installed node
+      # brings its own profile (the `installed` job installs it); here the
+      # restriction is lifted for these tests. Root makes no namespace, so
+      # they cannot run in the step above. The last step that runs tests, as
+      # it changes the machine.
+      - name: Tests of a command's own /proc, user namespaces open
+        run: |
+          restrict=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          [ ! -e "$restrict" ] || echo 0 | sudo tee "$restrict" > /dev/null
+          cargo test --locked -p nerve-node --test own_proc -- --show-output 2>&1 | tee "$RUNNER_TEMP/own_proc.log"
+      - name: Skipped tests, user namespaces open
+        if: success() || failure()
+        run: python3 .github/scripts/skips.py --job linux-userns "$RUNNER_TEMP/own_proc.log"
 
   # The released Linux programs are static, built against musl
   # (release.yml), and the standard library differs there: it drops O_PATH
