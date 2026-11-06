@@ -1,0 +1,129 @@
+# Runs chosen tests many times on a hosted runner, to show that a test which
+# failed now and then is stable (issues #107, #112, #180), or to catch one in
+# the act. Started by hand (Actions › Repeat tests › Run workflow, or
+# `gh workflow run repeat.yml --ref <branch> -f os=windows-2025
+# -f package=nerve-node -f count=50 -f filter=ctrl_c`).
+#
+# It builds the package's test programs once, as the CI job of that system
+# does, then runs them `count` times with `filter`, the arguments libtest
+# takes after `--` (test names or parts of them, `--exact`,
+# `--test-threads=1`, ...). It stops at the first failure and says in which
+# run; a filter that runs no test fails as well, so a typo does not pass.
+#
+# It only reads the CI cargo cache (it saves none) and uses no secrets.
+name: Repeat tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: The runner
+        type: choice
+        options:
+          - ubuntu-24.04
+          - windows-2025
+        default: windows-2025
+      package:
+        description: The package whose tests run (cargo -p)
+        type: string
+        default: nerve-node
+      filter:
+        description: What libtest takes after `--` (test names or parts, --exact, ...)
+        type: string
+        required: true
+      count:
+        description: How many times the tests run
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # As ci.yml, whose jobs this one repeats a part of.
+  RUST_TOOLCHAIN: "1.99.0"
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  repeat:
+    name: ${{ inputs.package }} ${{ inputs.filter }} ×${{ inputs.count }} on ${{ inputs.os }}
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 180
+    steps:
+      # As ci.yml's Windows job: the repository is LF everywhere.
+      - name: Check out with LF line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Cargo cache (read only)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      # What ci.yml's Linux job gives its tests: the desktop app's fontconfig,
+      # and a systemd user session for the limits test of a node run by hand.
+      - name: The Linux job's setup
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          [ -S "/run/user/$uid/bus" ]
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # As ci.yml's Windows job: the temporary folder by its long name.
+      - name: The Windows job's temporary folder
+        if: runner.os == 'Windows'
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Doctests are left out: they are no test programs to run again.
+      - name: Build the test programs once
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: cargo test --locked -p "$PACKAGE" --tests --no-run
+      # cargo runs them as they are built, each from its package's folder
+      # with the variables cargo gives a test, as the CI jobs do.
+      - name: Run them again and again
+        env:
+          PACKAGE: ${{ inputs.package }}
+          FILTER: ${{ inputs.filter }}
+          COUNT: ${{ inputs.count }}
+        run: |
+          # The filter is words for libtest, split as a shell splits them.
+          read -r -a args <<< "$FILTER"
+          log=$RUNNER_TEMP/run.log
+          for i in $(seq 1 "$COUNT"); do
+            echo "::group::run $i of $COUNT"
+            if ! cargo test --locked -p "$PACKAGE" --tests -- "${args[@]}" 2>&1 | tee "$log"; then
+              echo "::endgroup::"
+              echo "::error::run $i of $COUNT failed"
+              exit 1
+            fi
+            echo "::endgroup::"
+            ran=$(sed -n 's/^test result: [a-zA-Z]*\. \([0-9]*\) passed.*/\1/p' "$log" | awk '{ s += $1 } END { print s + 0 }')
+            if [ "$ran" = 0 ]; then
+              echo "::error::no test matched the filter"
+              exit 1
+            fi
+            echo "run $i of $COUNT: $ran tests passed"
+          done
+          echo "### $COUNT runs passed: $PACKAGE $FILTER" >> "$GITHUB_STEP_SUMMARY"
