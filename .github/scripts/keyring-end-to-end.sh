@@ -113,9 +113,36 @@ ui_smoke() {
   summary "- web UI smoke test of $1: passed"
 }
 
+# Where each process of the node's unit is now, the node's commands
+# included (issue #180: a shim that never started its command while the
+# unit spun one CPU). Per thread: its state, where it waits in the kernel
+# and its CPU, over its life and over the last second; its kernel stack;
+# its state and signals; and its open files, so a pipe whose other end is
+# still held shows on both sides.
+unit_processes() {
+  local cg pids p t
+  cg=$(systemctl show -p ControlGroup --value nerve-node 2>/dev/null || true)
+  [ -n "$cg" ] && [ -d "/sys/fs/cgroup$cg" ] || return 0
+  pids=$(find "/sys/fs/cgroup$cg" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -n | tr '\n' ' ')
+  [ -n "${pids// /}" ] || return 0
+  echo "---- the unit's processes: $pids"
+  ps -eLo pid,tid,stat,wchan:32,pcpu,args 2>&1 | awk -v want=" $pids " 'NR == 1 || index(want, " " $1 " ")' || true
+  top -H -b -n 2 -d 1 -p "$(echo $pids | tr ' ' ,)" 2>&1 | awk '/^top -/ { n++ } n == 2' || true
+  for p in $pids; do
+    echo "-- $p: $(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+    grep -E '^(State|SigQ|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt|voluntary_ctxt_switches|nonvoluntary_ctxt_switches)' "/proc/$p/status" 2>&1 || true
+    for t in /proc/"$p"/task/*; do
+      echo "   thread ${t##*/} ($(cat "$t/comm" 2>/dev/null), wchan $(cat "$t/wchan" 2>/dev/null)):"
+      sed 's/^/     /' "$t/stack" 2>&1 || true
+    done
+    ls -l "/proc/$p/fd" 2>&1 | sed 's/^/   /' || true
+  done
+}
+
 diagnostics() {
   echo "---- diagnostics"
   systemctl status nerve-node --no-pager -l 2>&1 | tail -20 || true
+  unit_processes
   journalctl -u nerve-node --no-pager -n 60 2>&1 || true
   loginctl list-users 2>&1 || true
   nuid=$(id -u nerve 2>/dev/null || true)
