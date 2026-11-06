@@ -8,13 +8,21 @@
 # branch. Before that, and for a branch whose changes are not on main yet,
 # a push to a branch `repeat/<anything>` runs it too, with what the file
 # `.github/repeat.env` on that branch says, one `key=value` a line: `os`,
-# `package`, `filter`, `count`, as the inputs below.
+# `package`, `filter`, `count`, `load`, as the inputs below.
 #
 # It builds the package's test programs once, as the CI job of that system
 # does, then runs them `count` times with `filter`, the arguments libtest
 # takes after `--` (test names or parts of them, `--exact`,
 # `--test-threads=1`, ...). It stops at the first failure and says in which
 # run; a filter that runs no test fails as well, so a typo does not pass.
+#
+# A few tests alone run on an idle runner, and a flake that needs a busy one
+# (a process start that takes seconds) does not show. `load` workers
+# (.github/scripts/repeat-load.sh) keep every core busy and start processes
+# all the time while the tests run, as the whole `cargo test --workspace` of
+# a CI job does. A fix for such a flake is shown by the old tests failing and
+# the new ones passing under the same load; 4 workers are enough on the
+# 4-core Windows runner.
 #
 # It only reads the CI cargo cache (it saves none) and uses no secrets.
 name: Repeat tests
@@ -44,6 +52,10 @@ on:
         description: How many times the tests run
         type: number
         default: 20
+      load:
+        description: Workers that load the machine while the tests run (0 for none)
+        type: number
+        default: 0
 
 permissions:
   contents: read
@@ -71,6 +83,7 @@ jobs:
       package: ${{ steps.what.outputs.package }}
       filter: ${{ steps.what.outputs.filter }}
       count: ${{ steps.what.outputs.count }}
+      load: ${{ steps.what.outputs.load }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
@@ -84,7 +97,10 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           FILTER: ${{ inputs.filter }}
           COUNT: ${{ inputs.count }}
+          LOAD: ${{ inputs.load }}
         run: |
+          # A push without the key runs unloaded, as the input's default does.
+          LOAD=${LOAD:-0}
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             [ -f .github/repeat.env ] || { echo "::error::a repeat/ branch needs .github/repeat.env"; exit 1; }
             # Read as data, never run.
@@ -94,11 +110,13 @@ jobs:
                 package) PACKAGE=$value ;;
                 filter) FILTER=$value ;;
                 count) COUNT=$value ;;
+                load) LOAD=$value ;;
               esac
             done < .github/repeat.env
           fi
           case $OS in ubuntu-24.04 | windows-2025) ;; *) echo "::error::no runner $OS"; exit 1 ;; esac
           case $COUNT in '' | *[!0-9]* | 0) echo "::error::no count $COUNT"; exit 1 ;; esac
+          case $LOAD in '' | *[!0-9]*) echo "::error::no load $LOAD"; exit 1 ;; esac
           [[ $PACKAGE =~ ^[a-z0-9_-]+$ ]] || { echo "::error::no package $PACKAGE"; exit 1; }
           [ -n "$FILTER" ] || { echo "::error::no filter"; exit 1; }
           {
@@ -106,10 +124,11 @@ jobs:
             echo "package=$PACKAGE"
             echo "filter=$FILTER"
             echo "count=$COUNT"
+            echo "load=$LOAD"
           } >> "$GITHUB_OUTPUT"
 
   repeat:
-    name: ${{ needs.what.outputs.package }} ${{ needs.what.outputs.filter }} ×${{ needs.what.outputs.count }} on ${{ needs.what.outputs.os }}
+    name: ${{ needs.what.outputs.package }} ${{ needs.what.outputs.filter }} ×${{ needs.what.outputs.count }} (load ${{ needs.what.outputs.load }}) on ${{ needs.what.outputs.os }}
     needs: what
     runs-on: ${{ needs.what.outputs.os }}
     timeout-minutes: 180
@@ -165,7 +184,14 @@ jobs:
           PACKAGE: ${{ needs.what.outputs.package }}
           FILTER: ${{ needs.what.outputs.filter }}
           COUNT: ${{ needs.what.outputs.count }}
+          LOAD: ${{ needs.what.outputs.load }}
         run: |
+          if [ "$LOAD" != 0 ]; then
+            # The loops end with the script, which ends with this step.
+            bash .github/scripts/repeat-load.sh "$LOAD" &
+            load=$!
+            trap 'kill "$load" 2>/dev/null || true' EXIT
+          fi
           # The filter is words for libtest, split as a shell splits them.
           read -r -a args <<< "$FILTER"
           log=$RUNNER_TEMP/run.log
@@ -184,4 +210,4 @@ jobs:
             fi
             echo "run $i of $COUNT: $ran tests passed"
           done
-          echo "### $COUNT runs passed: $PACKAGE $FILTER" >> "$GITHUB_STEP_SUMMARY"
+          echo "### $COUNT runs passed: $PACKAGE $FILTER (load: $LOAD workers)" >> "$GITHUB_STEP_SUMMARY"

@@ -182,6 +182,20 @@ fn running(pid: u32) -> bool {
     }
 }
 
+/// Waits until process `pid` has ended. The job's end only starts the
+/// termination: the exit code reads "still active" until the process's
+/// threads have run it, which on a loaded machine can take longer than the
+/// call needs to return.
+async fn gone(pid: u32) -> bool {
+    for _ in 0..100 {
+        if !running(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 /// Ends `pid` when a failed test left it running.
 fn sweep(pid: u32) {
     // SAFETY: plain values; the handle is closed once.
@@ -344,7 +358,7 @@ async fn a_command_that_ignores_ctrl_c_is_ended_after_the_grace() {
         .unwrap();
     let e = task.await.unwrap().unwrap_err();
     let took = t.elapsed();
-    let ended = !running(pid);
+    let ended = gone(pid).await;
     sweep(pid);
     assert_eq!(e.kind(), ErrorCode::Timeout);
     assert!(ended, "the process that ignored Ctrl+C outlived the call");

@@ -123,11 +123,15 @@ unit_processes() {
   local cg pids p t
   cg=$(systemctl show -p ControlGroup --value nerve-node 2>/dev/null || true)
   [ -n "$cg" ] && [ -d "/sys/fs/cgroup$cg" ] || return 0
-  pids=$(find "/sys/fs/cgroup$cg" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -n | tr '\n' ' ')
+  # A command's cgroup goes when the command ends, so the walk can fail
+  # half way; this runs in the EXIT trap, where a failing line would end the
+  # rest of the diagnostics and the cleanup.
+  pids=$(find "/sys/fs/cgroup$cg" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -n | tr '\n' ' ' || true)
   [ -n "${pids// /}" ] || return 0
   echo "---- the unit's processes: $pids"
   ps -eLo pid,tid,stat,wchan:32,pcpu,args 2>&1 | awk -v want=" $pids " 'NR == 1 || index(want, " " $1 " ")' || true
-  top -H -b -n 2 -d 1 -p "$(echo $pids | tr ' ' ,)" 2>&1 | awk '/^top -/ { n++ } n == 2' || true
+  # top takes at most 20 pids.
+  top -H -b -n 2 -d 1 -p "$(printf '%s\n' $pids | head -n 20 | paste -sd, -)" 2>&1 | awk '/^top -/ { n++ } n == 2' || true
   for p in $pids; do
     echo "-- $p: $(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
     grep -E '^(State|SigQ|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt|voluntary_ctxt_switches|nonvoluntary_ctxt_switches)' "/proc/$p/status" 2>&1 || true
