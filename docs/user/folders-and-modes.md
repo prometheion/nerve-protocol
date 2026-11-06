@@ -63,7 +63,9 @@ A folder gives rights, each its own letter:
 | `w` | Writing files |
 | `x` | Running commands whose working folder is in it |
 
-The letters do not imply each other: a command needs `x` and not `r`. A
+The letters do not imply each other for file calls: a command needs `x` and
+not `r`. A command in an `x` folder can also read its files by name, not list
+them ([what a command can reach](../dev/sandbox-linux.md#what-a-command-can-reach-in-folder-mode)). A
 folder covers everything below it, and where folders nest the deepest one
 decides.
 
@@ -131,8 +133,8 @@ Its limits:
 - All pairings share `/tmp` and `/var/tmp`. Keep no secret there, and run no
   key agent or credential cache in a pairing's home
   ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
-- Without Landlock, each pairing's commands reach the folders and the running
-  commands of the others, with their network, as all run as `nerve-run`. `status` warns; give a center you trust less a
+- Without Landlock, each pairing's commands reach the homes, the folders and the
+  running commands of the others, with their network, as all run as `nerve-run`. `status` warns; give a center you trust less a
   machine of its own ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
 - Below Linux 6.12 (stock Ubuntu 22.04, 24.04 and Debian 12), one center's
   commands can signal another's and reach its abstract sockets. `status`

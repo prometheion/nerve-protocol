@@ -129,6 +129,10 @@ memory only, so a restart turns sudo off.
   list only what you would run as root yourself
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
 - With the network off, no sudo-list command runs ([network](network.md)).
+- Turning sudo on in the center's web UI puts your password into a page the
+  center serves. If you do not trust the center, run `sudo nerve-node sudo on`
+  on the machine
+  ([from the web UI](../dev/policy-engine.md#from-the-web-ui)).
 
 ## The settings grant
 

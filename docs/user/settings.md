@@ -76,7 +76,9 @@ The node has a key per center, and one that signs `node.toml`:
 - `file` (the default): files only the node's account can read.
 - `keyring`: the system keyring (GNOME Keyring, KWallet). No copy stays in a
   file. At a terminal, `config set machine.secret_storage keyring` offers to
-  install a keyring where none answers.
+  install a keyring where none answers. On a node run by hand the keyring is
+  yours: an allow rule for `secret-tool` or a like tool hands a center the
+  node's keys ([keys](../dev/settings-and-config.md#where-the-node-keeps-its-keys)).
 
 The change moves the keys at once. If the keyring cannot take them, nothing
 changes ([keys](../dev/settings-and-config.md#where-the-node-keeps-its-keys)).

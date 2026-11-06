@@ -11,7 +11,8 @@
 //! on the machine as the center's account (or as root), makes a new one: the
 //! running center reads the file again when it changed, and the sessions of
 //! the old token end at their next request. A backup does not carry it; a
-//! restored center makes its own.
+//! center restored where it had none makes its own, one that has its token
+//! keeps it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

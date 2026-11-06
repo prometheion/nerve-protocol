@@ -93,3 +93,5 @@ a service manager, or detached on a node without a cgroup, keeps running: end
 what it left yourself, `nerve-run`'s processes, or your own for a command that
 ran as you or on a node run by hand
 ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
+A mode change, `cap set … off` or the end of a `--for` does not stop a command
+that runs; **Disable**, `center pause` or `panic` does.

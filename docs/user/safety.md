@@ -39,7 +39,7 @@ leads to the detail.
 - All pairings share `/tmp` and `/var/tmp`. Keep no secret there, and run no
   key agent or credential cache in a pairing's home
   ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
-- Without Landlock, each pairing's commands reach the folders and the
+- Without Landlock, each pairing's commands reach the homes, the folders and the
   running commands of the others, with their network, as all run as
   `nerve-run`. `status` warns; give a center you trust less a
   machine of its own ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).

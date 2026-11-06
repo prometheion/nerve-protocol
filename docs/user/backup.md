@@ -17,6 +17,9 @@ node, restores and starts it again; stop a node you run by hand first. The backu
 pairings, modes, folders and rules, and the keys in files. Not the audit
 log, the log or the sudo password: a restored node has sudo off.
 
+Restore only a backup you made yourself: it brings its pairings, modes, rules
+and allowed programs ([restore](../dev/backup.md#restore)).
+
 | Option | Does |
 |---|---|
 | `--include-keyring` | Also takes the keys that are in the system keyring |
@@ -40,8 +43,9 @@ harness token hashes and the action checker's settings. The machines find it
 again by the same pin and need not pair again.
 
 - A backup holds neither the owner token nor the checker's endpoint token.
-  A restored center makes a new owner token at its next start:
-  `sudo nerve-center owner-token` shows it. Enter the endpoint token again,
+  A center restored where it had none makes one at its next start; one that
+  has its token keeps it. `sudo nerve-center owner-token` shows it, and
+  `--new` replaces it. Enter the endpoint token again,
   or install the local model again
   ([what is not in a backup](../dev/backup.md#what-is-not-in-a-backup)).
 

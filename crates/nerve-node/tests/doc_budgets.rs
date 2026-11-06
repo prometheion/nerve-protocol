@@ -163,11 +163,11 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         (
             "docs/user/safety.md",
-            "the running commands of the others, with their network",
+            "the homes, the folders and the running commands of the others, with their network",
         ),
         (
             "docs/user/folders-and-modes.md",
-            "the running commands of the others, with their network",
+            "the homes, the folders and the running commands of the others, with their network",
         ),
         // Taking the grant back leaves what the center added.
         ("docs/user/rules.md", "That leaves what it added"),
@@ -183,6 +183,26 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/pair.md",
             "also other sites a reverse proxy serves there",
         ),
+        // The round 3 limits: the sudo form, what a mode change leaves, `x`
+        // reading by name, a foreign backup, the keyring and its clients.
+        (
+            "docs/user/rules.md",
+            "puts your password into a page the center serves",
+        ),
+        (
+            "docs/user/watch-and-stop.md",
+            "the end of a `--for` does not stop a command",
+        ),
+        (
+            "docs/user/folders-and-modes.md",
+            "can also read its files by name, not list them",
+        ),
+        (
+            "docs/user/backup.md",
+            "Restore only a backup you made yourself",
+        ),
+        ("docs/user/settings.md", "hands a center the node's keys"),
+        ("docs/user/backup.md", "one that has its token keeps it"),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
     ];
