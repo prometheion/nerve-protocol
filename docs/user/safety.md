@@ -36,6 +36,9 @@ leads to the detail.
 - All pairings share `/tmp` and `/var/tmp`. Keep no secret there, and run no
   key agent or credential cache in a pairing's home
   ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
+- Without Landlock, each pairing's commands reach the folders of the others,
+  as all run as `nerve-run`. `status` warns; give a center you trust less a
+  machine of its own ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
 - Below Linux 6.12 (stock Ubuntu 22.04, 24.04 and Debian 12), one center's
   commands can signal another's and reach its abstract sockets. `status`
   warns ([Landlock versions](../dev/sandbox-linux.md#landlock-versions)).

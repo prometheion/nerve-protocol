@@ -67,18 +67,21 @@ every call to them by the calling center's policy.
 7. **Data from a node is data.** File contents, command output and tool
    results are untrusted content at the center and in the harness. The center
    marks every tool result as device content.
-8. **No web UI on nodes.** A node is configured on the machine, or by a center
-   whose owner gave it the settings grant.
+8. **The node is configured on the machine.** By its owner, with the CLI, the
+   desktop app or the node's web UI (off until the owner turns it on, owner
+   tokens only, one CLI command per change), or by a center whose owner gave
+   it the settings grant ([web UIs](web-uis.md#the-nodes-web-ui)).
 
 ## What the node keeps
 
 | Where | What |
 |---|---|
-| Config folder | `node.toml`, signed. `keys/<name>.key`, one Ed25519 key per center, mode 0600; `keys/relay-tls.pem` (the relay's TLS key) and `keys/proxy-login.secret` (an `https://` proxy's password, a relay token), when there are. On Windows, DPAPI files: `command-account.dpapi` (the password of the account commands run as, on the installed node) and `sudo.dpapi` (the sudo password while sudo is on) |
+| Config folder | `node.toml`, signed. `keys/<name>.key`, one Ed25519 key per center, mode 0600; `keys/relay-tls.pem` (the relay's TLS key), `keys/ui-tls.pem` (the web UI's TLS key, beyond loopback) and `keys/proxy-login.secret` (an `https://` proxy's password, a relay token), when there are. The web UI's tokens are in `node.toml` as SHA-256 hashes (`[[ui.token]]`). On Windows, DPAPI files: `command-account.dpapi` (the password of the account commands run as, on the installed node) and `sudo.dpapi` (the sudo password while sudo is on) |
 | State folder | `audit.jsonl`, `log.jsonl`, `run/ctl.sock`, `run/ctl.token`, `acl.json` (the installed Linux node: the folders' ACL entries it gave `nerve-run`, `crate::acl`), `config.key` (the key of the config's MAC), `config.version` (the last version of `node.toml` the node saved or took), `keys.lock`, `keys.moving` (while the keys move between files and the keyring). On Windows, `grants.json` and `grants.json.lock`, the record of the folder grants |
-| System keyring | With `machine.secret_storage = "keyring"`: the center keys, the config's key, the relay's TLS key and an `https://` proxy's password instead of their files. The proxy's header values, always (the installed node on Windows takes none, see node-local §2) |
+| Runtime folder | The installed Linux node: `/run/nerve-node/owner.sock` (the owner's commands, `crate::owner`) and `/run/nerve-node/provider.sock` (programs that add capabilities), made at each start and gone at the stop |
+| System keyring | With `machine.secret_storage = "keyring"`: the center keys, the config's key, the relay's and the web UI's TLS keys and an `https://` proxy's password instead of their files. The proxy's header values, always (the installed node on Windows takes none, see node-local §2) |
 
-No call of any center reaches these two folders. See
+No call of any center reaches these folders. See
 [settings and config](settings-and-config.md). The center keeps `tls.pem`
 (and `tls.next.pem` during a key rotation), `state.json`, `log.jsonl`,
 `center.lock`, `run/harness.sock` (Unix) and, for the
@@ -99,7 +102,7 @@ model in `checker/` in its state folder ([logging](logging.md),
 | `crates/nerve-service` | What the node's and the center's services share: accounts, systemd, the files root writes, `update` (the program, its unit and the node's polkit files, put back together when the new program does not start), the backup passphrase prompt, and the fake machine their tests run on. Windows keeps its own update (`winsvc.rs`): the service control manager needs the service stopped before the program is replaced, and there are no unit or polkit files |
 | `crates/nerve-node` | The `nerve-node` binary: daemon and CLI |
 | `crates/nerve-node-desktop` | `nerve-node-desktop`, the node with a desktop app in one binary: with arguments it is `nerve-node`, without it opens a window (Slint) that runs `nerve-node --json` for every action; on a node installed as a service through a broker it starts with the rights the desktop gives (pkexec, the UAC prompt). Started from anywhere but its installed place it is its own installer: `install`, `update` and `uninstall` of this program put its parts (menu entry, `nerve://` handler) in place with the node (`nerve_node::edition`), and the service runs it |
-| `crates/nerve-center` | The `nerve-center` binary: links, MCP server, web UI, the action checker (`src/checker/`). It builds on the shared crates, not on `nerve-node`: the Help page's node commands are a file (`src/ui/node-help.json`) that a test checks against the node's own |
+| `crates/nerve-center` | The `nerve-center` binary: links, MCP server, web UI, the action checker (`src/checker/`). It builds on the shared crates, not on `nerve-node` (only its tests run a real node): the Help page's node commands are a file (`src/ui/node-help.json`) that a test checks against the node's own |
 | `crates/nerve-conformance` | The conformance suite: center, node and harness parts, an echo node and a fake center |
 
 A wire change, its spec text and both ends change together.

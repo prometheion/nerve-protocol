@@ -42,7 +42,10 @@ The `claude mcp add` line puts the token in your shell's history; the JSON
 does not. An agent can read its harness token. That token opens `/mcp`
 only ([tokens](../dev/mcp-surface.md#tokens)).
 
-Delete a token under **Settings › Harness tokens** to stop it.
+Delete a token under **Settings › Harness tokens** to stop it: its sessions
+end at once, with their jobs. A session also ends after 30 minutes without
+a request; the harness then opens a new one
+([sessions](../dev/mcp-surface.md#sessions)).
 
 The harness gets two tools: `list` shows the machines and what they offer,
 and `execute` runs one action. Your harness may ask before each tool call.

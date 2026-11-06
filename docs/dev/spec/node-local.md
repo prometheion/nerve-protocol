@@ -246,44 +246,34 @@ The header values of a proxy, and the password of an `http://` one, are in
 the keyring either way (§2), except on the installed node on Windows, which
 takes none (§2, Proxy).
 
-Two kinds of node keep their keys in files whatever is asked:
+One kind of node keeps its keys in files whatever is asked: the installed
+node on Windows (the service, which runs as `nerve`). The Credential Manager
+is one per account, and the CLI that writes the config there runs as an
+administrator, so a move into the keyring would put the keys in that
+administrator's Credential Manager, out of the service's reach. The node
+counts as installed on the folders `install` uses, in any spelling of their
+case, or when it runs as `nerve`. On Linux the keys may be in the keyring on
+every kernel; a node run by hand then runs no `folder` mode command (§1, the
+paragraphs on the session bus below).
 
-- The installed node on Windows (the service, which runs as `nerve`). The
-  Credential Manager is one per account, and the CLI that writes the config
-  there runs as an administrator, so a move into the keyring would put the
-  keys in that administrator's Credential Manager, out of the service's
-  reach. The node counts as installed on the folders `install` uses, in any
-  spelling of their case, or when it runs as `nerve`.
-- A Linux node whose kernel has a Landlock ABI below 9. Landlock there
-  cannot keep a command off the session bus the keyring answers on (§1,
-  the paragraphs on the session bus below), so with the keys in the keyring
-  a `folder` mode command could not run programs from its folders: the
-  sandbox cannot grant the keyring's access and execute together. This
-  holds whatever account runs the commands. Only an ABI that is read
-  counts: where Landlock is missing or off, so that its ABI cannot be read,
-  the keyring is allowed (folder mode then runs no command anyway), and
-  `setup` warns that it cannot tell.
-
-On such a node:
+On that node:
 
 - A change to `keyring` is refused before anything moves, by whatever
-  writes the config (`config set`, setup, `config accept`); `node.toml` and
-  the keys stay as they were. This refusal comes before the count of running
+  writes the config (`config set`, `config accept`); `node.toml` and the
+  keys stay as they were. This refusal comes before the count of running
   commands below, as it holds whatever runs. A running node does not reload a
   file another writer saved with `keyring`.
 - `config accept` refuses a file that says `keyring`, even when the keys are
   in the keyring already, so nothing would move.
-- `setup` does not ask where the keys go. It prints a warning with the
-  reason, and moves keys left in the keyring into files. On Linux it first
-  checks that the keyring answers, and offers to install one as it does
-  elsewhere, so that it can read the keys it moves; on the installed node on
-  Windows it asks no keyring.
 - `install`, and the node at its start, refuse a `node.toml` that says
   `keyring`. The message names the file and the command that moves the keys
   into files, with `--config-dir` and `--state-dir` of the folders it
   refused, so it works whether or not a service is registered yet. It is run
-  as the account whose keyring holds them: on Windows the administrator
-  that put them there, on Linux the node's user (sudo becomes it).
+  as the administrator whose Credential Manager holds them.
+
+`setup` asks nowhere where the keys go: they stay in files, and
+`config set machine.secret_storage keyring` moves them, offering at a
+terminal to install a keyring where none answers.
 
 The node looks for the key that checks `node.toml` where that file says,
 read before its MAC is checked. A file that names another place than the one
@@ -1131,7 +1121,7 @@ grant or not.
   its owner through the owner endpoint (below), with `NERVE_OWNER_VIA=web` in
   its environment and every check the CLI makes. A command with that variable
   refuses `ui on`, `ui off`, `ui token add`, any change of a `ui.*` setting
-  (`config set`, `config edit` and the like) that is not the removal of a
+  (`config set`, `config add`, `config rm`, `config unset`) that is not the removal of a
   token, and `config accept`; the rest of `ui` reads or revokes. So a browser
   session can neither widen the UI's address, nor give itself a token that
   outlives it. The pages offer what the desktop app's offer; the commands

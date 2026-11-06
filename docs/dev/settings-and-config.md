@@ -128,6 +128,10 @@ center reads, or the node refuses the whole change and names the field.
 13. The pairing's `policy.no_network` (every mode, #167) once it is on: a
     center cannot clear it (`settings::client_only`). It may change
     `policy.mode` and `policy.until` meanwhile, as no mode sheds the switch.
+14. The node's web UI, `[ui]`: its address, its certificate's pin and its
+    tokens. It is in no center's document, and a command the web UI runs for
+    the owner may not change it either, only revoke a token
+    ([web UIs](web-uis.md#the-nodes-web-ui)).
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`
@@ -175,6 +179,9 @@ after `hello` and carries its calls.
 | `reload` | Reread `node.toml` (only a file the node signed) |
 | `sudo.status`, `sudo.on`, `sudo.off` | The sudo switch |
 | `folder.add` | `folder add`, judged by the node as the owner; it stores and records the real place |
+| `folder.grants` | Brings the folders' ACL entries for `nerve-run` in line with the config, and says what that left; with `every` (`folder add` of a listed folder, `folder sync`) every grant is walked |
+| `caps.list` | What `cap` shows: every action, its source, and each center's access |
+| `center.rotate-key` | `center rotate-key`: a new key for one center, sent over the link; it waits for the center's answer |
 | `owner.check` | Nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
 | `hello` | A capability provider attaches; its connection stays ([node-local §7](spec/node-local.md#7-capability-providers)) |
 
@@ -186,7 +193,8 @@ as the node's files are none. For a `folder` mode command the token also
 holds, as far as the sandbox does.
 
 Windows has no control socket. It has a control pipe with the same lines,
-which serves `status`, `folder.add`, `folder.set` and `folder.rm` only
+which serves `status`, `caps.list`, `center.rotate-key`, `folder.add` and
+`folder.rm` only
 ([node-local.md §5](spec/node-local.md#5-control-socket)). For every other
 change the CLI signs `node.toml` itself, and the change applies at the next
 start.
