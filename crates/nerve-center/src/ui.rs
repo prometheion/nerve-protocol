@@ -3211,6 +3211,7 @@ mod tests {
             "Trust as wildcard",
             "Switch this entry off for this machine",
             "The decision model is on but does not run",
+            "every call it checks is refused. The Log page says why.",
             "With the model on and none installed",
             // With fail closed off the page says the calls pass unjudged,
             // and does not fold that switch away (round 1, security 2).
