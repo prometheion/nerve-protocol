@@ -115,6 +115,10 @@ async fn seen_by_the_other(root: &Path, own_proc: bool) -> (String, String) {
 /// there (so a shim that fails here fails the tests, not skips them), else
 /// of the shim.
 fn namespaces_here() -> bool {
+    // Root makes none (nerve_sandbox::own_proc::wants_namespace).
+    if nerve_transport::net::euid() == 0 {
+        return false;
+    }
     let asked = std::process::Command::new("unshare")
         .args([
             "--user",
@@ -258,10 +262,11 @@ fn pid_of(text: &str) -> Option<u32> {
     })
 }
 
-/// A node that runs as root (run by hand with full rights) keeps root's
-/// rights over the files of other accounts in the namespace of a command:
-/// the namespace maps every id root sees (round 1, correctness 1). Needs
-/// root, so it is skipped otherwise; the LXC run has it.
+/// A node that runs as root (run by hand with full rights) makes no
+/// namespace for a command, so root keeps its rights over the files of other
+/// accounts: in a user namespace with one id mapped it would lose them (round
+/// 1, correctness 1). Needs root, so it is skipped otherwise; the LXC run
+/// has it.
 #[tokio::test]
 async fn a_root_node_keeps_its_rights_over_other_accounts_files() {
     use nerve_node::exec::{self, RunCall};
@@ -270,10 +275,10 @@ async fn a_root_node_keeps_its_rights_over_other_accounts_files() {
         eprintln!("skipped: needs root");
         return;
     }
-    if !namespaces_here() {
-        eprintln!("skipped: this kernel gives the shim no PID namespace with its own /proc");
-        return;
-    }
+    // The node's probe finds none, so it says so (`status` warns).
+    assert!(!nerve_sandbox::own_proc::works(std::path::Path::new(env!(
+        "CARGO_BIN_EXE_nerve-node"
+    ))));
     let dir = tempfile::tempdir().unwrap();
     // 0711 above, so the test's own folder is no hurdle; the inside is
     // another account's alone.
@@ -411,7 +416,8 @@ async fn the_cgroup_has_room_for_the_shim_and_the_init() {
     use nerve_node::exec::{self, RunCall};
     use nerve_policy::config::Granted;
     use std::sync::Arc;
-    if !namespaces_here() {
+    // Root's own cgroup counts only with systemd's mark, which folders lack.
+    if nerve_transport::net::euid() == 0 || !namespaces_here() {
         eprintln!("skipped: this kernel gives the shim no PID namespace with its own /proc");
         return;
     }

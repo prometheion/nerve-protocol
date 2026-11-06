@@ -9,12 +9,8 @@
 //! first, unprivileged, in which it may make the other two. The namespace
 //! maps the command's own user and group to themselves and nothing else:
 //! there is no root inside, a file of another account shows as `nobody`,
-//! and the kernel still checks every access as the real account. A node
-//! that runs as root maps every id it sees instead ([`id_map`]): in a
-//! namespace the kernel lets root override file permissions only over ids
-//! the namespace maps, and root's command would lose its rights over the
-//! files of everyone else. Three
-//! processes then stand for the command:
+//! and the kernel still checks every access as the real account. Root makes
+//! none ([`wants_namespace`]). Three processes then stand for the command:
 //!
 //! - the shim, in the node's namespace, which the node waits for: it waits
 //!   for the next and ends as the command ended, by the same signal too;
@@ -50,20 +46,17 @@ fn last() -> io::Error {
 pub fn enter() -> io::Result<Entered> {
     // SAFETY: plain getters.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    // The parent's maps are read before the unshare changes what
-    // `/proc/self` says.
-    let (uids, gids) = (parent_map("uid_map"), parent_map("gid_map"));
+    if !wants_namespace(uid) {
+        return Ok(Entered::Inside);
+    }
     // SAFETY: unshare with flags only.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWPID | libc::CLONE_NEWNS) } != 0 {
         return Err(last());
     }
-    // The command's own ids, and no others: nobody is root inside. Root
-    // keeps its rights, and may leave `setgroups` as it is.
-    std::fs::write("/proc/self/uid_map", id_map(uid, &uids))?;
-    if uid != 0 {
-        std::fs::write("/proc/self/setgroups", "deny")?;
-    }
-    std::fs::write("/proc/self/gid_map", id_map(gid, &gids))?;
+    // The command's own ids, and no others: nobody is root inside.
+    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+    std::fs::write("/proc/self/setgroups", "deny")?;
+    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
     let mut ends = [0; 2];
     // SAFETY: a pipe into an array of two descriptors.
     if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -87,32 +80,16 @@ pub fn enter() -> io::Result<Entered> {
     }
 }
 
-/// The ids the process sees, as `/proc/self/{uid,gid}_map` says: its text,
-/// empty where it cannot be read (the namespace then maps the one id).
-fn parent_map(file: &str) -> String {
-    std::fs::read_to_string(format!("/proc/self/{file}")).unwrap_or_default()
-}
-
-/// What the new namespace maps, for the process whose id is `own` and
-/// whose namespace's map is `parent` (`inside outside count` lines, the
-/// first column being what this process sees). A process that is not root
-/// maps its own id to itself and nothing else. Root maps every id it sees
-/// to itself: there it keeps `CAP_DAC_OVERRIDE` and the like over the
-/// files of everyone else, which a map of one id would take from it (they
-/// show as `nobody`, and root's own rights stop at the files it owns).
-fn id_map(own: u32, parent: &str) -> String {
-    let all: Vec<String> = parent
-        .lines()
-        .filter_map(|l| {
-            let mut w = l.split_whitespace();
-            let (inside, _outside, count) = (w.next()?, w.next()?, w.next()?);
-            Some(format!("{inside} {inside} {count}\n"))
-        })
-        .collect();
-    if own != 0 || all.is_empty() {
-        return format!("{own} {own} 1\n");
-    }
-    all.concat()
+/// Whether the shim run by `uid` makes a namespace. Root does not: in a user
+/// namespace the kernel lets root override file permissions only over ids the
+/// namespace maps, and the one id the shim may map is its own, so root's
+/// command would lose its rights over the files of every other account (they
+/// show as `nobody`). A map of every id has to be written from outside the
+/// namespace, which the shim cannot. A node that runs as root (`allow_root`)
+/// holds its commands apart by Landlock alone, and `status` warns of the
+/// processes they see.
+fn wants_namespace(uid: u32) -> bool {
+    uid != 0
 }
 
 /// The name of the node's AppArmor profile, which `nerve-node install` puts
@@ -360,22 +337,12 @@ pub fn works(exe: &std::path::Path) -> bool {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    /// Root keeps its rights in the namespace: it maps every id it sees,
-    /// as the kernel gives root's override of file permissions only over
-    /// ids the namespace maps (round 1, correctness 1). Any other account
-    /// maps itself alone.
+    /// Root makes no namespace, so that it keeps its rights over the files
+    /// of other accounts; any other account does (round 1, correctness 1).
     #[test]
-    fn a_root_node_maps_every_id_it_sees_and_another_account_its_own() {
-        assert_eq!(super::id_map(0, "0 0 4294967295\n"), "0 0 4294967295\n");
-        // A node in a container sees what its map shows it.
-        assert_eq!(
-            super::id_map(0, "         0     100000      65536\n"),
-            "0 0 65536\n"
-        );
-        assert_eq!(super::id_map(0, "0 1000 1\n5 1005 3\n"), "0 0 1\n5 5 3\n");
-        assert_eq!(super::id_map(1000, "0 0 4294967295\n"), "1000 1000 1\n");
-        // A map that cannot be read leaves root its own id.
-        assert_eq!(super::id_map(0, ""), "0 0 1\n");
+    fn root_makes_no_namespace_and_another_account_does() {
+        assert!(!super::wants_namespace(0));
+        assert!(super::wants_namespace(1000));
     }
 
     /// Only the node's own profile is left at exec, in any of its modes.

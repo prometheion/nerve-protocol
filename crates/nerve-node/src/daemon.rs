@@ -564,7 +564,7 @@ impl CenterState {
 
 /// What `status` says where the pairings' commands see each other's
 /// processes ([`Shared::processes_warning`]).
-pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (the node may not make user namespaces here): each pairing's commands see the running commands of the others, with their command lines";
+pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (the node runs as root, or the kernel does not let it make user namespaces): each pairing's commands see the running commands of the others, with their command lines";
 
 /// Whether an `exec.run` command gets a `/proc` of its own: on a node where
 /// the shim can make one (`available`, [`Shared::own_proc`]), the commands

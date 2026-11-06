@@ -2826,12 +2826,21 @@ async fn the_nodes_commands_leave_its_apparmor_profile() {
         label.starts_with("nerve-node"),
         "the node is in its profile: {label}"
     );
+    // The link the node dialled before the restart is closed: the one that
+    // answers is the new one.
     let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    let mut conn = inc.conn;
+    let mut conn = None;
+    for _ in 0..5 {
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        if fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .is_ok()
+        {
+            conn = Some(inc.conn);
+            break;
+        }
+    }
+    let mut conn = conn.expect("a link that answers");
     let r = run(&mut conn, &work, "cat /proc/self/attr/current")
         .await
         .unwrap();

@@ -230,11 +230,12 @@ mount) and reaps what is left to it; and the command. A signal to the
 command's process group reaches the command as before; the shim and the init
 let it pass. When the command ends, the init ends and the kernel kills what
 is left in the namespace, as the node kills what is left in its cgroup.
-A sudo command and root's run without it: sudo would not rise there. A node
-that runs as root (`allow_root`) maps every id it sees instead of its own
-alone, as the kernel gives root its override of file permissions only over
-ids the namespace maps; its command keeps its rights over the files of other
-accounts.
+A sudo command and root's run without it: sudo would not rise there. So does
+a node that runs as root (`allow_root`): the namespace maps one id, and the
+kernel gives root its override of file permissions only over ids the
+namespace maps, so root's command would lose its rights over the files of
+every other account. Its commands are held apart by Landlock alone, and
+`status` warns of the processes they see.
 
 What it costs, measured on Linux 7.2 (median of 30 starts): about 0.7 ms more
 per command (3.2 ms instead of 2.5 ms for `true` through the shim).
