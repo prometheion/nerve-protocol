@@ -153,11 +153,11 @@ buttons.
 
 A decision the center's [action checker](action-checker.md) made shows here
 too, marked as the checker's and with whether the entry or switch was the one
-for every machine or this machine's own. A model refusal gets **Allow** and **Allow as
-wildcard** buttons that save a checker allow rule (center-side, so no settings
-grant is needed), and **Allow with this value** for an argument it pins.
-**Allow** saves the refused command line exactly. A blocklist refusal has none: it is a hard deny, so you
-change or remove the entry on the Action checker page. Only the center marks
+for every machine or this machine's own. A model refusal gets **Trust this** and **Trust as
+wildcard** buttons that save a skip rule (center-side, so no settings
+grant is needed), and **Trust with this value** for an argument it pins.
+**Trust this** saves the refused command line exactly. A blocklist refusal has none: it is a hard deny, so its
+**Switch this entry off for this machine** leads to the Action checker page. Only the center marks
 an entry as the checker's: a machine's own entry that claims to be one shows
 as that machine's.
 

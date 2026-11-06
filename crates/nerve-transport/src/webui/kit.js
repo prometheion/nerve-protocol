@@ -442,6 +442,21 @@ const HELP_KEYS = [
 ];
 const GUIDE = "https://github.com/prometheion/nerve-protocol/tree/main/docs/user";
 
+// The folds that are open, by key, so a redraw of the page keeps them so.
+const openFolds = new Set();
+
+// The rest of a short text, folded under `summary` ("More" when empty): the
+// line before it says what counts, a limit included; this holds the why and
+// the detail. `key` names it across redraws.
+function more(key, summary, ...body) {
+  const d = el("details", { class: "more", "data-focus": `more:${key}` },
+    el("summary", {}, el("span", {}, summary || "More"), icon("chev", "sm chev")),
+    el("div", { class: "body" }, body));
+  d.open = openFolds.has(key);
+  d.addEventListener("toggle", () => { if (d.open) openFolds.add(key); else openFolds.delete(key); });
+  return d;
+}
+
 // A part that opens on a click, as the app's Expander: its head stays.
 function expander(title, ic, open, ...body) {
   const d = el("details", { class: "card exp" },

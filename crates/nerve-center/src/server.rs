@@ -87,20 +87,38 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     )));
 
     let mut ui = None;
+    let mut page = None;
     if let Some(a) = ui_addr {
         let tls = !is_loopback(&a);
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
-        tasks.push(tokio::spawn(
-            Ui::new(&center, token.as_deref(), !tls).serve(server),
-        ));
+        let u = Ui::new(&center, token.as_deref(), !tls);
+        page = Some(u.clone());
+        tasks.push(tokio::spawn(u.serve(server)));
     }
 
     let mut mcp = None;
+    let told = |mode: &str, url: Option<String>, pin: Option<String>| {
+        if let Some(p) = &page {
+            p.set_mcp(mode, url, pin);
+        }
+    };
+    match &args.mcp {
+        McpMode::Stdio => told("stdio", None, None),
+        McpMode::Off => told("off", None, None),
+        McpMode::Http(_) => {}
+    }
     if let McpMode::Http(at) = &args.mcp {
         let tls = !is_loopback(at);
         let server = Server::bind(at, &center, !tls).await?;
         mcp = Some(server.local_addr());
+        // The URL a harness on this machine uses, or the address it was
+        // given beyond it, with the certificate's pin to trust.
+        let url = match tls {
+            true => format!("https://{at}/mcp"),
+            false => format!("http://{}/mcp", server.local_addr()),
+        };
+        told("http", Some(url), tls.then(|| center.pin()).flatten());
         if !has_token {
             center.log().record(
                 Level::Warn,

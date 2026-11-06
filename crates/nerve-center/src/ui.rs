@@ -66,6 +66,9 @@ pub struct Ui {
     owner: OwnerToken,
     sessions: Sessions,
     wrong: webui::WrongSecrets,
+    /// How this center serves MCP, for the Connect a harness card
+    /// (`/api/overview`'s `mcp`); stdio until the server says otherwise.
+    mcp: std::sync::OnceLock<Value>,
 }
 
 impl Ui {
@@ -80,7 +83,17 @@ impl Ui {
             owner: OwnerToken::new(center.dir()),
             sessions: Sessions::new(),
             wrong: webui::WrongSecrets::default(),
+            mcp: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Says how this center serves MCP: `mode` stdio, http or off, and for
+    /// http the endpoint's URL and, beyond loopback, the pin of the
+    /// certificate it serves.
+    pub fn set_mcp(&self, mode: &str, url: Option<String>, pin: Option<String>) {
+        let _ = self
+            .mcp
+            .set(json!({"mode": mode, "url": url, "fingerprint": pin}));
     }
 
     pub async fn serve(self: Arc<Self>, server: Server) {
@@ -289,6 +302,7 @@ impl Ui {
                 "nodes": c.nodes_json(),
                 "alerts": c.alerts(),
                 "sessions": c.sessions_json(),
+                "mcp": self.mcp.get().cloned().unwrap_or_else(|| json!({"mode": "stdio"})),
             })),
             ("GET", "/api/stats") => Ok(c.stats_json()),
             ("GET", "/api/audit") => Ok(json!({"decisions": c.audit()})),
@@ -1489,7 +1503,7 @@ mod tests {
             assert!(row.contains(part), "{part}");
         }
         let checker = &APP_JS[APP_JS.find("function checkerAuditRow(").unwrap()..];
-        assert!(checker.contains(r#"btn("Allow with this value", "", allow(false, pins.pin)"#));
+        assert!(checker.contains(r#"btn("Trust with this value", "", allow(false, pins.pin)"#));
         assert_eq!(
             APP_JS.matches(", ruleIn, ruleFieldsHint(ruleIn))").count(),
             3
@@ -1726,7 +1740,10 @@ mod tests {
                 ":remove`",
             ),
             ("btn(\"Switch on again\"", ":on`"),
-            ("btn(\"Delete\"", ":delete`"),
+            (
+                "btn(\"Remove\", \"danger-soft\", act(async () => { await api(\"POST\", \"/api/tokens/delete\"",
+                ":delete`",
+            ),
         ] {
             let lines: Vec<_> = APP_JS.lines().filter(|l| l.contains(label)).collect();
             assert!(!lines.is_empty(), "{label}");
@@ -1819,8 +1836,8 @@ mod tests {
         );
         // The pin of an argument, and its buttons, are named by the entry.
         assert!(APP_JS.contains("key: `${auditKey}:pin`"));
-        assert!(APP_JS.contains("`${auditKey}:Allow with this value`"));
-        assert!(APP_JS.contains("`${auditKey}:Allow as wildcard`"));
+        assert!(APP_JS.contains("`${auditKey}:Trust with this value`"));
+        assert!(APP_JS.contains("`${auditKey}:Trust as wildcard`"));
     }
 
     /// A save in flight pulls the focus back only while the focus is still
@@ -3025,6 +3042,65 @@ mod tests {
     /// No script of the center's page builds HTML from text: what a node
     /// wrote goes into text nodes only, and the page's session is readable
     /// by its scripts. The page has no inline script.
+    /// The overview tells the page how this center serves MCP, for the
+    /// Connect a harness card: stdio unless the server says otherwise, and
+    /// for HTTP the URL and, beyond loopback, the pin to trust.
+    #[tokio::test]
+    async fn the_overview_says_how_harnesses_connect() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(d.path()), None, true);
+        let h = ("Host", "127.0.0.1:7480");
+        let session = owner_login(&ui, h).await;
+        let ck = session_token(&session);
+        let get = req("GET", "/api/overview", &[h, (SESSION, &ck)], "");
+        let mcp = |r: Response| serde_json::from_slice::<Value>(&r.body).unwrap()["mcp"].clone();
+        assert_eq!(mcp(ui.request(get.clone()).await)["mode"], "stdio");
+        ui.set_mcp(
+            "http",
+            Some("https://0.0.0.0:7481/mcp".into()),
+            Some("PIN".into()),
+        );
+        let m = mcp(ui.request(get).await);
+        assert_eq!(m["url"], "https://0.0.0.0:7481/mcp");
+        assert_eq!(m["fingerprint"], "PIN");
+    }
+
+    /// The page's words and parts for a new user: Connect a harness with its
+    /// token and what to paste, the folder after a pairing, the checker's
+    /// Skip the model and Trust this, the way from a blocklist refusal to
+    /// its switch, a banner for a model that is on and does not run, and
+    /// folds for the detail (H6, H7, H10, H11, F4, F5).
+    #[test]
+    fn the_page_has_the_short_words_and_the_folds() {
+        for want in [
+            r#"el("span", { class: "name" }, "Connect a harness")"#,
+            "Make a token",
+            "claude mcp add --transport http nerve",
+            "nerve-node folder add ~/project rw",
+            "is paired",
+            "Skip the model",
+            "Trust this",
+            "Trust as wildcard",
+            "Switch this entry off for this machine",
+            "The decision model is on but does not run",
+            "With the model on and none installed",
+            "more(\"settings:center\"",
+            "more(\"settings:machines\", \"Advanced",
+            "more(\"checker:advanced\", \"Advanced\"",
+        ] {
+            assert!(APP_JS.contains(want), "{want}");
+        }
+        // One word for taking a thing away, and the checker's rules are not
+        // allow rules: a node's allow rule lets a call run.
+        for gone in [
+            "\"Delete\"",
+            "\"Allow rules\"",
+            "Added a checker allow rule",
+        ] {
+            assert!(!APP_JS.contains(gone), "{gone}");
+        }
+    }
+
     #[test]
     fn the_page_builds_no_html_from_text() {
         assert_eq!(

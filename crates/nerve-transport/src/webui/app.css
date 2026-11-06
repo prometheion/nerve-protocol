@@ -1932,6 +1932,30 @@ code.target,
   overflow-wrap: anywhere;
 }
 
+/* ---- A short text's rest, folded (more() in kit.js) ---- */
+
+details.more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-xs, 4px);
+  color: var(--text-muted);
+  font-size: 0.9em;
+  list-style: none;
+  cursor: pointer;
+}
+
+details.more > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.more > summary .chev {
+  margin-left: 0;
+}
+
+details.more > .body {
+  margin-top: var(--sp-sm);
+}
+
 /* ---- Parts that open: the app's Expander ---- */
 
 details.card {
