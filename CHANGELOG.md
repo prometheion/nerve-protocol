@@ -20,6 +20,9 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - `as_owner` goes with `allowlist` mode alone: a timed `folder` or `user` mode a center saves no longer ends in `allowlist` as you, and `mode` and `status` say ", as you" for the mode a timer ends in ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
 - `center settings off` says what the center changed stays (mode, rules, sudo list, folders, capability switches) and names the command that shows each; the app says it too ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
 - On Windows an administrator as the owner is warned of where Linux warns of root: `center settings on`, `status` and the app ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `proxy set -` reads the proxy URL or relay link from the first line of stdin, as `center add -` does, and `relay add` shows that form: the relay token is no longer in the process list or the shell's history ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- The center's **Pair a machine** card shows `nerve-node center add -` with the link to paste under it, each with Copy, and says to open the link on a Windows machine ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- The desktop app no longer keeps a `nerve://` link on its own command line while its window is open: the start the link opens hands it to a new start on stdin and ends ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
 
 ## 0.0.7
 

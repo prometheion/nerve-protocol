@@ -722,9 +722,9 @@ pub enum ProxyCmd {
     ///
     /// Reach centers through an HTTP proxy. Header values and a password are kept in the system keyring, never in node.toml; the installed node on Windows takes neither.
     Set {
-        /// http://[user[:password]@]host:port, https://… or a nerve://relay link
+        /// http://[user[:password]@]host:port, https://…, a nerve://relay link; - for stdin
         ///
-        /// The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the first line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token.
+        /// The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the next line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token. `-` reads it from the first line of stdin, where it never shows in the process list.
         url: String,
         /// The pin of an https:// proxy's certificate
         ///

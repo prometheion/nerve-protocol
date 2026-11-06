@@ -200,8 +200,8 @@ and the pin.
 ```
 relay node lab-pc added; its link, shown only now:
   nerve://relay?address=relay.example%3A7490&node=lab-pc&token=0123…&pin=q1Q3tvgE…
-on lab-pc, paste it in the desktop app (Relay, Connect), or run:
-  nerve-node proxy set 'nerve://relay?address=relay.example%3A7490&node=lab-pc&token=0123…&pin=q1Q3tvgE…'
+on lab-pc, paste it in the desktop app (Relay, Connect), or run this and paste it on the next line:
+  nerve-node proxy set -
 it may reach every https center of this node
 ```
 
@@ -249,11 +249,13 @@ shows each node's list.
 ### On the relayed node
 
 Paste the link: in the desktop app on the Relay page (**Connect through a
-relay**), or in a terminal. Then pair as usual:
+relay**), or in a terminal on the line after `proxy set -`. Then pair as
+usual; each `-` reads its link from stdin, so neither is ever in the process
+list or the shell's history (#198):
 
 ```sh
-nerve-node proxy set 'nerve://relay?address=...&node=lab-pc&token=...&pin=...'
-nerve-node center add 'nerve://pair?center=...&code=...&pin=...'
+nerve-node proxy set -        # then the relay link
+nerve-node center add -       # then the pairing link
 ```
 
 The link is the relay as this node's proxy: the same as `proxy set
@@ -403,9 +405,9 @@ Each of these ends the tunnels it concerns at once:
   name `b` too. The relay tells an address in any spelling apart from
   others, but not a name from the address it resolves to: pair the relay's
   centers at one name or address each.
-- The link holds the token, and so does the `proxy set` line: your shell
-  keeps it in its history (fish, bash, PowerShell's `ConsoleHost_history.txt`). Delete it
-  from there after you ran it.
+- The link holds the token. Given to `proxy set` as an argument instead of
+  on stdin (`-`), it is in the process list while that runs, and in the
+  shell's history (fish, bash, PowerShell's `ConsoleHost_history.txt`).
 
 ## A proxy, as the owner sets it up
 
@@ -432,10 +434,13 @@ relay shows, which holds the relay's address, this node's name and token,
 and the pin of the relay's certificate:
 
 ```sh
-nerve-node proxy set 'nerve://relay?address=relay.example%3A7490&node=lab-pc&token=...&pin=...'
+nerve-node proxy set -     # then the link on the next line
 ```
 
-It is the same as the URL with the login and the pin:
+`-` takes the URL or the link from the first line of stdin; a password the
+URL asks for (`http://user@host:port`) comes on the line after it, and
+`--header -` headers after that. It is the same as the URL with the login
+and the pin:
 `proxy set 'https://lab-pc:<token>@relay.example:7490' --pin=<pin>`.
 
 Give the pin as `--pin=<pin>`: a pin can start with `-`, which would be read

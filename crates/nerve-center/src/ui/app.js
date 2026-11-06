@@ -141,11 +141,16 @@ function harnessCard(mcp) {
   return el("div", { class: "card", id: "harness" }, parts);
 }
 
+// The command the pairing card gives a Linux machine: the link comes on its
+// stdin, pasted on the next line, so the unused code never sits in the
+// process list while `center add` waits for the owner's yes.
+const PAIR_COMMAND = "nerve-node center add -";
+
 function pairingCard(p) {
-  const command = `nerve-node center add '${p.link}'`;
-  // The two ways a machine takes it, each with its own copy button: the
-  // command for a terminal, the bare link for the desktop app. The link
-  // holds the center, the code and the pin, so they are not shown apart.
+  // The command and the bare link, each with its own copy button: on Linux
+  // the command reads the link pasted under it, the desktop app takes the
+  // link alone; on Windows the app opens the link. The link holds the
+  // center, the code and the pin, so they are not shown apart.
   const row = (label, value) => el("div", { class: "pair-row" },
     el("span", { class: "pair-label" }, label),
     el("code", { class: "pair-value mono" }, value),
@@ -153,10 +158,11 @@ function pairingCard(p) {
   return el("div", { class: "card", id: "pairing" },
     el("div", { class: "card-top" }, itile("link", "accent"), el("span", { class: "name" }, "Pair a machine"),
       el("button", { type: "button", class: "btn ghost icon sm push", "aria-label": "Dismiss", "data-focus": "pair:dismiss", onclick: () => { state.pairing = null; draw(true); } }, icon("x", "sm"))),
-    el("p", { class: "meta" }, "On the machine, run the command, or paste the link in the Nerve app (Centers, Pair a center)."),
+    el("p", { class: "meta" }, "On a Linux machine, run the command, then paste the link on the next line, or paste it in the Nerve app."),
     el("div", { class: "pair-rows" },
-      row("Command", command),
+      row("Command", PAIR_COMMAND),
       row("Link", p.link)),
+    el("p", { class: "meta" }, "On a Windows machine, open this link on the machine: the Nerve app pairs with it."),
     el("p", { class: "meta" }, `The code is valid until ${when(p.expires_ms)} and works for one machine.`),
     el("p", { class: "meta" }, "Then give it a folder on that machine:"),
     el("div", { class: "pair-rows" }, row("Then", FOLDER_STEP)),

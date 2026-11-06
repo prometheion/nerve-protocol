@@ -878,10 +878,25 @@ mod tests {
         let js = String::from_utf8(js.body).unwrap();
         let card = &js[js.find("function pairingCard").unwrap()..];
         let card = &card[..card.find("\n}\n").unwrap()];
-        // Two rows with a Copy each: the command, and the link alone for the
-        // desktop app. The link's parts are not shown apart.
-        assert!(card.contains("row(\"Command\", command)"), "{card}");
+        // Two rows with a Copy each: the command, which reads the link from
+        // stdin so that it is never in the process list (#198), and the link
+        // alone for the desktop app, which a Windows machine opens. The
+        // link's parts are not shown apart.
+        assert!(card.contains("row(\"Command\", PAIR_COMMAND)"), "{card}");
+        assert!(
+            js.contains("const PAIR_COMMAND = \"nerve-node center add -\";"),
+            "{js}"
+        );
         assert!(card.contains("row(\"Link\", p.link)"), "{card}");
+        assert!(!card.contains("center add '"), "{card}");
+        assert!(
+            card.contains("then paste the link on the next line"),
+            "{card}"
+        );
+        assert!(
+            card.contains("On a Windows machine, open this link on the machine"),
+            "{card}"
+        );
         for gone in ["\"Center\"", "\"Code\"", "\"Certificate pin\""] {
             assert!(!card.contains(gone), "{gone} is still a row: {card}");
         }

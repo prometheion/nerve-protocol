@@ -118,11 +118,10 @@ leads to the detail.
   ([backup](../dev/backup.md#what-is-not-in-a-backup)).
 - A restored backup brings its own pairings, modes and rules: restore only
   one you made yourself ([restore](../dev/backup.md#restore)).
-- While `center add` asks, the link is in the process list: use
-  `center add -` ([pair](pair.md)).
-- The relay link holds the relay token, and the `claude mcp add` line holds
-  the harness token. Delete them from your shell's history
-  ([pair](pair.md), [center](center.md)).
+- A pairing or relay link given as an argument is in the process list: give
+  `-` and paste it ([pair](pair.md)).
+- The `claude mcp add` line holds the harness token. Delete it from your
+  shell's history ([center](center.md)).
 - A relay token reaches the relay's centers' host and port, and the other
   sites a reverse proxy serves there
   ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).

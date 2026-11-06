@@ -921,8 +921,8 @@
             {
               "args": [
                 {
-                  "line": "http://[user[:password]@]host:port, https://… or a nerve://relay link",
-                  "more": "The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the first line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token.",
+                  "line": "http://[user[:password]@]host:port, https://…, a nerve://relay link; - for stdin",
+                  "more": "The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the next line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token. `-` reads it from the first line of stdin, where it never shows in the process list.",
                   "name": "<URL>",
                   "optional": false
                 },

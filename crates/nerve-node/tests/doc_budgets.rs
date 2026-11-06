@@ -242,17 +242,17 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         (
             "docs/user/pair.md",
-            "the link is in the process list, which any account can read",
+            "the link is\n   in the process list, which any account can read",
         ),
         // The round 5 limits: the secrets that land in the process list or
         // the shell's history.
         (
             "docs/user/safety.md",
-            "the link is in the process list: use `center add -`",
+            "A pairing or relay link given as an argument is in the process list",
         ),
         (
             "docs/user/safety.md",
-            "the `claude mcp add` line holds the harness token",
+            "The `claude mcp add` line holds the harness token",
         ),
         // The round 6 limits: one center's command lines are open to the
         // others.

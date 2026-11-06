@@ -68,19 +68,23 @@ pub fn after_window_error(error: &str, chosen: Option<&str>) -> Next {
     }
 }
 
-/// Runs this program again with the same arguments, drawing in software;
-/// its exit code.
-pub fn rerun_in_software() -> i32 {
+/// Runs this program again with the same arguments, or with the `link` this
+/// start took on stdin, drawing in software; its exit code.
+pub fn rerun_in_software(link: Option<&str>) -> i32 {
     let Ok(exe) = std::env::current_exe() else {
         return 1;
     };
-    std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .env(BACKEND_VAR, SOFTWARE)
-        .status()
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(1)
+    // A link this start took goes on as it came, on stdin
+    // (crate::instance::hand_on), never on the command line.
+    let run = match link {
+        Some(link) => crate::instance::hand_on(&exe, link, &[(BACKEND_VAR, SOFTWARE)])
+            .and_then(|mut c| c.wait()),
+        None => std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env(BACKEND_VAR, SOFTWARE)
+            .status(),
+    };
+    run.ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
 /// Shows `text` as a desktop notification where one can be shown; a

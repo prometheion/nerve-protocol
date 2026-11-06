@@ -5,6 +5,14 @@
 //! Windows); a later start sends it one line, `{"link": …}`,
 //! `{"uninstall": true}` or `{}`, and ends.
 //!
+//! A start the desktop opens with a link has it on its own command line,
+//! which every account on the machine can read while the process lives
+//! (`/proc/<pid>/cmdline`, a process list on Windows). So that start hands
+//! the link at once to a new start of the app on that start's stdin
+//! ([`hand_on`], [`LINK_ON_STDIN`]) and ends; the new start goes on as one
+//! with the link would, to the open window or to a window of its own,
+//! and its command line holds no link.
+//!
 //! A link can carry a pairing's code and pin, so a start sends nothing to
 //! a socket or pipe that another user could have made: on Linux the
 //! socket's folder is this user's alone and the window at the other end
@@ -44,6 +52,79 @@ impl Asked {
             ..Asked::default()
         }
     }
+}
+
+/// The argument of a start that takes its `nerve://` link from the first
+/// line of stdin, not from its command line ([`hand_on`]).
+pub const LINK_ON_STDIN: &str = "--link-on-stdin";
+
+/// What a start with the arguments `words` (the program's name left out)
+/// is: one with a `nerve://` link on its command line hands it on
+/// ([`Start::HandOn`]); one with [`LINK_ON_STDIN`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// Opens the window, or hands what it asks to the open one.
+    Window(Asked),
+    /// Has a link on its command line: hands it to a new start and ends.
+    HandOn(String),
+    /// Takes the link from the first line of stdin.
+    LinkOnStdin,
+    /// None of these: a command of the node.
+    Command,
+}
+
+impl Start {
+    pub fn of(words: &[Option<&str>], uninstall_arg: &str) -> Start {
+        match words {
+            [Some(link)] if link.to_ascii_lowercase().starts_with("nerve://") => {
+                Start::HandOn(link.to_string())
+            }
+            [Some(arg)] if *arg == LINK_ON_STDIN => Start::LinkOnStdin,
+            [Some(arg)] if *arg == uninstall_arg => Start::Window(Asked {
+                uninstall: true,
+                ..Asked::default()
+            }),
+            [] => Start::Window(Asked::default()),
+            _ => Start::Command,
+        }
+    }
+}
+
+/// Starts `program` (this one, in the app) with [`LINK_ON_STDIN`] and
+/// `link` on its stdin, with `env` set for it, and lets it come to the
+/// front on Windows; the caller then ends, and with it the command line
+/// that held the link.
+pub fn hand_on(
+    program: &std::path::Path,
+    link: &str,
+    env: &[(&str, &str)],
+) -> std::io::Result<std::process::Child> {
+    let mut child = std::process::Command::new(program)
+        .arg(LINK_ON_STDIN)
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    // The new start was not opened by the person, this one was: it may
+    // bring its window up as this one could.
+    #[cfg(windows)]
+    // SAFETY: a plain call with a process id.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(child.id())
+    };
+    let mut stdin = child.stdin.take().expect("piped");
+    writeln!(stdin, "{link}")?;
+    Ok(child)
+}
+
+/// The link of a [`LINK_ON_STDIN`] start: the first line of its stdin;
+/// none where that is empty or no `nerve://` link.
+pub fn link_on_stdin() -> Option<String> {
+    let mut text = String::new();
+    std::io::stdin().lock().read_line(&mut text).ok()?;
+    let link = text.trim();
+    link.to_ascii_lowercase()
+        .starts_with("nerve://")
+        .then(|| link.to_string())
 }
 
 fn line(a: &Asked) -> String {
@@ -515,9 +596,68 @@ mod win {
     }
 }
 
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    /// A link on the command line is handed on, never kept by the window's
+    /// process; the start that takes it reads it from stdin (#198).
+    #[test]
+    fn a_link_on_the_command_line_is_handed_on() {
+        let link = "nerve://pair?center=x&code=c0de&pin=p1n";
+        let of = |w: &[Option<&str>]| Start::of(w, "--uninstall");
+        assert_eq!(of(&[Some(link)]), Start::HandOn(link.into()));
+        assert_eq!(
+            of(&[Some("NERVE://relay?address=x")]),
+            Start::HandOn("NERVE://relay?address=x".into())
+        );
+        assert_eq!(of(&[Some(LINK_ON_STDIN)]), Start::LinkOnStdin);
+        assert_eq!(of(&[]), Start::Window(Asked::default()));
+        assert_eq!(
+            of(&[Some("--uninstall")]),
+            Start::Window(Asked {
+                uninstall: true,
+                ..Asked::default()
+            })
+        );
+        for words in [
+            vec![Some("status")],
+            vec![Some(link), Some("x")],
+            vec![None],
+        ] {
+            assert_eq!(of(&words), Start::Command, "{words:?}");
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The link goes on the new start's stdin, its command line holds only
+    /// [`LINK_ON_STDIN`] (#198).
+    #[test]
+    fn a_handed_on_link_is_on_stdin_not_on_the_command_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let program = d.path().join("app");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {0}/args\nprintf '%s' \"$WHO\" > {0}/env\ncat > {0}/input\n",
+                d.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = "nerve://pair?center=x&code=c0de&pin=p1n";
+        let mut child = hand_on(&program, link, &[("WHO", "software")]).unwrap();
+        assert!(child.wait().unwrap().success());
+        let read = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap();
+        assert_eq!(read("args"), format!("{LINK_ON_STDIN}\n"));
+        assert_eq!(read("input"), format!("{link}\n"));
+        assert_eq!(read("env"), "software");
+    }
 
     /// In a folder that other users may open, a socket there could be
     /// theirs: a start sends nothing to it and opens a window that says so.
