@@ -4,7 +4,9 @@
 asks for, its settings tabs, what it needs per desktop, its keys and its own
 settings. The user guide's [install](../user/install.md#the-desktop-app) and
 [web UIs](../user/web-uis.md#the-desktop-app) pages are the short version.
-The rest of this page was the user guide's.
+Windows comes with 0.1.0: the release has the Linux app only, and the
+Windows text below waits for it ([Windows](windows.md)). The rest of this
+page was the user guide's.
 
 `nerve-node-desktop` is the node with a window, for a machine with a desktop:
 Linux x86_64 with GNOME or KDE Plasma (Wayland or X11), and Windows x86_64.

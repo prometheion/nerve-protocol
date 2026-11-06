@@ -12,6 +12,10 @@ workflow from" too: GitHub takes the workflow file from there, not from
 | `branch` | The branch to build from. Default `main` |
 | `kind` | `pre-release` or `release` |
 | `version` | `x.y.z`, the version of `nerve-center`, `nerve-node` and `nerve-node-desktop` in the workspace `Cargo.toml` |
+| `windows` | Build and publish the Windows programs too. Off by default |
+
+Windows comes with 0.1.0: until then a release publishes the Linux programs
+only, and the `windows` input stays off. 0.1.0 turns it on.
 
 ## Rules
 
@@ -40,13 +44,15 @@ workflow from" too: GitHub takes the workflow file from there, not from
    `cargo clippy --locked --workspace --all-targets -- -D warnings` and
    `cargo test --locked --workspace` with the pinned toolchain.
 2. Builds `nerve-center` and `nerve-node` for `x86_64-unknown-linux-musl` and
-   `aarch64-unknown-linux-musl` (static) and `x86_64-pc-windows-msvc` (static C
-   runtime). Each Linux binary must be static. Each binary must print its
-   version from `--version`, and it must equal the one given.
-   It also builds the desktop app `nerve-node-desktop`: for Linux x86_64 on
-   Ubuntu 22.04, the oldest runner (it links glibc and fontconfig, so it runs
-   where glibc is 2.35 or newer; the run's summary says the glibc it needs) and for Windows x86_64
-   (static C runtime). It must print `nerve-node-desktop <version>`.
+   `aarch64-unknown-linux-musl` (static). Each Linux binary must be static.
+   Each binary must print its version from `--version`, and it must equal the
+   one given. It also builds the desktop app `nerve-node-desktop` for Linux
+   x86_64 on Ubuntu 22.04, the oldest runner (it links glibc and fontconfig,
+   so it runs where glibc is 2.35 or newer; the run's summary says the glibc
+   it needs). It must print `nerve-node-desktop <version>`. With `windows`,
+   the `windows` job also builds `nerve-center` and `nerve-node-desktop` for
+   `x86_64-pc-windows-msvc` (static C runtime); without it that job is
+   skipped.
 3. Runs the conformance suite (`cargo test -p nerve-conformance`) against the
    Linux binaries that were just built, the ones to be released, with
    `NERVE_CENTER_BIN` and `NERVE_NODE_BIN` set to them. `x86_64` runs on an
@@ -54,13 +60,16 @@ workflow from" too: GitHub takes the workflow file from there, not from
    Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, and
    runs the real-machine tests, the keyring path and the center as a service
    there, as CI does (`.github/workflows/installed.yml`,
-   [building](building.md#checks)). The Windows binaries are built but not
-   run by the workflow.
-4. Publishes a GitHub Release with the seven binaries and `SHA256SUMS`
-   (Windows has no `nerve-node` of its own: the desktop app is the node there). The
-   desktop app's update takes `nerve-node-desktop-x86_64-linux` or
-   `nerve-node-desktop-x86_64-windows.exe` from there, as `nerve-node update`
-   takes `nerve-node-*`. A release
+   [building](building.md#checks)). Windows binaries, with `windows`, are
+   built but not run by the workflow.
+4. Publishes a GitHub Release with `SHA256SUMS` and the five Linux binaries:
+   `nerve-center` and `nerve-node` for each machine, and
+   `nerve-node-desktop-x86_64-linux`. With `windows` there are seven:
+   `nerve-center-x86_64-windows.exe` and
+   `nerve-node-desktop-x86_64-windows.exe` too (Windows has no `nerve-node` of
+   its own: the desktop app is the node there). The release text ends with a
+   footer that names the programs it has. The desktop app's update takes its
+   own file from there, as `nerve-node update` takes `nerve-node-*`. A release
    is marked latest. A pre-release is marked as a pre-release.
 
 The binaries are not signed. The workflow uses no secrets. Only its last job
@@ -85,7 +94,9 @@ run again.
 1. Set the version in the workspace `Cargo.toml`, in the `version` of the path
    dependencies in `[workspace.dependencies]`, and in `Cargo.lock` (run
    `cargo build`). Rename the `## Unreleased` section of `CHANGELOG.md`, where
-   the changes since the last release collect, to `## <version>`.
+   the changes since the last release collect, to `## <version>`. Until 0.1.0
+   the Windows items stay under `## Unreleased`, as the release has no Windows
+   program.
 2. Merge that to `main`.
 3. Run the workflow with kind `release` and that version.
 

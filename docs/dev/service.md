@@ -425,6 +425,11 @@ The config, the keys, the accounts and the audit log are not touched.
 installed one. If the new program does not start, the old one is put back
 with the old unit and polkit files, and started again.
 
+A program the node may just have written (the program `update` staged, the
+desktop app at the hand-over of `uninstall`, the owner's program) is started
+again when Linux answers "Text file busy": five tries, 50 ms apart. Why a
+command for the owner did not start reaches the CLI.
+
 ### Uninstall the node
 
 ```sh

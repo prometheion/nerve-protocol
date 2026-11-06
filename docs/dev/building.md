@@ -174,7 +174,8 @@ the target `aarch64-unknown-linux-musl` and the variable
 
 ## Windows binaries from Linux
 
-Use `cargo-xwin`. The static C runtime avoids a missing `vcruntime140.dll`:
+Windows comes with 0.1.0: CI builds and tests it, and a release publishes no
+Windows program until then ([releasing](releasing.md)). Use `cargo-xwin`. The static C runtime avoids a missing `vcruntime140.dll`:
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
