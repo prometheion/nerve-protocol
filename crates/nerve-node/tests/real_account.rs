@@ -2016,7 +2016,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert!(ok, "{said}");
 }
 
-/// The limits per command on the installed node (docs/user/limits.md): the
+/// The limits per command on the installed node (docs/dev/sandbox-linux.md): the
 /// service's cgroup is delegated to it, so a folder mode command of
 /// `nerve-run` runs in a cgroup of its own below the service, with the
 /// memory, CPU and processes its call asked for; one past its memory is

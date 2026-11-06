@@ -145,12 +145,12 @@ impl Ctl {
         self.with_store(|s| s.set_elevate_needed(true));
     }
 
+    /// The first-run steps: the first center and its mode, as `setup` asks
+    /// in a terminal. The machine's name and where the keys live keep their
+    /// defaults; Settings changes them.
     pub(super) fn setup_start(self: &Rc<Self>) {
-        let host = nerve_node::descriptor::node_name(&nerve_policy::NodeConfig::default());
         self.with_store(|s| {
             s.set_setup_step(0);
-            s.set_setup_name(host.as_str().into());
-            s.set_setup_storage(0);
             s.set_setup_mode("allowlist".into());
             s.set_setup_error(SharedString::new());
             s.set_setup_busy(false);
@@ -160,32 +160,6 @@ impl Ctl {
             s.set_pair_error(SharedString::new());
             s.set_setup_open(true);
         });
-        // What is set already.
-        self.command(
-            vec!["config".into(), "get".into(), "node.name".into()],
-            None,
-            |c, v| {
-                if let Some(n) = v.ok().and_then(|v| v["value"].as_str().map(str::to_string)) {
-                    c.with_store(|s| s.set_setup_name(n.into()));
-                }
-            },
-        );
-        self.command(
-            vec![
-                "config".into(),
-                "get".into(),
-                "machine.secret_storage".into(),
-            ],
-            None,
-            |c, v| {
-                if let Ok(v) = &v {
-                    c.keyring_state(v);
-                }
-                if v.is_ok_and(|v| v["value"] == "keyring") {
-                    c.with_store(|s| s.set_setup_storage(1));
-                }
-            },
-        );
     }
 
     fn setup_go(&self, step: i32) {
@@ -196,18 +170,12 @@ impl Ctl {
         });
     }
 
-    /// Runs a step's command, then goes to `next`. With `say`, what the
-    /// command said comes in a toast: where the keys went, and what that
-    /// changes.
-    fn setup_run(self: &Rc<Self>, args: Vec<String>, next: i32, say: bool) {
+    /// Runs a step's command, then goes to `next`.
+    fn setup_run(self: &Rc<Self>, args: Vec<String>, next: i32) {
         self.with_store(|s| s.set_setup_busy(true));
         self.command(args, None, move |c, answer| match answer {
             Ok(v) => {
-                if say && !super::said_of(&v).is_empty() {
-                    c.done(&v, "");
-                } else {
-                    c.restart_for(&v);
-                }
+                c.restart_for(&v);
                 c.setup_go(next)
             }
             Err(e) => {
@@ -220,55 +188,25 @@ impl Ctl {
     }
 
     fn setup_next(self: &Rc<Self>) {
-        let Some((step, name, storage, mode, center, pair_step, link, pair_name)) = self
-            .with_store(|s| {
-                (
-                    s.get_setup_step(),
-                    s.get_setup_name().to_string(),
-                    s.get_setup_storage(),
-                    s.get_setup_mode().to_string(),
-                    s.get_setup_center().to_string(),
-                    s.get_pair_step(),
-                    s.get_pair_link().to_string(),
-                    s.get_pair_name().to_string(),
-                )
-            })
-        else {
+        let Some((step, mode, center, pair_step, link, pair_name)) = self.with_store(|s| {
+            (
+                s.get_setup_step(),
+                s.get_setup_mode().to_string(),
+                s.get_setup_center().to_string(),
+                s.get_pair_step(),
+                s.get_pair_link().to_string(),
+                s.get_pair_name().to_string(),
+            )
+        }) else {
             return;
         };
         match step {
-            0 => {
-                let host = nerve_node::descriptor::node_name(&nerve_policy::NodeConfig::default());
-                let name = name.trim();
-                if name.is_empty() || name == host {
-                    self.setup_go(1);
-                } else {
-                    let args = vec![
-                        "config".into(),
-                        "set".into(),
-                        "--".into(),
-                        "node.name".into(),
-                        name.into(),
-                    ];
-                    self.setup_run(args, 1, false);
-                }
-            }
-            1 => {
-                let to = if storage == 1 { "keyring" } else { "file" };
-                let args = vec![
-                    "config".into(),
-                    "set".into(),
-                    "machine.secret_storage".into(),
-                    to.into(),
-                ];
-                self.setup_run(args, 2, true);
-            }
             // Back from the mode: the center is paired, on to its mode.
-            2 if pair_step == 2 => self.setup_go(3),
-            2 => self.pair(&link, &pair_name, pair_step == 1),
-            3 => {
+            0 if pair_step == 2 => self.setup_go(1),
+            0 => self.pair(&link, &pair_name, pair_step == 1),
+            1 => {
                 let args = vec!["mode".into(), mode, format!("--center={center}")];
-                self.setup_run(args, 4, false);
+                self.setup_run(args, 2);
             }
             _ => {
                 let (state, due) = self
@@ -289,7 +227,7 @@ impl Ctl {
     /// The first-run steps paired `name`: its mode is next.
     pub(super) fn setup_paired(&self, name: &str) {
         self.with_store(|s| s.set_setup_center(name.into()));
-        self.setup_go(3);
+        self.setup_go(1);
     }
 
     /// The steps closed before their end, with × or Escape: the restart
@@ -320,26 +258,26 @@ impl Ctl {
             return;
         };
         match step {
-            0 => {}
-            2 if pair_step == 1 => {
+            0 if pair_step == 1 => {
                 self.with_store(|s| {
                     s.set_pair_error(SharedString::new());
                     s.set_pair_step(0);
                 });
             }
-            3 => {
+            0 => {}
+            1 => {
                 self.with_store(|s| s.set_pair_step(2));
-                self.setup_go(2);
+                self.setup_go(0);
             }
-            4 if center.is_empty() => self.setup_go(2),
+            2 if center.is_empty() => self.setup_go(0),
             _ => self.setup_go(step - 1),
         }
     }
 
     fn setup_skip(&self) {
-        let step = self.with_store(|s| s.get_setup_step()).unwrap_or(0);
-        // Without a center there is no mode to choose.
-        self.setup_go(if step >= 2 { 4 } else { step + 1 });
+        // Without a center there is no mode to choose: past the pairing, or
+        // past the mode, the steps are done.
+        self.setup_go(2);
     }
 }
 

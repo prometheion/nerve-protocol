@@ -1,5 +1,5 @@
 # The static Linux programs installed and driven on real machines: the
-# distributions Nerve supports (docs/user/platforms.md), on x86_64 and arm64.
+# distributions Nerve supports (docs/user/install.md, "What it needs"), on x86_64 and arm64.
 # CI calls it with the programs its `musl` job built the way the release
 # builds them; the release calls it with the very programs it is about to
 # publish, before it publishes them.

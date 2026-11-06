@@ -552,8 +552,5 @@ fn clip(s: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    match one.char_indices().nth(300) {
-        Some((end, _)) => format!("{}…", &one[..end]),
-        None => one,
-    }
+    nerve_proto::text::clip(&one, 300)
 }

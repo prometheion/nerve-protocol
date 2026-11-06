@@ -102,3 +102,180 @@ Both sides can end a pairing.
   `bye {reason: "revoked"}` and closes the link. The node stops dialling that
   center and keeps the key until `center rm`, so the owner can see what
   happened.
+
+## Pairing, as the owner does it
+
+Pairing links a machine to a center. Do it once per machine and center.
+
+### Steps
+
+1. Open the center's web UI (`http://127.0.0.1:7480`). On Overview, press
+   **Pair a machine**. It shows a command and the pairing link, each with a
+   Copy button. With the [desktop app](desktop.md), paste the link there
+   (Centers, **Pair a center**) and skip the command.
+2. On the machine, as a normal user, run the command it shows:
+
+   ```sh
+   nerve-node center add 'nerve://pair?center=https%3A%2F%2Flab.example%3A7443&code=k3v7x9q2m1ab&pin=...'
+   ```
+
+   Keep the quotes. The link has `&` in it.
+
+   The node shows the center's address and what the center may do at first,
+   then asks you to confirm. Nothing is stored before you say yes.
+
+3. Start the node. It stays in the foreground, so run later commands in
+   another shell:
+
+   ```sh
+   nerve-node run
+   ```
+
+4. Check the link:
+
+   ```sh
+   nerve-node status
+   ```
+
+   The machine shows as online in the web UI, and the pairing card there
+   closes: the code is used up.
+
+The new pairing starts in mode `folder`, with no folder of yours, and the
+center may not change settings. On the node installed as a service its
+commands run as `nerve-run`, with `/tmp`, `/var/tmp` and its own home and
+nothing of yours until you give it a folder. There its file calls may still
+read what every account on the machine may read
+([reading in folder mode](sandbox-linux.md#reading-in-folder-mode)); writes and
+commands wait for a folder:
+`nerve-node folder add ~/project rwx` ([modes](policy-engine.md#modes-and-folders-as-the-owner-sets-them),
+[rules](policy-engine.md#rules-as-the-owner-writes-them)). Its deny list holds the
+guard, which keeps commands off this node itself
+([rules](policy-engine.md#the-guard-against-changing-the-node)).
+
+### The code
+
+- It is valid for 10 minutes and for one machine. Change the time in Settings,
+  Center (1 to 1440 minutes).
+- It allows 10 tries in all. After that make a new one.
+- A wrong code counts against every open code.
+
+Before it asks you, `center add` checks the link: the center answers (through
+your proxy or relay, if you use one), its certificate is the one the link
+pins, and the code is still valid. If one of these fails, it says why and asks
+nothing: make a new link, or fix the way to the center. The check uses
+nothing up and counts no try. A center that gets many checks with wrong codes
+stops saying whether a code is valid for a while; `center add` then asks all
+the same.
+
+### Options of `center add`
+
+| Option | Does |
+|---|---|
+| `--name <name>` | The name you use for this center on the machine. Default: the center's own name. Letters, digits, `-` and `_`, starting and ending with a letter or digit |
+| `--yes` | Skip the question |
+
+### Machine names
+
+A machine's name comes from its host name. It has 1 to 32 characters of `a-z`,
+`0-9` and `-`, starting and ending with a letter or digit. To choose it, run `nerve-node config set node.name <name>`
+before `center add`. Later, the web UI can rename a machine (Rename). That name
+stays in the center.
+
+### Several centers
+
+A node can pair with any number of centers. Each one is separate: its own key,
+rules, folders and audit entries. A center is not told of the other centers.
+
+Every command that works on one center takes `--center <name>`. With more than
+one center the command refuses to guess:
+
+```sh
+nerve-node mode folder --center lab
+nerve-node center
+```
+
+### Unpair
+
+| From | How | Effect |
+|---|---|---|
+| The machine | `nerve-node center rm lab` | Tells the center if the link is up, forgets the center and deletes its key |
+| The center | Overview, **Remove** on the machine | Ends the link. The node stops dialling that center and shows it as `revoked` until you run `center rm` |
+
+To pair again, remove the old pairing on both sides, then make a new link.
+
+### Rotate the machine's key
+
+Each pairing has its own key. To replace the key for a center without pairing
+again, run on the machine, while the node runs and is linked to that center:
+
+```sh
+nerve-node center rotate-key lab
+```
+
+The node makes a new key and sends it to the center over the link, signed with
+the old one. It prints the new public key once. The center takes the old key
+for 7 more days, so nothing breaks while the switch is under way. To end that
+now:
+
+```sh
+nerve-node center rotate-key --end-grace lab
+```
+
+- The machine keeps its id at the center; what it offers and its statistics stay.
+- If the center refuses the new key, the old one stays. If no answer comes,
+  the old key stays in use and the node sends the new key again on its next
+  link.
+- Each rotation is in the [audit log](logging.md#the-audit-log-as-the-owner-reads-it).
+
+The center's own key is rotated in its web UI ([center](#rotate-the-centers-key)).
+A running node follows it by itself.
+
+### Drops
+
+The node dials the center. When a link drops without a goodbye (an address
+change, a short outage), both sides keep it for 30 seconds: running commands
+go on, and their output reaches the agent once the node is back. The node
+dials again: it waits 1 second, then doubles the wait up to 60 seconds. If
+the link is not back within 30 seconds, or the node or the center restarted,
+the commands on it end and their calls fail with `connection_lost`.
+
+A machine whose key was copied to another machine is caught: a center keeps
+one live link per machine. If a second link arrives while the first still
+answers, the center refuses it and shows an alert.
+
+### Back up or move
+
+`nerve-node backup <file>` keeps the config and the keys, and
+`nerve-node restore <file>` puts them back on this machine or another one, so
+a moved node needs no new pairing ([backup](backup.md#back-up-restore-and-move-step-by-step)).
+
+### Keep it running
+
+`nerve-node run` runs in the foreground. On Linux with systemd,
+`sudo nerve-node install` makes it a service that starts with the machine,
+under a user of its own ([service](service.md#the-node-as-a-service)). Elsewhere, run
+`nerve-node run` under your own service manager. On Windows the node is
+always the service, which the [desktop app](desktop.md)'s installer installs;
+the app pairs it under **Centers**, **Pair a center**.
+
+### Rotate the center's key
+
+In the web UI, Settings, **Center key**, press **Rotate key**. The center makes
+a new key and shows its pin once. It tells every machine that is linked, and
+every machine that links in the next 7 days, signed with the old key; each
+machine then trusts the new key too. The center keeps serving the old key for
+those 7 days, then switches to the new one. **Serve the new key now** switches
+at once.
+
+- A machine that does not link during the 7 days does not learn the new key.
+  After the switch it cannot connect and has to be [paired again](#pairing-as-the-owner-does-it).
+- A node of 0.0.6 links to this center but does not take the notice (it asks
+  for rotation by a feature that every link has now, and the center no longer
+  names it), and the count of machines told includes it. Update the nodes
+  before you rotate the center's key.
+- New pairing links carry the pin of the key the center serves.
+- The switch also changes the certificate of the web UI and the HTTP MCP
+  endpoint when they use TLS. A browser asks to trust it again.
+- The center's [log](logging.md#the-log-as-the-owner-reads-it) says when the key was rotated and when the new
+  one is served. The keys are `tls.pem` and, during the 7 days, `tls.next.pem`
+  in the state folder.

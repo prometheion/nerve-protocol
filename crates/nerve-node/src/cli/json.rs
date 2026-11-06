@@ -1,4 +1,4 @@
-//! The `--json` forms of the commands (docs/user/commands.md), for programs
+//! The `--json` forms of the commands (docs/dev/settings-and-config.md), for programs
 //! that drive the CLI, such as the desktop app: the read commands print
 //! their data as one JSON object, `audit --follow` one entry a line, and the
 //! other commands the lines they print as `{"messages": [...]}`. An error is
@@ -385,7 +385,7 @@ fn center(paths: &NodePaths, c: &nerve_policy::CenterEntry, now: u64) -> Value {
         "revoked": c.revoked,
         "unknown": c.unknown,
     });
-    // Which `nerve.*` profile is this pairing's (docs/user/modes.md).
+    // Which `nerve.*` profile is this pairing's (docs/dev/policy-engine.md).
     if cfg!(windows) {
         v["appcontainer"] = json!(crate::grants::profile_name(paths, &c.node_id));
     }

@@ -343,7 +343,10 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     screen.resize(ROOM.0 as u32, 1600);
     caps.set_params_scrolled(0.0);
     screen.draw();
-    let wheel = |x: f32, y: f32, delta_y: f32| {
+    // A probe needs no picture: the event finds its item by the layout, and
+    // the timers move what it starts. A full software render after each of
+    // up to 1600 probes made this the slowest test of the workspace.
+    let probe = |x: f32, y: f32, delta_y: f32| {
         window
             .window()
             .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
@@ -351,12 +354,16 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
                 delta_x: 0.0,
                 delta_y,
             });
+        slint::platform::update_timers_and_animations();
+    };
+    let wheel = |x: f32, y: f32, delta_y: f32| {
+        probe(x, y, delta_y);
         screen.draw();
     };
     let mut over = None;
     'find: for y in (0..1600).step_by(8) {
         for x in [380.0, 450.0, 520.0, 600.0, 680.0, 760.0, 840.0, 900.0] {
-            wheel(x, y as f32, -20.0);
+            probe(x, y as f32, -20.0);
             if caps.get_params_scrolled() < 0.0 {
                 over = Some((x, y as f32));
                 break 'find;
@@ -522,6 +529,9 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     store.on_show(move |page| w.unwrap().global::<Store>().set_page(page));
     let w = window.as_weak();
     store.on_set_appearance(move |i| w.unwrap().global::<Store>().set_appearance(i));
+    // As above, a click finds its item by the layout, so the scan draws
+    // only after a change of the page, whose sidebar marks the new item.
+    screen.draw();
     let click = |x: f32, y: f32| {
         let position = slint::LogicalPosition::new(x, y);
         let w = window.window();
@@ -534,7 +544,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
             position,
             button: slint::platform::PointerEventButton::Left,
         });
-        screen.draw();
+        slint::platform::update_timers_and_animations();
     };
     let mut opened = vec![Page::Overview];
     let mut about = false;
@@ -548,6 +558,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         let page = store.get_page();
         if opened.last() != Some(&page) {
             opened.push(page);
+            screen.draw();
         }
     }
     assert_eq!(
@@ -568,6 +579,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     assert!(about, "About is not below Help in the window");
     // Dark, the last third of the switch, 27 pixels above the foot.
     click(12.0 + 211.0 * 5.0 / 6.0, LEAST.1 as f32 - 27.0);
+    screen.draw();
     assert_eq!(
         store.get_appearance(),
         2,

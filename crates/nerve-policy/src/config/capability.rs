@@ -1,5 +1,5 @@
 //! Capabilities the owner declares in `node.toml` (`[[capability]]`,
-//! docs/user/config-capabilities.md): each one is one action, `cap.action`,
+//! docs/dev/capabilities.md): each one is one action, `cap.action`,
 //! that runs one fixed program with fixed arguments and the call's arguments
 //! filled in as whole arguments. The installed node runs it itself as
 //! `nerve-run`, never through a shell, and returns its output.
@@ -544,7 +544,7 @@ pub(crate) fn unseen(c: char) -> bool {
 
 /// Refuses an entry of the file `doc` that names an `account`: every
 /// capability of node.toml runs as `nerve-run` (an `account = "owner"` of
-/// earlier versions is gone, docs/user/config-capabilities.md), and the
+/// earlier versions is gone, docs/dev/capabilities.md), and the
 /// owner is told so in words, not as a field serde does not know.
 pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
     let entries = doc.get("capability").and_then(toml::Value::as_array);
@@ -559,7 +559,7 @@ pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
                 None => "[[capability]]".into(),
             };
             return Err(format!(
-                "{name}: account is no setting any more: a capability of node.toml always runs as nerve-run, held to the folders; remove the line. An action with your own rights comes from a program you allow as a provider (docs/user/providers.md)"
+                "{name}: account is no setting any more: a capability of node.toml always runs as nerve-run, held to the folders; remove the line. An action with your own rights comes from a program you allow as a provider (docs/user/capabilities.md)"
             ));
         }
     }
@@ -569,7 +569,7 @@ pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
 /// Refuses an entry of the file `doc` that declares `state`, `events` or
 /// `streams`: a capability of node.toml offers actions only, so its state
 /// is read by an action (effect `read` or `sense`), and events and streams
-/// come from a program (docs/user/config-capabilities.md). The owner is
+/// come from a program (docs/dev/capabilities.md). The owner is
 /// told so in words, not as a field serde does not know.
 pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
     let entries = doc.get("capability").and_then(toml::Value::as_array);
@@ -587,7 +587,7 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
                 None => "[[capability]]".into(),
             };
             return Err(format!(
-                "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/providers.md)"
+                "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/capabilities.md)"
             ));
         }
     }

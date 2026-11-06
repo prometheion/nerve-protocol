@@ -1,21 +1,166 @@
-# Run the node as a service
+# Installing the node and the center
+
+The life cycle of the installed programs on Linux: what `install` makes,
+root as the owner, polkit, `update` and what it puts back, `uninstall`,
+and the hand-run unit for a machine without the system service. The user
+guide's [install page](../user/install.md) has the commands.
+
+## Download and install
+
+Put `nerve-center` on the machine where your agent harness runs. Put a node
+on every machine the agent may use: `nerve-node`, or on a machine with a
+desktop `nerve-node-desktop`, the node with an app
+([desktop app](desktop.md)). On Windows the node is always the desktop app.
+A center and a node can share a machine.
+
+### Download
+
+Get the programs from
+[Releases](https://github.com/prometheion/nerve-protocol/releases). Each
+release has seven programs and a `SHA256SUMS` file.
+
+| System | Files |
+|---|---|
+| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux` |
+| Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
+| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
+
+`nerve-node-desktop` is the node with a desktop app, which installs itself
+when you open it ([desktop app](desktop.md)). Windows has no `nerve-node` of
+its own: there the app is the only way to the node.
+
+The Linux programs except the desktop app are static and need no libraries. The Windows programs
+need no Visual C++ runtime. The programs are not signed, so check them
+against `SHA256SUMS`.
+
+### Install on Linux
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+install -m 0755 nerve-center-x86_64-linux ~/.local/bin/nerve-center
+install -m 0755 nerve-node-x86_64-linux ~/.local/bin/nerve-node
+nerve-node --version
+```
+
+Use the `aarch64` files on an ARM machine. `~/.local/bin` must be on your
+`PATH`.
+
+To run the node as a service that starts with the machine, download it and
+let it install itself instead ([service](#the-node-as-a-service)):
+
+```sh
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
+chmod +x nerve-node-x86_64-linux
+sudo ./nerve-node-x86_64-linux install
+nerve-node setup
+```
+
+`install` puts the program at `/usr/local/bin/nerve-node`, whatever the
+downloaded file is called. Run as root itself, without `sudo` (a server
+where you log in as root), it asks whether root is to be the node's owner,
+or takes `--owner=root --accept-root-owner` without a terminal; then `user`
+mode runs commands as root ([root as the owner](#root-as-the-owner)).
+Root stays the owner at a later `install`; `install --owner=none` takes it back.
+
+The center installs itself as a service the same way, with MCP over HTTP
+([center](#the-center-as-a-service)):
+
+```sh
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-center-x86_64-linux
+chmod +x nerve-center-x86_64-linux
+sudo ./nerve-center-x86_64-linux install
+```
+
+### Build from source
+
+See [building](building.md).
+
+### After the install
+
+[Run the center](settings-and-config.md#the-centers-settings-ports-and-files).
+
+## Linux distributions
+
+| | Distributions |
+|---|---|
+| Tested | Ubuntu 22.04 and 24.04, Debian 12. CI installs the released programs on each and runs the node's and the center's whole install, use and uninstall there, on x86_64 and on Ubuntu 24.04 also on aarch64 |
+| Expected to work, not tested | Fedora, Arch Linux, and other distributions with systemd |
+| Not supported as a service | Distributions without systemd (Alpine with OpenRC, Void with runit, containers without an init, WSL 1): run the node by hand ([below](#a-node-you-run-by-hand)) |
+
+The tests run on GitHub's kernels, which are newer than the ones the
+distributions ship (Ubuntu 22.04 has 5.15, Debian 12 has 6.1). How much
+Landlock holds depends on the kernel ([modes](sandbox-linux.md#what-a-command-can-reach-in-folder-mode));
+`nerve-node status` shows the version yours has.
+
+`install` and the installed node need:
+
+- systemd, to run the service;
+- `useradd`, `userdel`, `getent` and `id`, for the accounts `nerve` and
+  `nerve-run`;
+- a file system with POSIX ACLs where you grant folders (ext4, XFS, Btrfs
+  have them);
+- cgroup v2, which systemd gives every current distribution, for the
+  [limits per command](sandbox-linux.md#limits-per-command);
+- polkit with `pkexec`, for `nerve-node service` and the desktop app to start
+  and stop the service without `sudo`;
+- for the keyring step of `setup` only, `apt`, `dnf` or `pacman`
+  ([config](settings-and-config.md#settings-as-the-owner-changes-them)); elsewhere install GNOME Keyring yourself, or keep the
+  keys in files.
+
+### A node you run by hand
+
+Without systemd, or for a node of your own account, run `nerve-node run`
+under your service manager. Such a node runs every command as you: there is
+no `nerve-run`, `folder` mode needs Landlock, and it offers no
+[capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml). With systemd, a unit of
+your own systemd keeps it running and gives it its [limits](sandbox-linux.md#limits-per-command):
+
+```ini
+# ~/.config/systemd/user/nerve-node.service
+[Unit]
+Description=Nerve node
+
+[Service]
+ExecStart=%h/.local/bin/nerve-node run
+Restart=on-failure
+RestartSec=5
+# The node's own cgroup, to hold each command to its limits.
+Delegate=yes
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+install -m 755 nerve-node-x86_64-linux ~/.local/bin/nerve-node
+systemctl --user daemon-reload
+systemctl --user enable --now nerve-node
+loginctl enable-linger "$USER"   # starts it at boot, before you log in
+nerve-node status
+```
+
+Without systemd, start `nerve-node run` from your service manager as your
+own account, not as root; its commands then run without limits, and
+`nerve-node status` says why.
+
+## The node as a service
 
 On Linux with systemd, `nerve-node` installs itself as a service. The
 service starts with the machine and runs under a user of its own, `nerve`,
 which owns the node's config and state folders. `install`, `update` and
 `uninstall` need root. On Linux without systemd, run `nerve-node run` under
-your own service manager ([pairing](pairing.md#keep-it-running)). A node you
+your own service manager ([pairing](identity-and-pairing.md#keep-it-running)). A node you
 start yourself as root is refused unless `machine.allow_root` is set, and
 warns at start when it runs
-([root and administrator](platforms.md#root-and-administrator)). On Windows
+([root and administrator](windows.md#root-and-administrator)). On Windows
 the node is always the service, and the [desktop app](desktop.md) installs
-and runs it; see [Windows](#windows). The center installs itself the same
-way on Linux ([center](center.md#run-it-as-a-service)).
+and runs it; see [Windows](windows.md#the-node-as-a-service-on-windows). The center installs itself the same
+way on Linux ([center](#the-center-as-a-service)).
 
-## Install
+### What `install` does
 
 Download the program for your machine (`nerve-node-x86_64-linux` or
-`nerve-node-aarch64-linux`, [install](install.md)) and run it once with
+`nerve-node-aarch64-linux`, [install](#download-and-install)) and run it once with
 `sudo` from your own account:
 
 ```sh
@@ -45,7 +190,7 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
 2. Makes the system user `nerve-run`, with its own group, no other group, no
    login and the home `/var/lib/nerve-run` (mode 0700), which holds a home
    and a temporary folder for each pairing. Commands of
-   `folder` and `allowlist` mode run as it ([modes](modes.md#the-account-nerve-run-linux)).
+   `folder` and `allowlist` mode run as it ([modes](sandbox-linux.md#the-account-nerve-run)).
    A `nerve` or `nerve-run` that `install` did not make is refused.
 3. Makes the folders, private to `nerve` (mode 0700). Folders an earlier
    install left behind are given to the new user.
@@ -74,11 +219,11 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
 7. Writes the unit `/etc/systemd/system/nerve-node.service`, which names the
    owner (`NERVE_NODE_OWNER`), enables it and starts it. It waits until the
    node answers. The unit hands the node its cgroup (`Delegate=cpu memory
-   pids`), so each command runs held to its [limits](limits.md), and keeps
+   pids`), so each command runs held to its [limits](sandbox-linux.md#limits-per-command), and keeps
    the node running when one of them is killed for its memory
    (`OOMPolicy=continue`).
 
-### Root as the owner
+#### Root as the owner
 
 On a server where you log in as root, there is no other account to be the
 owner, and without one `user` mode and `allowlist` mode as the owner run no
@@ -92,7 +237,7 @@ nerve-node install --owner=none            # root is the owner no longer
 
 At a terminal `install` asks `Make root the owner of this node? [y/N]`, and
 says before it what a yes and a no do on this node, and which centers have
-the [settings grant](settings-grant.md) already: with root as the owner they
+the [settings grant](settings-and-config.md#the-settings-grant) already: with root as the owner they
 can run commands as root. The flags' install says the same. It asks only where both
 its input and its output are a terminal, and not with `--json`. Elsewhere (a
 script, piped input, output to a file, the desktop app) nothing is asked and
@@ -112,14 +257,14 @@ mode reaches them no more (step 4 above);
 With root as the owner, commands of `user` mode and of `allowlist` mode as
 the owner run as root (`HOME=/root`, root's groups). They can do everything
 on this machine, and change and read Nerve itself, its keys included.
-Nothing in Nerve holds them back: the [guard](rules.md#the-guard-against-changing-the-node)
-and the center's [action checker](action-checker.md) only catch mistakes.
+Nothing in Nerve holds them back: the [guard](policy-engine.md#the-guard-against-changing-the-node)
+and the center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) only catch mistakes.
 `folder` mode and `allowlist` mode run as `nerve-run`, as on any node, and
 get the folders root gives them. `~` in folders and rules is `/root`.
 `status` says `owner: root is the owner: …` (`"owner_is_root": true` with
 `--json`), and so does the [desktop app](desktop.md). Root needs no polkit
 files to start and stop the service, so `install` writes none. No center can
-turn [sudo](sudo.md) on, since sudo checks no password of root's: root does,
+turn [sudo](policy-engine.md#sudo-as-the-owner-uses-it) on, since sudo checks no password of root's: root does,
 with `nerve-node sudo on` on the machine. The node's own file actions (`fs`)
 for a center in `user` mode, or in `allowlist` mode as the owner, run as
 root without root's extra rights (the service holds only `CAP_SETUID` and
@@ -127,7 +272,7 @@ root without root's extra rights (the service holds only `CAP_SETUID` and
 commands have all of root's rights. For a center in `folder` mode or plain
 `allowlist` mode they run as `nerve-run`, as its commands do.
 
-A center with the [settings grant](settings-grant.md) may set its own mode,
+A center with the [settings grant](settings-and-config.md#the-settings-grant) may set its own mode,
 and so may switch itself to `user` mode: where root is the owner, its
 commands then run as root, and no password is asked. Giving that grant here
 gives the center root. `center settings on` warns of it, and so does
@@ -137,7 +282,7 @@ the desktop app when you give the grant.
 nor an account that can open the node's folders.
 
 When the settings of an earlier install keep the keys in the system keyring
-([keys](config.md#where-the-node-keeps-its-keys)), `install` first checks
+([keys](settings-and-config.md#where-the-node-keeps-its-keys)), `install` first checks
 that a keyring answers for `nerve`. In a terminal it offers to install one;
 otherwise, and on a no, it stops before it starts the service.
 
@@ -146,7 +291,7 @@ Running `install` again repairs what is missing and restarts the service.
 | What | Where |
 |---|---|
 | `node.toml`, one key per center | `/etc/nerve` |
-| Audit log, [log](logs.md), control socket and its token, config key, the last version of `node.toml`, the record of the folders' ACLs and of the pairings' own folders | `/var/lib/nerve/state` |
+| Audit log, [log](logging.md#the-log-as-the-owner-reads-it), control socket and its token, config key, the last version of `node.toml`, the record of the folders' ACLs and of the pairings' own folders | `/var/lib/nerve/state` |
 | The keys, with `machine.secret_storage = "keyring"` | the keyring of `nerve`, `/var/lib/nerve/.local/share/keyrings` |
 | Home of `nerve` | `/var/lib/nerve` |
 | Home of `nerve-run` | `/var/lib/nerve-run` |
@@ -158,7 +303,7 @@ Running `install` again repairs what is missing and restarts the service.
 
 Nothing else is written. `journalctl -u nerve-node` shows the node's output.
 
-## Use the commands
+### Use the commands
 
 When the node is installed, `nerve-node` without `--config-dir` and
 `--state-dir` works on the installed node. Its owner, the account that ran
@@ -183,67 +328,18 @@ these folders runs as `nerve`, so every file it writes stays the node's.
 Another user gets a message that says to use `sudo`.
 
 Programs of the owner's and root's that add capabilities
-([providers](providers.md)) attach on the provider socket beside it,
+([providers](capabilities.md#capability-providers-in-use)) attach on the provider socket beside it,
 `/run/nerve-node/provider.sock`, once the owner allows them with `nerve-node
 provider add`. Any other account is refused as it connects. The two
 sockets have places of their own, so attached programs never keep the owner's
 commands out, nor the reverse.
 
-The [web UI](node-web-ui.md) is part of the service too, on Linux, and off
+The [web UI](web-uis.md#the-nodes-web-ui) is part of the service too, on Linux, and off
 until the owner runs `nerve-node ui on`: then the running service listens on
 `127.0.0.1:7470` itself, with no change to the unit. `nerve-node ui off`
 stops it at once. Off, the service listens on nothing for it.
 
-## The accounts commands run as
-
-`nerve` only holds the node's config, keys and state; no command runs as it.
-A center's commands run as one of two accounts:
-
-| Mode | Account |
-|---|---|
-| `folder` | `nerve-run` |
-| `allowlist` | `nerve-run`, or the owner with `mode allowlist --as-owner` |
-| `user` | the owner (root, where [root is the owner](#root-as-the-owner)) |
-| an allowed [sudo](sudo.md) command | root: through the owner's sudo where the pairing runs as the owner, started by the node itself where it runs as `nerve-run` |
-
-There is no other account to choose. A command gets the account's groups,
-its home as `HOME` and, when the call names no folder, as its working
-folder (a sudo command starts in the owner's home). A command of `nerve-run`
-gets of the service's environment only `PATH`, `LANG`, `TERM` and
-the names you list in `machine.command_env` (its `HOME` and `TMPDIR` are its
-pairing's own, below `/var/lib/nerve-run`), nothing the unit sets
-(`NERVE_NODE_OWNER`, an `Environment=` line of yours) and nothing of
-systemd's; a command as the owner gets the service's environment ([the
-environment](modes.md#the-account-nerve-run-linux)). Do not put a secret into
-the unit's `Environment=` that the owner's commands should not see. The node reads and writes files for a center (`fs`) as that account
-as well: it sees what the account sees, and the files it makes belong to the
-account. `~` in [folders](modes.md), [rules](rules.md) and the
-[protected paths](protected-paths.md) is the owner's home.
-
-The node's keys are private to `nerve`, and no command of `nerve-run` or
-the owner can read them, except where [root is the owner](#root-as-the-owner):
-root's commands read them. Before a command starts, the node checks that its
-account cannot open the node's folders, and refuses to run it if it can;
-root as the owner is let through.
-`nerve-run` is in no group and has no sudo of its own: only a command on the
-[sudo list](sudo.md), with sudo on, runs as root, started by the node, and
-as root it can read what root can, the node's keys included. Put on the
-list only what you would run as root yourself. The owner can become root
-too, through `sudo` or a group such as `docker`: a `user` mode command runs
-as the owner and can do what the owner can, which is the owner's choice of
-mode ([modes](modes.md#user-mode)).
-
-### The one privilege the service keeps
-
-To start a command as `nerve-run` or the owner, the service keeps two
-capabilities, `CAP_SETUID` and `CAP_SETGID` (`AmbientCapabilities=` in the
-unit). This is the one privilege it has beyond what `nerve` may do. The node
-uses it to switch to the account, and to give `nerve-run` its folders as the
-owner, who owns them. Every command it starts drops both capabilities before
-it runs, in every mode, so no command keeps them; a command of root as the
-[owner](#root-as-the-owner) keeps all of root's rights instead.
-
-## Setup
+### Setup
 
 `nerve-node setup` asks these things, one at a time; `install` asks them at
 a terminal. Enter keeps what is in brackets. It is optional: `center add`,
@@ -252,7 +348,7 @@ a terminal. Enter keeps what is in brackets. It is optional: `center add`,
 1. A pairing link from the center's web UI. Enter skips it. The node shows
    the center and asks before it pairs, as `center add` does.
 2. The mode of that center: `folder`, `allowlist` or `user`
-   ([modes](modes.md)). For `folder` it asks for one folder and its rights;
+   ([modes](policy-engine.md#modes-and-folders-as-the-owner-sets-them)). For `folder` it asks for one folder and its rights;
    Enter gives `rwx`, so that commands can work there. `~` is your home.
 3. The network for its commands: `on` or `off`. In `user` mode no command
    runs while it is off, and setup says so first.
@@ -260,7 +356,7 @@ a terminal. Enter keeps what is in brackets. It is optional: `center add`,
 The node's name stays the host name (`nerve-node config set node.name lab-pc`
 changes it), and its keys stay in files (`nerve-node config set
 machine.secret_storage keyring` moves them to the system keyring
-([keys](config.md#where-the-node-keeps-its-keys)); with no keyring that
+([keys](settings-and-config.md#where-the-node-keeps-its-keys)); with no keyring that
 answers it offers, at a terminal, to install one where `nerve` has no
 desktop, taking root by the service's own rights for that step alone).
 
@@ -268,7 +364,7 @@ Each answer is saved when you give it, through the running node, like every
 other command. You can stop setup at any point and run it again. It works on
 a node that is not installed as well.
 
-## Start and stop
+### Start and stop
 
 ```sh
 nerve-node service stop      # the node ends its links; nothing runs
@@ -294,7 +390,7 @@ stopped service starts again with the machine. `status` says whether
 the node is installed as a service, whether it runs, whether it starts with
 the machine, and the installed program's version.
 
-## Update
+### Update the node
 
 ```sh
 sudo nerve-node update
@@ -329,7 +425,12 @@ The config, the keys, the accounts and the audit log are not touched.
 installed one. If the new program does not start, the old one is put back
 with the old unit and polkit files, and started again.
 
-## Uninstall
+A program the node may just have written (the program `update` staged, the
+desktop app at the hand-over of `uninstall`, the owner's program) is started
+again when Linux answers "Text file busy": five tries, 50 ms apart. Why a
+command for the owner did not start reaches the CLI.
+
+### Uninstall the node
 
 ```sh
 sudo nerve-node uninstall           # keeps the config and state folders
@@ -356,152 +457,7 @@ handler and the `nerve-node` link it made. Where the app took over the node,
 (`nerve-node-desktop uninstall`, with `--purge` if given), so the app goes
 with the node.
 
-## Windows
-
-On Windows the node is the [desktop app](desktop.md). Open the downloaded
-`nerve-node-desktop-x86_64-windows.exe`: its installer installs the node as a
-service, and the app does everything else for it
-([install](desktop.md#install)). There is no `nerve-node` for a terminal on
-Windows, and the node runs only as the service: started any other way, it
-says so and does not run.
-
-The install does this, and the installer shows each step:
-
-1. Makes the local user `nerve`, with a long random password that nobody
-   types; the service manager keeps it. `nerve` may log on as a service and
-   in no other way, and does not show on the sign-in screen. A `nerve` user
-   that the install did not make is refused.
-2. Makes the folders and gives them an access list of their own: `nerve`,
-   SYSTEM and the administrators, nothing inherited from the folders above.
-3. Sets the account that commands run as: the account that installs. An
-   account chosen before stays. The installer asks for that account's
-   password (**Your Windows password**) and stores it with DPAPI in the
-   config folder, so only what can open that folder can read it. A stored
-   password that still works is not asked for again.
-4. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
-5. Registers the service `nerve-node`, which runs as `nerve`, starts with the
-   machine and starts again after a failure.
-6. Registers the source `nerve-node` in the Windows Event Log, then starts
-   the service. It waits until the node runs.
-
-| What | Where |
-|---|---|
-| `node.toml`, one key per center, the stored password of the account commands run as, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
-| Audit log, [log](logs.md), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
-| The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
-| Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](logs.md#the-windows-event-log)) |
-
-The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
-the app's **Log** page shows. When it does not start, the Event Viewer says
-why, and the log has the rest.
-
-The install also makes the user who ran it an owner of the node: its SID goes
-into the service's registry key
-(`HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters`, value
-`Owners`), and the service lets it start, stop and restart the service. The
-owner changes the node in the app without administrator rights; the service
-runs the app's commands as `nerve` over a pipe open to the owners only, and
-audits them with the owner's name
-([who may change the node](desktop.md#administrator-rights)). For update,
-uninstall, turning sudo on and the `machine.*` settings that pick the
-account (also a restore that would change them), the app asks Windows for an
-administrator's rights, with the UAC prompt. Uninstalling removes the
-service, and the owners and their rights with it.
-
-The service takes folder changes at once over its
-[control pipe](platforms.md#the-control-pipe), and every other change at its
-next start, for which the app restarts it
-([start and stop](desktop.md#start-and-stop)).
-
-The installed node on Windows keeps its keys in files. The service runs as
-`nerve`, and the Credential Manager is one per account: keys put in the
-keyring would be in the Credential Manager of the account that put them
-there, where the service does not find them. So the app's first-run steps
-do not ask where the keys go, and take keys they find in the keyring into
-files; the keyring under **Settings**, **Keys** is refused and changes
-nothing. A `node.toml` that keeps the keys in the keyring is refused by the
-install, before it changes anything, and the service does not start with
-one: those keys are out of the service's reach. If the keys are still in
-files in `config\keys` (the line in `node.toml` was changed), set the line
-back to `"file"` and nothing is lost. Otherwise delete the node's folders
-(with **Settings**, **App**, **Uninstall** and **Delete the data**, where
-Nerve is installed; that deletes the audit log too, so copy
-`state\audit.jsonl` aside first) and pair the centers again.
-
-The same account problem keeps the proxy's values out of reach: the installed
-node on Windows takes a proxy only if it needs no header and no password.
-A proxy with either is refused and changes nothing
-([proxy](proxy.md#on-the-node-installed-as-a-service-on-windows)).
-
-To run the commands as another account, an ordinary one, set `machine.user`
-to its name under **Settings**, **Advanced**, **Any setting** (the app asks
-for an administrator's rights), then save that account's password under
-**Settings**, **General**, **Account for commands**, which installs the
-service again with it.
-
-### The account commands run as on Windows
-
-Every command, and the node's file work for a center, runs as that account,
-logged on with its stored password. It must be a local account that has
-signed in once, so it has a profile folder. A command gets the account's
-environment, its profile folder as working folder when the call names none,
-and a job object that ends it with every process it started. While the
-account is not signed in, its registry (`HKCU`) is not loaded: a command
-then gets the usual folders of its profile (`APPDATA`, `TEMP` and so on),
-but not the variables the account set itself. An
-administrator's command runs as UAC gives it to a sign-in: the
-Administrators group only denies. Before a command starts, the node checks
-that the account can open neither the node's folders nor a file in them, and
-refuses it if it can. The install checks the same.
-
-`folder` mode runs no command on the service yet: its AppContainer is not
-started as another account ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)).
-Use `allowlist` or `user` mode for its centers.
-
-UAC is no security boundary: a command of an administrator can get the
-group's rights back and read the keys. The install warns about an account in
-Administrators or Backup Operators. Choose an ordinary account as above.
-[Sudo on Windows](sudo.md#sudo-on-windows) needs an administrator: its
-commands run with the account's administrator rights on purpose.
-
-If the account's password changes, commands fail until you save the new one
-under **Settings**, **General**, **Account for commands**. A Microsoft
-account works with its Microsoft password, which can change outside the
-machine.
-
-To start a process as that account, the service keeps two privileges,
-`SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows
-takes every other privilege from it, `SeImpersonatePrivilege` included. No
-command gets them.
-
-### Update and uninstall on Windows
-
-**Settings**, **App**, **Update** downloads
-`nerve-node-desktop-x86_64-windows.exe` and checks it as above, or takes a
-file you downloaded. It stops the service, moves the old program aside, puts
-the new one in its place and starts the service; if the new one does not
-start, the old one goes back. The old program goes once nothing holds it, or
-at the next restart of Windows when Windows still holds it: when the update
-ran from it, or when the Event Log read the text of the node's entries from
-it. An install over an installed node moves the old program aside the same
-way.
-
-**Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
-and removes the service, the source `nerve-node` of the Event Log (its
-entries stay), the user `nerve` and its profile, the program, the app's
-Start menu entry, its link handler and its entry in Apps & features. It also
-takes off the folder grants of `folder` mode left on your folders and removes
-the profiles of their AppContainers
-([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)). With
-**Keep the data** the folders and the stored password stay, open to the
-administrators only; the [sudo](sudo.md#sudo-on-windows) password goes, so
-sudo is off after a later install. A later install takes them up again.
-**Delete the data** deletes them. The installed program cannot delete its
-own file at once: it moves it aside, and Windows deletes it at its next
-start. Where Windows still holds the profile of `nerve` (Windows Search
-can), the uninstall says where to remove it after a restart.
-
-## The rules for these commands
+### The rules for these commands
 
 - `install`, `setup`, `update` and `uninstall` are refused from a command the
   node runs for a center, as every other change of the node's settings is.
@@ -509,6 +465,160 @@ can), the uninstall says where to remove it after a restart.
   pipe does not take this check yet; there install, update and uninstall need
   an administrator, which a command gets only through an account in
   Administrators (the UAC warning above).
-- Each is written to the [audit log](audit.md) with the steps it did, and the
+- Each is written to the [audit log](logging.md#the-audit-log-as-the-owner-reads-it) with the steps it did, and the
   error that stopped it, if any. `uninstall --purge` deletes the log with the
   rest.
+
+## The center as a service
+
+On Linux with systemd, `nerve-center` installs itself as a service, as the
+node does ([service](#the-node-as-a-service)). The service starts with the machine and
+runs under a user of its own, `nerve-center`, with MCP over HTTP: harnesses
+connect to it with a [harness token](mcp-surface.md#tokens) instead of starting
+it. `install`, `update` and `uninstall` need root and take none of the
+center's flags: the service's settings are in its
+[settings file](#settings-of-the-service). Windows is not supported yet.
+
+### Install
+
+Download the program for your machine (`nerve-center-x86_64-linux` or
+`nerve-center-aarch64-linux`, [install](#download-and-install)) and run it once as
+root:
+
+```sh
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-center-x86_64-linux
+chmod +x nerve-center-x86_64-linux
+sudo ./nerve-center-x86_64-linux install
+```
+
+`install` does this, and says each step:
+
+1. Makes the system user `nerve-center`, with its own group, no login and the
+   home `/var/lib/nerve-center`. A `nerve-center` user that `install` did
+   not make is refused.
+2. Makes the state folder `/var/lib/nerve-center`, private to that user
+   (mode 0700). A folder an earlier install left behind is given to the new
+   user.
+3. Makes the [owner token](web-uis.md#log-in) in
+   `/var/lib/nerve-center/owner-token` (mode 0600), unless one is there.
+4. Writes the settings file `/etc/nerve-center/center.env`, which belongs to
+   root (mode 0600), with a new harness token for the HTTP MCP endpoint. A
+   settings file that is there already is kept as it is.
+5. Copies the program to `/usr/local/bin/nerve-center`.
+6. Writes the unit `/etc/systemd/system/nerve-center.service`, enables it
+   and starts it. It waits until the center answers.
+
+Running `install` again repairs what is missing and restarts the service.
+
+Last it prints the owner token. Open the web UI, `http://127.0.0.1:7480`,
+and log in with it. To see it again, or to make a new one:
+
+```sh
+sudo cat /var/lib/nerve-center/owner-token
+sudo nerve-center owner-token --new
+```
+
+Harnesses on this machine use the HTTP MCP endpoint,
+`http://127.0.0.1:7481/mcp`, with the harness token of the settings file
+(`sudo grep NERVE_CENTER_HARNESS_TOKEN /etc/nerve-center/center.env`) or one made
+in the web UI ([harness](mcp-surface.md#what-a-harness-and-its-model-see)). A harness cannot start its own
+`nerve-center` on this machine while the service runs: the node port is
+taken.
+
+| What | Where |
+|---|---|
+| Identity and TLS key, paired machines, statistics, the [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up)'s settings and local model, [log](logging.md#the-log-as-the-owner-reads-it), harness socket | `/var/lib/nerve-center` |
+| Settings | `/etc/nerve-center/center.env` |
+| The program | `/usr/local/bin/nerve-center` |
+| The unit | `/etc/systemd/system/nerve-center.service` |
+
+Nothing else is written. `journalctl -u nerve-center` shows the center's
+output.
+
+The service starts with a new center. To move a center you ran yourself
+into it, with its pairings, [back it up](backup.md#the-center) and restore
+it into the service's state folder while the service is stopped:
+
+```sh
+nerve-center --state-dir ~/.local/state/nerve-center backup ~/nerve-center.bak   # as you, on the center you ran
+sudo nerve-center restore ~/nerve-center.bak --replace   # stops the service and starts it again
+```
+
+Stop the center you ran yourself for good: the service has its key now.
+
+### Settings of the service
+
+The settings are the variables of the [table above](settings-and-config.md#the-centers-settings), in
+`/etc/nerve-center/center.env`. Change them there and restart the service:
+
+```sh
+sudo nano /etc/nerve-center/center.env
+sudo systemctl restart nerve-center
+```
+
+The service runs with `--mcp http` unless the file sets `NERVE_CENTER_MCP`;
+`stdio` does not work there, as no harness gives it an input. The state
+folder is fixed. The settings file belongs to root, so the center cannot
+change how it is started.
+
+The service has no privilege: no capability, and no new privileges through
+a setuid program. It may write its state folder and nothing else on the
+machine, and sees no home folders, no shared memory (`/dev/shm`) and no
+hardware devices, so the action checker's local model runs on the CPU there. The
+unit also keeps it from the kernel interfaces a center never needs: it may
+not make namespaces, open other sockets than IPv4, IPv6 and Unix ones, or
+make system calls outside systemd's `@system-service` set, and it cannot
+see other processes or change kernel settings, the clock or the host name.
+A `NERVE_CENTER_LISTEN` on a port below 1024 fails; use a higher port, or forward
+one to it.
+
+### Update
+
+```sh
+sudo nerve-center update
+```
+
+`update` downloads `nerve-center-x86_64-linux` or
+`nerve-center-aarch64-linux` from the latest release on GitHub, checks it
+against the release's `SHA256SUMS`, puts it in place as
+`/usr/local/bin/nerve-center` and restarts the service. `HTTPS_PROXY` is used
+when it is set. `--from <file>` takes a program you downloaded and checked
+yourself.
+
+`update` also writes the service unit as the new program has it, so a
+release that changes it needs no `install` again, and its steps go to the
+center's [log](logging.md#the-log-as-the-owner-reads-it) file. The running center reads that file only when it starts, so the entry reaches the Log page at the center's next start; the file download has it at once. It asks the new program for the unit, run as root
+with an empty environment; the same program again still brings the unit it
+has, so a second `update` repairs a unit that is behind. The unit is written
+as a whole, so a line of your own in it is replaced: local changes belong in
+a drop-in, `sudo systemctl edit nerve-center`, which `update` and `install`
+leave alone. This holds for an update done by a release that has it: the
+update that brings such a release is done by the program already installed,
+which replaces only the program, so the first time after it (the notes say
+when) run `sudo nerve-center install` once, or `update` again.
+
+The state folder and the settings are not touched. `update` refuses a file
+that is not `nerve-center` and a program older than the installed one. If the
+new program does not start, the old one is put back with the old unit and
+started again. Its
+last line says where the owner token is: a center installed before there
+was one makes it at this start, and its web UI no longer takes the harness
+token (`sudo cat /var/lib/nerve-center/owner-token`).
+
+### Uninstall
+
+```sh
+sudo nerve-center uninstall           # keeps the state and the settings
+sudo nerve-center uninstall --purge   # deletes them too
+```
+
+`uninstall` stops and disables the service, removes the unit, the user
+`nerve-center` and `/usr/local/bin/nerve-center`. Without `--purge`,
+`/var/lib/nerve-center` and `/etc/nerve-center` stay and belong to root from
+then on, so no later user with the old uid gets the center's key. A later
+`install` takes them up again: the center comes back with its pairings and
+its harness token and its owner token. `--purge` deletes them.
+
+`install`, `update` and `uninstall` are refused from a command that the node
+installed on the same machine runs for a center, as the node's own are
+([service](#the-rules-for-these-commands)).

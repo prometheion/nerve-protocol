@@ -920,7 +920,7 @@ pub fn default_blocklist() -> Vec<BlockEntry> {
         //      about to change the node it runs on. This catches a confused
         //      agent, not one that hides what it does; the real protection
         //      is that commands run as an account of their own
-        //      (docs/user/action-checker.md) ----
+        //      (docs/dev/action-checker.md) ----
         b(
             "nerve-node",
             "exec.run:nerve-node",

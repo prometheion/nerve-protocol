@@ -1,5 +1,5 @@
 //! The capabilities the owner declares in `node.toml` (`[[capability]]`,
-//! nerve_policy::config::ConfigCapability, docs/user/config-capabilities.md):
+//! nerve_policy::config::ConfigCapability, docs/dev/capabilities.md):
 //! what the node offers of them, and what a call's run returns. The link
 //! decides a call like any other and runs the command itself (crate::link).
 //!

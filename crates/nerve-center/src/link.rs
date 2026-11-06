@@ -953,12 +953,12 @@ fn from_node(e: RpcError) -> RpcError {
     };
     data.insert("code".into(), Value::String(code.as_str().to_string()));
     if let Some(Value::String(r)) = data.get_mut("reason") {
-        *r = crate::util::clip(r, NODE_ERROR_MAX);
+        *r = crate::util::clip_bytes(r, NODE_ERROR_MAX);
     }
     data.insert("from".into(), json!("node"));
     RpcError {
         code: code.numeric(),
-        message: crate::util::clip(&e.message, NODE_ERROR_MAX),
+        message: crate::util::clip_bytes(&e.message, NODE_ERROR_MAX),
         data: Some(Value::Object(data)),
     }
 }

@@ -78,6 +78,4 @@ pub use daemon::{Daemon, Event, Hold, HoldAt, NodeOptions};
 pub use paths::NodePaths;
 
 /// Milliseconds since the Unix epoch.
-pub fn now_ms() -> u64 {
-    nerve_proto::msg::now_ms()
-}
+pub use nerve_proto::msg::now_ms;

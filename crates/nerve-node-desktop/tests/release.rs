@@ -1,6 +1,7 @@
-//! What the release gives Windows: the desktop app and the center, and no
+//! That 0.0.7 publishes the Linux programs only, and what the release gives
+//! Windows once its switch is on: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
-//! (docs/user/install.md); what the released app keeps for the licence it
+//! (docs/dev/windows.md); what the released app keeps for the licence it
 //! uses Slint under; and that the Linux programs are installed and tested
 //! where the docs say before they are published; and that the security
 //! policy names a way in that needs no repository setting.
@@ -21,9 +22,33 @@ fn job(name: &str) -> String {
         .join("\n")
 }
 
+/// Release 0.0.7 publishes the Linux programs only: the input `windows`,
+/// off by default, gates the Windows job, and the publish job then counts
+/// five programs and names no Windows program in its footer. 0.1.0 turns it
+/// on, and the Windows job builds the app and the center, no `nerve-node`.
 #[test]
-fn windows_gets_the_app_and_the_center_and_no_nerve_node() {
+fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
+    let inputs = RELEASE
+        .split("    inputs:\n")
+        .nth(1)
+        .unwrap()
+        .split("\npermissions:")
+        .next()
+        .unwrap();
+    let switch = inputs
+        .split("      windows:\n")
+        .nth(1)
+        .expect("an input windows");
+    assert!(switch.contains("type: boolean"), "{switch}");
+    assert!(switch.contains("default: false"), "{switch}");
+    assert!(RELEASE.contains("  WINDOWS: ${{ inputs.windows }}\n"));
     let windows = job("windows");
+    assert!(
+        windows
+            .lines()
+            .any(|l| l.trim() == "if: ${{ inputs.windows }}"),
+        "{windows}"
+    );
     assert!(windows.contains("x86_64-pc-windows-msvc"), "{windows}");
     assert!(
         windows.contains("-p nerve-center -p nerve-node-desktop"),
@@ -39,64 +64,140 @@ fn windows_gets_the_app_and_the_center_and_no_nerve_node() {
             assert!(!words.contains(&"nerve-node"), "{line}");
         }
     }
-    // Two Linux programs on each of two machines, the Linux desktop app, and
-    // Windows' two.
-    assert!(RELEASE.contains("!= 7 ]"), "the checksums count 7 programs");
-    let footer = RELEASE
-        .lines()
-        .find(|l| l.trim_start().starts_with("footer="))
-        .unwrap();
+    // The publish job waits for a Windows job that ran with the switch, and
+    // takes one that was skipped without it.
+    let publish = job("publish");
     assert!(
-        footer.contains("no \\`nerve-node\\` for Windows"),
-        "{footer}"
+        publish.contains("needs.windows.result == (inputs.windows && 'success' || 'skipped')"),
+        "{publish}"
+    );
+    for need in [
+        "check",
+        "linux",
+        "desktop-linux",
+        "conformance",
+        "installed",
+    ] {
+        assert!(
+            publish.contains(&format!("needs.{need}.result == 'success'")),
+            "{need}: {publish}"
+        );
+    }
+    // Two Linux programs on each of two machines and the Linux desktop app;
+    // Windows' two only with the switch.
+    assert!(publish.contains("want=5\n"), "{publish}");
+    assert!(
+        publish.contains("if [ \"$WINDOWS\" = true ]; then\n            want=7"),
+        "{publish}"
+    );
+    let footers: Vec<&str> = publish
+        .lines()
+        .filter(|l| l.trim_start().starts_with("footer="))
+        .collect();
+    assert_eq!(footers.len(), 2, "{publish}");
+    let (on, off) = (footers[0], footers[1]);
+    assert!(on.contains("no \\`nerve-node\\` for Windows"), "{on}");
+    assert!(
+        off.contains("Windows comes with 0.1.0") && !off.contains("Windows x86_64"),
+        "{off}"
+    );
+    let switch_on = publish
+        .split("footer=")
+        .next()
+        .unwrap()
+        .trim_end()
+        .ends_with("if [ \"$WINDOWS\" = true ]; then");
+    assert!(
+        switch_on,
+        "the first footer is the one with Windows: {publish}"
     );
 }
 
-/// The user docs name no terminal command for the node on Windows (#176).
-/// The rules page is left out: it lists what an agent's command may not do
-/// to the node, Windows' commands among them.
+/// The user guide is Linux only until 0.1.0 (Q9 of the PR 6 plan): it names
+/// Windows once, in "Windows comes with 0.1.0", and every Windows text is in
+/// docs/dev/windows.md until then. The release notes of 0.0.7 hold no
+/// Windows item either: they wait under `## Unreleased`.
 #[test]
-fn the_docs_send_nobody_to_a_terminal_on_windows() {
-    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user");
+fn the_user_guide_and_the_notes_are_linux_only() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut found = Vec::new();
-    for entry in std::fs::read_dir(&docs).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "md") || path.ends_with("rules.md") {
-            continue;
-        }
+    let mut pages = vec![root.join("README.md")];
+    for entry in std::fs::read_dir(root.join("docs/user")).unwrap() {
+        pages.push(entry.unwrap().path());
+    }
+    for path in pages {
         let text = std::fs::read_to_string(&path).unwrap();
         for (i, line) in text.lines().enumerate() {
-            for word in [
-                "nerve-node-x86_64-windows",
-                "nerve-node.exe",
-                "Restart-Service nerve-node",
-                "Start-Service nerve-node",
-                "Stop-Service nerve-node",
-                "Run as administrator",
-                "administrator's terminal",
-                "CLI edition",
-                "Windows node you run yourself",
-            ] {
-                if line.contains(word) {
-                    found.push(format!("{}:{}: {word}", path.display(), i + 1));
-                }
+            let rest = line.replace("Windows comes with 0.1.0", "");
+            if rest.contains("Windows") || rest.contains(".exe") {
+                found.push(format!("{}:{}: {line}", path.display(), i + 1));
             }
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let notes = changelog
+        .split("\n## 0.0.7\n")
+        .nth(1)
+        .expect("a section ## 0.0.7")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let windows: Vec<&str> = notes
+        .lines()
+        .filter(|l| {
+            l.replace("Windows comes with 0.1.0", "")
+                .contains("Windows")
+        })
+        .collect();
+    assert!(windows.is_empty(), "{windows:?}");
+    assert!(notes.contains("Update the center first, then the nodes."));
+    let unreleased = changelog
+        .split("\n## Unreleased\n")
+        .nth(1)
+        .unwrap()
+        .split("\n## ")
+        .next()
+        .unwrap();
+    assert!(
+        unreleased.contains("### Windows (with 0.1.0)"),
+        "{unreleased}"
+    );
 }
 
-/// The commands page says that `run` is refused on Windows (#176): the table
-/// row of a command Windows refuses carries the note, since the scan above
-/// can only look for words.
+/// The Breaks of 0.0.7 tell a user what to change in a script or a state
+/// folder from 0.0.6: the renames of the commands and options, and the
+/// steps of the one change that stops a center (the local model d1-3B).
+/// Each line here was missing from the notes once.
 #[test]
-fn the_run_row_says_windows_refuses_it() {
-    let page = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/commands.md"),
-    )
-    .unwrap();
-    let row = page.lines().find(|l| l.starts_with("| `run` |")).unwrap();
-    assert!(row.contains("Windows") && row.contains("refused"), "{row}");
+fn the_breaks_of_the_notes_give_the_action_of_each() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let breaks = changelog
+        .split("\n## 0.0.7\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### Breaks\n")
+        .nth(1)
+        .expect("a section ### Breaks")
+        .split("\n### ")
+        .next()
+        .unwrap();
+    let flat = breaks.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Forms that 0.0.6 never had are no break.
+    for unreleased in ["folder network", "--pin", "cap provider", "[[capability]]"] {
+        assert!(!flat.contains(unreleased), "the Breaks name {unreleased}");
+    }
+    for needed in [
+        "`relay add <n> --center C` → `--to C`",
+        "`--mcp none` → `--mcp off`",
+        "with no `--wildcard`",
+        "`daemon:`",
+        "set `threshold` to 0.75",
+        "`timeout_ms` to 12000",
+        "install the model again on the Action checker page",
+    ] {
+        assert!(flat.contains(needed), "the Breaks lack {needed}:\n{breaks}");
+    }
 }
 
 /// The released app keeps what Slint's Royalty-free license 2.0, under which
@@ -136,7 +237,7 @@ fn the_app_shows_slints_notice_as_its_licence_asks() {
 
 /// The release publishes no Linux program before the install test passed on
 /// the very files it publishes (`installed.yml`), CI runs the same test, and
-/// the machines it runs on are the ones the platforms page calls tested.
+/// the machines it runs on are the ones the install page calls tested.
 #[test]
 fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() {
     let publish = job("publish");
@@ -176,14 +277,45 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
             "Debian 12 x86_64"
         ]
     );
-    let platforms = include_str!("../../../docs/user/platforms.md");
-    let tested = platforms
+    let install = include_str!("../../../docs/user/install.md");
+    let tested = install
         .lines()
         .find(|l| l.starts_with("| Tested |"))
         .unwrap();
     for name in ["Ubuntu 22.04 and 24.04, Debian 12", "aarch64"] {
         assert!(tested.contains(name), "{name}: {tested}");
     }
+}
+
+/// The app's links to the user guide open the docs at the ref the build
+/// names (`Store.guide-ref`: the release's tag, or `main` in a build that is
+/// no release, whose tag would not exist), and a release run names its tag.
+#[test]
+fn the_app_opens_the_guide_of_its_release() {
+    for (name, ui) in [
+        ("help.slint", include_str!("../ui/help.slint")),
+        ("overview.slint", include_str!("../ui/overview.slint")),
+    ] {
+        let links: Vec<&str> = ui
+            .lines()
+            .filter(|l| l.contains("nerve-protocol/") && l.contains("/docs/user"))
+            .collect();
+        assert!(!links.is_empty(), "{name}");
+        for l in links {
+            assert!(
+                l.contains("/\" + Store.guide-ref + \"/docs/user"),
+                "{name}: {l}"
+            );
+        }
+    }
+    let env = RELEASE
+        .lines()
+        .find(|l| l.starts_with("  NERVE_GUIDE_REF: "))
+        .expect("the run names the guide's ref");
+    assert!(
+        env.contains("inputs.kind == 'release' && format('v{0}', inputs.version) || 'main'"),
+        "{env}"
+    );
 }
 
 /// GitHub's private vulnerability reporting is a setting of the repository,

@@ -1,4 +1,4 @@
-//! The program itself with `--json` (docs/user/commands.md): a program that
+//! The program itself with `--json` (docs/dev/settings-and-config.md): a program that
 //! drives it reads every answer from stdout, an error too, since stderr
 //! also carries the log's events.
 

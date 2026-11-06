@@ -1,4 +1,4 @@
-//! The node as a Windows service (docs/user/service.md): `install`, `update`
+//! The node as a Windows service (docs/dev/windows.md): `install`, `update`
 //! and `uninstall`, as the Linux ones in [`crate::service`] are. The service
 //! `nerve-node` runs `nerve-node run` as a local account of its own, `nerve`,
 //! which with SYSTEM and the administrators alone may open the node's config,
@@ -193,7 +193,7 @@ fn remove_grants(
         let then = if kept {
             "connect their drives, then install Nerve and uninstall it again to take them off"
         } else {
-            "their record goes with the data, so once their drives are connected, take them off by hand (docs/user/modes.md)"
+            "their record goes with the data, so once their drives are connected, take them off by hand (docs/dev/windows.md)"
         };
         steps.did(format!(
             "left {} folder grants of {whose} on, on drives that are not connected now ({}): {then}",
@@ -212,7 +212,7 @@ fn remove_grants(
         let then = if kept {
             "once it stopped, install Nerve and uninstall it again to remove them"
         } else {
-            "its config goes with the data, so once it stopped, remove them by hand (docs/user/modes.md)"
+            "its config goes with the data, so once it stopped, remove them by hand (docs/dev/windows.md)"
         };
         steps.did(format!(
             "left the AppContainer profiles of {whose} ({}), since {}: {then}",

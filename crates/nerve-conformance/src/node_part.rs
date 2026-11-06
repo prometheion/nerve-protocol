@@ -518,11 +518,7 @@ async fn sudo_offer(conn: &mut Conn, center: &FakeCenter, key: &str) -> Result<O
     Ok(offer)
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
+use nerve_proto::msg::now_ms;
 
 /// Runs the profile checks in [`PROFILE_CHECKS`] order, giving each result
 /// to `check`; stops at the first failure.

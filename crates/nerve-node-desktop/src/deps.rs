@@ -1,5 +1,5 @@
 //! What the app needs of the desktop, and what it says when that is missing
-//! (docs/user/desktop.md, "What the app needs"): a display, a renderer that
+//! (docs/dev/desktop.md, "What the app needs"): a display, a renderer that
 //! draws on it, polkit's `pkexec` with an authentication agent that asks the
 //! owner, and a desktop portal whose file chooser opens files and folders.
 //! GNOME and KDE Plasma bring all of it; another desktop may not. Each check

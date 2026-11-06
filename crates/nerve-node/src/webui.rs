@@ -1,4 +1,4 @@
-//! The node's web UI (docs/user/node-web-ui.md): a page like the desktop
+//! The node's web UI (docs/dev/web-uis.md): a page like the desktop
 //! app's, served by the installed node on Linux while `ui.listen` is set
 //! (`nerve-node ui on`). Off, the task only waits for a change of the config:
 //! no listener, no timer, no file.
@@ -223,12 +223,8 @@ fn token_label<'a>(cfg: &'a NodeConfig, hash: &str) -> Option<&'a str> {
     cfg.ui
         .tokens
         .iter()
-        .find(|t| ct_eq(t.token_sha256.as_bytes(), hash.as_bytes()))
+        .find(|t| nerve_transport::keys::ct_eq(t.token_sha256.as_bytes(), hash.as_bytes()))
         .map(|t| t.label.as_str())
-}
-
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// What a signed-in request runs its commands with: the UI's context, and

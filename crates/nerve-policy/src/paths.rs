@@ -106,21 +106,6 @@ pub fn to_wire(p: &Path) -> String {
     }
 }
 
-/// A path of the center's form as the owner reads it on this computer: the
-/// folders a running client reports are in it (`/c/Users/x`), and a window or
-/// `status` shows `C:\Users\x` on Windows, as `folder list` does from the
-/// config. Where it does not translate, the path stays as it is.
-pub fn wire_for_display(wire: &str) -> String {
-    #[cfg(windows)]
-    {
-        win::display(wire)
-    }
-    #[cfg(not(windows))]
-    {
-        wire.to_string()
-    }
-}
-
 /// Windows path rules as pure string functions, so they are tested on every
 /// platform. On Windows they back `parse_device_path`, `within` and `to_wire`.
 pub mod win {
@@ -192,12 +177,6 @@ pub mod win {
             first = false;
         }
         Ok(out)
-    }
-
-    /// `from_wire` for a path that is only shown: one that does not
-    /// translate (nothing the policy would have accepted) stays as it is.
-    pub fn display(wire: &str) -> String {
-        from_wire(wire).unwrap_or_else(|_| wire.to_string())
     }
 
     fn check_component(c: &str) -> Result<(), PathError> {
@@ -428,15 +407,6 @@ mod win_tests {
         assert_eq!(to_wire("C:\\Users\\x"), "/c/Users/x");
         assert_eq!(to_wire("\\\\?\\C:\\Users\\x\\"), "/c/Users/x");
         assert_eq!(to_wire("C:\\"), "/c");
-    }
-
-    #[test]
-    fn a_wire_path_is_shown_in_the_native_form() {
-        assert_eq!(display("/c/pst/work/fx"), "C:\\pst\\work\\fx");
-        assert_eq!(display("/d"), "D:\\");
-        // Not a wire path: shown as it came.
-        assert_eq!(display("/home/alice/work"), "/home/alice/work");
-        assert_eq!(display("C:\\x"), "C:\\x");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The owner of the installed node and the owner's way in without root
-//! (docs/user/service.md, "Who may change the node").
+//! (docs/dev/service.md, root as the owner).
 //!
 //! The owner is the account that ran `install` (on Linux through sudo or
 //! pkexec): the unit names it ([`OWNER_VAR`]), and only `install` writes
@@ -28,7 +28,7 @@
 //! A command of `user` mode runs as the owner, and so is the owner, by the
 //! owner's choice of mode; the checks of the caller's process (not below a
 //! command of the node, no `no_new_privs`) catch the simple cases of such a
-//! command changing the node, nothing more (docs/user/modes.md).
+//! command changing the node, nothing more (docs/dev/policy-engine.md).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -345,8 +345,6 @@ pub fn is_owner_here() -> bool {
             .and_then(|s| crate::win_host::sid_text(&s).ok());
         me.is_some_and(|me| crate::win_host::owners().is_ok_and(|o| o.contains(&me)))
     }
-    #[cfg(not(any(unix, windows)))]
-    false
 }
 
 /// Whether the CLI sends `cli`'s command to the owner endpoint: the node is
@@ -1075,16 +1073,11 @@ pub fn take_text(pending: &mut Vec<u8>) -> String {
     text
 }
 
-/// The owner socket this process talks to: the installed node's, or the one
-/// `NERVE_OWNER_SOCKET` names.
-#[cfg(unix)]
-pub fn socket_here() -> PathBuf {
-    std::env::var_os("NERVE_OWNER_SOCKET").map_or_else(socket, PathBuf::from)
-}
-
+/// The installed node's owner socket, connected. No variable moves it: the
+/// CLI talks to the one place the service listens on.
 #[cfg(unix)]
 async fn connect(_paths: &NodePaths) -> Result<tokio::net::UnixStream, String> {
-    connect_at(&socket_here()).await
+    connect_at(&socket()).await
 }
 
 /// The owner socket at `at`, connected.
@@ -1105,11 +1098,6 @@ async fn connect(
     paths: &NodePaths,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
     win::connect(paths).await
-}
-
-#[cfg(not(any(unix, windows)))]
-async fn connect(_paths: &NodePaths) -> Result<tokio::io::DuplexStream, String> {
-    Err(nerve_transport::ctl::NOT_RUNNING.into())
 }
 
 /// Who is an owner.

@@ -368,7 +368,7 @@ async fn connect(center: Center, mut io: BoxIo, req: Request, admitted: Admitted
             None,
             &format!(
                 "a node that is not paired tried to connect (id {})",
-                crate::util::clip(&node_id, 64)
+                crate::util::clip_bytes(&node_id, 64)
             ),
         );
         // §4.1: an unknown node is told so before any handshake, and stops

@@ -4,9 +4,12 @@
 //! (crate::winsudo, tests/win_sudo.rs).
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::linked;
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, NodeOptions, NodePaths};
@@ -108,15 +111,6 @@ async fn node_of(
     .await
     .expect("the owner's edit");
     Daemon::start(o).await.expect("start")
-}
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
 }
 
 /// Every frame the node sends, as text, with the answer to one request.

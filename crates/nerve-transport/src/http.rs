@@ -275,8 +275,19 @@ impl Response {
         for (k, v) in &self.headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }
+        // No answer is kept by a cache; one that says so itself (the web UIs'
+        // API, crate::webui::with_security_headers) says it once.
+        let cache = if self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"))
+        {
+            ""
+        } else {
+            "Cache-Control: no-store\r\n"
+        };
         head.push_str(&format!(
-            "Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+            "Content-Length: {}\r\nConnection: close\r\n{cache}\r\n",
             self.body.len()
         ));
         let timed_out = || {
@@ -533,14 +544,35 @@ mod tests {
         assert!(read_request_head(&mut b).await.is_err());
     }
 
+    /// Every answer says `Cache-Control: no-store` once: also one that set
+    /// the header itself, as the web UIs' API does.
+    #[tokio::test]
+    async fn an_answer_says_no_store_once() {
+        for resp in [
+            Response::text(200, "x"),
+            Response::text(200, "x").with_header("Cache-Control", "no-store"),
+        ] {
+            let mut out = Vec::new();
+            resp.write(&mut out).await.unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(
+                text.to_ascii_lowercase().matches("cache-control:").count(),
+                1,
+                "{text}"
+            );
+            assert!(text.contains("Cache-Control: no-store\r\n"), "{text}");
+        }
+    }
+
     /// A peer that reads nothing of its answer is dropped once a part of it
     /// waits [`HEAD_TIMEOUT`]: it would hold the connection, and one of the
     /// listener's slots, for good (issue #150).
-    #[tokio::test]
+    /// The clock is paused: the timeout passes without the test waiting it.
+    #[tokio::test(start_paused = true)]
     async fn a_peer_that_takes_nothing_of_the_response_is_dropped() {
         let (_a, mut b) = tokio::io::duplex(1024);
         let resp = Response::new(200, "text/plain", vec![b'x'; 64 * 1024]);
-        let t = std::time::Instant::now();
+        let t = tokio::time::Instant::now();
         let r = tokio::time::timeout(HEAD_TIMEOUT * 3, resp.write(&mut b))
             .await
             .expect("the write waited on a peer that takes nothing");
@@ -582,8 +614,9 @@ mod tests {
 
     /// A request body sent a byte now and then is dropped after
     /// [`time_for`] its length, though each byte comes within
-    /// [`HEAD_TIMEOUT`] of the last (issue #150).
-    #[tokio::test]
+    /// [`HEAD_TIMEOUT`] of the last (issue #150). The clock is paused, so
+    /// the 2 s between the bytes pass without the test waiting them.
+    #[tokio::test(start_paused = true)]
     async fn a_body_sent_a_byte_at_a_time_is_dropped() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let sender = tokio::spawn(async move {

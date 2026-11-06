@@ -267,17 +267,13 @@ fn the_app_drives_the_cli_end_to_end() {
         "{ended:?}"
     );
     assert_eq!(ctl.end(), None, "once");
-    // The first-run steps restart it once, at their end: a new name waits
-    // for it meanwhile.
-    store.set_restart_due(false);
+    // The first-run steps restart it once, at their end: a change made
+    // before them waits for it meanwhile.
     store.invoke_setup_start();
-    store.set_setup_name("boxy".into());
-    store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 1, "{}", store.get_setup_error());
-    assert!(store.get_restart_due());
+    store.set_restart_due(true);
     store.set_toast("".into());
     store.invoke_setup_skip();
-    store.invoke_setup_skip();
+    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
     // The service's restart ran (and failed: there is none).
@@ -289,11 +285,8 @@ fn the_app_drives_the_cli_end_to_end() {
     );
     // Closed with × or Escape before their end, the steps restart it all
     // the same.
-    store.set_restart_due(false);
     store.invoke_setup_start();
-    store.set_setup_name("boxy-2".into());
-    store.invoke_setup_next();
-    assert!(store.get_restart_due(), "{}", store.get_setup_error());
+    store.set_restart_due(true);
     store.set_toast("".into());
     store.invoke_setup_close();
     assert!(!store.get_setup_open());
@@ -1187,62 +1180,52 @@ fn the_app_drives_the_cli_end_to_end() {
         store.get_toast()
     );
 
-    // The first-run steps: a name, the keys, a new center, its mode.
+    // The first-run steps: a new center and its mode, as `setup` asks
+    // them. The name and the keys keep what they are.
     let second = rt.block_on(FakeCenter::start(true)).unwrap();
+    let before = config(&paths);
     store.invoke_setup_start();
     assert!(store.get_setup_open());
-    if cfg!(target_os = "linux") {
-        assert!(!store.get_keyring_usable());
-        assert!(
-            store.get_keyring_why().contains("keyring"),
-            "{}",
-            store.get_keyring_why()
-        );
-    }
-    store.set_setup_name("studio".into());
-    store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 1, "{}", store.get_setup_error());
-    assert_eq!(config(&paths).node.name.as_deref(), Some("studio"));
-    // Back, and on again.
-    store.invoke_setup_back();
-    assert_eq!(store.get_setup_step(), 0);
+    assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 0));
     store.invoke_setup_back();
     assert_eq!(store.get_setup_step(), 0, "the first step has no back");
-    store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 1, "{}", store.get_setup_error());
-    store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
     store.set_pair_link(second.link().render().into());
     store.set_pair_name("studio-center".into());
     store.invoke_setup_next();
     assert_eq!(store.get_pair_step(), 1, "{}", store.get_pair_error());
     // Back from the confirmation to the link, and on.
     store.invoke_setup_back();
-    assert_eq!((store.get_setup_step(), store.get_pair_step()), (2, 0));
+    assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 0));
     store.invoke_setup_next();
     assert_eq!(store.get_pair_step(), 1, "{}", store.get_pair_error());
     store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 3, "{}", store.get_pair_error());
+    assert_eq!(store.get_setup_step(), 1, "{}", store.get_pair_error());
     assert_eq!(store.get_setup_center(), "studio-center");
     // Back from the mode: the center stays paired, and Continue goes on to
     // its mode without pairing again.
     store.invoke_setup_back();
-    assert_eq!((store.get_setup_step(), store.get_pair_step()), (2, 2));
+    assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 2));
     store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 3, "{}", store.get_pair_error());
+    assert_eq!(store.get_setup_step(), 1, "{}", store.get_pair_error());
     store.set_setup_mode("folder".into());
     store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 4, "{}", store.get_setup_error());
+    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
     assert_eq!(
         config(&paths).center("studio-center").unwrap().policy.mode,
         nerve_policy::Mode::Folder
     );
     store.invoke_setup_back();
-    assert_eq!(store.get_setup_step(), 3);
+    assert_eq!(store.get_setup_step(), 1);
     store.invoke_setup_next();
-    assert_eq!(store.get_setup_step(), 4, "{}", store.get_setup_error());
+    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
+    let after = config(&paths);
+    assert_eq!(after.node.name, before.node.name, "the steps ask no name");
+    assert_eq!(
+        after.machine.secret_storage, before.machine.secret_storage,
+        "the steps ask nowhere for the keys"
+    );
 
     // A nerve:// link goes straight to the pairing's confirmation.
     let third = rt.block_on(FakeCenter::start(false)).unwrap();

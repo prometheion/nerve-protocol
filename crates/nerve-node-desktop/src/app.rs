@@ -213,12 +213,7 @@ fn mono_font() -> String {
         .unwrap_or_else(|| "DejaVu Sans Mono".into())
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
-}
+use nerve_proto::msg::now_ms;
 
 /// The account the app runs as, by name.
 pub fn app_user() -> String {
@@ -367,6 +362,7 @@ impl Ctl {
         });
         let store = window.global::<Store>();
         store.set_version(env!("CARGO_PKG_VERSION").into());
+        store.set_guide_ref(nerve_transport::webui::GUIDE_REF.into());
         let install = window.global::<Install>();
         install.set_version(env!("CARGO_PKG_VERSION").into());
         install.set_windows(cfg!(windows));
@@ -715,7 +711,7 @@ impl Ctl {
 
     /// Whether the keys may go into the system keyring here, from what
     /// `config get machine.secret_storage` said, in the app's words when
-    /// they may not; both the first-run steps and Settings offer it.
+    /// they may not; only Settings offers it.
     fn keyring_state(&self, said: &Value) {
         let k = &said["keyring"];
         let usable = k["usable"] == true;

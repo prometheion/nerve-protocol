@@ -51,7 +51,7 @@ pub struct NodeConfig {
     /// default.
     #[serde(default, skip_serializing_if = "Relay::is_default")]
     pub relay: Relay,
-    /// The node's web UI (docs/user/node-web-ui.md); off by default.
+    /// The node's web UI (docs/dev/web-uis.md); off by default.
     #[serde(default, skip_serializing_if = "Ui::is_default")]
     pub ui: Ui,
     #[serde(default)]
@@ -61,7 +61,7 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Providers::is_empty")]
     pub providers: Providers,
     /// The capabilities the owner declares here (`[[capability]]`), each
-    /// one action that runs a fixed command (docs/user/config-capabilities.md).
+    /// one action that runs a fixed command (docs/dev/capabilities.md).
     #[serde(default, rename = "capability", skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<ConfigCapability>,
     #[serde(default, rename = "center", skip_serializing_if = "Vec::is_empty")]
@@ -274,7 +274,7 @@ impl Default for Limits {
 /// The memory, CPU and processes of one command: what it gets when its call
 /// names none, and the most a call may ask for. Only the owner sets them; a
 /// call may ask for less than the most, never for more. On Linux the node
-/// holds a command to them with a cgroup of its own (docs/user/limits.md).
+/// holds a command to them with a cgroup of its own (docs/dev/sandbox-linux.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandLimits {
@@ -437,7 +437,7 @@ fn max_key(name: &str) -> String {
     }
 }
 
-/// The node's log (docs/user/logs.md). Only the owner sets it: it is a
+/// The node's log (docs/dev/logging.md). Only the owner sets it: it is a
 /// machine setting, not part of what a center reads or changes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -773,7 +773,7 @@ pub struct CenterEntry {
     #[serde(default)]
     pub policy: CenterPolicy,
     /// The capabilities this center added itself (`settings.cap-add`, with
-    /// the settings grant `write`; docs/user/config-capabilities.md): shaped
+    /// the settings grant `write`; docs/dev/capabilities.md): shaped
     /// as the owner's `[[capability]]` entries, offered to this center
     /// alone, always run as `nerve-run` and counted as `execute`. Not part
     /// of its [`CenterDocument`]: `settings.set` leaves them as they are.

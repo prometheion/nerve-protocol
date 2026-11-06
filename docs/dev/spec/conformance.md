@@ -236,8 +236,10 @@ its end), all `read`, with allow rules for `echo.level`, `echo.ping` and
 ## Not covered
 
 Binary frames (§5.4), limits (§5.5), the duplicate-link rule (§4.3),
-liveness timing (§4.4), back-off (§4.6), proxies (§4.7), relays (§4.8) and
-the resume of a dropped link (§4.9) have tests in the implementations but no
-conformance checks of their own. `nerve-node`'s relay tests run the node part
+liveness timing (§4.4), back-off (§4.6), proxies (§4.7), relays (§4.8), the
+resume of a dropped link (§4.9), key rotation (§4.10), unpairing (§3.3), the
+pair request's `409` answer and its limit of 10 tries, and `pair/check`
+(§3.2) have tests in the implementations but no conformance checks of their
+own. `nerve-node`'s relay tests run the node part
 against a node that reaches the fake center only through a relay
 (`crates/nerve-node/src/relay.rs`).

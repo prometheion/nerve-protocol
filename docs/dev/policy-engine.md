@@ -2,7 +2,7 @@
 
 The node decides every call. The engine is `crates/nerve-policy/src/decide.rs`.
 The exact rules are in [spec/node-local.md](spec/node-local.md) §2 to §4.
-For how it looks to an owner, see the user guide ([modes](../user/modes.md),
+For how it looks to an owner, see the user guide ([modes](#modes-and-folders-as-the-owner-sets-them),
 [rules](../user/rules.md)).
 
 ## Three layers
@@ -100,7 +100,7 @@ checker parses and matches the same conditions (`checker::blocklist`), with
 ## The guard
 
 A new pairing's deny list starts with the guard (`nerve_policy::rules::GUARD`,
-[rules](../user/rules.md#the-guard-against-changing-the-node)): three rules
+[rules](#the-guard-against-changing-the-node)): three rules
 `guard:node-programs`, `guard:node-paths` and `guard:node-service`
 (`nerve_policy::guard::Guard`), and five `fs.write` globs for the node's
 folders. A `guard:` rule covers `exec.run` and looks at commands, not at the
@@ -544,7 +544,7 @@ center's local name):
 
 What the container does not stop, in short (the user docs list each point with
 how it was checked on Windows 11 Pro 26H2, build 10.0.26300, and what was not:
-[modes](../user/modes.md#what-the-appcontainer-does-not-stop)):
+[modes](windows.md#what-the-appcontainer-does-not-stop)):
 
 - The network: out to the internet and the local network, no filter by
   address or port; not the machine itself (its loopback address, its own
@@ -626,3 +626,801 @@ while the sudo switch is on and `exec.run` is neither hidden nor off for
 that center (`sudo`). It is built from
 that center's pairing alone. It describes the policy; it decides nothing, and
 every call is still decided as above.
+
+## Modes and folders, as the owner sets them
+
+Every pairing has a mode. It sets how much that center may do on the machine.
+
+| Mode | What is allowed | Commands on the installed Linux node |
+|---|---|---|
+| `allowlist` | Only what an [allow rule](#rules-as-the-owner-writes-them) names | As `nerve-run`, held to the folders you grant; or as you, if you say so (as root where [root is the owner](service.md#root-as-the-owner)) |
+| `folder` (default for a new pairing) | Writing and commands inside the folders you grant, by their rights; reading there too, and on the installed Linux node also what every account on the machine may read ([below](#what-each-mode-allows)) | As `nerve-run`, held to those folders |
+| `user` | Everything you could do yourself | As you, not confined (as root where [root is the owner](service.md#root-as-the-owner)) |
+
+From most to least locked down: `allowlist`, `folder`, `user`. On the node
+[installed as a service](service.md#the-node-as-a-service) on Linux, `folder` and `allowlist` mode
+run commands as `nerve-run`, an account of its own
+([below](sandbox-linux.md#the-account-nerve-run)). A node you run yourself, and
+Windows, run every command as the account that runs the node.
+
+[Deny rules](#deny-a-command) and [protected paths](#protected-paths-as-the-owner-sees-them)
+apply in every mode. A call that nothing allows is refused at once. Nothing
+waits for an answer.
+
+### What each mode allows
+
+A mode allows the same for every capability, the node's own (`fs`, `exec`),
+those a [program adds](capabilities.md#capability-providers-in-use) and [your own in
+`node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml), by what the capability does (its
+effect, which `list` shows the agent):
+
+| Effect | `allowlist` | `folder` | `user` |
+|---|---|---|---|
+| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node, outside every folder, one open to every account ([below](sandbox-linux.md#reading-in-folder-mode)); with no path, only where you set it `on` | allowed |
+| `write` | an allow rule | each path it writes in a `w` folder (and each it reads in an `r` one); with no path, only where you set it `on` | allowed |
+| `execute` | an allow rule | `exec.run`: its working directory in an `x` folder. Another capability: each of its paths in a folder with `x` and the flag for what it does there; with no path, only where you set it `on` | allowed |
+| `sense`, `actuate` | an allow rule | only where you set it `on`, and each of its paths in the folders as above | only where you set it `on` |
+
+`on` (`nerve-node cap set lamp on`) never lets a call out of the folders: it
+allows only what names no path, and sensing and acting on the world, whose
+paths stay in the folders too. A write whose only paths are ones it reads
+names no place it writes, so it counts as a write with no path. Deny rules,
+`off`, `hidden`, [protected paths](#protected-paths-as-the-owner-sees-them) and the node's own
+files win in every mode, for the paths a capability names.
+
+A capability names its paths by marking them in its schema
+(`x-nerve-path`): `fs` marks its `path`, `exec.run` its `cwd`, and a program's
+capability the arguments it reads or writes. Those paths count as an `fs`
+call's do: the folders, the [rules](#rule-syntax), protected paths and
+the node's own files judge them, and the [audit log](logging.md#the-audit-log-as-the-owner-reads-it) names them. A
+folder handed to a program counts with everything below it, since the program
+may read or write there: it is refused when a protected path, the node's own
+files, a place a deny rule of that capability names or, in `folder` mode, a
+folder you gave less lies below it, and when a link below it leads where the
+call may not go. The node sees only the paths a program
+marks: an argument it does not mark is not a path to the node, so a program's
+action that marks none (it may still read files where it likes, with your
+rights) needs `on` in `folder` mode, whatever it does. A program that reads or
+writes files should mark its path arguments; switch an action `off` that takes
+a path without the marker.
+
+### Set the mode
+
+```sh
+nerve-node mode allowlist
+nerve-node mode folder
+nerve-node mode user
+```
+
+`folder` and `user` stay until you change them. To set a time limit, add
+`--for` with hours. When it ends, a timed `user` goes back to the mode before
+it (`folder` or `allowlist`, never `user`), a timed `folder` to `allowlist`.
+`nerve-node mode` and `status` say where it ends.
+
+```sh
+nerve-node mode user --for 2
+```
+
+`--for` needs at least 1 and does not go with `allowlist`. Setting a mode
+again without `--for` removes an earlier limit.
+
+`allowlist` mode runs the allowed commands as `nerve-run`. To run them as
+you instead, outside the folders' sandbox:
+
+```sh
+nerve-node mode allowlist --as-owner
+```
+
+Setting the mode again without `--as-owner` goes back to `nerve-run`.
+
+### Folders and rights
+
+A folder gives rights. Each right is its own flag:
+
+| Flag | Allows |
+|---|---|
+| `r` | Read: `fs` stat, list, read, grep, find, and the paths another capability reads |
+| `w` | Write files: `fs.write`, and the paths another capability writes |
+| `x` | Run commands whose working directory is in the folder, and capabilities that run something at their paths |
+
+The flags do not imply each other. A write needs `w` and not `r`. A read needs
+`r` and not `w`. A command needs `x` and not `r`. A folder covers everything
+below it. Where folders nest, the deepest one decides.
+
+Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
+the sandbox the allowed commands run in; the allow rules decide what runs.
+
+The agent is told each center's own mode and account, and in `folder` mode
+whether it may read outside the folders what every account may read, and its folders with their
+flags (the built-in ones of `nerve-run` among them,
+marked as its own; a folder left without rights is not named, and the
+granted folder around it is marked as having folders below it that allow
+less; where the machine runs no `folder` mode command, no folder is shown
+with `x`, and where your sudo list for that center names commands while
+the node's [sudo switch](#sudo-as-the-owner-uses-it) is on and `exec.run` is neither hidden
+nor off for that center, the agent is told that those run
+by that list alone, in any folder and outside the sandbox): `list` shows
+them
+([harness](mcp-surface.md#the-tools-the-model-gets)). Every center is told this
+of its own pairing, with the [settings grant](settings-and-config.md#the-settings-grant) or without.
+A change of the folders, the mode or the account reaches the center at once.
+Another center's folders are never shown. In `allowlist` mode the folders
+are not shown, though they still hold the commands that run as `nerve-run`.
+
+The folders of `nerve-run` marked as its own are, for each pairing whose
+commands run as `nerve-run`, a home and a temporary folder of that pairing
+alone (`/var/lib/nerve-run/<center>/home` and `…/tmp`, where `HOME`, the
+`XDG_*` folders and `TMPDIR` of its commands point), and `/tmp` and
+`/var/tmp`, marked `shared` as well: every pairing and every account on the
+machine shares those two. With Landlock a command reaches the files of its
+own pairing's home and temporary folder and no other pairing's (a socket
+that a program listens on there is the exception, see
+[what it does not stop](sandbox-linux.md#what-it-does-not-stop-linux)), so the settings and
+caches its programs keep in its home are its own: what another center's
+agent leaves in its own home cannot steer this one's `git status` or `npm
+test`. What it leaves in `/tmp` or `/var/tmp` can, for programs that look
+there by themselves; the agent is told to keep nothing secret there and to
+change no program's settings there unless asked. Without Landlock the
+folders are closed (0700) to other accounts, but every pairing's commands
+run as the one account `nerve-run`, so nothing keeps one pairing out of
+another's home: a center you trust less then needs a machine of its own.
+A folder you give a center that holds `nerve-run`'s home (`/`, `/var`,
+`/var/lib`) is cut around it: it gives that center no other pairing's home
+or temporary folder, in its commands and in its file calls, and a folder you
+give inside that home gives nothing. In every mode, also `allowlist`, a
+file call or a program's action that names a path in another pairing's
+folders is refused whatever the folders and the allow rules say, and so is
+a program's action on a folder with a link in it that leads there: the node
+opens such a path as `nerve-run`, which owns them all, and a program follows
+links. `list`, `find`, `grep` and `stat` open each folder on their way
+without following a link, so a folder that a command swaps for a link while
+they run is left out, not followed. On a kernel below Landlock ABI
+3 a command of another pairing can still cut a file in these folders to
+nothing (see [Landlock versions](sandbox-linux.md#landlock-versions)). A pairing made again under the name of
+one that went waits for the node to delete the old folders before its
+commands and file calls run; where that cannot be done they say why.
+Even with Landlock the pairings share more than `/tmp`: see [the account
+`nerve-run`](sandbox-linux.md#the-account-nerve-run) for what it does not keep apart.
+Not `--as-owner` either: that runs the allowed commands as you (as root
+where root is the owner), outside the sandbox, so they reach all your
+folders and credentials.
+
+| Command | Does |
+|---|---|
+| `nerve-node folder add ~/proj rwx` | Add a folder, with its rights as one word (`r`, `rw`, `rx`, `rwx`) |
+| `nerve-node folder add ~/proj rx` | Change the rights of a folder it has |
+| `nerve-node folder add ~/proj/secret none` | Close a folder inside one it has |
+| `nerve-node folder rm ~/proj` | Remove the folder |
+| `nerve-node folder` | List folders and rights |
+
+`folder add` on a path that is listed already replaces its rights. `none`
+leaves a folder with no rights in the list. `folder rm` removes it. Inside a granted folder, a folder with no
+rights closes what lies below it to file calls and to commands that start
+there, but a command started in the folder around it still reaches it: the
+sandbox is built from the folders that grant something.
+
+### `user` mode
+
+`user` mode allows everything you could do yourself, except
+[protected paths](#protected-paths-as-the-owner-sees-them). Commands run as your user, without
+confinement. A command can do what you can do, including changing the node's
+own state. Use it only for a center you would trust with a shell.
+
+On a node [installed as a service](service.md#the-node-as-a-service) the node runs as its own
+user, `nerve`, and, unless root is the owner (below), `user` mode commands run as you, the owner, the account
+that ran `install`. They can do what you can do. They cannot read the node's
+keys, which are `nerve`'s, but they can change the node's settings as you
+can without a password, through the owner socket (on Windows the owners'
+pipe), as your own programs do. The node does not stop that: it is your
+choice of mode. The center's [blocklist and action checker](action-checker.md#the-checker-as-the-owner-sets-it-up)
+and the node's [guard](#the-guard-against-changing-the-node) catch
+such a command when an agent tries it by mistake, and the node refuses a
+process it sees below one of its commands, but none of that is a boundary.
+The same holds for `allowlist` mode with `--as-owner`. The node's
+[web UI](web-uis.md#the-nodes-web-ui), when you turn it on, adds no way for such a command:
+it reaches only the login, and a token is what lets one in; a command as
+`nerve-run` is closed before it can try one. The same holds for the center's
+[web UI](web-uis.md#the-centers-web-ui) on a machine that also runs a node: a command reaches its
+login, which asks for the owner token. That token is in the center's state
+folder, which a `nerve-run` command cannot read; a `user` mode command runs
+as you and can, when the center runs as you too (a center the harness
+starts). A harness token, which the agent may read in its harness's
+settings, does not log in.
+
+Where root is the owner (an install that root ran itself and confirmed,
+[service](service.md#root-as-the-owner)), `user` mode and `allowlist` mode
+with `--as-owner` run commands as root. They can do everything on the
+machine, read the node's keys and change the node itself. Nothing in Nerve
+holds them back: the guard, the action checker and the refusal of the owner
+socket only catch mistakes, and root needs none of them to get in. It is
+your choice, as root, when you answer yes at `install`. `folder` mode and
+`allowlist` mode without `--as-owner` still run as `nerve-run`. A center with
+the [settings grant](settings-and-config.md#the-settings-grant) can switch itself to `user` mode,
+and so to root.
+
+### Which mode
+
+| You want | Use |
+|---|---|
+| The agent may run a few known commands | `allowlist` with [rules](#rules-as-the-owner-writes-them) |
+| The agent works freely in a project folder | `folder` (the default) with one folder `rwx` |
+| The agent acts as you | `user`, maybe with `--for` |
+
+## Rules, as the owner writes them
+
+Rules say which calls are allowed and which are refused. Each pairing has
+three lists.
+
+| List | Counts in | Does |
+|---|---|---|
+| `allow` | `allowlist` mode only | A matching call may run |
+| `deny` | every mode | A matching call is refused. A deny rule beats every other rule and mode |
+| `sudo` | every mode, while [sudo](#sudo-as-the-owner-uses-it) is on | A matching `sudo` command may run |
+
+In `folder` and `user` mode, allow rules do nothing. The mode decides.
+
+The commands below are the CLI's, on Linux. On Windows the
+[desktop app](desktop.md)'s **Permissions** page adds, edits and removes the
+rules (**Allowed commands**, **Forbidden commands**, the sudo list); the
+guard is built in.
+
+### Allow a command
+
+```sh
+nerve-node rule add allow 'git status'
+nerve-node rule add allow 'git status *'
+```
+
+The first allows that exact command line. The second allows `git status` with
+anything after it: a trailing ` *` is the wildcard, and `rule add` says what it
+covers. A rule applies to one command line, so `git status` does not allow
+`git status --short`. `'rm *'` allows every `rm` command, not the files of a
+folder.
+
+### Deny a command
+
+```sh
+nerve-node rule add deny 'rm *'
+nerve-node rule add deny 'git push origin main'
+```
+
+A deny rule matches the whole command line. It does not see `rm` inside
+`x; rm …`, in `/bin/rm`, in a script, or in another program that deletes
+files. In `folder` and `user` mode it guards against mistakes. It is not a
+sandbox. (The guard's own rules read each command of a line; see below.)
+
+### The guard against changing the node
+
+Every pairing has built-in deny rules that keep its commands off this node
+itself. `rule` shows them as one line, `guard: 8 rules, built in`; they
+cannot be removed or edited, and the node keeps them current.
+
+| Rule | Refuses |
+|---|---|
+| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Start-BitsTransfer`, `certutil`, `Set-Content`, `Clear-Content`, `Out-File`, `gzip`, `upx`, `objcopy` …), since replacing the program changes the node. The path may stand in a brace group in `sh` and fish (`mv nerve-node{,.bak}`), and may come through a pipe into the tools that take paths (`echo /usr/local/bin/nerve-node \| xargs rm`, `Get-Item …\nerve-node.exe \| Remove-Item`, `(Get-Item …\nerve-node.exe) \| Remove-Item`, `… \| Clear-Content`; not into a writer such as `tee`). Only the listed programs count, so another program or a .NET call that writes the file is not seen |
+| `guard:node-paths` | A command that names the node's socket or pipes or its config and state folders (`/run/nerve-node`, `/etc/nerve`, `/var/lib/nerve`, `~/.config/nerve`, `~/.local/state/nerve`, `%ProgramData%\Nerve`) |
+| `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
+| `fs.write:…` (five rules) | A write into those folders |
+
+`nerve-node ui …` is such a command too, so a center's command cannot turn
+on the [web UI](web-uis.md#the-nodes-web-ui) or make a token for it. Its port is not a
+rule's matter: the node closes a connection from a command's account itself
+([who can reach it](web-uis.md#who-can-reach-it)).
+
+The three `guard:` rules read the command line as the node's shell does
+(`/bin/sh` or `machine.shell` on Linux, PowerShell or cmd on Windows) and
+look at each command in it. The whole line is refused when any one of them
+is a guarded command:
+
+- in a list or a pipe: after `;`, `&&`, `||`, `&`, `|` or a line break, with
+  any indent;
+- in a group or block: `{ … }`, `( … )`, `(( … ))`, `if`, `for`, `while`,
+  `case` (also inside another block), a function, PowerShell's `{ … }` and
+  `( … )`. The words of an array (`a=(x y)`) or of a regular expression in
+  `[[ … ]]` are data; a substitution in them runs;
+- in a substitution: `$( … )` and backticks, also inside double quotes;
+- in the text a shell runs: `sh -c`, `bash -c`, `su -c`, `runuser -c`, `eval`,
+  `powershell -Command`, `cmd /c`, `Invoke-Expression`, and a here-document
+  or here-string fed to a shell (`bash`, also with `-s` and arguments, `su`,
+  `sudo -s`, `sudo -i`);
+- behind a program that runs another: `sudo` (with its options), `env`,
+  `runuser -u`,
+  `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, a
+  path to the program, and on Windows `&`, `Start-Process` and cmd's `start`,
+  `@`, `if`, `for … do` and the command in `for /f … in ('…')`. A file name or a string in the brackets of `for /f` is read as words, so a path to the node's folders in it is still refused.
+
+fish is read as a shell of its own: its `( … )` is a command substitution
+(`echo (nerve-node status)` is refused) and `and`, `or` and `not` start a
+command, in a `fish -c` text and when `machine.shell` is fish. In PowerShell
+a quoted string that starts a statement is a value
+(`'nerve-node' | Set-Content x.txt` runs), unless `&`, `.` or
+`Start-Process` runs it.
+
+The text a shell runs is read by that shell's rules, not the line's: the
+`& nerve-node` in `powershell -Command "& nerve-node"` is PowerShell's call
+operator even in a line for `sh`, and `start /b nerve-node` in a `cmd /c` text
+is cmd's.
+
+So `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo systemctl
+restart nerve-node`, `bash -c 'pkill nerve-node'` and
+`powershell -Command "Stop-Service nerve-node"` (or `/c`, as PowerShell
+takes `/` before its switches too) are refused. cmd's `/c` text is read as cmd reads it from the line, also in the form with doubled quotes that a program path with a blank needs
+(`cmd /s /c ""C:\Program Files\Nerve\nerve-node-desktop.exe" status"`), and the argument string of `Start-Process cmd`. A word of
+another program is data, so a line that only mentions the node runs:
+`git commit -m "refuse systemctl stop nerve-node"`, `echo`, `grep`, a
+here-document written to a file. The name alone is not refused either:
+`cargo build -p nerve-node`, `journalctl -u nerve-node`,
+`ls -l /usr/local/bin/nerve-node`. A path in a sentence (a blank before it in
+the same word) is data too. For the same reason a script text handed to
+another program is seen only when no blank comes before the path in its word
+(`python3 -c "print(open('/etc/nerve/node.toml').read())"` is refused,
+`python3 -c "import os; print(open('/etc/nerve/node.toml').read())"` runs),
+and a folder name with a blank in it (`"/home/john smith/.config/nerve"`) is
+not seen: both are a program that another program runs, listed below.
+
+| | Refused | Still runs |
+|---|---|---|
+| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart`, `try-reload-or-restart` (and `force-reload`, `condrestart`, `condstop`, `condreload`, `reload-or-try-restart`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`, also as one alternative of the pattern (`pkill -f 'nerve-node\|nerve-center'`, `pkill -f 'target/debug/(nerve-node\|nerve-center)'`); `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
+| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets (also with the `\|` at the start of the next line); `reg add`, `delete`, `copy` or `restore` on the service's key or a key below it (`…\Services\nerve-node`, `…\nerve-node\Parameters`, which holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and their kin on them (a folder `C:\Services\nerve-node` is a folder, not that key); the service by its display name too (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`) | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
+
+The Windows commands and program names match in any case (`STOP-SERVICE`,
+`NET STOP`, `sc stop Nerve-Node`, `taskkill /IM NERVE-NODE.EXE`), as Windows
+reads them, and `\` separates a path there.
+
+A line the guard cannot read with confidence (a quote or bracket left open,
+a line nested deeper than 16 levels, a command wrapped in more than 256
+wrappers, a shell that reads its script from a pipe such as `curl … | sh`,
+PowerShell's `-EncodedCommand`, a substitution inside `${ … }`) is checked
+twice: the commands read before the place that gave out are checked like any
+others (so `env X=1 sudo systemctl stop nerve-node; curl … | sh` is refused),
+and the whole line is checked with the guard's text patterns from before it
+read commands, which look for the commands where a command starts in the
+text. Such a line is refused wherever either refuses it. What stands after the
+place that gave out is only seen by the text patterns.
+
+What the guard does not see: a name built at run time
+(`n=nerve-node; systemctl stop $n`), a program that another program runs
+(`cargo run -p nerve-node`, `find … -exec`, `ssh`, a script file, or a
+launcher outside the list above such as `systemd-run`, `taskset` or `watch`,
+also with the program's path), a name
+that reaches `kill` or `systemctl` through a loop or another way than a
+straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
+`echo nerve-node | xargs systemctl stop`), and `pkill` or `killall` with a
+part of the name (`pkill nerve`, which matches the node too), and `reg import` or `regedit` of a file that holds the service's key.
+
+A rule of the guard is written `guard:<name>`, and only these three exist.
+The guard is built in: every pairing has its rules on top of its own deny
+rules, the node keeps them current, and none can be removed. `rule` shows it
+as one line (`guard: 8 rules, built in`). A pairing made before the guard
+read commands may still hold its rules as text patterns: they are deny rules
+of its own now, beside the guard, and `rule rm` takes them off. Those older
+patterns hold tabs and
+line breaks: `rule` and the app's rule lists write them as `\t`, `\r` and
+`\n`, so a rule stays one line, and `rule rm` and `rule edit` take the entry
+as it is listed there (the new entry of `rule edit` too). `config add` and
+the app's add field take the character itself: the listed text of such a
+rule, or of a rule already on that list, is refused there, since pasted so
+its `\n` would be the letter, not the line break. Any other text is a rule as
+it stands, a Windows path such as `C:\tools\x.exe` too.
+
+The guard catches an agent's mistakes, such as an agent that tries to give
+itself more rights. It does not stop a command written to get around it (a
+name built at run time, a copy of the program). The real protection is that
+commands run as an account of their own, which may not change the node
+([service](service.md#the-node-as-a-service)), and the node's own folders, which no rule or mode
+opens ([protected paths](#protected-paths-as-the-owner-sees-them)).
+
+### List, change and remove rules
+
+```sh
+nerve-node rule            # all three lists
+nerve-node rule allow
+nerve-node rule edit allow 'exec.run:git status' 'git status --short'
+nerve-node rule rm allow 'git status'
+nerve-node rule rm 'git status *'
+```
+
+`rule edit` changes one entry in its place, as one change in the audit: the
+entry as `rule` prints it, then what it becomes. That is an entry in the
+same form (`'exec.run:git *'`, `'fs.read:~/notes/*'`), or a plain command
+line, which becomes the rule `rule add` makes of it. It works on every list,
+but not on the rules of the guard. The desktop app's Permissions page edits a
+rule the same way (the pencil beside it).
+
+`rule rm` takes the command line `rule add` was given, or an entry as `rule`
+prints it, such as `'exec.run:git *'`. The list is needed only when the entry
+is on two lists. When the text could mean two entries on the list, `rule rm`
+removes none and tells you the two commands that remove them one after the
+other.
+
+### Rules for files and other actions
+
+`rule add` writes command rules and rules on an action's arguments
+(`lamp.set:room=office`, see above). It refuses an entry in the other pattern
+forms (`fs.read:...`, `fs:...`, and also `exec.run:...` and `exec:...`, the
+form `rule` prints), which would never match as a command. Give `rule add` the
+bare command (`'git *'`), not that form. (`rule rm` does take it.) For files and
+other actions, add the rule to the policy by name. `lab` is the center's name on this machine (see
+`nerve-node center`).
+
+```sh
+nerve-node config add center.lab.policy.allow 'fs.read:~/notes/*'
+nerve-node config add center.lab.policy.deny  'fs:~/private/*'
+```
+
+The web UI's [Audit](web-uis.md#audit) page writes the same rules with four
+buttons. That needs the [settings grant](settings-and-config.md#the-settings-grant).
+
+`--action` makes the rule such a button makes for an audit entry of that
+action: the entry's path, or a folder and all below it as `/srv/data/*`. An
+action without a path takes `''`, and covers its capability as `'*'`.
+`--arg FIELD=VALUE` holds such a rule to one argument of the call, as the
+audit buttons that pin one do (see below). `--exact` takes the entry's text as
+it is, a `*` at its end too, as the **Allow** and **Deny** buttons do: an
+agent's `rm -rf *` stays that one command.
+
+```sh
+nerve-node rule add allow /srv/data/report.txt --action fs.read
+nerve-node rule add deny '/srv/data/*' --action fs.write                 # fs.write:/srv/data/*
+nerve-node rule add deny '' --action lamp.set --arg room=bedroom          # lamp.set:room=bedroom
+```
+
+### Rules on an action's arguments
+
+A rule for any action but the `fs` ones and `exec.run` may name values of
+the call's arguments, and a rule for a program's stream the values of its
+parameters. Its pattern is one or more conditions, joined by `,`. The rule
+covers a call that meets all of them; the other arguments are free.
+
+```sh
+nerve-node rule add allow 'lamp.set:room=office,brightness<=50'
+nerve-node rule add deny  'lamp.set:room=bedroom'
+nerve-node rule add deny  'notes.save:path~~/private/*'
+```
+
+| Condition | Meets a call whose argument |
+|---|---|
+| `room=office` | is `office` (a string, number or boolean: `level=3`, `on=true`) |
+| `room!=office` | is not `office` |
+| `brightness<=50` | is a number up to 50; also `<`, `>`, `>=` |
+| `label~desk*` | is a string the glob matches |
+
+- A field is a top-level argument of the action, as its schema in
+  `cap --json` names it. A value is read as that argument's type.
+- A `,` in a value is written `\,`, a `\` before it `\\`. The `,` inside a
+  glob's `{a,b}` or `[...]` needs none. In the value of `=` and `!=` a `[` or
+  `{` is a character like any other.
+- An argument the schema marks as a path (`x-nerve-path`) is matched as a
+  path, as an `fs` rule matches one: as the node resolved it, `~/` is your
+  home, and on Windows case does not count. `path=/srv/a` names that path,
+  `path~/srv/*` a folder and below. As a deny rule it also refuses a call
+  handed a folder above that place, such as `~`, since the program works
+  below it. A path condition starts with `/` or `~` (a `~` glob also with a
+  wildcard, such as `path~**/.env`), as the paths the node resolves do. A
+  plain string has no home: a `~` glob that starts at the home (`~/…`) on
+  one is flagged (see below), since the rule was written for a path argument
+  that is a plain string now. An exact string, such as an audit pins, may
+  start with `~/` like any text.
+- Conditions name the arguments of one action: `lamp.set:…`, not `lamp:…`.
+  A rule without a pattern (`lamp.set`, `lamp`) still covers every call.
+
+The node checks the conditions against the action's schema when the rule is
+written, by `rule add`, `rule edit`, `config add`, the desktop app or a center
+with the [settings grant](settings-and-config.md#the-settings-grant). An argument the action does not
+take, a value not of its type (`brightness=high`), an operator its type does
+not take (`room<3`), a value its schema does not list, and an action nothing
+offers now are refused. So a rule for a [program's](capabilities.md#capability-providers-in-use) action goes
+on once the program is attached.
+
+A call that gives such an argument a value of another type, or leaves it
+out, cannot be told by the rule. Then a deny rule refuses it and an allow rule
+does not cover it: `lamp.set:brightness>50` on the deny list also refuses a
+`lamp.set` call without `brightness`.
+
+When a capability changes and its schema no longer fits a rule (an argument
+the rule names is gone or has another type, or a value it names is no longer
+one the schema lists), the rule stays and decides as written, which is no
+longer what you meant. Where its argument is gone it fails closed: as a deny
+rule it refuses every call of that action, as an allow rule it covers none.
+Where its value is no longer listed, `room=bedroom` holds for no call. `rule
+ls` says so after the rules, `rule --json` lists them under `stale`, and the
+desktop app marks the row:
+
+```text
+warning: the deny rule "lamp.set:room=bedroom" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it
+```
+
+The audit keeps the arguments a rule may pin (top-level strings of up to 200
+characters, numbers and booleans, at most 16) on each entry of such an
+action. The audit pages of the desktop app and the web UI offer each of them:
+pick one, then **Allow with this value** or **Deny with this value**. A path
+argument is kept as the node resolved it, so the rule names the place the call
+reached, however the agent spelt it; a call refused before its path was
+resolved (an action that is off, a path that does not resolve) keeps none, and
+neither does one for an argument the schema does not name. A value is compared
+as written, so a deny on a free string covers that exact value only
+(`mail.send:to=boss@example.com` does not refuse `Boss@Example.com`, which a
+program may read as the same person). Where a program reads values more
+loosely, let its schema list the allowed ones (`enum`), or use the allow list.
+
+### Rule syntax
+
+A rule is `<scope>` or `<scope>:<pattern>`.
+
+- The scope is a capability (`fs`, `exec`) or one action (`fs.read`,
+  `exec.run`).
+- The pattern of `exec.run` and of an `fs` scope is a glob over the call's
+  target. `*` matches across `/` and spaces. Any other action's pattern is
+  conditions on its arguments (see above).
+- Without a pattern the rule covers every call of its scope.
+- A pattern ending in ` *` also matches the bare program. One ending in `/*`
+  also matches the folder itself.
+
+| Pattern of | Is |
+|---|---|
+| `exec.run` | A glob over the whole command line |
+| every `fs` action | A glob over the resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
+| any other action | Conditions on its arguments, a path argument (`x-nerve-path`) read as an `fs` path is |
+
+| Rule | Covers |
+|---|---|
+| `exec.run:git status` | That command line, exactly |
+| `exec.run:git *` | `git` and anything after it |
+| `fs.read:/home/u/notes/*` | Reading the folder and below (not `list` or `grep`) |
+| `fs:~/private/*` | Every `fs` action on the folder and below |
+| `notes.open:path~~/private/*` | The program's `notes.open` with its path there; as a deny rule also one handed a folder above it, such as `~` |
+| `lamp.set:room=office,brightness<=50` | `lamp.set` in the office, up to half bright |
+| `exec` | Every `exec` action, so every command |
+
+Commands and paths never mix: `fs:/tmp/*` is not a command rule. A path rule
+covers the capability it names only: `fs:~/private/*` does not keep a
+[program's capability](capabilities.md#paths-it-takes) that takes paths out of
+that folder. Deny each such action too (`notes.open:path~~/private/*`), or
+make the place a [protected path](#protected-paths-as-the-owner-sees-them), which every capability
+respects. A
+program handed a folder works below it, so a deny rule of its capability that
+may cover a place below that folder refuses the folder as well (and a new
+path it would write to, where it may make a folder; a file it is handed holds
+nothing below it); an `fs` walk
+(`grep`, `find`, `list`) skips the denied place instead. A path rule covers
+only the paths a program marks as such. An unknown rule shape is refused
+when you add it, and so is an `fs` rule written as conditions
+(`fs.read:path~~/private/*`): an `fs` rule names the path itself
+(`fs.read:~/private/*`).
+
+### What a wildcard covers
+
+A wildcard allow rule covers plain commands only. A command is plain when it
+has none of these:
+
+- shell characters: `; & | $ ` ( ) < > @ { } % ' " # , \`
+- a line break or another control character
+- a word that starts another shell or runs text as code, such as `powershell`,
+  `pwsh`, `cmd`, `sh`, `bash`, `eval`, `iex`, `Invoke-Expression`,
+  `Start-Process`, `-Command`, `-EncodedCommand`, `-File`, `/c`, `/k`
+
+Only an allow rule that names the whole line covers such a command. This keeps
+`git *` from allowing `git x; rm -rf ~`. A Windows path with `\` needs an exact
+rule, or `/` in the path.
+
+### Switch a capability off
+
+`cap set` turns a capability or one action on, off or hidden for a center.
+
+```sh
+nerve-node cap set exec.run off
+nerve-node cap set fs hidden
+nerve-node cap
+```
+
+`cap` lists every capability, each action with its effect and, per
+center, whether it may use it now and the switch you set
+([providers](capabilities.md#see-what-is-there)).
+
+| Setting | Effect |
+|---|---|
+| `on` | Normal. Rules and mode decide |
+| `off` | Calls are refused with `disabled`. The center lists it as off |
+| `hidden` | The node leaves it out of what it tells the center, and refuses it |
+
+A capability is `fs` or `exec`. An action is `fs.write` or `exec.run`. A
+switch applies in every mode.
+
+## Protected paths, as the owner sees them
+
+Some places hold secrets or start programs later. The node refuses file calls
+that touch them, in every mode, `user` mode too, whatever a rule says.
+
+### What is protected
+
+On Linux:
+
+| Group | Examples |
+|---|---|
+| Keys and credentials | `~/.ssh`, `~/.gnupg`, keyrings, password managers, `~/.git-credentials`, `~/.netrc`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.npmrc`, `~/.pypirc` |
+| Browser and mail profiles | `~/.mozilla`, `~/.thunderbird`, `~/.config/google-chrome`, `~/.config/chromium` |
+| Shell start-up | `~/.bashrc`, `~/.profile`, `~/.zshrc`, `~/.config/fish` |
+| Autostart and user services | `~/.config/autostart`, `~/.config/systemd` |
+| System files | `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, `/etc/ssh`, `/etc/pam.d`, `/etc/cron.d`, `/etc/systemd`, `/etc/profile` |
+
+These are protected against writes only: `~/.gitconfig`, `~/.config/git`,
+`~/.local/bin`, `~/.local/share/applications`. Tools need to read them.
+
+On Windows the list also holds the OpenSSH server's files in
+`%ProgramData%\ssh`, the registry hives in `%SystemRoot%\System32\config`, the
+all-users Startup folder, Windows PowerShell's home and its profiles, PowerShell
+7's install folder, the user's PowerShell profiles and modules in `Documents`,
+and `NTUSER.DAT`. PowerShell 7 counts when installed with the MSI or winget. A
+copy unpacked from a zip file, installed as a .NET tool or put in a folder of
+your choice is not covered.
+
+Names are matched without regard to case.
+
+### What protection covers
+
+- The file actions (`fs`) and the working directory of a command.
+- It does not cover what a command reads or writes by itself. In `folder` mode
+  (Landlock on Linux, the AppContainer on Windows), a command's sandbox leaves
+  protected paths out. In `user`
+  mode a command runs as you, without a sandbox, and can reach them.
+- It does not see a path a command builds while it runs
+  ([modes](sandbox-linux.md#paths-a-command-builds-at-run-time)).
+- It does not cover what a command asks another program for. With the keys
+  in the system keyring, a command that asks the keyring (`secret-tool`,
+  `busctl --user`, `gdbus`, `dbus-send`) names no protected path, so an
+  allow rule for it reaches the node's keys
+  ([keys](settings-and-config.md#where-the-node-keeps-its-keys)).
+
+### The node's own folders
+
+The node's config and state folders are closed harder. No rule, mode, folder or
+release opens them. The node also checks the paths a command line names
+plainly. In `folder` mode (Landlock on Linux, the AppContainer on Windows) the
+command's sandbox leaves the folders out. A `user` mode command runs as you and can still reach them.
+
+### Release a protected path
+
+Only you can release one, on the machine.
+
+Grant a folder at or inside the protected path. The folder releases it for the
+rights it has, and no more: `r` for reads, `w` for writes, `x` for commands.
+
+```sh
+nerve-node folder add ~/.ssh r       # reads of ~/.ssh may now pass
+```
+
+Or release a path by name:
+
+```sh
+nerve-node config add center.lab.policy.protected.allow '~/.ssh/config'
+```
+
+A folder at a protected path does not release the rest. `~/` as a folder does
+not release `~/.ssh`.
+
+### Protect more
+
+```sh
+nerve-node config add center.lab.policy.protected.extra '~/secrets'
+```
+
+A center with the [settings grant](settings-and-config.md#the-settings-grant) can add paths here. It
+cannot remove one or release one.
+
+## Sudo, as the owner uses it
+
+Sudo is a switch on the machine, not a mode. It works on Linux, and on
+Windows on the node [installed as a service](windows.md#the-node-as-a-service-on-windows) ([sudo on
+Windows](windows.md#sudo-on-windows)). It is off by default.
+
+| Switch | What happens to a `sudo` command |
+|---|---|
+| Off | Refused, even if the sudo list names it. The node holds no password |
+| On | Runs only if the sudo list names it, in every mode. Deny rules and protected paths still apply |
+
+A sudo command is one whose first word is `sudo` (or a path ending in
+`/sudo`). It has its own list, `sudo`. The normal allow list does not count
+for it.
+
+### Turn it on
+
+1. Put the commands on the sudo list: a rule that starts with `sudo` goes
+   there.
+
+   ```sh
+   nerve-node rule add allow 'sudo apt update'
+   nerve-node rule add allow 'sudo apt *'   # sudo apt, and anything after it
+   ```
+
+2. Switch sudo on. The node must be running. It asks for your own sudo
+   password, which shows that you may run commands as root on this machine
+   (on the node installed as a service on Linux with `sudo` in front, as this
+   command stays root's):
+
+   ```sh
+   nerve-node sudo on
+   ```
+
+   A sudo command is yours: it runs as root, in every mode, and the folders
+   do not hold it. Put on the sudo list only what you would run yourself.
+   Who raises it depends on the account the pairing's commands run as
+   ([service](sandbox-linux.md#the-accounts-commands-run-as)):
+
+   - **as you** (`user` mode, `allowlist` mode as you, a node you run
+     yourself): through your sudo, with your password.
+   - **as `nerve-run`** (`folder` mode and `allowlist` mode on the installed
+     Linux node): the node starts the command as root itself. `nerve-run`
+     has no sudo and no password of its own, and your password is not used
+     for it: the sudo list is the only way to root for it. Switching sudo on
+     still asks for your password: it shows that you, who give these
+     commands root, may run commands as root on this machine yourself.
+
+3. Look or turn it off:
+
+   ```sh
+   nerve-node sudo
+   nerve-node sudo off
+   ```
+
+`rule add allow 'sudo …'` puts the command on the sudo list.
+
+### What the node does
+
+On Linux (Windows differs, see [sudo on Windows](windows.md#sudo-on-windows)):
+
+- It checks the password with `sudo -S -k -v`, run as you (the owner on the
+  installed node), so sudo checks your password and your sudoers entries. A wrong password is refused and the switch stays as it was.
+- It keeps the password in memory only. Turning sudo off drops it. A node that
+  restarts has sudo off.
+- It never sends the password to a center. It replaces any copy in a frame,
+  also in a command's output stream, or in the audit log with `[redacted]`.
+  This holds on Windows too.
+- No sudo command runs for a center whose [network you turned
+  off](sandbox-linux.md#no-network-for-a-centers-commands): it would run outside
+  what keeps that center's commands off the network, with full rights. The
+  node refuses it and says why, and `list` tells the agent.
+- A sudo command must be one simple command. One with `; & | $ ` ( ) < >` or a
+  line break is refused. This holds on Windows too.
+- A wildcard entry (a trailing ` *`) covers plain commands only, as a [wildcard allow
+  rule](#what-a-wildcard-covers) does. A line with `@ { } % ' " # , \`
+  or a word that starts another command, such as `start`, `sh`, `powershell`,
+  `cmd`, `iex` or `-Command`, runs only when an entry names the whole line.
+  So `sudo systemctl *` does not cover `sudo systemctl start nginx`, and
+  `sudo net *` does not cover `sudo net start spooler`: add
+  `nerve-node rule add allow 'sudo systemctl start nginx'` without the `*`.
+  The refusal names the character or word. This holds on Windows too.
+- For a pairing whose commands run as you, it starts the command as you, as
+  `sudo -S -k -p <prompt> …`, so sudo raises it from your account. It runs
+  without the Landlock sandbox, which would stop sudo from gaining
+  privileges. It writes the password only after sudo prints the prompt.
+- For a pairing whose commands run as `nerve-run`, it starts the command as
+  root, with root's own group, through `/bin/sh`, in the command's working
+  folder, without the Landlock sandbox. The shell gets the allowed line and
+  nothing else, with a fixed environment (the system's `PATH`, root's
+  `HOME`); it reads the line as root, so `~` is root's home there. The node
+  enters the working folder for it as you, so a folder in your closed home
+  works. The sudo program and its sudoers rules play no part in it. So the
+  line takes no option of sudo: a leading `-n` and `--` are dropped, as
+  they change nothing here, and a command that starts with any other one,
+  such as `sudo -E …` or `sudo -u bob …`, is refused with the reason. Allow
+  and send it without the option.
+- Every other command runs with `no_new_privs`. A `sudo` later in a command
+  line, or any setuid program, cannot gain privileges.
+
+### From the web UI
+
+A center with the [settings grant](settings-and-config.md#the-settings-grant) can turn sudo on and off.
+In Settings, open the machine and press **Turn sudo on**. The browser seals the
+password for the node, and the center only passes it on. The center cannot read
+it.
+
+The center serves the form that takes the password. A tampered center could
+capture the password before the browser seals it. Turn sudo on from the
+machine if you do not trust the center.
+
+Where root is the node's owner ([service](service.md#root-as-the-owner)), no
+center turns sudo on: sudo checks no password of root's, so the password
+would show nothing. Root does, with `nerve-node sudo on` on the machine. That
+does not keep a center from root there: a center with the
+[settings grant](settings-and-config.md#the-settings-grant) may switch itself to `user` mode, whose
+commands run as root, with no password at all.

@@ -785,11 +785,6 @@ fn list(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcErr
     Ok(json!({ "entries": entries }))
 }
 
-/// The hex SHA-256 of a file's bytes.
-pub fn etag_of(path: &Path) -> std::io::Result<String> {
-    digest(&mut std::fs::File::open(path)?)
-}
-
 /// The hex SHA-256 of what `r` reads.
 fn digest(r: &mut impl Read) -> std::io::Result<String> {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
@@ -1015,8 +1010,7 @@ fn write(path: &Path, content: &[u8], if_match: Option<&str>) -> Result<Value, R
         let _ = dir.remove(&tmp);
         return Err(open_error(path, e));
     }
-    let h = ring::digest::digest(&ring::digest::SHA256, content);
-    Ok(json!({"etag": nerve_proto::msg::hex(h.as_ref()), "size": content.len()}))
+    Ok(json!({"etag": nerve_transport::keys::sha256_hex(content), "size": content.len()}))
 }
 
 /// The resolved folder `path`, opened a part at a time from `/` without

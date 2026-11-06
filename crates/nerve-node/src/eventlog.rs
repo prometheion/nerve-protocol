@@ -1,5 +1,5 @@
 //! The installed node's entries in the Windows Event Log: its start, its
-//! stop, a start that fails and a crash (docs/user/logs.md). The program
+//! stop, a start that fails and a crash (docs/dev/windows.md). The program
 //! carries the message table that gives each entry its text: `build.rs`
 //! links the resource [`resource`] makes into `nerve-node.exe`, and `install`
 //! registers the program as the message file of the source [`SOURCE`] in the

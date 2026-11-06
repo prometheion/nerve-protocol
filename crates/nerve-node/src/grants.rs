@@ -1,4 +1,4 @@
-//! The folder grants of Windows folder mode (docs/user/modes.md). Each
+//! The folder grants of Windows folder mode (docs/dev/windows.md). Each
 //! pairing's commands run in an AppContainer of their own
 //! (`nerve_sandbox::appcontainer`), which reaches only what carries a grant
 //! for its SID. The node puts those grants on the center's folders, with the
@@ -660,10 +660,6 @@ impl RecordLock {
                 }
             }
         }
-        #[cfg(not(any(unix, windows)))]
-        Ok(RecordLock {
-            _file: opts.open(&path)?,
-        })
     }
 }
 

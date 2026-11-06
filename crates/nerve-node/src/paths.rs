@@ -144,7 +144,7 @@ impl NodePaths {
         self.state_dir.join("audit.jsonl")
     }
 
-    /// The log (docs/user/logs.md): what the node did, apart from the audit
+    /// The log (docs/dev/logging.md): what the node did, apart from the audit
     /// log, which is what it decided.
     pub fn log_file(&self) -> PathBuf {
         nerve_transport::log::file_in(&self.state_dir)

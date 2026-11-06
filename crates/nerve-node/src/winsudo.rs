@@ -1,4 +1,4 @@
-//! The sudo switch on Windows (docs/user/sudo.md, docs/dev/spec/node-local.md
+//! The sudo switch on Windows (docs/dev/windows.md, docs/dev/spec/node-local.md
 //! §4). Windows has no sudo program: a sudo command starts with the full
 //! token of the account the commands run as. That is the account's logon
 //! as a batch job, which UAC does not filter, as the task scheduler logs an

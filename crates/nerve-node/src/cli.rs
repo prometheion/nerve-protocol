@@ -494,7 +494,7 @@ pub enum CapCmd {
 }
 
 /// What `cap add` and `cap edit` set of a capability of node.toml
-/// (docs/user/config-capabilities.md). The schemas come inline or on stdin
+/// (docs/dev/capabilities.md). The schemas come inline or on stdin
 /// (`-`), never from a file the node would open.
 #[derive(Debug, Args, Clone, Default)]
 pub struct CapSpec {
@@ -881,8 +881,8 @@ pub fn help_pages(cmd: clap::Command, program: &'static str) -> clap::Command {
         .fold(cmd, |cmd, name| {
             cmd.mut_subcommand(name, |c| {
                 c.after_long_help(format!(
-                    "More in the user guide: docs/user/{}",
-                    doc_of(name)
+                    "More in the user guide: {}",
+                    guide_url(doc_of(name))
                 ))
             })
         })
@@ -1085,24 +1085,27 @@ fn rest_of(long: Option<String>, line: &str) -> String {
 /// The user guide's page for a command of the top level.
 pub fn doc_of(command: &str) -> &'static str {
     match command.split([' ', '/']).next().unwrap_or_default() {
-        "install" | "uninstall" | "setup" | "update" | "service" => "service.md",
+        "install" | "uninstall" | "setup" | "update" | "service" | "run" => "install.md",
         "backup" | "restore" => "backup.md",
-        "center" => "pairing.md",
-        "mode" | "folder" | "network" => "modes.md",
-        "rule" => "rules.md",
-        "sudo" => "sudo.md",
-        "status" => "troubleshooting.md",
-        "audit" => "audit.md",
-        "log" => "logs.md",
-        "panic" | "unlock" => "stop.md",
-        "cap" => "config-capabilities.md",
-        "provider" => "providers.md",
-        "proxy" => "proxy.md",
-        "relay" => "relay.md",
-        "ui" => "node-web-ui.md",
-        "config" => "config.md",
+        "center" | "proxy" | "relay" => "pair.md",
+        "mode" | "folder" => "folders-and-modes.md",
+        "network" => "network.md",
+        "rule" | "sudo" => "rules.md",
+        "status" | "audit" | "log" | "panic" | "unlock" => "watch-and-stop.md",
+        "cap" | "provider" => "capabilities.md",
+        "ui" => "web-uis.md",
+        "config" => "settings.md",
         _ => "commands.md",
     }
+}
+
+/// The user guide's page `doc` as this build has it: the docs at the
+/// release's tag in a release build, at `main` in any other.
+pub fn guide_url(doc: &str) -> String {
+    format!(
+        "https://github.com/prometheion/nerve-protocol/blob/{}/docs/user/{doc}",
+        nerve_transport::webui::GUIDE_REF
+    )
 }
 
 fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
@@ -1480,11 +1483,6 @@ async fn rotate_key(
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "center.rotate-key", params).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "center.rotate-key", params).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = params;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     let v = match r {
         Ok(v) => v,
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
@@ -2430,11 +2428,6 @@ async fn daemon_answers(paths: &NodePaths, folders: bool) -> bool {
     {
         folders && crate::pipe::call(paths, "status", json!({})).await.is_ok()
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (paths, folders);
-        false
-    }
 }
 
 /// What `status` says of the limits per command (crate::cgroup::status):
@@ -2497,11 +2490,6 @@ async fn live_status(paths: &NodePaths) -> Result<Option<Value>, String> {
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "status", json!({})).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = paths;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     match r {
         Ok(v) => Ok(Some(v)),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(None),
@@ -2599,7 +2587,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     w(
                         out,
                         format!(
-                            "the AppContainer profile {} stays, since {why}: once the node stopped, remove it by hand (docs/user/modes.md)",
+                            "the AppContainer profile {} stays, since {why}: once the node stopped, remove it by hand (docs/dev/windows.md)",
                             of(n)
                         ),
                     );
@@ -2650,7 +2638,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     ),
                 );
                 // Which `nerve.*` profile is this pairing's: the others
-                // belong to other nodes or are left over (docs/user/modes.md).
+                // belong to other nodes or are left over (docs/dev/windows.md).
                 if cfg!(windows) {
                     w(
                         out,
@@ -4707,11 +4695,6 @@ async fn sudo_cmd(
             SudoCmd::Off => crate::winsudo::off(paths, &WinHost, out).await,
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (paths, out, w, c);
-        Err("the sudo switch works on Linux and Windows only".into())
-    }
 }
 
 /// Whether sudo is on: the running node holds the password (on Windows the
@@ -4729,11 +4712,6 @@ async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
     #[cfg(windows)]
     {
         crate::winsudo::status(paths)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = paths;
-        Ok(false)
     }
 }
 
@@ -4805,11 +4783,6 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     let r = nerve_transport::ctl::call(&paths.ctl_socket(), "caps.list", json!({})).await;
     #[cfg(windows)]
     let r = crate::pipe::call(paths, "caps.list", json!({})).await;
-    #[cfg(not(any(unix, windows)))]
-    let r: Result<Value, String> = {
-        let _ = paths;
-        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
-    };
     match r {
         Ok(v) => Ok(v),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(
@@ -5461,7 +5434,7 @@ fn clear_log(paths: &NodePaths, who: &str) -> Result<(), String> {
     .map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// `log`: the node's log file, the moved-aside one first (docs/user/logs.md).
+/// `log`: the node's log file, the moved-aside one first (docs/dev/logging.md).
 /// `--follow` looks again every 500 ms and reads what was added to the file,
 /// or the new file from its start once the old one was moved aside. With
 /// `json` the lines are as the file holds them: one list, or with `follow`
@@ -5871,7 +5844,7 @@ async fn proxy_cmd(
                 return Err("no password given: the first line of stdin is empty".into());
             }
             // A relay's link holds the proxy URL with this node's login and
-            // the pin: one paste (docs/user/relay.md).
+            // the pin: one paste (docs/dev/node-link.md).
             let (url, pin) =
                 if nerve_proto::link::strip_prefix_ci(url.trim(), "nerve://relay").is_some() {
                     let link = nerve_proto::link::RelayLink::parse(&url)?;
@@ -6075,16 +6048,6 @@ pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
         "proxy password: ",
         out,
     );
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = out;
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| format!("cannot read stdin: {e}"))?;
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
-    }
 }
 
 /// `relay`, `relay on|off|add|set|token|rm` (crate::relay). A token is
@@ -6434,8 +6397,6 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
         Err(e) => return Err(format!("cannot ask the running node: {e}")),
     };
-    #[cfg(not(any(unix, windows)))]
-    let live: Option<Value> = None;
     match (&r.listen, &live) {
         (None, _) => w(out, "relay off".into()),
         (Some(l), Some(v)) => w(
@@ -6589,7 +6550,7 @@ fn relay_pin(
 }
 
 /// The port a relay link names when the relay has no address to listen on
-/// yet: the one docs/user/relay.md uses.
+/// yet: the one docs/dev/node-link.md uses.
 const RELAY_PORT: u16 = 7490;
 
 /// Where a relayed node finds the relay, for its link: `given` (with the
@@ -6879,7 +6840,7 @@ fn setting(cfg: &NodeConfig, key: &str) -> Result<toml::Value, String> {
             Err(no_center_named(cfg, name))
         }
         [first, ..] if SETTING_TABLES.contains(&first.as_str()) => Err(format!(
-            "{key} is not set, so its default applies (docs/user/config.md lists the defaults)"
+            "{key} is not set, so its default applies (docs/dev/settings-and-config.md lists the defaults)"
         )),
         _ => Err(format!(
             "{key} is no setting of node.toml; its tables are {}",
@@ -10822,7 +10783,10 @@ mod tests {
         assert!(!folder.render_help().to_string().contains("--json"));
         let long = folder.render_long_help().to_string();
         assert!(
-            long.ends_with("More in the user guide: docs/user/modes.md\n"),
+            long.ends_with(&format!(
+                "More in the user guide: https://github.com/prometheion/nerve-protocol/blob/{}/docs/user/folders-and-modes.md\n",
+                nerve_transport::webui::GUIDE_REF
+            )),
             "{long}"
         );
         // Bare, it names the commands of every day, each one that exists.

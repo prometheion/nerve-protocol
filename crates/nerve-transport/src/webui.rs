@@ -24,7 +24,17 @@ use crate::http::{Request, Response};
 pub const APP_CSS: &str = include_str!("webui/app.css");
 pub const THEME_JS: &str = include_str!("webui/theme-init.js");
 pub const ICON: &str = include_str!("webui/icon.svg");
-pub const KIT_JS: &str = include_str!("webui/kit.js");
+/// The git ref of the user guide the program's help links to: the release's
+/// tag in a release build, `main` in any other (build.rs).
+pub const GUIDE_REF: &str = env!("NERVE_GUIDE_REF");
+/// The kit, after the guide's ref: its help links to the user guide there
+/// (`GUIDE` in kit.js), which matches the program.
+pub const KIT_JS: &str = concat!(
+    "const NERVE_GUIDE_REF = \"",
+    env!("NERVE_GUIDE_REF"),
+    "\";\n",
+    include_str!("webui/kit.js")
+);
 pub const LOGIN: &str = include_str!("webui/login.html");
 pub const LOGIN_JS: &str = include_str!("webui/login.js");
 
@@ -530,6 +540,30 @@ mod tests {
             vec!["  s.innerHTML = ICONS[name] || \"\";"]
         );
         assert_eq!(html_sinks(LOGIN_JS), Vec::<&str>::new());
+    }
+
+    /// The help's guide links name the docs of this release, at its tag,
+    /// when it is a release build, and `main` in any other build: a tag
+    /// that does not exist yet would be a dead link.
+    #[test]
+    fn the_guide_is_the_one_of_this_release() {
+        assert!(
+            GUIDE_REF == "main" || GUIDE_REF == concat!("v", env!("CARGO_PKG_VERSION")),
+            "{GUIDE_REF}"
+        );
+        assert!(
+            KIT_JS.starts_with(&format!("const NERVE_GUIDE_REF = \"{GUIDE_REF}\";\n")),
+            "{}",
+            &KIT_JS[..80]
+        );
+        let guide = KIT_JS
+            .lines()
+            .find(|l| l.starts_with("const GUIDE = "))
+            .unwrap();
+        assert!(
+            guide.contains("/tree/${NERVE_GUIDE_REF}/docs/user`"),
+            "{guide}"
+        );
     }
 
     /// The scanner of short texts finds a long subtitle, a long banner and a

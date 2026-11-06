@@ -1,4 +1,4 @@
-//! The node as a service (docs/user/service.md): `install`, `update` and
+//! The node as a service (docs/dev/service.md): `install`, `update` and
 //! `uninstall`, on Linux with systemd. The service runs `nerve-node run`
 //! under a user of its own, `nerve`, which owns the node's config and state
 //! folders. The owner's commands reach that node with `sudo nerve-node …`:
@@ -404,14 +404,9 @@ pub fn is_service_node(paths: &NodePaths) -> bool {
     if *paths == Layout::system().paths {
         return true;
     }
-    #[cfg(any(unix, windows))]
-    {
-        let me = crate::account::own_uid();
-        me != 0
-            && matches!(crate::account::lookup(USER), Ok(Some(a)) if a.uid == me && a.comment == USER_MARK)
-    }
-    #[cfg(not(any(unix, windows)))]
-    false
+    let me = crate::account::own_uid();
+    me != 0
+        && matches!(crate::account::lookup(USER), Ok(Some(a)) if a.uid == me && a.comment == USER_MARK)
 }
 
 /// What install, update and uninstall do to the machine besides writing the
@@ -1881,11 +1876,6 @@ fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
 #[cfg(unix)]
 fn symlink(target: &Path, at: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, at)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("the link is made on Linux only"))
 }
 
 /// Removes the link [`link_node`] made, and no other.
@@ -4268,11 +4258,7 @@ pub(crate) mod tests {
     /// did before it moved to the shared downloader, and refuses a sixth
     /// (review r3, finding 7).
     fn sha(b: &[u8]) -> String {
-        ring::digest::digest(&ring::digest::SHA256, b)
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        nerve_transport::keys::sha256_hex(b)
     }
 
     #[tokio::test]

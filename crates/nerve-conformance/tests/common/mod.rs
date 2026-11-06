@@ -123,11 +123,10 @@ pub struct HttpCenter {
 }
 
 impl HttpCenter {
-    /// Its call wait: a call that runs longer becomes a job. It is
-    /// nerve-center's default, longer than the harness part's own wait for
-    /// an answer, so the part is shown to wait for an `execute` that holds
-    /// its answer that long.
-    pub const CALL_WAIT: Duration = Duration::from_secs(20);
+    /// Its call wait: a call that runs longer becomes a job. Short, as the
+    /// harness part's job calls each wait it out; that the part waits that
+    /// much longer for an answer is its own unit test's (`request_wait`).
+    pub const CALL_WAIT: Duration = Duration::from_secs(2);
 
     pub fn start(state: &Path, token: &str) -> HttpCenter {
         let mcp_addr = format!("127.0.0.1:{}", free_port());

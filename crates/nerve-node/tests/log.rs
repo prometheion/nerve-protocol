@@ -2,9 +2,12 @@
 //! the level `node.toml` sets. This file holds one test, since the log it
 //! reads is the process's.
 
+mod common;
+
 use std::time::Duration;
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use common::linked;
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_transport::log::{Entry, Level, Query};
@@ -12,15 +15,6 @@ use serde_json::json;
 use tokio::net::TcpStream;
 
 const WAIT: Duration = Duration::from_secs(15);
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
-}
 
 /// The call's error code, or `ok`.
 async fn invoke(conn: &mut Conn<TcpStream>, action: &str, args: serde_json::Value) -> String {

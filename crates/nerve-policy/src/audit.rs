@@ -105,10 +105,6 @@ impl Entry {
         v["target"] = cut_target(&self.target).into();
         v
     }
-
-    pub fn is_refusal(&self) -> bool {
-        self.decision == "forbidden"
-    }
 }
 
 /// One changed setting: a dotted key and its old and new value.

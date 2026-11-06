@@ -6,10 +6,12 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::Path;
 use std::time::Duration;
 
-use clap::Parser;
+use common::cli;
 use nerve_conformance::fake_center::{self, FakeCenter, Paired};
 use nerve_conformance::wire::{Conn, Recv};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
@@ -88,22 +90,6 @@ async fn next(conn: &mut Conn<TcpStream>, want: &str) -> Option<Map<String, Valu
             _ => return None,
         }
     }
-}
-
-/// Runs one `nerve-node` command line as the owner would.
-async fn cli(paths: &NodePaths, args: &[&str]) -> Result<String, String> {
-    let mut argv: Vec<String> = vec![
-        "nerve-node".into(),
-        "--config-dir".into(),
-        paths.config_dir.display().to_string(),
-        "--state-dir".into(),
-        paths.state_dir.display().to_string(),
-    ];
-    argv.extend(args.iter().map(|s| s.to_string()));
-    let cli = nerve_node::cli::Cli::try_parse_from(argv).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    nerve_node::cli::execute(cli, &mut out).await?;
-    Ok(String::from_utf8(out).unwrap())
 }
 
 /// `center rotate-key` in the background, so the test can play the center.

@@ -37,7 +37,7 @@ pub use config::{
 };
 pub use model::Endpoint;
 
-use crate::util::clip;
+use crate::util::clip_bytes;
 use blocklist::{Call, Rule};
 
 /// Which layer made a decision, for the audit entry.
@@ -517,13 +517,13 @@ pub fn unit_description(action: &str, unit: &str, capability: &str) -> String {
 /// node says of its capability: a description that claims a call is
 /// harmless is data for the model, never an instruction it is given.
 pub fn model_state(call: &CallInfo<'_>) -> Value {
-    let args = clip(&Value::Object(call.args.clone()).to_string(), 2000);
+    let args = clip_bytes(&Value::Object(call.args.clone()).to_string(), 2000);
     json!({
         "capability": call.cap,
         "action": call.action,
         "effect": call.effect.as_str(),
-        "description": clip(call.description, STATE_DESCRIPTION_MAX),
-        "target": clip(call.target, 2000),
+        "description": clip_bytes(call.description, STATE_DESCRIPTION_MAX),
+        "target": clip_bytes(call.target, 2000),
         "os": call.os,
         "tainted": call.tainted,
         "args": args,

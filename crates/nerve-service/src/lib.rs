@@ -1,9 +1,8 @@
-//! What the node's and the center's services share (docs/user/service.md,
-//! docs/user/center.md "Run it as a service"): the accounts, systemd, the
-//! files root writes for a service, the owner's passphrase prompt, and
-//! `update`, which replaces the program, writes the service's files as the
-//! new program has them and puts both back when it does not start. Each
-//! service names its own program, user and files.
+//! What the node's and the center's services share (docs/dev/service.md):
+//! the accounts, systemd, the files root writes for a service, the owner's
+//! passphrase prompt, and `update`, which replaces the program, writes the
+//! service's files as the new program has them and puts both back when it
+//! does not start. Each service names its own program, user and files.
 //!
 //! What a step does to the machine beyond the service's files (accounts,
 //! systemd, running a program) goes through [`System`], so the tests run

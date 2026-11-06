@@ -65,6 +65,12 @@ slint-build = "1.18"
 # The desktop app's file and folder dialogs.
 rfd = "0.17"
 
+# Line tables are enough for a backtrace, and keep a worktree's target folder
+# small; CI builds the same way. `CARGO_PROFILE_DEV_DEBUG=true` brings full
+# debug info back for a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

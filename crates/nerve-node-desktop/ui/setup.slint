@@ -1,7 +1,8 @@
 // The first-run steps, as `nerve-node setup` asks them in a terminal: the
-// machine's name, where the keys live, the first center and its mode. Each
-// step runs its own command when the owner goes on, so the steps can stop
-// anywhere and be taken again.
+// first center and its mode. The machine's name and where the keys live
+// keep their defaults, which Settings changes. Each step runs its own
+// command when the owner goes on, so the steps can stop anywhere and be
+// taken again.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Store } from "store.slint";
@@ -10,17 +11,13 @@ import {
 } from "widgets.slint";
 
 export component SetupDialog inherits Dialog {
-    title: Store.setup-step == 0 ? "Set up this machine"
-        : Store.setup-step == 1 ? "Where the keys live"
-        : Store.setup-step == 2 ? "Pair your first center"
-        : Store.setup-step == 3 ? "What may " + Store.setup-center + " do?"
+    title: Store.setup-step == 0 ? "Pair your first center"
+        : Store.setup-step == 1 ? "What may " + Store.setup-center + " do?"
         : "This machine is set up";
-    subtitle: Store.setup-step == 0 ? "How centers show this machine. Each step is saved when you go on."
-        : Store.setup-step == 1 ? "A key for each center, and one for the settings. Files are right unless you use a keyring for such things."
-        : Store.setup-step == 2 && Store.pair-step == 1 ? "Check that this is your center."
-        : Store.setup-step == 2 && Store.pair-step == 2 ? ""
-        : Store.setup-step == 2 ? "Paste the link the center's web UI shows under Pair a machine."
-        : Store.setup-step == 3 ? "You can change it any time under Permissions."
+    subtitle: Store.setup-step == 0 && Store.pair-step == 1 ? "Check that this is your center."
+        : Store.setup-step == 0 && Store.pair-step == 2 ? ""
+        : Store.setup-step == 0 ? "Paste the link the center's web UI shows under Pair a machine."
+        : Store.setup-step == 1 ? "You can change it any time under Permissions."
         : Store.service-state == "stopped" ? "Start the service to link this machine to its centers."
         : "The node links this machine to its centers.";
     card-width: 580px;
@@ -28,7 +25,7 @@ export component SetupDialog inherits Dialog {
         Store.setup-close();
     }
     enter => {
-        if (!Store.setup-busy && !Store.pair-busy && (Store.setup-step != 2 || (Store.pair-step == 0 && Store.pair-link != "")
+        if (!Store.setup-busy && !Store.pair-busy && (Store.setup-step != 0 || (Store.pair-step == 0 && Store.pair-link != "")
             || (Store.pair-step == 1 && Store.pair-preview.ready) || Store.pair-step == 2)) {
             Store.setup-next();
         }
@@ -38,55 +35,9 @@ export component SetupDialog inherits Dialog {
     // step says all in its title.
     VerticalLayout {
         Reveal {
-            shown: Store.setup-step < 4 || Store.setup-error != "";
+            shown: Store.setup-step < 2 || Store.setup-error != "";
             Reveal {
-                shown: Store.setup-step == 0;
-                Field {
-                    label: "Name";
-                    hint: "Empty: the host name.";
-                    TextField {
-                        text <=> Store.setup-name;
-                        label: "Name";
-                        edited => {
-                            Store.setup-error = "";
-                        }
-                        accepted => {
-                            Store.setup-next();
-                        }
-                    }
-                }
-            }
-
-            Reveal {
-                shown: Store.setup-step == 1;
-                HorizontalLayout {
-                    spacing: Space.md;
-                    OptionTile {
-                        icon: @image-url("icons/archive.svg");
-                        title: "Files";
-                        text: "Only the node's account can read them.";
-                        selected: Store.setup-storage == 0;
-                        clicked => {
-                            Store.setup-storage = 0;
-                        }
-                    }
-                    OptionTile {
-                        icon: @image-url("icons/key.svg");
-                        title: "System keyring";
-                        text: Store.keyring-usable || Store.setup-storage == 1
-                            ? "The keyring of the node's account. It must answer when the node starts."
-                            : Store.keyring-why;
-                        enabled: Store.keyring-usable || Store.setup-storage == 1;
-                        selected: Store.setup-storage == 1;
-                        clicked => {
-                            Store.setup-storage = 1;
-                        }
-                    }
-                }
-            }
-
-            Reveal {
-                shown: Store.setup-step == 2 && Store.pair-step == 0;
+                shown: Store.setup-step == 0 && Store.pair-step == 0;
                 VerticalLayout {
                     spacing: Space.lg;
                     Field {
@@ -116,7 +67,7 @@ export component SetupDialog inherits Dialog {
 
             // Back from the mode: the center is paired already.
             Reveal {
-                shown: Store.setup-step == 2 && Store.pair-step == 2;
+                shown: Store.setup-step == 0 && Store.pair-step == 2;
                 Banner {
                     tone: Tone.ok;
                     title: "Paired with " + Store.setup-center;
@@ -125,7 +76,7 @@ export component SetupDialog inherits Dialog {
             }
 
             Reveal {
-                shown: Store.setup-step == 2 && Store.pair-step == 1;
+                shown: Store.setup-step == 0 && Store.pair-step == 1;
                 Rectangle {
                     background: Theme.surface-alt;
                     border-radius: Radius.lg;
@@ -158,7 +109,7 @@ export component SetupDialog inherits Dialog {
 
 
             Reveal {
-                shown: Store.setup-step == 3;
+                shown: Store.setup-step == 1;
                 HorizontalLayout {
                     spacing: Space.md;
                     OptionTile {
@@ -193,11 +144,11 @@ export component SetupDialog inherits Dialog {
 
 
             Reveal {
-                shown: (Store.setup-step == 2 ? Store.pair-error : Store.setup-error) != "";
+                shown: (Store.setup-step == 0 ? Store.pair-error : Store.setup-error) != "";
                 gap: Space.xl;
                 Banner {
                     tone: Tone.danger;
-                    text: Store.setup-step == 2 ? Store.pair-error : Store.setup-error;
+                    text: Store.setup-step == 0 ? Store.pair-error : Store.setup-error;
                 }
             }
 
@@ -212,14 +163,16 @@ export component SetupDialog inherits Dialog {
             VerticalLayout {
                 alignment: center;
                 Steps {
-                    count: 5;
+                    count: 3;
                     current: Store.setup-step;
                 }
             }
             Rectangle {
                 horizontal-stretch: 1;
             }
-            if Store.setup-step > 0: Button {
+            // Back from the pairing's confirmation to its link, and from a
+            // later step to the one before.
+            if Store.setup-step > 0 || Store.pair-step == 1: Button {
                 text: "Back";
                 icon: @image-url("icons/arrow-left.svg");
                 kind: ButtonKind.ghost;
@@ -228,8 +181,8 @@ export component SetupDialog inherits Dialog {
                     Store.setup-back();
                 }
             }
-            if Store.setup-step < 4: Button {
-                text: Store.setup-step == 2 ? "Not now" : "Skip";
+            if Store.setup-step < 2: Button {
+                text: Store.setup-step == 0 ? "Not now" : "Skip";
                 kind: ButtonKind.ghost;
                 enabled: !Store.setup-busy && !Store.pair-busy;
                 clicked => {
@@ -237,13 +190,13 @@ export component SetupDialog inherits Dialog {
                 }
             }
             Button {
-                text: Store.setup-step == 4 ? (Store.service-state == "stopped" ? "Start the service" : "Done")
-                    : Store.setup-step == 2 && Store.pair-step == 1 ? "Pair"
+                text: Store.setup-step == 2 ? (Store.service-state == "stopped" ? "Start the service" : "Done")
+                    : Store.setup-step == 0 && Store.pair-step == 1 ? "Pair"
                     : "Continue";
                 kind: ButtonKind.primary;
                 busy: Store.setup-busy || Store.pair-busy;
                 // Pair only when the check found that it can work.
-                enabled: Store.setup-step != 2 || (Store.pair-step == 0 && Store.pair-link != "")
+                enabled: Store.setup-step != 0 || (Store.pair-step == 0 && Store.pair-link != "")
                     || (Store.pair-step == 1 && Store.pair-preview.ready) || Store.pair-step == 2;
                 clicked => {
                     Store.setup-next();

@@ -1,4 +1,4 @@
-//! Limits per command (docs/user/limits.md): on Linux every command runs in
+//! Limits per command (docs/dev/sandbox-linux.md): on Linux every command runs in
 //! a cgroup of its own, with the memory, CPU and processes its call was
 //! granted ([`nerve_policy::config::CommandLimits::grant`]).
 //!

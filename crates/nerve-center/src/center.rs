@@ -641,7 +641,7 @@ impl Center {
         &self.dir
     }
 
-    /// The log (docs/user/logs.md): what the web UI shows and the file holds.
+    /// The log (docs/dev/logging.md): what the web UI shows and the file holds.
     pub fn log(&self) -> &Arc<Log> {
         &self.log
     }
@@ -2187,13 +2187,13 @@ impl Center {
                     .to_string();
                 self.update(|s| {
                     if let Some(n) = s.nodes.get_mut(&node) {
-                        n.going_away = Some(util::clip(&why, 200));
+                        n.going_away = Some(util::clip_bytes(&why, 200));
                     }
                 });
                 self.note(
                     Level::Info,
                     Some(&node),
-                    format!("the node is going away: {}", util::clip(&why, 200)),
+                    format!("the node is going away: {}", util::clip_bytes(&why, 200)),
                 );
                 self.changed(Change::Nodes);
             }
@@ -2244,10 +2244,6 @@ impl Center {
                 .map(|n| n.name.clone())
                 .unwrap_or_default()
         })
-    }
-
-    pub fn node_id_by_name(&self, name: &str) -> Option<String> {
-        self.read(|s| s.node_by_name(name).map(|n| n.id.clone()))
     }
 
     pub fn audit(&self) -> Vec<Value> {
@@ -2556,7 +2552,7 @@ impl Center {
                 format!(
                     "the node did not {wanted} from the web UI ({}): {}",
                     e.kind().as_str(),
-                    util::clip(&e.message, 300)
+                    util::clip_bytes(&e.message, 300)
                 ),
             ),
         }

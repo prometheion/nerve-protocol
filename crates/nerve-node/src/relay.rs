@@ -387,7 +387,7 @@ pub fn new_token() -> (String, String) {
 
 /// The lowercase hex SHA-256 of a relay token.
 pub fn token_hash(token: &str) -> String {
-    nerve_proto::msg::hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
+    nerve_transport::keys::sha256_hex(token.as_bytes())
 }
 
 /// Runs the relay while the config says so: listens on `relay.listen`
@@ -1067,11 +1067,7 @@ async fn dial_center(url: &CenterUrl, until: tokio::time::Instant) -> Result<Box
 
 /// A target as the log shows it: cut, since a peer chooses it.
 fn clip(s: &str) -> String {
-    let mut out: String = s.chars().take(80).collect();
-    if s.chars().count() > 80 {
-        out.push('…');
-    }
-    out
+    nerve_proto::text::clip(s, 80)
 }
 
 /// Carries bytes both ways between the relayed node and the center, unread,

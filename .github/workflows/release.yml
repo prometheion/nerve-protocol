@@ -40,6 +40,13 @@ on:
         description: "Version x.y.z, the one in the workspace Cargo.toml"
         type: string
         required: true
+      # Off until 0.1.0, which turns it on: 0.0.7 publishes the Linux programs
+      # only (docs/dev/releasing.md).
+      windows:
+        description: "Build and publish the Windows programs too (off until 0.1.0)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +70,11 @@ env:
   BRANCH: ${{ inputs.branch }}
   KIND: ${{ inputs.kind }}
   VERSION: ${{ inputs.version }}
+  WINDOWS: ${{ inputs.windows }}
+  # The git ref the programs' help links to for the user guide: a release
+  # links its own tag (made after the run, before anyone has the programs), a
+  # pre-release links main, since its tag exists only after the run.
+  NERVE_GUIDE_REF: ${{ inputs.kind == 'release' && format('v{0}', inputs.version) || 'main' }}
 
 jobs:
   check:
@@ -346,8 +358,10 @@ jobs:
       tests: tests-{0}-linux
       ref: ${{ needs.check.outputs.sha }}
 
+  # Only with the input `windows`: 0.0.7 publishes no Windows program.
   windows:
     needs: check
+    if: ${{ inputs.windows }}
     runs-on: windows-2025
     env:
       TARGET: x86_64-pc-windows-msvc
@@ -363,7 +377,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
       # The static C runtime: a fresh Windows has no vcruntime140.dll.
       # No nerve-node on its own: on Windows the desktop app is the only way
-      # to the node (docs/user/install.md).
+      # to the node (docs/dev/windows.md).
       - name: Build
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
@@ -398,9 +412,20 @@ jobs:
   # The release is made as a draft with its files first, then the tag, then the
   # draft is published, so that the step most likely to fail (the upload) runs
   # before there is a tag. If anything here fails, the last step removes the
-  # draft and the tag this run created, and nothing else (see there).
+  # draft and the tag this run created, and nothing else (see there). The
+  # Windows job is skipped without the input `windows`, which would skip this
+  # job too, so it says itself what it needs: every other job passed, and the
+  # Windows job passed with the input or was skipped without it.
   publish:
     needs: [check, linux, desktop-linux, windows, conformance, installed]
+    if: >-
+      ${{ !cancelled()
+      && needs.check.result == 'success'
+      && needs.linux.result == 'success'
+      && needs.desktop-linux.result == 'success'
+      && needs.conformance.result == 'success'
+      && needs.installed.result == 'success'
+      && needs.windows.result == (inputs.windows && 'success' || 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -423,11 +448,16 @@ jobs:
       - name: The checksums
         run: |
           cd dist
-          # nerve-node-* takes the desktop app's two as well; Windows has no
-          # nerve-node of its own.
+          # Two Linux programs on each of two machines and the Linux desktop
+          # app; with Windows also its two (nerve-node-* takes the desktop
+          # app's as well; Windows has no nerve-node of its own).
+          want=5
+          if [ "$WINDOWS" = true ]; then
+            want=7
+          fi
           files=(nerve-center-* nerve-node-*)
-          if [ "${#files[@]}" != 7 ]; then
-            echo "expected 7 binaries, got: ${files[*]}" >&2
+          if [ "${#files[@]}" != "$want" ]; then
+            echo "expected $want binaries, got: ${files[*]}" >&2
             exit 1
           fi
           sha256sum "${files[@]}" > SHA256SUMS
@@ -444,7 +474,11 @@ jobs:
               prerelease=true
               ;;
           esac
-          footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/service.md, docs/user/desktop.md)."
+          if [ "$WINDOWS" = true ]; then
+            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
+          else
+            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer), built from $SHA. Windows comes with 0.1.0. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
+          fi
           # A pre-release's body is the footer alone.
           if [ "$KIND" = release ]; then
             { cat notes/changelog.md; echo; echo "$footer"; } > release-notes.md

@@ -1,5 +1,5 @@
 //! Conditions on a call's arguments (#152, C1): the pattern of a rule for
-//! any action but the `fs` ones and `exec.run` (docs/user/rules.md).
+//! any action but the `fs` ones and `exec.run` (docs/dev/policy-engine.md).
 //!
 //! A pattern is one or more conditions joined by `,`, each `field`, an
 //! operator and a value: `=` and `!=` compare a string, number or boolean,

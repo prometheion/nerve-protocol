@@ -3,14 +3,16 @@
 //! and one that no rule allows, folder mode where allow rules do not count,
 //! the 401 stop, and the conformance node checks.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::owner_edit;
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, NodeOptions, NodePaths};
-use nerve_policy::NodeConfig;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
@@ -67,18 +69,6 @@ async fn pair_in_allowlist(paths: &NodePaths, center: &FakeCenter) {
         c.centers[0].policy.mode = nerve_policy::Mode::Allowlist
     })
     .await;
-}
-
-/// Changes the config the way the owner does while no daemon runs: through
-/// the CLI's settings store, which signs the file. The node refuses a file it
-/// did not sign.
-async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
-    nerve_node::cli::edit(paths, |c| {
-        f(c);
-        Ok(())
-    })
-    .await
-    .expect("the owner's edit");
 }
 
 /// Accepts the node's link and runs the handshake.
@@ -1521,7 +1511,7 @@ async fn folder_mode_says_nothing_of_the_links_that_were_there_before() {
 /// A folder mode command gets no controlling terminal. On a node run by hand
 /// in a terminal that is the owner's, which the command must not reach
 /// through `/dev/tty`, nor read the pty by its name under `/dev/pts`
-/// (docs/user/modes.md). The test runs itself again in a session of
+/// (docs/dev/sandbox-linux.md). The test runs itself again in a session of
 /// its own whose controlling terminal is a new pty, as a node started in a
 /// terminal has.
 #[cfg(target_os = "linux")]

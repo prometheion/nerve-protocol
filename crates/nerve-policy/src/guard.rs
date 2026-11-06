@@ -1,5 +1,5 @@
 //! The guard against changing the node, on parsed commands
-//! (docs/dev/policy-engine.md, the guard; docs/user/rules.md).
+//! (docs/dev/policy-engine.md, the guard).
 //!
 //! Each rule of the guard is a deny rule `guard:<name>` that looks at every
 //! command of an `exec.run` line ([`crate::command`]): at any depth (`$( … )`,

@@ -348,7 +348,7 @@ mod sys {
         if !trusted_owner(&owner, &system, &admins, node.as_ref()) {
             let who = crate::win_host::sid_text(&owner).unwrap_or_else(|e| e);
             return Err(format!(
-                "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/user/troubleshooting.md, \"The control pipe is not the node's\"). With the node stopped, folder changes go to node.toml"
+                "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/dev/windows.md, \"The control pipe is not the node's\"). With the node stopped, folder changes go to node.toml"
             ));
         }
         Ok(())

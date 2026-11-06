@@ -8,6 +8,8 @@ pub mod backup;
 pub mod ctl;
 pub mod download;
 pub mod files;
+#[cfg(test)]
+mod guide_ref;
 pub mod http;
 pub mod keys;
 pub mod log;

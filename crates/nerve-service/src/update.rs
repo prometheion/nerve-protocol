@@ -439,11 +439,7 @@ pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
         })
         .ok_or_else(|| format!("the release's SHA256SUMS lists no {asset}"))?;
     let program = download(&format!("{base}/{asset}"), PROGRAM_MAX).await?;
-    let got: String = ring::digest::digest(&ring::digest::SHA256, &program)
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let got = nerve_transport::keys::sha256_hex(&program);
     if got != want {
         return Err(format!(
             "the downloaded {asset} does not match its line in SHA256SUMS; nothing changed"

@@ -1,4 +1,4 @@
-//! Capabilities of the config (`[[capability]]`, docs/user/config-capabilities.md)
+//! Capabilities of the config (`[[capability]]`, docs/dev/capabilities.md)
 //! on a real node daemon, in process: the node offers them by its platform
 //! and by the effect table, decides and audits each call like any other, and
 //! runs the owner's command itself with the call's arguments as whole
@@ -9,11 +9,14 @@
 //! only: Windows reads them and offers none yet.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use common::{linked, owner_edit};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
@@ -46,15 +49,6 @@ fn options(root: &Path) -> NodeOptions {
     o
 }
 
-async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
-    nerve_node::cli::edit(paths, |c| {
-        f(c);
-        Ok(())
-    })
-    .await
-    .expect("the owner's edit");
-}
-
 /// A config capability from its `[[capability]]` lines.
 fn cap(toml: &str) -> ConfigCapability {
     let c = NodeConfig::parse(&format!("[[capability]]\n{toml}\n")).expect("a capability");
@@ -79,15 +73,6 @@ async fn node(
     })
     .await;
     Daemon::start(o).await.expect("start")
-}
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
 }
 
 async fn invoke(

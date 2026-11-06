@@ -25,6 +25,7 @@ use nerve_transport::ws::WsMessage;
 
 use crate::descriptor::IMPLICIT;
 use crate::paths::{NodePaths, home_dir};
+use nerve_proto::text::clip;
 
 /// How a daemon runs.
 #[derive(Debug, Clone)]
@@ -1882,7 +1883,7 @@ pub const NETWORK_SUDO: &str = "the owner turned the network off for this center
 /// whether this is the installed node, `account` the account they run as.
 /// Where Landlock is missing, `nerve-run` is held to its folders by its own
 /// account and the ACLs alone, and the installed Linux node runs its
-/// commands without it (docs/user/modes.md). `account` is asked only when
+/// commands without it (docs/dev/sandbox-linux.md). `account` is asked only when
 /// the answer depends on it.
 pub fn folder_refusal(
     sandbox: bool,
@@ -2324,11 +2325,6 @@ impl Daemon {
                 let _ = tx.send(Event::Stop);
             });
         }
-        #[cfg(not(any(unix, windows)))]
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = tx.send(Event::Stop);
-        });
         Daemon::run_until(opts, events).await
     }
 
@@ -2495,11 +2491,6 @@ async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-async fn start_ctl(_shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
-    Ok(tokio::spawn(async {}))
-}
-
 /// What [`Shared::add_folder`] stored.
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
@@ -2571,7 +2562,7 @@ pub(crate) async fn pipe_control(
             shared.config_caps,
         )),
         "center.rotate-key" => rotate_key(shared, &params).await,
-        "folder.add" | "folder.set" | "folder.rm" => {
+        "folder.add" | "folder.rm" => {
             let (center, change) =
                 match crate::folder_change::FolderChange::from_request(method, params) {
                     Ok(r) => r,
@@ -2974,13 +2965,6 @@ fn show_value(v: &Value) -> String {
         other => other.to_string(),
     };
     clip(&text, 80)
-}
-
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
-    }
 }
 
 /// The entries of a list setting. A list that is empty is not in the file, so

@@ -216,7 +216,7 @@ component CommandRow inherits Rectangle {
                         kind: ButtonKind.ghost;
                         small: true;
                         clicked => {
-                            Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/main/docs/user/" + root.item.doc);
+                            Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/" + root.item.doc);
                         }
                     }
                     Rectangle {
@@ -354,7 +354,7 @@ export component HelpPage inherits PageFrame {
             icon: @image-url("icons/external.svg");
             kind: ButtonKind.ghost;
             clicked => {
-                Platform.open-url("https://github.com/prometheion/nerve-protocol/tree/main/docs/user");
+                Platform.open-url("https://github.com/prometheion/nerve-protocol/tree/" + Store.guide-ref + "/docs/user");
             }
         }
     }

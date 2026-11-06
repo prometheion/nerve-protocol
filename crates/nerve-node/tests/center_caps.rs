@@ -1,5 +1,5 @@
 //! Capabilities a center adds itself (`settings.cap-add`, `cap-edit`,
-//! `cap-rm`; docs/user/config-capabilities.md) on a real node daemon, in
+//! `cap-rm`; docs/dev/capabilities.md) on a real node daemon, in
 //! process: a center with the settings grant `write` adds them to its own
 //! entry, they are offered to it alone, counted as `execute`, and run as
 //! `nerve-run`, which a node run by hand does not have; here the node by
@@ -7,10 +7,13 @@
 //! as in config_caps.rs. Linux only: Windows takes none yet (issue #176).
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use common::{linked, owner_edit};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
@@ -35,15 +38,6 @@ fn options(root: &Path, by_hand: bool) -> NodeOptions {
         appcontainer: false,
     });
     o
-}
-
-async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
-    nerve_node::cli::edit(paths, |c| {
-        f(c);
-        Ok(())
-    })
-    .await
-    .expect("the owner's edit");
 }
 
 /// Pairs with each of `centers` under its name, gives each the settings
@@ -71,15 +65,6 @@ async fn node(
     })
     .await;
     Daemon::start(o).await.expect("start")
-}
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
 }
 
 async fn invoke(

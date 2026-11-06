@@ -1,5 +1,13 @@
 # The desktop app
 
+`nerve-node-desktop`: the node with an app. Its installer, the rights it
+asks for, its settings tabs, what it needs per desktop, its keys and its own
+settings. The user guide's [install](../user/install.md#the-desktop-app) and
+[web UIs](../user/web-uis.md#the-desktop-app) pages are the short version.
+Windows comes with 0.1.0: the release has the Linux app only, and the
+Windows text below waits for it ([Windows](windows.md)). The rest of this
+page was the user guide's.
+
 `nerve-node-desktop` is the node with a window, for a machine with a desktop:
 Linux x86_64 with GNOME or KDE Plasma (Wayland or X11), and Windows x86_64.
 It is one program: it holds the node, its CLI and the app. It installs
@@ -20,7 +28,7 @@ From [Releases](https://github.com/prometheion/nerve-protocol/releases):
 | Linux, x86_64 | `nerve-node-desktop-x86_64-linux` (needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
 | Windows, x86_64 | `nerve-node-desktop-x86_64-windows.exe` |
 
-Check it against `SHA256SUMS` ([install](install.md#download)).
+Check it against `SHA256SUMS` ([install](service.md#download)).
 
 ## Install
 
@@ -33,18 +41,13 @@ A downloaded file may not run as a program yet.
 - **KDE Dolphin**: right-click the file, **Properties**, **Permissions**, tick
   **Is executable**, **OK**, then click the file.
 
-### Windows
-
-Double-click the file. It is not signed, so Windows may show "Windows
-protected your PC": **More info**, then **Run anyway**.
-
 ### The installer
 
 The first start shows the app's installer. It says what it installs, and
 **Install** does it:
 
 - the node, as a service under a user of its own, `nerve`, that starts with
-  the machine (what `nerve-node install` does, [service](service.md));
+  the machine (what `nerve-node install` does, [service](service.md#the-node-as-a-service));
 - the app, with **Nerve** in the application menu (the Start menu on
   Windows);
 - `nerve://` links, so a pairing link from a center's web UI opens in Nerve.
@@ -55,17 +58,16 @@ become the node's owner: from then on the app needs it only for update,
 uninstall and a few more ([administrator rights](#administrator-rights)). On
 Windows the installer first asks for your own Windows password: commands
 from your centers run as you, and the service needs your password to start
-them ([Windows](service.md#the-account-commands-run-as-on-windows)). That
+them ([Windows](windows.md#the-account-commands-run-as-on-windows)). That
 holds when you are a standard user and an administrator types their name and
 password into the UAC prompt: the commands still run as you, not as the
 administrator. If your password was mistyped, enter it again under
 **Settings**, **General**, **Account for commands**. On Linux `folder` and
 `allowlist` mode run them as `nerve-run`, an account of their own that
-install makes, and `user` mode as you ([modes](modes.md#the-account-nerve-run-linux)).
+install makes, and `user` mode as you ([modes](sandbox-linux.md#the-account-nerve-run)).
 
-When it is done, **Open Nerve** opens the app. Its first-run steps name the
-machine, choose where the keys live, pair the first center and choose its
-mode; **Back** goes to the step before, **Skip** past one. The downloaded
+When it is done, **Open Nerve** opens the app. Its first-run steps pair the
+first center and choose its mode; **Back** goes to the step before, **Skip** past one. The downloaded
 file is no longer needed.
 
 | What | Linux | Windows |
@@ -74,7 +76,7 @@ file is no longer needed.
 | The menu entry | `/usr/local/share/applications/nerve-node-desktop.desktop`, its icon in `/usr/local/share/icons/hicolor` | `Nerve` in the Start menu of all users |
 | `nerve://` links | the entry's `x-scheme-handler/nerve`, the default in `/etc/xdg/mimeapps.list` | `HKEY_LOCAL_MACHINE\Software\Classes\nerve` |
 | Apps & features | | `Nerve`, in `HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve` |
-| The node's files, the service | as `nerve-node install` puts them ([service](service.md#install)) | as on Windows ([service](service.md#windows)) |
+| The node's files, the service | as `nerve-node install` puts them ([service](service.md#what-install-does)) | as on Windows ([service](windows.md#the-node-as-a-service-on-windows)) |
 
 On Linux, a node installed before with `nerve-node install` keeps its
 settings, pairings and keys: the installer adds the app, and the service runs
@@ -82,7 +84,7 @@ the app's program from then on, so there is one program to update. The old
 program, `/usr/local/bin/nerve-node`, becomes a link to the app's, so the
 command `nerve-node` keeps working. A plain `nerve-node uninstall` later
 hands over to the app's uninstall, so it removes the app too
-([uninstall](service.md#uninstall)).
+([uninstall](service.md#uninstall-the-node)).
 
 ## Administrator rights
 
@@ -119,7 +121,7 @@ How: the running node takes the owner's command over a socket of its own
 (`/run/nerve-node/owner.sock`; on Windows a named pipe open to the owners
 only), checks who asks by the account the system names for the caller, and
 runs the command as its own user, exactly as `sudo nerve-node …` does. Every
-change keeps the CLI's checks and is in the [audit log](audit.md) with the
+change keeps the CLI's checks and is in the [audit log](logging.md#the-audit-log-as-the-owner-reads-it) with the
 owner's name. While the node is stopped, only an administrator changes it:
 start it first.
 
@@ -136,12 +138,12 @@ start it first.
   change the node's settings as you can, also through a program of yours
   outside the node (your systemd user manager, a tmux server). That is your
   choice when you give a center this mode, and yours to answer for. By
-  default the center's [blocklist and action checker](action-checker.md) and
-  the node's [guard](rules.md#the-guard-against-changing-the-node) catch a
+  default the center's [blocklist and action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) and
+  the node's [guard](policy-engine.md#the-guard-against-changing-the-node) catch a
   command that tries it by mistake; they are no boundary.
 
 On Windows every command runs as you, `folder` mode in an AppContainer
-([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)); an
+([modes](windows.md#what-a-command-can-reach-in-folder-mode-windows)); an
 account of their own there is planned.
 
 The node also refuses the owner socket to a process it sees below a command
@@ -207,7 +209,7 @@ so the node checks a value as it checks the command line's.
 - **Network**: the **Proxy**. The relay has a page of its own
   ([Relay](#relay)).
 - **Limits**: what one command may use and the most a call may ask for
-  (`limits.command`, [limits](limits.md)), how long a command runs
+  (`limits.command`, [limits](sandbox-linux.md#limits-per-command)), how long a command runs
   (`limits.default_timeout_secs`, `max_timeout_secs`, in minutes), and the
   node's commands at once and output kept of a command (`limits.max_running`,
   `output_cap_bytes`, in MiB). An empty field is the default again.
@@ -228,7 +230,7 @@ so the node checks a value as it checks the command line's.
 The settings without a control of their own are under **Advanced**:
 `machine.allow_root` and `machine.sudo_path` (Linux, for a node run by hand,
 not the installed one), and `policy.protected` of a center ([protected
-paths](protected-paths.md)). The programs allowed as providers and the
+paths](policy-engine.md#protected-paths-as-the-owner-sees-them)). The programs allowed as providers and the
 capabilities of your `node.toml` are on [Capabilities](#capabilities).
 A center's other settings are on **Centers**, **Permissions** and
 **Capabilities**.
@@ -240,7 +242,7 @@ forbidden commands, and a line that the allow rules count only in allowlist
 mode. The sudo list is in **Sudo**, beside its switch. The pencil beside a
 rule edits it in place, as one change (`rule edit`), the rules of the guard
 too. A rule on an action's arguments (`lamp.set:room=office`,
-[rules](rules.md#rules-on-an-actions-arguments)) goes on the allow or deny
+[rules](policy-engine.md#rules-on-an-actions-arguments)) goes on the allow or deny
 list as it is: while you type one, the line below the field names the
 arguments that action takes, from what the node offers this center, or says
 what is wrong with the conditions so far (an argument it does not take, a value
@@ -281,24 +283,24 @@ lost**: none of its commands runs until that is fixed.
 Where the kernel has no Landlock, a center whose commands run as `nerve-run`
 shows **Without Landlock** under the mode, and **nerve-run can read more of
 your home** when your home is open to other accounts or a folder you gave
-lies in it ([modes](modes.md#your-home-and-other-accounts)). With Landlock
+lies in it ([modes](sandbox-linux.md#your-home-and-other-accounts)). With Landlock
 neither shows.
 
 The guard against changing the node is built in on **Permissions** as on
-the CLI ([rules](rules.md#the-guard-against-changing-the-node)).
+the CLI ([rules](policy-engine.md#the-guard-against-changing-the-node)).
 
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
 the keyring), and the keyring `setup` installs for the node's account on a
 Linux without a desktop session for it. On Windows neither is there: the
-installed node keeps its keys in files ([Windows](service.md#windows)).
+installed node keeps its keys in files ([Windows](windows.md#the-node-as-a-service-on-windows)).
 
 ## Capabilities
 
 **Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap`
 does: its own capabilities, the [capabilities of your
-`node.toml`](config-capabilities.md) and those of the programs you allow
-([providers](providers.md)). Each action, and each state key, event or
+`node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) and those of the programs you allow
+([providers](capabilities.md#capability-providers-in-use)). Each action, and each state key, event or
 stream of a program, has its effect (`read`, `write`, `execute`, `sense`,
 `actuate`), its line for the agent and, while the node runs, whether the
 chosen center may use it now. **On**, **Off** and **Hidden** switch a
@@ -308,7 +310,7 @@ shows it marked "like its capability"; with neither chosen its mode decides,
 and `sense` and `actuate` need your **On**. One the
 node leaves out, such as a program's action whose schema is outside what a
 center takes, says why in red and has no switch. A capability the chosen
-center [added itself](config-capabilities.md#capabilities-a-center-adds)
+center [added itself](capabilities.md#capabilities-a-center-adds)
 shows with the source `center <name>`, its switches and the whole command
 it runs, over as many lines as it takes, and only while that center is
 chosen: its line for the agent is the center's own words, so read the
@@ -343,7 +345,7 @@ add more.
 
 ## Relay
 
-The **Relay** page has both sides of a [relay](relay.md). **This node
+The **Relay** page has both sides of a [relay](node-link.md#a-relay-as-the-owner-sets-it-up). **This node
 through a relay**: for a machine that reaches no center itself, **Connect…**
 takes the link a relay showed (or its parts: the relay's address, this
 node's name there, its token and the relay's pin), and the page says through
@@ -368,10 +370,10 @@ An entry of a call has the four buttons of the web UI's audit page
 (**Allow**, **Allow as wildcard**, **Deny**, **Deny as wildcard**, which run
 `rule add --action`); one whose call has arguments a rule may pin also offers
 them: pick one (`room=office`), then **Allow with this value** or **Deny with
-this value** (`rule add --pin`, [rules](rules.md#rules-on-an-actions-arguments)).
+this value** (`rule add --pin`, [rules](policy-engine.md#rules-on-an-actions-arguments)).
 **Clear** on either asks
 first, then runs `nerve-node audit clear` or `log clear`. A cleared audit log
-is not gone: its entries stay in `audit.jsonl.1` ([audit](audit.md#clear-it)),
+is not gone: its entries stay in `audit.jsonl.1` ([audit](logging.md#clear-it-1)),
 and the page starts with "Audit log cleared" and who did it.
 
 ## Pairing links
@@ -409,7 +411,7 @@ it. Opening
 the downloaded file again offers **Uninstall…** too, and on Windows so does
 **Uninstall** at Nerve in **Settings**, **Apps** (Apps & features): it opens
 the same in the app. Kept data comes back with the next install
-([uninstall](service.md#uninstall)).
+([uninstall](service.md#uninstall-the-node)).
 
 ## What the app needs
 
@@ -452,7 +454,7 @@ the place in the app that does it instead (**Permissions › Folders**).
 
 ## The web UI (Linux)
 
-On Linux the app's node has the [node web UI](node-web-ui.md) too, off unless
+On Linux the app's node has the [node web UI](web-uis.md#the-nodes-web-ui) too, off unless
 you turn it on: `nerve-node-desktop ui on` (or `nerve-node ui on`). It works as
 for the plain `nerve-node`, and the app does not switch it. On Windows there is
 none: the app is the node's UI there.

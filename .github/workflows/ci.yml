@@ -57,9 +57,6 @@ env:
   CARGO_TERM_COLOR: never
   # A CI run never builds twice, so incremental compilation only fills the cache.
   CARGO_INCREMENTAL: "0"
-  # Line tables are enough for a backtrace, and the cache and the link step stay
-  # small (the Windows PDBs most of all).
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # A test that fails on a machine nobody can reach says where.
   RUST_BACKTRACE: "1"
 
@@ -360,9 +357,10 @@ jobs:
       # - a_cancel_ends_a_chain_of_processes_that_hand_over_and_exit is a
       #   timing flake under load: it waits a fixed 4 seconds for hops to
       #   start, and it passes when run alone (issue #107).
-      # - a_timeout_ends_a_grandchild_whose_parent_exited fails on the hosted
-      #   runner (crates/nerve-node/src/exec.rs) in a PR run while it passes on main; the same
-      #   class as #107 (issue #112).
+      # - a_timeout_ends_a_grandchild_whose_parent_exited (a Windows test in
+      #   crates/nerve-node/src/exec.rs) is a timing flake on the hosted runner,
+      #   of the same class as #107: it failed in a PR run and passes on main
+      #   (issue #112, open).
       # TMP and TEMP point at the runner's temp folder, a long-name path
       # (D:\a\_temp). The default is C:\Users\RUNNER~1\AppData\Local\Temp, and
       # tempfile hands out that 8.3 short form: a test that compares it with the

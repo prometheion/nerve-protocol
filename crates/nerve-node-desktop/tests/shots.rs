@@ -222,22 +222,6 @@ fn every_page_light_and_dark() {
     // The first-run steps, as the app opens them on a new node.
     let home = rt.block_on(FakeCenter::start(true)).unwrap();
     store.invoke_setup_start();
-    store.set_setup_name("build-server-basement-rack3-left".into());
-    shots.take("setup-name");
-    // A name the node refuses: the step says why.
-    store.set_setup_name("build-server-in-the-basement-rack-3-left-side".into());
-    store.invoke_setup_next();
-    shots.take("setup-name-refused");
-    store.set_setup_name("build-server-basement-rack3-left".into());
-    store.invoke_setup_next();
-    shots.take("setup-keys");
-    // Where no keyring can hold the keys, the tile says why.
-    let usable = store.get_keyring_usable();
-    store.set_keyring_usable(false);
-    store.set_keyring_why(nerve_node_desktop::view::no_keyring("no-answer").into());
-    shots.take("setup-keys-no-keyring");
-    store.set_keyring_usable(usable);
-    store.invoke_setup_next();
     store.set_pair_link(home.link().render().into());
     store.set_pair_name("home".into());
     shots.take("setup-center");
@@ -776,6 +760,7 @@ fn every_page_light_and_dark() {
     shots.take_full("settings-general", 1000);
     // Where no keyring can hold the keys, a limit being saved and one
     // refused, and a setting by its name.
+    let usable = store.get_keyring_usable();
     store.set_keyring_usable(false);
     store.set_keyring_why(nerve_node_desktop::view::no_keyring("windows-service").into());
     prefs.set_tab(1);

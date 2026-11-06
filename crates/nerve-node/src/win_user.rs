@@ -1,5 +1,5 @@
 //! The account a center's commands run as on a node installed as a Windows
-//! service (docs/user/service.md). The service runs as `nerve`, which alone
+//! service (docs/dev/windows.md). The service runs as `nerve`, which alone
 //! (with SYSTEM and the administrators) may open the node's config, keys and
 //! state; every command runs as the account `machine.user` names instead,
 //! logged on with the password `install` stored with DPAPI in the config
