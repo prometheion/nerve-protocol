@@ -123,8 +123,9 @@ nerve-node center add 'nerve://pair?...'
 ```
 
 `relay add lab-pc --to home` lets it reach only that center. `relay` shows
-the relayed nodes; `relay rm lab-pc` cuts one off. A center cannot turn the
-relay on or see it ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).
+the relayed nodes; `relay rm lab-pc` cuts one off. A relay token reaches the host and port of the relay's centers from the
+relay's address, also other sites a reverse proxy serves there. A center
+cannot turn the relay on or see it ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).
 
 ## Drops
 

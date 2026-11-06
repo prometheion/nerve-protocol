@@ -165,6 +165,24 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/safety.md",
             "the running commands of the others, with their network",
         ),
+        (
+            "docs/user/folders-and-modes.md",
+            "the running commands of the others, with their network",
+        ),
+        // Taking the grant back leaves what the center added.
+        ("docs/user/rules.md", "That leaves what it added"),
+        // A stop leaves a command's own leftovers when it ran as you.
+        (
+            "docs/user/watch-and-stop.md",
+            "or your own for a command that ran as you",
+        ),
+        // A panic ends sessions, not tokens.
+        ("docs/user/web-uis.md", "A panic ends sessions, not tokens"),
+        // A relay token reaches what the relay's centers' address serves.
+        (
+            "docs/user/pair.md",
+            "also other sites a reverse proxy serves there",
+        ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
     ];

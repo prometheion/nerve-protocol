@@ -183,6 +183,10 @@ fn the_breaks_of_the_notes_give_the_action_of_each() {
         .next()
         .unwrap();
     let flat = breaks.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Forms that 0.0.6 never had are no break.
+    for unreleased in ["folder network", "--pin", "cap provider", "[[capability]]"] {
+        assert!(!flat.contains(unreleased), "the Breaks name {unreleased}");
+    }
     for needed in [
         "`relay add <n> --center C` → `--to C`",
         "`--mcp none` → `--mcp off`",

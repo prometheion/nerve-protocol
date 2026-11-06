@@ -144,7 +144,9 @@ With the grant a center may change its own pairing's mode (up to `user`),
 folders, rules and capability switches, and turn sudo on and off. It may add
 rules with the audit page's buttons, and capabilities of its own: fixed
 commands that run as `nerve-run`. It turns those on itself; one that senses
-or acts waits for your `on`. To stop it adding commands, take the grant back.
+or acts waits for your `on`. To stop it adding commands, take the grant back. That leaves what it added,
+still on: `cap rm NAME --center <name>` removes it
+([the grant](../dev/settings-and-config.md#without-the-grant)).
 
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
 or another center's pairing, or change the proxy or a machine setting (the

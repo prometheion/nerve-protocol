@@ -67,6 +67,10 @@ reach the UI. One as you (`user` mode) reaches only the login. A session
 ends with **Sign out**, `ui off`, a revoked token, a restart and **Panic**.
 A node run by hand serves no web UI.
 
+A panic ends sessions, not tokens: whoever holds a token can log in and
+unlock. If one leaked, `ui token rm` it first, then `panic`
+([panic](../dev/web-uis.md#panic)).
+
 `ui on --listen 0.0.0.0:7470` opens it to the network, over HTTPS with a
 certificate of its own. `ui on` prints its fingerprint.
 

@@ -87,27 +87,23 @@ There are no aliases: change your scripts.
 - `fs.stat` of a link describes what it leads to.
 - A center with the settings grant can no longer turn on what acts on the
   world (`actuate`): turn it on yourself.
-- A `[[capability]]` with `account`, `state`, `events` or `streams` is
-  refused: remove the line.
 - The variables have one prefix per program, `NERVE_NODE_*` and
   `NERVE_CENTER_*`. A program does not start while an old name is set: rename
   it in `/etc/nerve-center/center.env`, your shell or the harness's entry.
   `--mcp-listen` goes into `--mcp <address>`.
 - Renamed commands: `mode set` → `mode`; `folder ls`, `center ls`, `rule ls`,
   `cap ls`, `proxy ls`, `relay ls`, `sudo status` → the noun alone;
-  `folder add <p> +r +w` → `folder add <p> rw`, and `folder set` is gone;
-  `folder network` → `network`.
+  `folder add <p> +r +w` → `folder add <p> rw`, and `folder set` is gone.
 - More: `rule add sudo` → `rule add allow 'sudo …'`; `--wildcard` → a
-  trailing ` *`; `--pin` → `--arg`; `center rm --center lab` →
-  `center rm lab`; `center grant settings` → `center settings on|off`;
-  `cap provider` → `provider`.
+  trailing ` *`; `center rm --center lab` → `center rm lab`;
+  `center grant settings` → `center settings on|off`.
 - And: `relay set <address>` → `relay on`; `relay set-centers` and
   `set-limits` → `relay set`; `relay add <n> --center C` → `--to C`;
   `proxy rm` → `proxy off`; `config remove` → `config rm`;
   `audit --denied` → `audit --refused`; `service status` → `status`; the
   `--…-stdin` flags → `-`; the center's `--mcp none` → `--mcp off`.
-- `rule rm` takes the entry as `rule add` shows it, with no `--wildcard`,
-  `--action` or `--pin`. `status` starts its first line with `node:` where it
+- `rule rm` takes the entry as `rule add` shows it, with no `--wildcard`
+  or `--action`. `status` starts its first line with `node:` where it
   started with `daemon:`: change a script that reads it.
 - `rule guard` is gone, and a guard rule cannot be removed.
 - `--json`: `status`'s `folder_grants` is `folder_access`, and

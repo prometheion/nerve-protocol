@@ -711,7 +711,7 @@ impl Ctl {
 
     /// Whether the keys may go into the system keyring here, from what
     /// `config get machine.secret_storage` said, in the app's words when
-    /// they may not; both the first-run steps and Settings offer it.
+    /// they may not; only Settings offers it.
     fn keyring_state(&self, said: &Value) {
         let k = &said["keyring"];
         let usable = k["usable"] == true;
