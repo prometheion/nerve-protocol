@@ -889,6 +889,21 @@ fn client_only(
             "policy.sudo_allow {glob}: only the owner puts a command on the sudo list, on the machine itself"
         ));
     }
+    // A deny rule of exec narrows a sudo entry (`sudo apt *` with a deny rule
+    // for `sudo apt remove*`), so taking one off while the list holds an
+    // entry widens what runs as root: that stays the owner's too. It is
+    // judged by the rule's scope, since a pattern cannot tell which entries
+    // it narrows.
+    if !o.sudo_allow.is_empty()
+        && let Some(rule) = o.deny.iter().find(|r| {
+            let scope = crate::rules::scope_of(r);
+            !n.deny.contains(r) && (scope == "exec" || scope.starts_with("exec."))
+        })
+    {
+        return Err(format!(
+            "policy.deny {rule}: while the sudo list has an entry, only the owner takes off a deny rule of exec, which narrows the entry"
+        ));
+    }
     // The network switch holds the commands back; taking it away lets them
     // reach the network again.
     if o.no_network && !n.no_network {
@@ -1577,6 +1592,55 @@ mod tests {
                 .sudo_allow
                 .is_empty()
         );
+    }
+
+    /// A deny rule of exec narrows a sudo entry, so a center with the grant
+    /// leaves it on while the list has an entry; it may add more and take
+    /// off rules of other scopes, and with no entry left all are its own.
+    #[test]
+    fn a_deny_rule_that_narrows_a_sudo_entry_stays() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        s.update(|c| {
+            let p = &mut c.center_mut("home").unwrap().policy;
+            p.sudo_allow = vec!["sudo apt *".into()];
+            p.deny = vec!["exec.run:sudo apt remove*".into(), "fs.read:/x".into()];
+            Ok(())
+        })
+        .unwrap();
+        let set = |s: &mut SettingsStore, deny: serde_json::Value| {
+            let v = s.version();
+            let mut new = doc(s);
+            new["policy"]["deny"] = deny;
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+        };
+        for deny in [
+            json!(["fs.read:/x"]),
+            json!([]),
+            json!(["exec.run:sudo apt remove*x", "fs.read:/x"]),
+        ] {
+            let e = set(&mut s, deny.clone()).unwrap_err();
+            assert!(
+                matches!(&e, SetError::Forbidden(m) if m.contains("policy.deny exec.run:sudo apt remove*")
+                    && m.contains("only the owner")),
+                "{deny}: {e:?}"
+            );
+        }
+        // More rules, and the other kinds of rule off, are the center's.
+        set(
+            &mut s,
+            json!(["exec.run:sudo apt remove*", "exec.run:sudo rm*"]),
+        )
+        .unwrap();
+        let e = set(&mut s, json!(["exec.run:sudo apt remove*"])).unwrap_err();
+        assert!(matches!(e, SetError::Forbidden(_)), "{e:?}");
+        // With no entry left there is nothing to narrow.
+        s.update(|c| {
+            c.center_mut("home").unwrap().policy.sudo_allow.clear();
+            Ok(())
+        })
+        .unwrap();
+        set(&mut s, json!([])).unwrap();
     }
 
     #[test]

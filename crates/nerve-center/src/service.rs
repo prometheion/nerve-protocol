@@ -977,6 +977,7 @@ pub async fn update(
             path: layout.unit.clone(),
             mode: 0o644,
         }],
+        before_restart: &|_| {},
     };
     let mut steps = Steps::new(out);
     let started = || sys.wait_running(&layout.state);

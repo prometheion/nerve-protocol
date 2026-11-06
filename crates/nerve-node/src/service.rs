@@ -1445,6 +1445,16 @@ fn put_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         write_file(&path, text.as_bytes(), 0o644)?;
     }
+    load_apparmor(layout, sys, steps);
+    Ok(())
+}
+
+/// Loads the profile file at its place into the kernel and says so; where
+/// it does not load, a warning. `update` calls it before the service
+/// restarts, where the new program brought the file ([`service_files_text`]),
+/// so the restarted node is in the profile the unit names.
+fn load_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) {
+    let path = layout.apparmor_profile();
     match sys.apparmor(&path, false) {
         Ok(()) => steps.did(format!(
             "put the AppArmor profile {}, which lets the node give each command a /proc of its own",
@@ -1455,7 +1465,6 @@ fn put_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<
             path.display()
         )),
     }
-    Ok(())
 }
 
 /// Takes the node's AppArmor profile out of the kernel and deletes it.
@@ -1747,6 +1756,11 @@ async fn update_steps(
         install: &install,
         files_args,
         places: service_places(layout),
+        before_restart: &|steps| {
+            if sys.restricts_userns() && layout.apparmor_profile().is_file() {
+                load_apparmor(layout, sys, steps);
+            }
+        },
     };
     let started = || sys.wait_running(&layout.paths);
     if nerve_service::update(&p, sys, from, &started, steps).await? {
@@ -1781,16 +1795,28 @@ fn service_places(layout: &Layout) -> Vec<nerve_service::Place> {
         place("polkit_action", layout.polkit_action(), 0o644),
         place("polkit_rule", layout.polkit_rule(), 0o644),
         place("polkit_pkla", layout.polkit_pkla(), 0o644),
+        place("apparmor", layout.apparmor_profile(), 0o644),
     ]
 }
 
 /// What `service-files` prints: the unit for `owner` and, with an owner
 /// other than root, the polkit files `polkit` reads (`rules`, `pkla`; none
 /// for `none`, where polkit is missing), the others as gone; without an
-/// owner or for root, none of them. `update` of an earlier program writes
-/// them, so that the new program runs under its own unit ([`update`]).
-pub fn service_files_text(layout: &Layout, owner: Option<&str>, polkit: &str) -> String {
+/// owner or for root, none of them. Where AppArmor holds user namespaces
+/// back from an account (`apparmor`), the node's profile too. `update` of
+/// an earlier program writes them, so that the new program runs under its
+/// own unit and profile ([`update`]); one that does not know the profile's
+/// role says that `install` puts it.
+pub fn service_files_text(
+    layout: &Layout,
+    owner: Option<&str>,
+    polkit: &str,
+    apparmor: bool,
+) -> String {
     let mut files = vec![("unit", Some(layout.unit_text(owner)))];
+    if apparmor {
+        files.push(("apparmor", Some(apparmor_profile_text())));
+    }
     let helper = layout.service_helper();
     match owner {
         Some(o) if o != ROOT && polkit != "none" => {
@@ -2524,6 +2550,11 @@ pub(crate) mod tests {
             self.apparmor
                 .borrow_mut()
                 .push((profile.to_path_buf(), !remove));
+            self.calls.borrow_mut().push(format!(
+                "apparmor_parser {} {}",
+                if remove { "-R" } else { "-r" },
+                profile.display()
+            ));
             Ok(())
         }
     }
@@ -4298,6 +4329,60 @@ pub(crate) mod tests {
         assert_eq!(sys.calls().len(), calls);
     }
 
+    /// `update` puts the profile the new program names, loads it before the
+    /// service restarts (the restarted node is in the profile its unit
+    /// names), and a program that has none leaves the machine as it was.
+    #[tokio::test]
+    async fn update_loads_the_apparmor_profile_before_it_restarts_the_service() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let profile = l.apparmor_profile();
+        assert!(!profile.exists());
+        sys.restricts_userns.set(true);
+        let files: serde_json::Value =
+            serde_json::from_str(&service_files_text(&l, Some("alice"), "rules", true)).unwrap();
+        assert_eq!(files["apparmor"], apparmor_profile_text());
+        let new = d.path().join("new");
+        std::fs::write(&new, format!("nerve-node 1.1.0\n{files}\n")).unwrap();
+        let mut out = Vec::new();
+        update(&l, &sys, Some(&new), &mut out).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            apparmor_profile_text()
+        );
+        let calls = sys.calls();
+        let n = calls.len();
+        assert_eq!(
+            calls[n - 3..],
+            [
+                "systemctl daemon-reload".to_string(),
+                format!("apparmor_parser -r {}", profile.display()),
+                format!("systemctl restart {UNIT_NAME}"),
+            ]
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("put the AppArmor profile"), "{out}");
+        // A machine that holds nothing back loads nothing, whatever file an
+        // earlier install left.
+        let loads = |sys: &Fake| {
+            sys.calls()
+                .iter()
+                .filter(|c| c.starts_with("apparmor_parser"))
+                .count()
+        };
+        sys.restricts_userns.set(false);
+        let before = loads(&sys);
+        let files: serde_json::Value =
+            serde_json::from_str(&service_files_text(&l, Some("alice"), "rules", false)).unwrap();
+        let newer = d.path().join("newer");
+        std::fs::write(&newer, format!("nerve-node 1.2.0\n{files}\n")).unwrap();
+        update(&l, &sys, Some(&newer), &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(loads(&sys), before);
+    }
+
     #[tokio::test]
     async fn update_refuses_an_older_or_foreign_program_and_puts_back_one_that_does_not_start() {
         let d = tempfile::tempdir().unwrap();
@@ -4347,7 +4432,7 @@ pub(crate) mod tests {
         let rule = std::fs::read_to_string(l.polkit_rule()).unwrap();
         // The new release's unit has a line more, and its rule another text.
         let files: serde_json::Value =
-            serde_json::from_str(&service_files_text(&l, Some("alice"), "rules")).unwrap();
+            serde_json::from_str(&service_files_text(&l, Some("alice"), "rules", false)).unwrap();
         let mut files = files.as_object().unwrap().clone();
         let new_unit = unit.replace("[Service]\n", "[Service]\nNice=5\n");
         assert_ne!(new_unit, unit);
@@ -4408,7 +4493,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let l = layout(d.path());
         let said = |owner, polkit| -> serde_json::Value {
-            serde_json::from_str(&service_files_text(&l, owner, polkit)).unwrap()
+            serde_json::from_str(&service_files_text(&l, owner, polkit, false)).unwrap()
         };
         let v = said(Some("alice"), "rules");
         assert_eq!(v["unit"], l.unit_text(Some("alice")));

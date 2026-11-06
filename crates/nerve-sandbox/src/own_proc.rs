@@ -106,6 +106,20 @@ fn in_profile(label: &[u8]) -> bool {
         .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\n' | 0)))
 }
 
+/// Whether this process is in the node's AppArmor profile now.
+pub fn in_own_profile() -> bool {
+    let mut label = [0u8; 160];
+    read_small(c"/proc/self/attr/current", &mut label).is_some_and(|n| in_profile(&label[..n]))
+}
+
+/// Whether AppArmor holds user namespaces back from an account here
+/// (`kernel.apparmor_restrict_unprivileged_userns`, Ubuntu 24.04), which
+/// the node's profile lifts for the node's own program.
+pub fn userns_restricted() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .is_ok_and(|v| v.trim() == "1")
+}
+
 /// Reads at most `buf.len()` bytes of the file at `path` into `buf`: how
 /// many, or `None` where it cannot be opened or read. Plain system calls
 /// only, so it may run between `fork` and `exec`.
@@ -223,6 +237,21 @@ fn shim(first: libc::pid_t, read: i32) -> i32 {
     }
 }
 
+/// Whether nobody reads the other end of the pipe `write` any more: the
+/// shim holds it until it ends, so a pipe that reports no reader says the
+/// shim is gone. The init's own parent id is 0 in its namespace, so the
+/// check the shim's start makes cannot be used here.
+fn shim_gone(write: i32) -> bool {
+    let mut p = libc::pollfd {
+        fd: write,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: polls one descriptor of this process without waiting.
+    let n = unsafe { libc::poll(&mut p, 1, 0) };
+    n == 1 && p.revents & libc::POLLERR != 0
+}
+
 /// The init's part: mounts the namespace's `/proc`, starts the command's
 /// own process (which returns [`Entered::Inside`]), and ends when the
 /// command ends, with its wait status sent on `write` first.
@@ -231,6 +260,13 @@ fn init(write: i32) -> io::Result<Entered> {
     unsafe {
         // It ends with the shim, and the namespace with it.
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+        // A shim that died before the line above sends no signal: the
+        // command would run on with no node watching it.
+        if shim_gone(write) {
+            let said = b"nerve-node: the shim is gone before its command started\n";
+            libc::write(2, said.as_ptr().cast(), said.len());
+            libc::_exit(crate::SHIM_FAILED);
+        }
         if libc::mount(
             std::ptr::null(),
             c"/".as_ptr(),
@@ -346,6 +382,61 @@ mod tests {
     }
 
     /// Only the node's own profile is left at exec, in any of its modes.
+    /// The init sees that the shim is gone before it starts the command: a
+    /// pipe with no reader says so, one with a reader does not, and an init
+    /// whose shim is gone ends before it mounts or forks.
+    #[test]
+    fn the_init_ends_where_the_shim_is_gone() {
+        let mut ends = [0; 2];
+        // SAFETY: a pipe into an array of two descriptors.
+        assert_eq!(
+            unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let [read, write] = ends;
+        assert!(!super::shim_gone(write), "a reader holds the pipe");
+        // The test process closes the read end before the fork, so the
+        // child has no reader; its stderr goes to a pipe of its own.
+        let mut said = [0; 2];
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::pipe2(said.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: the child does plain system calls and the init's own
+        // code, which is made to run in a forked process, and then ends.
+        match unsafe { libc::fork() } {
+            0 => unsafe {
+                libc::close(read);
+                libc::dup2(said[1], 2);
+                let _ = super::init(write);
+                libc::_exit(0);
+            },
+            pid => {
+                // SAFETY: closes this process's ends it does not use.
+                unsafe {
+                    libc::close(read);
+                    libc::close(write);
+                    libc::close(said[1]);
+                }
+                let mut text = Vec::new();
+                let mut file = {
+                    use std::os::fd::FromRawFd;
+                    // SAFETY: the read end is this process's alone.
+                    unsafe { std::fs::File::from_raw_fd(said[0]) }
+                };
+                std::io::Read::read_to_end(&mut file, &mut text).unwrap();
+                let mut status = 0;
+                // SAFETY: waits for the child above.
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                let text = String::from_utf8_lossy(&text);
+                assert!(text.contains("the shim is gone"), "{text}");
+                assert!(libc::WIFEXITED(status));
+                assert_eq!(libc::WEXITSTATUS(status), crate::SHIM_FAILED);
+            }
+        }
+    }
+
     #[test]
     fn the_node_leaves_its_own_profile_and_no_other() {
         for label in [

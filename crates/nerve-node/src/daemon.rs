@@ -57,6 +57,10 @@ pub struct NodeOptions {
     /// (nerve_sandbox::own_proc), instead of trying it once at start. A test
     /// sets it, to stand for a kernel that cannot.
     pub own_proc: Option<bool>,
+    /// Whether the installed node runs outside the AppArmor profile that
+    /// the system needs for the namespace, instead of asking the system. A
+    /// test sets it.
+    pub apparmor_missing: Option<bool>,
     /// Whether this is the installed service, instead of asking where its
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
@@ -144,6 +148,7 @@ impl NodeOptions {
             confinement: None,
             net_filter: None,
             own_proc: None,
+            apparmor_missing: None,
             service: None,
             config_caps_by_hand: false,
             cgroups: None,
@@ -566,6 +571,11 @@ impl CenterState {
 /// processes ([`Shared::processes_warning`]).
 pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (the node runs as root, or the kernel does not let it make user namespaces): each pairing's commands see the running commands of the others, with their command lines";
 
+/// [`PROCESSES_SHARED`] where the cause is that the node runs outside its
+/// AppArmor profile: an `update` does not put it from a node of before the
+/// profile, `install` does.
+pub const PROCESSES_NO_PROFILE: &str = "the system holds user namespaces back and the node is not in its AppArmor profile, so no command gets a /proc of its own: each pairing's commands see the running commands of the others, with their command lines; `sudo nerve-node install` puts the profile";
+
 /// Whether an `exec.run` command gets a `/proc` of its own: on a node where
 /// the shim can make one (`available`, [`Shared::own_proc`]), the commands
 /// held apart from the owner, by Landlock (folder mode) or as `nerve-run`
@@ -573,6 +583,16 @@ pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its 
 /// sees the owner's processes anyway.
 pub(crate) fn exec_has_own_proc(available: bool, landlock_held: bool, separate_held: bool) -> bool {
     available && (landlock_held || separate_held)
+}
+
+/// Whether the system holds user namespaces back from an account and this
+/// node is not in its AppArmor profile ([`Shared::apparmor_missing`]).
+fn apparmor_missing_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::own_proc::userns_restricted()
+        && !nerve_sandbox::own_proc::in_own_profile();
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 /// Whether the shim at `exe` can give a command a PID namespace with a
@@ -689,6 +709,11 @@ pub(crate) struct Shared {
     /// sees only its own processes (nerve_sandbox::own_proc, #199): Linux,
     /// where the kernel lets the shim make one.
     pub own_proc: bool,
+    /// Whether the system holds user namespaces back from an account and the
+    /// installed node is not in the profile that lifts it (an `update` from
+    /// before the profile left it out): `install` puts it
+    /// ([`PROCESSES_NO_PROFILE`]).
+    pub apparmor_missing: bool,
     /// Where a test holds a command's call ([`NodeOptions::hold`]).
     pub hold: Option<Hold>,
     /// Whether the node runs with full rights (root, an elevated token): its
@@ -1471,7 +1496,11 @@ impl Shared {
     /// [`Shared::pairings_warning`] says more.
     fn processes_warning(&self) -> Option<&'static str> {
         (cfg!(target_os = "linux") && self.confinement.landlock_abi.is_some() && !self.own_proc)
-            .then_some(PROCESSES_SHARED)
+            .then_some(if self.apparmor_missing {
+                PROCESSES_NO_PROFILE
+            } else {
+                PROCESSES_SHARED
+            })
     }
 
     /// That the commands of two or more pairings run as `nerve-run` here
@@ -2130,6 +2159,9 @@ impl Daemon {
         let own_proc = opts
             .own_proc
             .unwrap_or_else(|| own_proc_here(opts.exe.as_deref()));
+        let apparmor_missing = opts
+            .apparmor_missing
+            .unwrap_or_else(|| service && !own_proc && apparmor_missing_here());
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
@@ -2143,6 +2175,7 @@ impl Daemon {
             ),
             net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
             own_proc,
+            apparmor_missing,
             hold: opts.hold,
             full_rights,
             cgroups,
@@ -4560,15 +4593,19 @@ mod tests {
     /// The status says where the pairings' commands see each other's
     /// processes, on the installed node and on one run by hand: no /proc of
     /// their own here (#199). A node where the shim makes one says nothing
-    /// of it.
+    /// of it. Where the system holds user namespaces back and the installed
+    /// node is not in its profile (an `update` from before the profile), it
+    /// names `install`.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_status_says_where_the_pairings_see_each_others_processes() {
-        for (service, own_proc, told) in [
-            (true, false, true),
-            (true, true, false),
-            (false, false, true),
-            (false, true, false),
+        for (service, own_proc, missing, told) in [
+            (true, false, false, Some(PROCESSES_SHARED)),
+            (true, true, false, None),
+            (false, false, false, Some(PROCESSES_SHARED)),
+            (false, true, false, None),
+            (true, false, true, Some(PROCESSES_NO_PROFILE)),
+            (true, true, true, None),
         ] {
             let log = Log::new(Level::Info);
             let d = tempfile::tempdir().unwrap();
@@ -4578,6 +4615,7 @@ mod tests {
             o.service = Some(service);
             o.owner = Some("alice".into());
             o.own_proc = Some(own_proc);
+            o.apparmor_missing = Some(missing);
             o.confinement = Some(Confinement {
                 landlock_abi: Some(6),
                 appcontainer: false,
@@ -4585,12 +4623,13 @@ mod tests {
             let daemon = Daemon::start(o).await.unwrap();
             let st = daemon.status();
             assert_eq!(
-                st["processes_warning"].as_str() == Some(PROCESSES_SHARED),
+                st["processes_warning"].as_str(),
                 told,
-                "service {service}, own /proc {own_proc}: {st}"
+                "service {service}, own /proc {own_proc}, profile missing {missing}: {st}"
             );
             daemon.stop().await;
         }
+        assert!(PROCESSES_NO_PROFILE.contains("sudo nerve-node install"));
     }
 
     /// The installed node's status says that nothing keeps its pairings of

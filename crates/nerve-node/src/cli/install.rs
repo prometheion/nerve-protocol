@@ -104,7 +104,12 @@ pub(super) fn service_files(
     polkit: String,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let text = crate::service::service_files_text(&Layout::system(), owner.as_deref(), &polkit);
+    let text = crate::service::service_files_text(
+        &Layout::system(),
+        owner.as_deref(),
+        &polkit,
+        crate::service::System::restricts_userns(&Host),
+    );
     writeln!(out, "{text}").map_err(|e| e.to_string())
 }
 
@@ -361,7 +366,12 @@ mod tests {
                     Polkit::Old => "pkla",
                     Polkit::Missing => "none",
                 };
-                let want = service_files_text(&Layout::system(), owner, kind);
+                let want = service_files_text(
+                    &Layout::system(),
+                    owner,
+                    kind,
+                    crate::service::System::restricts_userns(&Host),
+                );
                 assert_eq!(said.trim(), want, "{argv:?}");
             }
         }
