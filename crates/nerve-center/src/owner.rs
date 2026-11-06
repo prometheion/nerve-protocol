@@ -88,6 +88,13 @@ pub fn ensure(state: &Path) -> Result<(String, bool), String> {
     }
 }
 
+/// Whether `state` is another account's folder that this one may not look
+/// into (the installed center's, to anyone but root and its user): then
+/// nothing in it can be told, also not whether a center ran there.
+pub fn not_yours(state: &Path) -> bool {
+    std::fs::read_dir(state).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 /// `nerve-center owner-token`: says the token and where it is kept, after
 /// making a new one with `new`. Run as the state folder's owner (the caller
 /// settled that).
@@ -95,6 +102,12 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     // A folder no center ran in yet gets no token: the wrong --state-dir
     // (the installed center's is /var/lib/nerve-center) would hand out a
     // token that opens nothing.
+    if not_yours(state) {
+        return Err(format!(
+            "{} is not yours to read: run it as the center's user, or `sudo nerve-center owner-token` for the installed center",
+            state.display()
+        ));
+    }
     if !state.join(crate::store::FILE).exists() && !path(state).exists() {
         return Err(format!(
             "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first (`sudo nerve-center install`)",
@@ -281,5 +294,32 @@ mod tests {
         let new = read(d.path()).unwrap().unwrap();
         assert_ne!(new, t);
         assert!(text.contains("made a new owner token") && text.contains(&new));
+    }
+
+    /// Another account's folder says so and names sudo, not that no center
+    /// ran there.
+    #[cfg(unix)]
+    #[test]
+    fn another_accounts_folder_names_sudo() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix_root() {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join(crate::store::FILE), "{}").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = run(&state, false, &mut Vec::new()).unwrap_err();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(e.contains("`sudo nerve-center owner-token`"), "{e}");
+        assert!(!e.contains("no center has run"), "{e}");
+    }
+
+    /// Root reads every folder, so the test above tells nothing as root.
+    #[cfg(unix)]
+    fn nix_root() -> bool {
+        // SAFETY: geteuid has no preconditions.
+        unsafe { libc::geteuid() == 0 }
     }
 }

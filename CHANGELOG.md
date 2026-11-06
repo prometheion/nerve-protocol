@@ -166,7 +166,7 @@
 
 ### Simple commands, configuration and help
 
-- `nerve-node` has one rule for every noun: the noun alone shows (`center`, `mode`, `folder`, `rule`, `sudo`, `cap`, `provider`, `proxy`, `relay`, `ui`, `ui token`), `add`/`rm` change a list, `set` a value, `on`/`off` a switch. `mode` alone shows each center's mode.
+- `nerve-node` has one rule for every noun: the noun alone shows (`center`, `mode`, `folder`, `network`, `rule`, `sudo`, `cap`, `provider`, `proxy`, `relay`, `ui`, `ui token`), `add`/`rm` change a list, `set` a value, `on`/`off` a switch. `mode` and `network` alone show each center's mode and network.
 - Folder rights are one word: `folder add ~/proj rw` adds a folder or changes the rights of one the center has, and `none` closes a folder inside another. A change of a folder's rights walks every grant, as `folder sync` does.
 - A trailing ` *` is the wildcard of a rule: `rule add allow 'git status *'`, and with `--action fs.read` a folder and all below it as `/srv/data/*`. `rule add` says what such a rule covers ("it allows every `rm` command"). A sudo command goes on the sudo list by itself: `rule add allow 'sudo apt update'`. `rule rm` takes the entry as `rule` shows it, or the command line that made it, and needs the list only when the entry is on two.
 - `rule add allow` for a center in `folder` or `user` mode says that allow rules do not count there, and names `mode allowlist`. An error names what to do: how to pair (`no center is paired; pair one: …`), the centers that are paired, the command that lists what was meant.

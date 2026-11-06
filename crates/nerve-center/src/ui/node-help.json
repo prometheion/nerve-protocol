@@ -432,16 +432,16 @@
             {
               "args": [
                 {
-                  "line": "`off` or `on`",
+                  "line": "`off` or `on`; without it, each center's network is shown",
                   "more": "",
                   "name": "<STATE>",
-                  "optional": false
+                  "optional": true
                 }
               ],
               "line": "Keep a center's commands off the network (`off`); in user mode nothing runs",
               "more": "Keep a center's commands off the network, or let them on it again: `off` lets them open no socket but a unix one, in every mode, and no sudo-list command runs; where they run as you (user mode, allowlist --as-owner) or the machine cannot hold them, none of them runs.",
               "name": "network",
-              "usage": "nerve-node network [OPTIONS] <STATE>"
+              "usage": "nerve-node network [OPTIONS] [STATE]"
             }
           ]
         },

@@ -219,9 +219,9 @@ pub enum Cmd {
     ///
     /// Keep a center's commands off the network, or let them on it again: `off` lets them open no socket but a unix one, in every mode, and no sudo-list command runs; where they run as you (user mode, allowlist --as-owner) or the machine cannot hold them, none of them runs.
     Network {
-        /// `off` or `on`.
+        /// `off` or `on`; without it, each center's network is shown.
         #[arg(value_parser = ["on", "off"])]
-        state: String,
+        state: Option<String>,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -2727,7 +2727,35 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             cmd: Some(FolderCmd::Sync),
             ..
         } => sync_folders(&paths, out).await,
-        Cmd::Network { state, center } => set_network(&paths, &state, &center, out).await,
+        Cmd::Network {
+            state: Some(state),
+            center,
+        } => set_network(&paths, &state, &center, out).await,
+        Cmd::Network {
+            state: None,
+            center,
+        } => {
+            let (cfg, _) = read_config(&paths).await?;
+            let names = match &center.center {
+                Some(_) => vec![pick_center(&cfg, &center)?],
+                None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
+            };
+            if names.is_empty() {
+                w(out, NO_CENTER_PAIRED.into());
+            }
+            let installed = crate::service::is_service_node(&paths);
+            for name in names {
+                let p = &cfg.center(&name).expect("listed").policy;
+                match p.no_network {
+                    true => w(out, format!("{name}: off: {NO_NETWORK_LINE}")),
+                    false => w(out, format!("{name}: on")),
+                }
+                if let Some(note) = network_mode_note(p, installed, apart_by_hand_here()) {
+                    w(out, note);
+                }
+            }
+            Ok(())
+        }
         Cmd::Folder { cmd: None, center } => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
@@ -3964,7 +3992,9 @@ fn typed_folder(text: &str, home: &Path) -> PathBuf {
 }
 
 /// The home of the person who runs this command: through sudo or pkexec
-/// the home of the account that ran it, not root's.
+/// the home of the account that ran it, not root's; for the owner of the
+/// installed node, whose commands the node runs as its own user, the
+/// owner's, not the node's.
 pub(crate) fn invoker_home() -> PathBuf {
     #[cfg(unix)]
     let root = nerve_transport::net::euid() == 0;
@@ -3972,6 +4002,7 @@ pub(crate) fn invoker_home() -> PathBuf {
     let root = false;
     home_of_invoker(
         root,
+        crate::owner::owner_running().is_some(),
         || {
             crate::account::lookup(&invoker())
                 .ok()
@@ -3983,13 +4014,15 @@ pub(crate) fn invoker_home() -> PathBuf {
 }
 
 /// [`invoker_home`] with what it reads given: whether this runs as root,
-/// the home of the account that ran it, and `HOME`.
+/// whether the node runs it for its owner, the home of the account that ran
+/// it, and `HOME`.
 fn home_of_invoker(
     root: bool,
+    for_owner: bool,
     account_home: impl FnOnce() -> Option<PathBuf>,
     home: PathBuf,
 ) -> PathBuf {
-    match root {
+    match root || for_owner {
         true => account_home().unwrap_or(home),
         false => home,
     }
@@ -4129,6 +4162,16 @@ async fn set_mode(
         _ => String::new(),
     };
     w(out, format!("{name}: mode {}{whom}{timer}", m.as_str()));
+    // A mode whose commands run as you, with the network off, runs none of
+    // them: said now, not found out from a refused call.
+    let (cfg, _) = read_config(paths).await?;
+    let installed = crate::service::is_service_node(paths);
+    if let Some(note) = cfg
+        .center(&name)
+        .and_then(|c| network_mode_note(&c.policy, installed, apart_by_hand_here()))
+    {
+        w(out, note);
+    }
     Ok(())
 }
 
@@ -7098,6 +7141,21 @@ mod tests {
         assert!(!run(&paths, &["folder"]).unwrap().contains("network"));
         let e = run(&paths, &["network", "maybe"]).unwrap_err();
         assert!(e.contains("'maybe'"), "{e}");
+        // Bare, it shows each center's switch.
+        assert_eq!(run(&paths, &["network"]).unwrap(), "home: on\n");
+        run(&paths, &["network", "off"]).unwrap();
+        let shown = run(&paths, &["network"]).unwrap();
+        assert!(
+            shown.starts_with(&format!("home: off: {NO_NETWORK_LINE}\n")),
+            "{shown}"
+        );
+        // A mode whose commands run as you says, with the network off, that
+        // none of them runs.
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(
+            out.contains("note:") && out.contains("runs none of them"),
+            "{out}"
+        );
     }
 
     /// Allowlist mode runs as the owner only when asked for, and setting a
@@ -8565,9 +8623,13 @@ mod tests {
         assert_eq!(typed_folder("~bob/x", home), Path::new("~bob/x"));
         let root = PathBuf::from("/root");
         let alice = || Some(PathBuf::from("/home/alice"));
-        assert_eq!(home_of_invoker(true, alice, root.clone()), home);
-        assert_eq!(home_of_invoker(false, alice, root.clone()), root);
-        assert_eq!(home_of_invoker(true, || None, root.clone()), root);
+        assert_eq!(home_of_invoker(true, false, alice, root.clone()), home);
+        assert_eq!(home_of_invoker(false, false, alice, root.clone()), root);
+        assert_eq!(home_of_invoker(true, false, || None, root.clone()), root);
+        // The installed node runs setup for its owner as its own user, whose
+        // HOME is the node's folder: `~` is the owner's home still.
+        let node = PathBuf::from("/var/lib/nerve");
+        assert_eq!(home_of_invoker(false, true, alice, node), home);
         #[cfg(unix)]
         {
             let account = crate::service::Account {

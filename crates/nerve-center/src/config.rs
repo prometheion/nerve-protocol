@@ -118,13 +118,18 @@ pub struct Args {
     )]
     pub state_dir: Option<PathBuf>,
     /// The center name shown to nodes and in the web UI.
-    #[arg(long, env = "NERVE_CENTER_NAME")]
+    #[arg(long, env = "NERVE_CENTER_NAME", global = true)]
     pub name: Option<String>,
     /// Where nodes reach the center.
-    #[arg(long, env = "NERVE_CENTER_LISTEN", default_value = "0.0.0.0:7443")]
+    #[arg(
+        long,
+        env = "NERVE_CENTER_LISTEN",
+        default_value = "0.0.0.0:7443",
+        global = true
+    )]
     pub listen: String,
     /// The URL put into pairing links; https://<host name>:<port> by default.
-    #[arg(long, env = "NERVE_CENTER_PUBLIC_URL")]
+    #[arg(long, env = "NERVE_CENTER_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP, on a loopback --listen only
     ///
@@ -459,6 +464,33 @@ mod tests {
         assert_eq!(
             given(&["install", "--state-dir", "/srv/c"]),
             ["--state-dir"]
+        );
+        // `install` takes its settings after its name too, as the docs
+        // write it, and the value is the program's.
+        assert_eq!(
+            given(&[
+                "install",
+                "--name",
+                "lab",
+                "--public-url",
+                "https://lab.example:7443",
+                "--listen",
+                "0.0.0.0:9443"
+            ]),
+            ["--name", "--listen", "--public-url"]
+        );
+        let a = Args::try_parse_from([
+            "nerve-center",
+            "install",
+            "--name",
+            "lab",
+            "--listen",
+            "0.0.0.0:9443",
+        ])
+        .unwrap();
+        assert_eq!(
+            (a.name.as_deref(), a.listen.as_str()),
+            (Some("lab"), "0.0.0.0:9443")
         );
         assert_eq!(
             given(&["--state-dir", "/srv/c", "install"]),

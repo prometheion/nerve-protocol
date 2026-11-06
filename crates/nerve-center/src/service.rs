@@ -354,6 +354,12 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
     lines.push(match runs {
         Some(true) => format!("center: running, in {}", state.display()),
         Some(false) => format!("center: not running, in {}", state.display()),
+        // Root and the center's user may look into its folder, not others:
+        // the service line says whether it runs.
+        None if crate::owner::not_yours(state) => format!(
+            "center: in {}, which only root and its user may read (`sudo nerve-center status` says more)",
+            state.display()
+        ),
         None if !state.exists() => format!("center: none has run in {} yet", state.display()),
         None => format!("center: not running, in {}", state.display()),
     });
@@ -1406,6 +1412,33 @@ mod tests {
             "{e}"
         );
         assert!(e.ends_with("update changed nothing"), "{e}");
+    }
+
+    /// `status` by another account than the center's: its folder says
+    /// nothing to it, which the status says instead of "not running".
+    #[cfg(unix)]
+    #[test]
+    fn the_status_of_another_accounts_center_names_sudo() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let state = d.path().join("own");
+        std::fs::create_dir_all(&state).unwrap();
+        crate::store::Store::new("c1".into(), "lab".into())
+            .save(&state)
+            .unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let lines = status_lines(&l, &state, true, None);
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            lines[0].contains("only root and its user may read"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("`sudo nerve-center status`"), "{lines:?}");
     }
 
     /// `status` of a center that is not installed: where it runs, how
