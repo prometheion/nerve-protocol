@@ -4554,11 +4554,23 @@ mod windows_tests {
     /// A `subst` drive on a free letter, unmapped when dropped.
     struct Subst(String);
 
+    /// `subst` looks whether a letter is taken and then takes it, two steps
+    /// that two runs at once can both pass: both succeed, one definition
+    /// stacked on the other, and one test's drive leads to the other test's
+    /// folder (#180). So the tests here make and remove their drives one at
+    /// a time.
+    static SUBST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_subst_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        SUBST.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     impl Subst {
-        /// `None` when no letter is free. Tests that run at the same time
-        /// can find the same letter free and both take it: the one that
-        /// comes second ("Drive already SUBSTed") tries the next.
+        /// `None` when no letter is free. A letter whose drive's folder is
+        /// gone looks free and is taken all the same ("Drive already
+        /// SUBSTed"): the next one is tried.
         fn new(base: &Path) -> Option<Subst> {
+            let _one = one_subst_at_a_time();
             let mut failed = None;
             for letter in ('R'..='Z').rev() {
                 let drive = format!("{letter}:");
@@ -4589,15 +4601,15 @@ mod windows_tests {
 
     impl Drop for Subst {
         fn drop(&mut self) {
+            let _one = one_subst_at_a_time();
             let _ = std::process::Command::new("subst")
                 .args([self.0.as_str(), "/d"])
                 .output();
         }
     }
 
-    /// A letter that looks free can be taken: by a test that took it
-    /// meanwhile, or by a drive whose folder is gone, as here. A new drive
-    /// goes to the next letter instead of failing.
+    /// A letter that looks free can be taken, by a drive whose folder is
+    /// gone. A new drive goes to the next letter instead of failing.
     #[test]
     fn a_subst_drive_takes_the_next_letter_when_one_is_taken() {
         let d = tempfile::tempdir().unwrap();
@@ -4806,31 +4818,150 @@ mod windows_tests {
         false
     }
 
+    /// cmd as the shell. The tests of processes that must be up before a
+    /// timeout or a wait runs out start no PowerShell: its start takes
+    /// seconds, on a busy runner more than the timeout (#107, #112, #180).
+    fn cmd_opts() -> RunOptions {
+        RunOptions {
+            shell: Some("cmd.exe".into()),
+            ..opts()
+        }
+    }
+
+    /// The command line of this test program that runs only its test `test`,
+    /// one of the stand-ins below.
+    fn stand_in(test: &str) -> String {
+        format!(
+            "\"{}\" --ignored --exact exec::windows_tests::{test}",
+            std::env::current_exe().unwrap().display()
+        )
+    }
+
+    /// Writes the cmd scripts `scripts` (name, lines) into `dir`, marked
+    /// for the stand-ins.
+    fn scripts(dir: &Path, scripts: &[(&str, &[&str])]) {
+        std::fs::write(dir.join("stand-in"), "").unwrap();
+        for (name, lines) in scripts {
+            let text: String = lines.iter().map(|l| format!("@{l}\r\n")).collect();
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+    }
+
+    /// The pid of the stand-in that wrote `<kind>-<pid>` in `dir`, once one
+    /// did.
+    async fn stand_in_pid(dir: &Path, kind: &str) -> u32 {
+        let prefix = format!("{kind}-");
+        for _ in 0..600 {
+            let pid = std::fs::read_dir(dir).unwrap().flatten().find_map(|e| {
+                e.file_name()
+                    .to_str()?
+                    .strip_prefix(prefix.as_str())?
+                    .parse()
+                    .ok()
+            });
+            if let Some(pid) = pid {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("no {kind} in {}", dir.display())
+    }
+
+    /// Says that it runs with a file `<kind>-<pid>`, written under another
+    /// name and renamed, so it appears whole; then sleeps until its job
+    /// ends it.
+    fn stand_in_runs(kind: &str) {
+        let me = std::process::id();
+        let tmp = format!("{kind}.{me}.tmp");
+        std::fs::write(&tmp, "").unwrap();
+        std::fs::rename(&tmp, format!("{kind}-{me}")).unwrap();
+        std::thread::sleep(Duration::from_secs(120));
+    }
+
+    /// A process of the tests here: this test program, started again by a
+    /// command's script. It is up within moments and says so
+    /// ([`stand_in_runs`], kind `sleeper`). Outside a folder marked
+    /// `stand-in` it does nothing.
+    #[test]
+    #[ignore = "a process the other tests start"]
+    fn stand_in_sleeps() {
+        if Path::new("stand-in").exists() {
+            stand_in_runs("sleeper");
+        }
+    }
+
+    /// As [`stand_in_sleeps`] (kind `orphan`), once its parent has exited: a
+    /// grandchild whose parent is gone, without a wait of a fixed time.
+    #[test]
+    #[ignore = "a process the other tests start"]
+    fn stand_in_outlives_its_parent() {
+        if !Path::new("stand-in").exists() {
+            return;
+        }
+        let me = std::process::id();
+        let born = crate::win::start_of(me);
+        let parent = crate::win::processes()
+            .into_iter()
+            .find(|p| p.pid == me)
+            .map(|p| p.ppid);
+        // A process made after this one is not its parent but one that got
+        // its pid since.
+        let alive = |pid: u32| {
+            crate::win::running(pid) && crate::win::start_of(pid).is_some_and(|t| Some(t) <= born)
+        };
+        if let Some(parent) = parent {
+            while alive(parent) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        stand_in_runs("orphan");
+    }
+
+    /// Whether the job of the command `ender` ended holds no process.
+    fn job_empty(ender: &Ender) -> bool {
+        use crate::job::{End, Ending};
+        match &ender.ending {
+            Ending::Job(j) => j.empty(),
+            Ending::Walk(_) => panic!("the command ran without a job"),
+        }
+    }
+
     /// A timeout ends a child of the shell and a grandchild whose parent
-    /// exited long before (the parent lives 1.5 s, so the poll sees it).
+    /// exited. Both are up before the timeout runs out: cmd and the
+    /// stand-ins start within moments of the 15 s (#112).
     #[tokio::test]
     async fn a_timeout_ends_a_grandchild_whose_parent_exited() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join("inner.ps1"),
-            "$p = Start-Process ping -ArgumentList '-n','120','127.0.0.1' -WindowStyle Hidden -PassThru\r\n\
-             Set-Content -Path grandchild.pid -Value $p.Id\r\n\
-             Start-Sleep -Milliseconds 1500\r\n",
-        )
-        .unwrap();
-        let command = "$c = Start-Process ping -ArgumentList '-n','120','127.0.0.1' -WindowStyle Hidden -PassThru; \
-             Set-Content -Path child.pid -Value $c.Id; \
-             Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','inner.ps1' -WindowStyle Hidden; \
-             Start-Sleep 120";
-        let c = call(command, d.path(), Duration::from_secs(15));
-        let task = tokio::spawn(async move { run(&c, &opts(), |_| {}).await });
-        let child = pid_in(&d.path().join("child.pid")).await;
-        let grandchild = pid_in(&d.path().join("grandchild.pid")).await;
+        let (child, grandchild) = (
+            stand_in("stand_in_sleeps"),
+            stand_in("stand_in_outlives_its_parent"),
+        );
+        scripts(
+            d.path(),
+            &[
+                ("inner.cmd", &[&format!("start \"\" /b {grandchild}")]),
+                (
+                    "go.cmd",
+                    &[
+                        &format!("start \"\" /b {child}"),
+                        "start \"\" /b cmd /c inner.cmd",
+                        "ping -n 120 127.0.0.1 >nul",
+                    ],
+                ),
+            ],
+        );
+        let c = call("go.cmd", d.path(), Duration::from_secs(15));
+        let task = tokio::spawn(async move { run(&c, &cmd_opts(), |_| {}).await });
+        let child = stand_in_pid(d.path(), "sleeper").await;
+        let grandchild = stand_in_pid(d.path(), "orphan").await;
         let e = task.await.unwrap().unwrap_err();
         assert_eq!(e.kind(), ErrorCode::Timeout);
-        assert!(gone(child).await, "the shell's child outlived the timeout");
+        let (child_gone, grandchild_gone) = (gone(child).await, gone(grandchild).await);
+        sweep(child);
+        sweep(grandchild);
+        assert!(child_gone, "the shell's child outlived the timeout");
         assert!(
-            gone(grandchild).await,
+            grandchild_gone,
             "the orphaned grandchild outlived the timeout"
         );
     }
@@ -4842,15 +4973,16 @@ mod windows_tests {
         }
     }
 
-    /// Runs `command` in `dir` until `pid_file` names a process, then
-    /// cancels the call the way the link does (the task is aborted, so the
-    /// run future is dropped); whether that process is gone afterwards.
-    async fn ended_by_cancel(command: &str, dir: &Path, pid_file: &str) -> bool {
-        let c = call(command, dir, Duration::from_secs(120));
-        let task = tokio::spawn(async move { run(&c, &opts(), |_| {}).await });
-        let pid = pid_in(&dir.join(pid_file)).await;
-        // Long enough for every parent in between to have exited.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+    /// Runs `c` with `o` until `pid` names a process, then cancels the call
+    /// the way the link does (the task is aborted, so the run future is
+    /// dropped); whether that process is gone afterwards.
+    async fn ended_by_cancel(
+        c: RunCall,
+        o: RunOptions,
+        pid: impl std::future::Future<Output = u32>,
+    ) -> bool {
+        let task = tokio::spawn(async move { run(&c, &o, |_| {}).await });
+        let pid = pid.await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         let ended = gone(pid).await;
@@ -4859,23 +4991,24 @@ mod windows_tests {
     }
 
     /// A cancel ends a grandchild whose parents exited at once: three cmd
-    /// levels that each start the next and exit.
+    /// levels that each start the next and exit. The grandchild says it
+    /// runs once its parent is gone, and the call is cancelled then.
     #[tokio::test]
     async fn a_cancel_ends_a_grandchild_whose_parents_exited_at_once() {
         let d = tempfile::tempdir().unwrap();
-        let w = |name: &str, text: &str| std::fs::write(d.path().join(name), text).unwrap();
-        w("a.cmd", "@start \"\" /b cmd /c b.cmd\r\n");
-        w("b.cmd", "@start \"\" /b cmd /c c.cmd\r\n");
-        w(
-            "c.cmd",
-            "@start \"\" /b powershell -NoProfile -ExecutionPolicy Bypass -File gc.ps1\r\n",
+        let grandchild = format!("start \"\" /b {}", stand_in("stand_in_outlives_its_parent"));
+        scripts(
+            d.path(),
+            &[
+                ("a.cmd", &["start \"\" /b cmd /c b.cmd"]),
+                ("b.cmd", &["start \"\" /b cmd /c c.cmd"]),
+                ("c.cmd", &[&grandchild]),
+                ("go.cmd", &["cmd /c a.cmd", "ping -n 120 127.0.0.1 >nul"]),
+            ],
         );
-        w(
-            "gc.ps1",
-            "Set-Content -Path gc.pid -Value $PID\r\nStart-Sleep 120\r\n",
-        );
+        let c = call("go.cmd", d.path(), Duration::from_secs(120));
         assert!(
-            ended_by_cancel("cmd /c a.cmd; Start-Sleep 120", d.path(), "gc.pid").await,
+            ended_by_cancel(c, cmd_opts(), stand_in_pid(d.path(), "orphan")).await,
             "the grandchild outlived the cancel"
         );
     }
@@ -4883,41 +5016,70 @@ mod windows_tests {
     /// A process that keeps starting its successor and exiting, each one a
     /// grandchild whose parent is gone: a walk of the process table loses
     /// the chain when one hop lives shorter than a poll, the job holds every
-    /// one. Each hop adds a line to `hops.txt`; after the cancel the file
-    /// must stop growing.
+    /// one. Each hop adds a line to `hops.txt`. The test waits for the
+    /// chain to run and, after the cancel, for the job to hold nothing;
+    /// from then on the file must not grow (#107).
     #[tokio::test]
     async fn a_cancel_ends_a_chain_of_processes_that_hand_over_and_exit() {
         let d = tempfile::tempdir().unwrap();
-        // `stop` ends a chain a failed test left running.
-        std::fs::write(
-            d.path().join("hop.cmd"),
-            "@if exist stop exit /b\r\n@echo x>>hops.txt\r\n@start \"\" /b cmd /c hop.cmd\r\n",
-        )
-        .unwrap();
-        // Ten chains side by side, so the walk has a lot to keep up with.
-        std::fs::write(
-            d.path().join("go.cmd"),
-            "@start \"\" /b cmd /c hop.cmd\r\n".repeat(10),
-        )
-        .unwrap();
-        let c = call(
-            "cmd /c go.cmd; Start-Sleep 120",
+        // `stop` ends a chain a failed test left running. Ten chains side by
+        // side, so the walk has a lot to keep up with.
+        let mut go = vec!["start \"\" /b cmd /c hop.cmd"; 10];
+        go.push("ping -n 120 127.0.0.1 >nul");
+        scripts(
             d.path(),
-            Duration::from_secs(120),
+            &[
+                (
+                    "hop.cmd",
+                    &[
+                        "if exist stop exit /b",
+                        "echo x>>hops.txt",
+                        "start \"\" /b cmd /c hop.cmd",
+                    ],
+                ),
+                ("go.cmd", &go),
+            ],
         );
-        let task = tokio::spawn(async move { run(&c, &opts(), |_| {}).await });
+        let c = call("go.cmd", d.path(), Duration::from_secs(120));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            run(&c, &cmd_opts(), |e| {
+                let _ = tx.send(e.clone());
+            })
+            .await
+        });
+        // The call's job, held open here past the call.
+        let ender = rx.await.unwrap();
         let hops = d.path().join("hops.txt");
         let count = || {
             std::fs::read_to_string(&hops)
                 .map(|t| t.lines().count())
                 .unwrap_or(0)
         };
-        // Long enough for many hops.
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        assert!(count() > 10, "the chain did not run: {} hops", count());
+        let mut ran = 0;
+        for _ in 0..1800 {
+            ran = count();
+            if ran > 10 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ran > 10, "the chain did not run: {ran} hops");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut ended = false;
+        for _ in 0..600 {
+            ended = job_empty(&ender);
+            if ended {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            ended,
+            "the command's job still holds processes after the cancel"
+        );
+        // Whatever writes now is outside the job.
         let after = count();
         tokio::time::sleep(Duration::from_secs(2)).await;
         let later = count();
@@ -4940,8 +5102,10 @@ mod windows_tests {
              -Arguments @{CommandLine = 'powershell -NoProfile -Command Start-Sleep 120'}; \
              Set-Content -Path wmi.pid -Value $r.ProcessId; \
              Start-Sleep 120";
+        let c = call(command, d.path(), Duration::from_secs(120));
+        let pid_file = d.path().join("wmi.pid");
         assert!(
-            ended_by_cancel(command, d.path(), "wmi.pid").await,
+            ended_by_cancel(c, opts(), pid_in(&pid_file)).await,
             "the process started through WMI outlived the cancel"
         );
     }
@@ -5005,19 +5169,19 @@ mod windows_tests {
 
     /// Run by [`a_node_that_dies_leaves_no_command_running`] in a process
     /// of its own, which that test then kills: a command whose shell starts
-    /// a ping and waits.
+    /// a stand-in and waits. It writes the shell's pid itself, under
+    /// another name and renamed, so the file appears whole.
     #[tokio::test]
     #[ignore = "a helper of a_node_that_dies_leaves_no_command_running"]
     async fn helper_runs_a_command_until_killed() {
         let dir = PathBuf::from(std::env::var_os("NERVE_TEST_DIR").expect("set by the test"));
-        let command = "Set-Content -Path shell.pid -Value $PID; \
-             $p = Start-Process ping -ArgumentList '-n','120','127.0.0.1' -WindowStyle Hidden -PassThru; \
-             Set-Content -Path ping.pid -Value $p.Id; \
-             Start-Sleep 120";
         let _ = run(
-            &call(command, &dir, Duration::from_secs(120)),
-            &opts(),
-            |_| {},
+            &call("go.cmd", &dir, Duration::from_secs(120)),
+            &cmd_opts(),
+            |e| {
+                std::fs::write(dir.join("shell.tmp"), e.pid().to_string()).unwrap();
+                std::fs::rename(dir.join("shell.tmp"), dir.join("shell.pid")).unwrap();
+            },
         )
         .await;
     }
@@ -5029,6 +5193,11 @@ mod windows_tests {
     #[tokio::test]
     async fn a_node_that_dies_leaves_no_command_running() {
         let d = tempfile::tempdir().unwrap();
+        let child = format!("start \"\" /b {}", stand_in("stand_in_sleeps"));
+        scripts(
+            d.path(),
+            &[("go.cmd", &[&child, "ping -n 120 127.0.0.1 >nul"])],
+        );
         let mut node = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -5040,15 +5209,15 @@ mod windows_tests {
             .spawn()
             .unwrap();
         let shell = pid_in(&d.path().join("shell.pid")).await;
-        let ping = pid_in(&d.path().join("ping.pid")).await;
+        let child = stand_in_pid(d.path(), "sleeper").await;
         // TerminateProcess: no destructor of the node runs, as in a crash.
         node.kill().unwrap();
         node.wait().unwrap();
         let shell_gone = gone(shell).await;
-        let ping_gone = gone(ping).await;
+        let child_gone = gone(child).await;
         sweep(shell);
-        sweep(ping);
+        sweep(child);
         assert!(shell_gone, "the shell outlived the node");
-        assert!(ping_gone, "the shell's child outlived the node");
+        assert!(child_gone, "the shell's child outlived the node");
     }
 }
