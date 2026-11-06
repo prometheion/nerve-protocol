@@ -1537,6 +1537,8 @@ async fn passes_the_conformance_checks_of_capabilities_a_center_adds() {
         let sudo = fake_sudo(&root);
         owner_edit(&o.paths, |c| {
             c.centers[0].settings = SettingsGrant::Write;
+            c.centers[0].policy.sudo_allow =
+                vec![nerve_conformance::node_part::SUDO_ALLOWED.into()];
             c.machine.sudo_path = Some(sudo.display().to_string());
         })
         .await;

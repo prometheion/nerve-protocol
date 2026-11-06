@@ -250,7 +250,10 @@ Use `allowlist` or `user` mode for its centers.
 
 UAC is no security boundary: a command of an administrator can get the
 group's rights back and read the keys. The install warns about an account in
-Administrators or Backup Operators. Choose an ordinary account as above.
+Administrators or Backup Operators, and so do the Overview (`status`'s
+`owner_is_admin`) and giving a center the settings grant, as a center with
+the grant can set its own mode to `user`: the twin of root as the owner on
+Linux. Choose an ordinary account as above.
 [Sudo on Windows](#sudo-on-windows) needs an administrator: its
 commands run with the account's administrator rights on purpose.
 

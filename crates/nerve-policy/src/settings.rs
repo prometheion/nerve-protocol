@@ -880,6 +880,15 @@ fn client_only(
             ));
         }
     }
+    // A command on the sudo list runs as root in every mode while the
+    // machine's sudo switch is on, so a center that could add to it would
+    // have root, and with it the node's keys: only the owner lists commands
+    // for root. Taking one off narrows, and stays the center's.
+    if let Some(glob) = n.sudo_allow.iter().find(|g| !o.sudo_allow.contains(g)) {
+        return Err(format!(
+            "policy.sudo_allow {glob}: only the owner puts a command on the sudo list, on the machine itself"
+        ));
+    }
     // The network switch holds the commands back; taking it away lets them
     // reach the network again.
     if o.no_network && !n.no_network {
@@ -1489,6 +1498,84 @@ mod tests {
         assert_eq!(
             s.config().center("home").unwrap().policy.deny,
             ["lamp.set:room=office", "exec.run:rm *"]
+        );
+    }
+
+    /// A center that sets a timed mode with `as_owner` does not get the
+    /// owner's account when the timer ends in allowlist: `as_owner` goes
+    /// with any mode but allowlist (#197).
+    #[test]
+    fn a_timed_mode_does_not_end_as_the_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let until = 4_000_000_000_000u64;
+        for mode in ["folder", "user"] {
+            let v = s.version();
+            let mut new = doc(&s);
+            new["policy"]["mode"] = json!(mode);
+            new["policy"]["until"] = json!(until);
+            new["policy"]["as_owner"] = json!(true);
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+                .unwrap();
+            let p = &s.config().center("home").unwrap().policy;
+            assert_eq!(p.mode_at(until), Mode::Allowlist, "{mode}");
+            assert!(!p.as_owner && !p.runs_as_owner(until), "{mode}");
+        }
+        // In allowlist mode it is the center's choice, as user mode is.
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["mode"] = json!("allowlist");
+        new["policy"]["until"] = json!(null);
+        new["policy"]["as_owner"] = json!(true);
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        assert!(s.config().center("home").unwrap().policy.as_owner);
+    }
+
+    /// The sudo list runs its commands as root: a center with the grant may
+    /// take a command off it, never put one on it (#197).
+    #[test]
+    fn only_the_owner_puts_a_command_on_the_sudo_list() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        s.update(|c| {
+            c.center_mut("home").unwrap().policy.sudo_allow = vec!["sudo apt update".into()];
+            Ok(())
+        })
+        .unwrap();
+        for list in [
+            json!(["sudo apt update", "sudo id"]),
+            json!(["sudo id"]),
+            json!(["sudo *"]),
+        ] {
+            let v = s.version();
+            let mut new = doc(&s);
+            new["policy"]["sudo_allow"] = list.clone();
+            let e = s
+                .set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+                .unwrap_err();
+            assert!(
+                matches!(&e, SetError::Forbidden(m) if m.contains("policy.sudo_allow sudo")
+                    && m.contains("only the owner")),
+                "{list}: {e:?}"
+            );
+        }
+        assert_eq!(
+            s.config().center("home").unwrap().policy.sudo_allow,
+            ["sudo apt update"]
+        );
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["sudo_allow"] = json!([]);
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        assert!(
+            s.config()
+                .center("home")
+                .unwrap()
+                .policy
+                .sudo_allow
+                .is_empty()
         );
     }
 

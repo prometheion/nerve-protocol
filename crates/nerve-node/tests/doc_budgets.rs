@@ -169,10 +169,11 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/folders-and-modes.md",
             "the homes, the folders and the running commands of the others, with their network",
         ),
-        // Taking the grant back leaves what the center added.
+        // Taking the grant back leaves what the center added; the command
+        // says what (#197).
         (
             "docs/user/rules.md",
-            "That leaves what it changed, still on: its mode (`nerve-node mode`), folders",
+            "That leaves what it changed, still on: `center settings off` names each part",
         ),
         // A stop leaves a command's own leftovers when it ran as you.
         (
@@ -206,23 +207,16 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         ("docs/user/settings.md", "hands a center the node's keys"),
         ("docs/user/backup.md", "one that has its token keeps it"),
-        // The round 4 limits: the sudo grant, safety.md holding every limit
-        // of the task pages, and the link in the process list.
+        // The round 4 limits: safety.md holding every limit of the task
+        // pages, and the link in the process list. Only the owner puts a
+        // command on the sudo list since #197.
         (
             "docs/user/rules.md",
-            "which run as root whenever sudo is on, also\n  after you take the grant back",
-        ),
-        (
-            "docs/user/rules.md",
-            "A center with the grant can still list commands for root",
+            "Nor\nmay it put a command on the sudo list",
         ),
         (
             "docs/user/safety.md",
-            "A center with the settings grant can list commands for root itself",
-        ),
-        (
-            "docs/user/safety.md",
-            "Taking the grant back leaves what the center changed, still on: its mode,\n  folders, rules, sudo list, capability switches and capabilities",
+            "Taking the grant back leaves what the center changed, still on.\n  `center settings off` names it",
         ),
         (
             "docs/user/safety.md",
@@ -250,16 +244,8 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/pair.md",
             "the link is in the process list, which any account can read",
         ),
-        // The round 5 limits: the sudo list outlives the grant, and the
-        // secrets that land in the process list or the shell's history.
-        (
-            "docs/user/safety.md",
-            "They run whenever sudo is on, also after you take the grant back",
-        ),
-        (
-            "docs/user/safety.md",
-            "check each center's sudo list with `nerve-node rule`",
-        ),
+        // The round 5 limits: the secrets that land in the process list or
+        // the shell's history.
         (
             "docs/user/safety.md",
             "the link is in the process list: use `center add -`",
@@ -268,29 +254,11 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/safety.md",
             "the `claude mcp add` line holds the harness token",
         ),
-        (
-            "docs/user/rules.md",
-            "check each center's sudo list with\n  `nerve-node rule --center <name>`",
-        ),
-        // The round 6 limits: keep sudo off for a center you would not give
-        // root, and one center's command lines are open to the others.
-        (
-            "docs/user/rules.md",
-            "keep sudo off while a center you would not give root has the
-  grant",
-        ),
-        (
-            "docs/user/safety.md",
-            "Keep sudo off while a center you would not give root has the grant",
-        ),
+        // The round 6 limits: one center's command lines are open to the
+        // others.
         (
             "docs/user/safety.md",
             "Put no secret in a command or a capability's line",
-        ),
-        // A timer on a mode a center left may end in allowlist as you.
-        (
-            "docs/user/rules.md",
-            "set the mode again (`nerve-node mode <mode> --center <name>`) even if it looks right",
         ),
         (
             "docs/dev/settings-and-config.md",

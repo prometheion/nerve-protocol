@@ -29,17 +29,28 @@ fn text_model(items: Vec<String>) -> ModelRc<SharedString> {
 /// What the Overview says while root is the node's owner (#151).
 pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user mode, and of allowlist mode as the owner, run as root. They can do everything on this machine, Nerve and its keys included, and nothing in Nerve holds them back.";
 
+/// What the Overview says while an administrator is the node's owner on
+/// Windows, the twin of [`ROOT_OWNER`] (#197).
+pub const ADMIN_OWNER: &str = "The owner of this node is an administrator: commands of user mode, and of allowlist mode as the owner, run as that account and can take its administrator rights (UAC is no security boundary). They can do everything on this machine, Nerve and its keys included.";
+
 /// What the app says once the settings grant of the center `name` is given
-/// (`on`) or taken. Where root is the node's owner (`root`), the center may
-/// set its own mode to user, whose commands run as root, and the app says
-/// so, as `center settings on` does.
-pub fn settings_grant_said(name: &str, on: bool, root: bool) -> String {
-    match (on, root) {
-        (true, true) => format!(
+/// (`on`) or taken. Where root is the node's owner (`root`), or on Windows an
+/// administrator (`admin`), the center may set its own mode to user, whose
+/// commands then have every right here, and the app says so, as `center
+/// settings on` does. Taken back, what the center changed stays, which the
+/// app says as `center settings off` does.
+pub fn settings_grant_said(name: &str, on: bool, root: bool, admin: bool) -> String {
+    match (on, root, admin) {
+        (true, true, _) => format!(
             "{name} may change this machine's settings now. Root is the owner of this node, so {name} can set its own mode to user, and its commands then run as root."
         ),
-        (true, false) => format!("{name} may change this machine's settings now."),
-        (false, _) => format!("{name} can no longer change this machine's settings."),
+        (true, false, true) => format!(
+            "{name} may change this machine's settings now. The owner of this node is an administrator, so {name} can set its own mode to user, and its commands can then take every right on this machine (UAC is no security boundary)."
+        ),
+        (true, false, false) => format!("{name} may change this machine's settings now."),
+        (false, ..) => format!(
+            "{name} can no longer change this machine's settings. What it changed stays until you change it: its mode, rules, sudo list and folders on Permissions, its capability switches on Capabilities."
+        ),
     }
 }
 
@@ -112,6 +123,8 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
     // the owner runs as root.
     if v["owner_is_root"] == true {
         warnings.push(ROOT_OWNER.into());
+    } else if v["owner_is_admin"] == true {
+        warnings.push(ADMIN_OWNER.into());
     }
     let n = |k: &str| limits[k].as_u64().unwrap_or_default();
     let limits_text = if held || limits_restart || !limits_off.is_empty() {
@@ -1974,11 +1987,32 @@ mod tests {
     /// center can make itself root.
     #[test]
     fn the_settings_grant_says_root_where_root_is_the_owner() {
-        let said = settings_grant_said("home", true, true);
+        let said = settings_grant_said("home", true, true, false);
         assert!(said.contains("home can set its own mode to user"), "{said}");
         assert!(said.contains("run as root"), "{said}");
-        assert!(!settings_grant_said("home", true, false).contains("root"));
-        assert!(!settings_grant_said("home", false, true).contains("root"));
+        assert!(!settings_grant_said("home", true, false, false).contains("root"));
+        assert!(!settings_grant_said("home", false, true, false).contains("root"));
+    }
+
+    /// Its Windows twin: an administrator as the owner, on the grant and on
+    /// the Overview; and taking the grant back says what stays (#197).
+    #[test]
+    fn the_settings_grant_says_an_administrator_owner_and_what_stays() {
+        let said = settings_grant_said("home", true, false, true);
+        assert!(
+            said.contains("is an administrator, so home can set its own mode to user"),
+            "{said}"
+        );
+        assert!(!settings_grant_said("home", true, false, false).contains("administrator"));
+        let off = settings_grant_said("home", false, false, true);
+        assert!(!off.contains("administrator"), "{off}");
+        assert!(off.contains("What it changed stays"), "{off}");
+        for daemon in ["running", "not running"] {
+            let v =
+                json!({"daemon": daemon, "owner": "alice", "owner_is_admin": true, "centers": []});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(ADMIN_OWNER)], "{daemon}");
+        }
     }
 
     /// That nothing keeps the pairings of nerve-run apart without Landlock

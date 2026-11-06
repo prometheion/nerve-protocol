@@ -1596,6 +1596,53 @@ mod tests {
         assert!(APP_JS.contains("((state.checker && state.checker.meta.fields) || {})[scope]"));
     }
 
+    /// A sudo command's audit row has no Allow buttons, as only the
+    /// machine's owner puts a command on the sudo list: it says where,
+    /// the nerve-node command with a Copy button, or the app's place on a
+    /// Windows machine (#197). The API refuses the list as well.
+    #[tokio::test]
+    async fn a_sudo_commands_audit_row_says_where_the_owner_adds_it() {
+        let row = &APP_JS[APP_JS.find("function auditRow(").unwrap()..];
+        let row = &row[..row.find("\n}\n").unwrap()];
+        for part in [
+            r#"sudo ? null : ruleBtn("Allow", "", "allow", false, "check")"#,
+            r#"sudo ? null : ruleBtn("Allow as wildcard", "", "allow", true)"#,
+            "known && sudo ? sudoListHint(n, d.target, auditKey) : null",
+        ] {
+            assert!(row.contains(part), "{part}");
+        }
+        assert!(!row.contains(r#""sudo""#), "no button writes the sudo list");
+        let hint = &APP_JS[APP_JS.find("function sudoListHint(").unwrap()..];
+        let hint = &hint[..hint.find("\n}\n").unwrap()];
+        for part in [
+            r#"n.platform === "windows""#,
+            "in the Nerve app on that machine, Permissions, Sudo",
+            "`nerve-node rule add allow ${shellWord(command)}`",
+            r#"btn("Copy", "ghost", () => copy(line)"#,
+        ] {
+            assert!(hint.contains(part), "{part}");
+        }
+        assert!(APP_JS.contains(r#"return `'${String(s).replace(/'/g, "'\\''")}'`;"#));
+        let dir = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(dir.path()), None, true);
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/audit/rule", &[], ""),
+                &json!({"list": "sudo", "cap": "exec", "action": "run",
+                        "target": "sudo apt update", "node_id": "n1"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status, 400);
+        assert!(
+            e["error"]
+                .as_str()
+                .unwrap()
+                .contains("only the machine's owner"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn the_capabilities_tab_has_a_picker_a_checked_form_and_a_read_only_view() {
         assert!(INDEX.contains(r##"<a href="#capabilities" data-page="capabilities">"##));

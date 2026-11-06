@@ -328,6 +328,34 @@ pub fn is_root(owner: Option<&str>) -> bool {
 /// What `status` and the app say of root as the owner.
 pub const ROOT_OWNER_NOTE: &str = "root is the owner: commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included";
 
+/// The Windows twin of root as the owner: the account commands run as there
+/// (`machine.user`) when it is an administrator, or in another group whose
+/// members can read every file (crate::win_user::admin_groups). Its
+/// commands can take those rights (UAC is no security boundary), so what
+/// runs as the owner can do everything on the machine, as root's can on
+/// Linux. None elsewhere.
+pub fn admin_owner(cfg: &nerve_policy::NodeConfig) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let name = cfg.machine.user.as_deref()?;
+        let a = crate::win_user::lookup(name).ok().flatten()?;
+        (!crate::win_user::admin_groups(&a).is_empty()).then(|| name.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cfg;
+        None
+    }
+}
+
+/// What `status` and the app say of an administrator as the owner
+/// ([`admin_owner`]).
+pub fn admin_owner_note(name: &str) -> String {
+    format!(
+        "{name} is an administrator: commands of user mode, and of allowlist mode as the owner, run as {name}, can take its administrator rights (UAC is no security boundary) and can do everything on this machine, Nerve and its keys included"
+    )
+}
+
 /// Whether the account running this is the owner of the installed node: the
 /// one its unit names on Linux, one of the service's owners on Windows.
 pub fn is_owner_here() -> bool {

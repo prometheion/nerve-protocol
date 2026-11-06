@@ -80,12 +80,13 @@ pub(super) async fn status(paths: NodePaths, out: &mut dyn Write) -> Result<(), 
 }
 
 /// The line of `status` on the node's owner, which says plainly what root
-/// as the owner means.
-fn owner_line(owner: Option<&str>, root: bool) -> Option<String> {
-    match (owner, root) {
-        (Some(_), true) => Some(format!("owner: {}", crate::owner::ROOT_OWNER_NOTE)),
-        (Some(o), false) => Some(format!("owner: {o}")),
-        (None, _) => None,
+/// as the owner means, and on Windows an administrator.
+fn owner_line(owner: Option<&str>, root: bool, admin: bool) -> Option<String> {
+    match (owner, root, admin) {
+        (Some(_), true, _) => Some(format!("owner: {}", crate::owner::ROOT_OWNER_NOTE)),
+        (Some(o), false, true) => Some(format!("owner: {}", crate::owner::admin_owner_note(o))),
+        (Some(o), false, false) => Some(format!("owner: {o}")),
+        (None, ..) => None,
     }
 }
 
@@ -125,7 +126,11 @@ fn status_lines(v: &Value) -> Vec<String> {
     if let Some(s) = v["sudo"].as_str() {
         lines.push(format!("sudo: {s}"));
     }
-    lines.extend(owner_line(v["owner"].as_str(), v["owner_is_root"] == true));
+    lines.extend(owner_line(
+        v["owner"].as_str(),
+        v["owner_is_root"] == true,
+        v["owner_is_admin"] == true,
+    ));
     if let Some(h) = v["home_warning"]["warning"].as_str() {
         lines.push(format!("warning: {h}"));
     }
@@ -162,7 +167,7 @@ fn status_lines(v: &Value) -> Vec<String> {
                 format!(
                     " for {} more, then {}",
                     nerve_transport::log::span(Duration::from_millis(left)),
-                    then_text(then, rules)
+                    then_text(then, rules, c["as_owner"] == true)
                 )
             }
             _ => String::new(),
@@ -371,7 +376,17 @@ mod tests {
             "{root:#?}"
         );
         assert!(crate::owner::ROOT_OWNER_NOTE.contains("run as root"));
-        assert_eq!(owner_line(None, false), None);
+        assert_eq!(owner_line(None, false, false), None);
+        // An administrator as the owner on Windows is its twin (#197).
+        let admin = status_lines(&json!({"owner": "alice", "owner_is_admin": true}));
+        assert!(
+            admin.contains(&format!(
+                "owner: {}",
+                crate::owner::admin_owner_note("alice")
+            )),
+            "{admin:#?}"
+        );
+        assert!(crate::owner::admin_owner_note("alice").contains("alice is an administrator"));
         // So does a stopped node's.
         let root_line = format!("owner: {}", crate::owner::ROOT_OWNER_NOTE);
         let stopped = |owner: Option<&str>| {
@@ -401,6 +416,28 @@ mod tests {
             !plain.contains("warning") && !plain.contains("Landlock,"),
             "{plain}"
         );
+    }
+
+    /// A timer that ends in allowlist mode as the owner says so, as `mode`
+    /// does (#197).
+    #[test]
+    fn the_status_says_a_timer_ends_as_the_owner() {
+        let until = crate::now_ms() + 3_600_000;
+        let line = |as_owner: bool| {
+            let lines = status_lines(&json!({
+                "daemon": "not running",
+                "centers": [{"name": "lab", "url": "https://c.example", "mode": "folder",
+                             "until": until, "then": "allowlist", "as_owner": as_owner,
+                             "folders": 0, "allow_rules": 1, "deny_rules": 0, "sudo_rules": 0}],
+            }));
+            lines.into_iter().find(|l| l.starts_with("lab ")).unwrap()
+        };
+        assert!(
+            line(true).contains(", then allowlist (1 allow rule), as you"),
+            "{}",
+            line(true)
+        );
+        assert!(!line(false).contains("as you"), "{}", line(false));
     }
 
     /// `status` is one place to look: the node and its service, each

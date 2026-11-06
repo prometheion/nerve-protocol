@@ -42,21 +42,28 @@ fn mode_line(p: &nerve_policy::config::CenterPolicy, now: u64) -> String {
         Some((until, then)) => format!(
             " for {} more, then {}",
             nerve_transport::log::span(Duration::from_millis(until - now)),
-            then_text(then, p.allow.len())
+            then_text(then, p.allow.len(), p.runs_as_owner(until))
         ),
         None => String::new(),
     };
     format!("{}{whom}{timer}", mode.as_str())
 }
 
-/// The mode a timer ends in, in words: allowlist says what it then runs.
-pub(super) fn then_text(then: Mode, allow_rules: usize) -> String {
-    match (then, allow_rules) {
+/// The mode a timer ends in, in words: allowlist says what it then runs,
+/// and that it runs as the owner (`as_owner`), as the mode in force would.
+pub(super) fn then_text(then: Mode, allow_rules: usize, as_owner: bool) -> String {
+    let whom = if as_owner && then == Mode::Allowlist {
+        ", as you"
+    } else {
+        ""
+    };
+    let mode = match (then, allow_rules) {
         (Mode::Allowlist, 0) => "allowlist (no allow rule: nothing runs)".into(),
         (Mode::Allowlist, 1) => "allowlist (1 allow rule)".into(),
         (Mode::Allowlist, n) => format!("allowlist ({n} allow rules)"),
         (m, _) => m.as_str().into(),
-    }
+    };
+    format!("{mode}{whom}")
 }
 
 /// A center's mode for `mode --json`.
@@ -140,7 +147,9 @@ pub(super) async fn set_mode(
     .await?;
     let whom = if as_owner { ", as you" } else { "" };
     let timer = match (for_hours, ends.get()) {
-        (Some(h), Some((then, rules))) => format!(" for {h} h, then {}", then_text(then, rules)),
+        (Some(h), Some((then, rules))) => {
+            format!(" for {h} h, then {}", then_text(then, rules, false))
+        }
         _ => String::new(),
     };
     w(out, format!("{name}: mode {}{whom}{timer}", m.as_str()));
@@ -178,6 +187,31 @@ mod tests {
             assert!(e.contains("--as-owner only goes with allowlist"), "{e}");
         }
         assert!(!policy().as_owner);
+    }
+
+    /// Where a timer ends in allowlist mode as the owner, `mode` says so
+    /// before it happens, as it says it of the mode in force (#197). The
+    /// policy's checks drop `as_owner` under a timed mode, so this is a
+    /// policy that never passed them.
+    #[test]
+    fn a_timer_that_ends_as_the_owner_says_so() {
+        let p = nerve_policy::config::CenterPolicy {
+            mode: Mode::Folder,
+            until: Some(2 * 3_600_000),
+            as_owner: true,
+            ..Default::default()
+        };
+        let line = mode_line(&p, 0);
+        assert!(
+            line.ends_with("then allowlist (no allow rule: nothing runs), as you"),
+            "{line}"
+        );
+        let p = nerve_policy::config::CenterPolicy {
+            as_owner: false,
+            ..p
+        };
+        assert!(!mode_line(&p, 0).contains("as you"));
+        assert_eq!(then_text(Mode::Folder, 0, true), "folder");
     }
 
     #[test]

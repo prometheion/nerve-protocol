@@ -18,14 +18,8 @@ leads to the detail.
 - Commands on the sudo list run as root, outside the folders. With the
   network off they do not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
-- A center with the settings grant can list commands for root itself. They
-  run whenever sudo is on, also after you take the grant back. Keep sudo
-  off while a center you would not give root has the grant. Before
-  `sudo on`, check each center's sudo list with `nerve-node rule` and
-  `rule rm` what you did not add
-  ([the grant](../dev/settings-and-config.md#the-settings-grant)).
-- Taking the grant back leaves what the center changed, still on: its mode,
-  folders, rules, sudo list, capability switches and capabilities
+- Taking the grant back leaves what the center changed, still on.
+  `center settings off` names it
   ([the grant](../dev/settings-and-config.md#without-the-grant)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust it, run `sudo nerve-node sudo on` on the

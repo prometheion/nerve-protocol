@@ -14,6 +14,13 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
 - On Windows the guard also refuses the node's service by its display name (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`), `reg add`, `delete`, `copy` and `restore` on the service's key and the keys below it (`Parameters` holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and kin on them; only keys of the registry count, a folder `C:\Services\nerve-node` is a folder. `pkill` and `killall` see an alternative in their pattern (`pkill -f 'nerve-node|nerve-center'`), and cmd's `/c` text is read from the line, also with the doubled quotes a program path with a blank needs (`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`).
 
+### The settings grant, secrets and other pairings' commands
+
+- Only the owner puts a command on the sudo list: the node refuses a center's addition, also with the settings grant, and the center's Audit page shows the `nerve-node rule add allow '<command>'` to run on the machine (on Windows: the app's Permissions › Sudo) in place of its sudo Allow buttons ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `as_owner` goes with `allowlist` mode alone: a timed `folder` or `user` mode a center saves no longer ends in `allowlist` as you, and `mode` and `status` say ", as you" for the mode a timer ends in ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `center settings off` says what the center changed stays (mode, rules, sudo list, folders, capability switches) and names the command that shows each; the app says it too ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- On Windows an administrator as the owner is warned of where Linux warns of root: `center settings on`, `status` and the app ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+
 ## 0.0.7
 
 The finished Linux version: `nerve-center` and `nerve-node` for Linux x86_64

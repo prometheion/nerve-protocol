@@ -540,7 +540,8 @@ protected = { extra = [], allow = [] }  # a center may add to extra; only the ow
                                         # also by a folder at or inside an entry
 allow = ["exec.run:git status", "fs.read:~/notes/*"]   # allowlist mode only
 deny = ["fs:~/private/*", "exec.run:rm *"]             # every mode
-sudo_allow = ["sudo apt update"]                       # sudo commands, every mode
+sudo_allow = ["sudo apt update"]                       # sudo commands, every mode; only the owner adds
+                                                       # (a center may remove: `policy.sudo_allow ...: only the owner ...`)
 ```
 
 Unknown keys are refused, and so is a rule that does not parse. Two centers

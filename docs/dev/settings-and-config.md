@@ -128,6 +128,14 @@ center reads, or the node refuses the whole change and names the field.
 13. The pairing's `policy.no_network` (every mode, #167) once it is on: a
     center cannot clear it (`settings::client_only`). It may change
     `policy.mode` and `policy.until` meanwhile, as no mode sheds the switch.
+15. Adding to the pairing's `policy.sudo_allow` (#197): its commands run as
+    root in every mode while the machine's sudo switch is on, and for a
+    `nerve-run` pairing the node starts them as root itself, so a center that
+    could add one would have root and the node's keys. A center may take an
+    entry off (`policy.sudo_allow <glob>: only the owner puts a command on the
+    sudo list`). The center's Audit page has no sudo button: for a sudo
+    command it shows `nerve-node rule add allow '<command>'` (Linux) or the
+    app's Permissions, Sudo (Windows).
 14. The node's web UI, `[ui]`: its address, its certificate's pin and its
     tokens. It is in no center's document, and a command the web UI runs for
     the owner may not change it either, only revoke a token
@@ -140,12 +148,10 @@ a write that differs there; it keeps the record as it was. The center adds no
 entry and changes none, and an entry goes only with its folder.
 
 Because the grant lets a center widen its rules up to `user` mode, a center
-with the grant is as strong as `user` mode on that machine. It also writes its
-own `policy.sudo_allow` (its Audit page does, `client_only` has no check on
-it, and nothing removes the entries when the grant goes), and the sudo switch
-is one for the machine: while it is on, those commands run as root in every
-mode. With sudo on, a center that has or had the grant reaches root through
-the entries it wrote.
+with the grant is as strong as `user` mode on that machine, never more: the
+sudo list is the owner's (item 15). `as_owner` goes with `allowlist` mode
+alone: `CenterPolicy::validate` drops it under any other mode, so a timed
+mode a center saves never ends in `allowlist` as the owner.
 
 ## The node's own folders
 
@@ -672,7 +678,7 @@ the agent needs them to know where it may work
 
 - Change its own pairing's policy, and read the rest of it: mode (up to
   `user`), folders, rules, capability switches.
-- Add rules with the web UI's Audit buttons.
+- Add allow and deny rules with the web UI's Audit buttons (not to the sudo list).
 - Edit the machine's settings as JSON in the web UI, Settings.
 - Pause the node's link.
 - Turn the [sudo switch](policy-engine.md#sudo-as-the-owner-uses-it) on and off.
@@ -685,17 +691,19 @@ Each change is checked, then saved. A change is audited on the machine with the
 old and the new value and the name of the center.
 
 A center with the grant can widen its own rights up to `user` mode. A center
-that is taken over is then as strong as `user` mode on that machine, and it
-can list commands for root in its own `policy.sudo_allow`, which run whenever
-sudo is on, also after the grant is taken back. Give the grant only to a center
-you would also give a shell, keep sudo off while a center you would not give
-root has the grant, and check each center's sudo list (`rule`) before `sudo on`.
+that is taken over is then as strong as `user` mode on that machine. Give the
+grant only to a center you would also give a shell.
 
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 `user` mode runs commands as root. A center with the grant can switch itself
 to it, and so run commands as root, with no password asked. On such a node
 the grant gives the center root: `center settings on` warns of it,
-and so does the desktop app when you give the grant.
+and so does the desktop app when you give the grant. Its Windows twin is an
+owner (`machine.user`) in Administrators or Backup Operators
+(`owner::admin_owner`): user mode's commands run as that account and can take
+its rights, as UAC is no security boundary. `center settings on` and the app
+warn of that too, and `status` (`owner_is_admin`) and the app's Overview say
+it.
 
 ### What stays with you
 
@@ -708,6 +716,7 @@ No grant lets a center change:
 - the proxy and its secrets
 - another center's pairing
 - the sudo password. A center only passes it on, sealed
+- the sudo list: a center may take a command off it, never put one on it
 - the release of a [protected path](policy-engine.md#protected-paths-as-the-owner-sees-them). A center may add paths
   to protect, never remove one, and its folders cannot open a protected place
   that yours do not
@@ -756,10 +765,13 @@ buttons stay off, and its Capabilities page is read only. Taking the grant back
 changes only the grant: what a center set while it had it stays in force. That
 is its mode, `as_owner`, folders (the `r` and `x` ones it added, and the `w`
 ones it added while its network was on; `network off` does not remove them),
-rules, sudo list, capability switches and the capabilities it added, which stay offered to it until you remove them. A timed `folder` mode it
-saved with `as_owner` set ends in `allowlist` as you, and `mode` shows the
-", as you" only once that mode is in force; `nerve-node mode <mode> --center
-<name>` clears it.
+rules, the sudo entries it kept, capability switches and the capabilities it
+added, which stay offered to it until you remove them. `center settings off`
+says so and names the command that shows each: `mode`, `rule` (rules and the
+sudo list), `folder` and `cap`, each with `--center <name>`; the app's toast
+names its Permissions and Capabilities pages. Where a timer ends in
+`allowlist` as the owner, `mode` and `status` say ", as you" for it before
+it ends.
 
 ## Where files live
 

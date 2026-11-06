@@ -882,8 +882,12 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
     Value::Object(out)
 }
 
+/// Why no audit button puts a command on a machine's sudo list.
+pub const SUDO_LIST_OWNER_ONLY: &str =
+    "only the machine's owner puts a command on the sudo list, on the machine itself";
+
 /// The list and the rule an audit button means: the entry's `cap`, `action`
-/// and `target`, the list (`allow`, `deny`, or `sudo` for a sudo command),
+/// and `target`, the list (`allow` or `deny`; never `sudo`),
 /// whether it is the wildcard form, and the argument it pins with its value
 /// (one of the entry's `args`), if it pins one.
 pub fn audit_rule(
@@ -904,12 +908,10 @@ pub fn audit_rule(
     }
     match list {
         "allow" | "deny" => nerve_policy::rules::rule_for(cap, action, target, wildcard, pin),
-        "sudo" if pin.is_some() => Err("the sudo list holds commands, not arguments".into()),
-        "sudo" if (cap, action) == ("exec", "run") => {
-            nerve_policy::rules::sudo_rule_for(target, wildcard)
-        }
-        "sudo" => Err("the sudo list is for sudo commands".into()),
-        _ => Err("the list is allow, deny or sudo".into()),
+        // Its commands run as root, so the machine takes that list from its
+        // owner only (nerve-policy's client_only); the Audit page says where.
+        "sudo" => Err(SUDO_LIST_OWNER_ONLY.into()),
+        _ => Err("the list is allow or deny".into()),
     }
 }
 

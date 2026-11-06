@@ -1474,6 +1474,12 @@ impl CenterPolicy {
             Some(_) if self.mode != Mode::User || self.until.is_none() => self.then = None,
             _ => {}
         }
+        // `as_owner` is allowlist mode's alone. Kept under a timed mode, it
+        // would hold again when the timer ends in allowlist, and run the
+        // allowed commands as the owner then without anyone having chosen it.
+        if self.mode != Mode::Allowlist {
+            self.as_owner = false;
+        }
         let mut folders: Vec<Folder> = Vec::with_capacity(self.folders.len());
         for f in &self.folders {
             folder_spelling(&f.path, cfg!(windows))?;

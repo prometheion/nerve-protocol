@@ -1736,6 +1736,8 @@ impl Shared {
             // root, as whom what runs as the owner then runs.
             "owner": self.owner_name(&cfg),
             "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
+            // Its Windows twin: the owner is an administrator.
+            "owner_is_admin": crate::owner::admin_owner(&cfg).is_some(),
             // Whether this is the installed node, which an owner may not
             // have been found for (the web UI words its advice by it).
             "installed": self.service,

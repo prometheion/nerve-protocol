@@ -131,9 +131,7 @@ memory only, so a restart turns sudo off.
 - With the network off, no sudo-list command runs ([network](network.md)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust the center, run `sudo nerve-node sudo on`
-  on the machine. A center with the grant can still list commands for root
-  (see [the settings grant](#the-settings-grant))
-  ([from the web UI](../dev/policy-engine.md#from-the-web-ui)).
+  on the machine ([from the web UI](../dev/policy-engine.md#from-the-web-ui)).
 
 ## The settings grant
 
@@ -150,27 +148,18 @@ folders, rules and capability switches, and turn sudo on and off. It may add
 rules with the audit page's buttons, and capabilities of its own: fixed
 commands that run as `nerve-run`. It turns those on itself; one that senses
 or acts waits for your `on`. To stop it changing things, take the grant back.
-That leaves what it changed, still on: its mode (`nerve-node mode`), folders
-(`nerve-node folder --center <name>`), rules and sudo list
-(`nerve-node rule --center <name>`), capability switches and capabilities
-(`nerve-node cap --center <name>`). Set them again; set the mode again
-(`nerve-node mode <mode> --center <name>`) even if it looks right, as a
-timer on it may end in `allowlist` as you. `cap rm NAME --center <name>`
-removes a capability
+That leaves what it changed, still on: `center settings off` names each part
+and the command that shows it
 ([the grant](../dev/settings-and-config.md#without-the-grant)).
 
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
 or another center's pairing, or change the proxy or a machine setting (the
 shell, `allow_root`, the sudo path, where the keys are, the log level). Nor
-may it turn its network on or release a protected path
-([the grant](../dev/settings-and-config.md#the-settings-grant)).
+may it put a command on the sudo list, turn its network on or release a
+protected path ([the grant](../dev/settings-and-config.md#the-settings-grant)).
 
-- A center with the grant can widen its rights up to `user` mode and put
-  commands on its own sudo list, which run as root whenever sudo is on, also
-  after you take the grant back. Give it only to a center you would also give
-  a shell, and keep sudo off while a center you would not give root has the
-  grant. Before `sudo on`, check each center's sudo list with
-  `nerve-node rule --center <name>`, and `rule rm` what you did not add.
+- A center with the grant can widen its rights up to `user` mode. Give it
+  only to a center you would also give a shell.
 - With root as the owner, a center with the settings grant can switch
   itself to `user` mode and so run commands as root
   ([root as the owner](../dev/service.md#root-as-the-owner)).
