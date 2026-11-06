@@ -727,16 +727,25 @@ fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
         Some(a) => a.to_string(),
     };
     let web = crate::config::address_url;
+    // The same `off` cases as `status` shows.
+    let ui_line = match ui.eq_ignore_ascii_case("off") {
+        true => "off".to_string(),
+        false => web(&ui),
+    };
+    let mcp_line = match mcp.eq_ignore_ascii_case("off") {
+        true => "none (MCP is off)".to_string(),
+        false => format!(
+            "{}/mcp, with a harness token: the web UI's Connect a harness card makes one",
+            web(&mcp)
+        ),
+    };
     [
-        format!("Web UI:      {}", web(&ui)),
+        format!("Web UI:      {ui_line}"),
         format!(
             "Owner token: {owner_token} (logs in to the web UI; kept in {}, `sudo nerve-center owner-token` shows it again)",
             kept.display()
         ),
-        format!(
-            "Harnesses:   {}/mcp, with a harness token: the web UI's Connect a harness card makes one",
-            web(&mcp)
-        ),
+        format!("Harnesses:   {mcp_line}"),
     ]
 }
 
@@ -1639,6 +1648,19 @@ mod tests {
             lines.iter().any(|l| l.starts_with("machines: ")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn install_ends_with_off_for_a_web_ui_and_mcp_that_are_off() {
+        let lines = done_lines(
+            "NERVE_CENTER_UI=off\nNERVE_CENTER_MCP=off\n",
+            "tok",
+            Path::new("/k"),
+        );
+        assert_eq!(lines[0], "Web UI:      off");
+        assert_eq!(lines[2], "Harnesses:   none (MCP is off)");
+        let on = done_lines("", "tok", Path::new("/k"));
+        assert!(on[0].contains("127.0.0.1:7480") && on[2].contains("/mcp"));
     }
 
     /// `status` of a center that is not installed: where it runs, how

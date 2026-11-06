@@ -140,7 +140,12 @@ pub struct Args {
     /// The web UI address, or `off`; it asks for the owner token
     ///
     /// The web UI address, or `off`. It always asks for the owner token (`nerve-center owner-token`).
-    #[arg(long, env = "NERVE_CENTER_UI", default_value = "127.0.0.1:7480")]
+    #[arg(
+        long,
+        env = "NERVE_CENTER_UI",
+        default_value = "127.0.0.1:7480",
+        global = true
+    )]
     pub ui: String,
     /// How harnesses reach the center: stdio, off, http or an address
     ///
@@ -149,7 +154,8 @@ pub struct Args {
         long,
         env = "NERVE_CENTER_MCP",
         value_name = "stdio|off|ADDRESS",
-        default_value = "stdio"
+        default_value = "stdio",
+        global = true
     )]
     pub mcp: McpMode,
     /// A harness token for the HTTP MCP endpoint (not a web UI login)
@@ -419,6 +425,14 @@ mod tests {
     /// Every command answers `--help` and `-h`, not only the top level
     /// (round 4, correctness 1): turning clap's own flag off had taken it
     /// from the subcommands too.
+    #[test]
+    fn status_takes_the_web_ui_and_mcp_flags_after_its_name() {
+        let a = Args::try_parse_from(["nerve-center", "status", "--ui", "127.0.0.1:7490"])
+            .expect("--ui after status");
+        assert_eq!(a.ui, "127.0.0.1:7490");
+        assert!(Args::try_parse_from(["nerve-center", "status", "--mcp", "off"]).is_ok());
+    }
+
     #[test]
     fn every_command_has_its_own_help_flag() {
         use clap::CommandFactory;
