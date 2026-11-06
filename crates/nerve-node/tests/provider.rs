@@ -7,14 +7,16 @@
 //! `/proc/<pid>/exe`.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::owner_edit;
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
-use nerve_policy::NodeConfig;
 use nerve_policy::config::{AllowedProvider, SettingsGrant};
 use nerve_proto::rpc::Message;
 use serde_json::{Value, json};
@@ -34,15 +36,6 @@ fn options(root: &Path) -> NodeOptions {
 /// This test program: what a provider started from here runs.
 fn me() -> String {
     std::env::current_exe().unwrap().display().to_string()
-}
-
-async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
-    nerve_node::cli::edit(paths, |c| {
-        f(c);
-        Ok(())
-    })
-    .await
-    .expect("the owner's edit");
 }
 
 /// Pairs with `center`, allows `exe` as the provider `desk`, lets `policy`

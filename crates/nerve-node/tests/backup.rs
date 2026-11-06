@@ -2,31 +2,18 @@
 //! it runs, restored on another machine's folders, and the restored node
 //! dials the center with the key the center knows.
 
+mod common;
+
 use std::path::Path;
 use std::time::Duration;
 
-use clap::Parser;
+use common::cli;
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 
 const WAIT: Duration = Duration::from_secs(15);
 const PASS: &str = "correct horse battery\n";
-
-async fn cli(paths: &NodePaths, args: &[&str]) -> Result<String, String> {
-    let mut argv: Vec<String> = vec![
-        "nerve-node".into(),
-        "--config-dir".into(),
-        paths.config_dir.display().to_string(),
-        "--state-dir".into(),
-        paths.state_dir.display().to_string(),
-    ];
-    argv.extend(args.iter().map(|s| s.to_string()));
-    let cli = nerve_node::cli::Cli::try_parse_from(argv).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    nerve_node::cli::execute(cli, &mut out).await?;
-    Ok(String::from_utf8(out).unwrap())
-}
 
 fn machine(root: &Path, name: &str) -> (NodePaths, NodeOptions) {
     let home = root.join(name);

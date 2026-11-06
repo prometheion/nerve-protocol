@@ -9,11 +9,14 @@
 //! is.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use common::linked;
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, Hold, HoldAt, NodeOptions, NodePaths};
@@ -99,15 +102,6 @@ async fn node(
         None,
     )
     .await
-}
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
 }
 
 async fn run(

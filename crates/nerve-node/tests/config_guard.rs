@@ -4,11 +4,13 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::Path;
 use std::time::Duration;
 
-use clap::Parser;
-use nerve_conformance::fake_center::{self, FakeCenter};
+use common::{cli, linked, owner_edit};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
@@ -33,41 +35,6 @@ fn options(root: &Path) -> NodeOptions {
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_nerve-node").into()),
     );
     o
-}
-
-/// The owner's change while no daemon runs: through the CLI's store.
-async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
-    nerve_node::cli::edit(paths, |c| {
-        f(c);
-        Ok(())
-    })
-    .await
-    .expect("the owner's edit");
-}
-
-/// Runs one `nerve-node` command line as the owner would.
-async fn cli(paths: &NodePaths, args: &[&str]) -> Result<String, String> {
-    let mut argv: Vec<String> = vec![
-        "nerve-node".into(),
-        "--config-dir".into(),
-        paths.config_dir.display().to_string(),
-        "--state-dir".into(),
-        paths.state_dir.display().to_string(),
-    ];
-    argv.extend(args.iter().map(|s| s.to_string()));
-    let cli = nerve_node::cli::Cli::try_parse_from(argv).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    nerve_node::cli::execute(cli, &mut out).await?;
-    Ok(String::from_utf8(out).unwrap())
-}
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
 }
 
 fn wire(p: &Path) -> String {
