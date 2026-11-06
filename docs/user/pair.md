@@ -44,8 +44,7 @@ modes](folders-and-modes.md)). Its deny list holds the built-in
 ## Several centers
 
 A node can pair with any number of centers. Each has its own key, mode,
-folders, rules and audit entries. A center cannot tell whether others
-exist.
+folders, rules and audit entries. A center is not told of the others.
 
 With more than one center, a command that works on one takes
 `--center <name>`; it refuses to guess.

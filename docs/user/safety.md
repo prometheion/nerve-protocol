@@ -19,12 +19,13 @@ leads to the detail.
   network off they do not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
 - A center with the settings grant can list commands for root itself. They
-  run whenever sudo is on, also after you take the grant back. Before
+  run whenever sudo is on, also after you take the grant back. Keep sudo
+  off while a center you would not give root has the grant. Before
   `sudo on`, check each center's sudo list with `nerve-node rule` and
   `rule rm` what you did not add
   ([the grant](../dev/settings-and-config.md#the-settings-grant)).
 - Taking the grant back leaves what the center changed, still on: its mode,
-  rules, sudo list and capabilities
+  folders, rules, sudo list, capability switches and capabilities
   ([the grant](../dev/settings-and-config.md#without-the-grant)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust it, run `sudo nerve-node sudo on` on the
@@ -91,8 +92,9 @@ leads to the detail.
   running command. A program handed to a service manager, or detached on a
   node without a cgroup, outlives a stop
   ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
-- A capability's command line, with the call's values, is readable by every
-  account while it runs. Put no secret in it
+- While a command runs, its line, with the call's values, is readable by
+  every account, the other centers' commands too. Put no secret in a command
+  or a capability's line
   ([secrets](../dev/capabilities.md#keep-secrets-out-of-the-command)).
 - The check of a program's provider tells programs apart, not users: allow
   only programs you trust

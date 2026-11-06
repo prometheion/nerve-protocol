@@ -688,8 +688,8 @@ A center with the grant can widen its own rights up to `user` mode. A center
 that is taken over is then as strong as `user` mode on that machine, and it
 can list commands for root in its own `policy.sudo_allow`, which run whenever
 sudo is on, also after the grant is taken back. Give the grant only to a center
-you would also give a shell, and check each center's sudo list (`rule`) before
-`sudo on`.
+you would also give a shell, keep sudo off while a center you would not give
+root has the grant, and check each center's sudo list (`rule`) before `sudo on`.
 
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 `user` mode runs commands as root. A center with the grant can switch itself
@@ -754,8 +754,9 @@ Everything is still possible on the machine, with [`nerve-node`](../user/command
 The web UI shows such a machine as keeping its settings to itself, its Audit
 buttons stay off, and its Capabilities page is read only. Taking the grant back
 changes only the grant: what a center set while it had it stays in force. That
-is its mode, `as_owner`, rules, sudo list and the capabilities it added, which
-stay offered to it until you remove them.
+is its mode, `as_owner`, folders (`r` and `x` ones always, `w` ones while its
+network is on), rules, sudo list, capability switches and the capabilities it
+added, which stay offered to it until you remove them.
 
 ## Where files live
 

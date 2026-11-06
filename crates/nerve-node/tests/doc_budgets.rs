@@ -172,7 +172,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         // Taking the grant back leaves what the center added.
         (
             "docs/user/rules.md",
-            "That leaves what it changed, still on: its mode",
+            "That leaves what it changed, still on: its mode (`nerve-node mode`), folders",
         ),
         // A stop leaves a command's own leftovers when it ran as you.
         (
@@ -222,7 +222,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         (
             "docs/user/safety.md",
-            "Taking the grant back leaves what the center changed, still on: its mode,\n  rules, sudo list and capabilities",
+            "Taking the grant back leaves what the center changed, still on: its mode,\n  folders, rules, sudo list, capability switches and capabilities",
         ),
         (
             "docs/user/safety.md",
@@ -236,7 +236,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ("docs/user/safety.md", "does not stop a running command"),
         (
             "docs/user/safety.md",
-            "readable by every account while it runs",
+            "is readable by every account, the other centers' commands too",
         ),
         ("docs/user/safety.md", "tells programs apart, not users"),
         ("docs/user/safety.md", "the keyring is yours"),
@@ -272,6 +272,21 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "docs/user/rules.md",
             "check each center's sudo list with\n  `nerve-node rule --center <name>`",
         ),
+        // The round 6 limits: keep sudo off for a center you would not give
+        // root, and one center's command lines are open to the others.
+        (
+            "docs/user/rules.md",
+            "keep sudo off while a center you would not give root has the
+  grant",
+        ),
+        (
+            "docs/user/safety.md",
+            "Keep sudo off while a center you would not give root has the grant",
+        ),
+        (
+            "docs/user/safety.md",
+            "Put no secret in a command or a capability's line",
+        ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
     ];
@@ -291,6 +306,11 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
     assert!(
         !trouble.contains("A command a center runs cannot"),
         "troubleshooting.md says a center's command cannot change the node"
+    );
+    let pair = std::fs::read_to_string(root().join("docs/user/pair.md")).unwrap();
+    assert!(
+        !pair.contains("cannot tell whether others"),
+        "pair.md says a center cannot tell that other centers exist"
     );
     let stop = std::fs::read_to_string(root().join("docs/user/watch-and-stop.md")).unwrap();
     assert!(

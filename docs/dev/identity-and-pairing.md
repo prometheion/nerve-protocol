@@ -184,8 +184,7 @@ stays in the center.
 ### Several centers
 
 A node can pair with any number of centers. Each one is separate: its own key,
-rules, folders and audit entries. A center cannot tell whether other centers
-exist.
+rules, folders and audit entries. A center is not told of the other centers.
 
 Every command that works on one center takes `--center <name>`. With more than
 one center the command refuses to guess:

@@ -150,10 +150,11 @@ folders, rules and capability switches, and turn sudo on and off. It may add
 rules with the audit page's buttons, and capabilities of its own: fixed
 commands that run as `nerve-run`. It turns those on itself; one that senses
 or acts waits for your `on`. To stop it changing things, take the grant back.
-That leaves what it changed, still on: its mode (`nerve-node center` shows it),
-its rules and sudo list (`nerve-node rule --center <name>`) and its
-capabilities. Set them again; `cap rm NAME --center <name>` removes a
-capability
+That leaves what it changed, still on: its mode (`nerve-node mode`), folders
+(`nerve-node folder --center <name>`), rules and sudo list
+(`nerve-node rule --center <name>`), capability switches and capabilities
+(`nerve-node cap --center <name>`). Set them again; `cap rm NAME --center
+<name>` removes a capability
 ([the grant](../dev/settings-and-config.md#without-the-grant)).
 
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
@@ -165,7 +166,8 @@ may it turn its network on or release a protected path
 - A center with the grant can widen its rights up to `user` mode and put
   commands on its own sudo list, which run as root whenever sudo is on, also
   after you take the grant back. Give it only to a center you would also give
-  a shell. Before `sudo on`, check each center's sudo list with
+  a shell, and keep sudo off while a center you would not give root has the
+  grant. Before `sudo on`, check each center's sudo list with
   `nerve-node rule --center <name>`, and `rule rm` what you did not add.
 - With root as the owner, a center with the settings grant can switch
   itself to `user` mode and so run commands as root
