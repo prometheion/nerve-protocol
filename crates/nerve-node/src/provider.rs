@@ -278,7 +278,7 @@ impl Providers {
         uid: u32,
         fragment: Vec<Fragment>,
         tx: mpsc::Sender<Value>,
-        now: impl FnOnce() -> Option<NodeConfig>,
+        now: impl FnOnce() -> Option<Arc<NodeConfig>>,
     ) -> Result<Arc<Attached>, String> {
         let mut held = lock(&self.attached);
         let Some(now) = now() else {
@@ -2145,7 +2145,7 @@ mod tests {
                     1000,
                     fragment(echo()),
                     tx.clone(),
-                    || Some(now),
+                    || Some(Arc::new(now)),
                 )
                 .err()
                 .expect("not held");
@@ -2167,7 +2167,7 @@ mod tests {
         assert_eq!(p.held("desk"), None);
         let a = p
             .hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
-                Some(allowing("desk", "/opt/desk"))
+                Some(Arc::new(allowing("desk", "/opt/desk")))
             })
             .unwrap();
         assert_eq!(p.held("desk"), Some((1000, a.serial)));
@@ -2181,7 +2181,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let hold = |tx| {
             p.hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
-                Some(allowing("desk", "/opt/desk"))
+                Some(Arc::new(allowing("desk", "/opt/desk")))
             })
             .unwrap()
             .serial

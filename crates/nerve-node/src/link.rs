@@ -1021,7 +1021,7 @@ impl Link {
     }
 
     /// The center's entry, or `None` when it was removed meanwhile.
-    fn entry(&self) -> Option<(NodeConfig, CenterEntry)> {
+    fn entry(&self) -> Option<(Arc<NodeConfig>, CenterEntry)> {
         let cfg = self.shared.config();
         let e = cfg.center(&self.name).cloned()?;
         Some((cfg, e))
@@ -2382,7 +2382,7 @@ impl Link {
     /// `exec.signal`: a signal to a running command of this link.
     async fn exec_signal(
         self: &Arc<Self>,
-        cfg: NodeConfig,
+        cfg: Arc<NodeConfig>,
         entry: CenterEntry,
         effect: Effect,
         inv: Invoke,
@@ -2412,7 +2412,7 @@ impl Link {
     /// pairing's commands run as, within what its folders allow.
     async fn fs_call(
         self: &Arc<Self>,
-        cfg: NodeConfig,
+        cfg: Arc<NodeConfig>,
         entry: CenterEntry,
         effect: Effect,
         inv: &Invoke,

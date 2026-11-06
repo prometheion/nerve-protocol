@@ -88,7 +88,7 @@ fn change_record(
 /// record keeps a pairing whose folders could not all be deleted, so the
 /// next sync tries again. A pairing's folders are handled under its own
 /// lock, so the commands of the others do not wait for a long delete.
-pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec<String> {
+pub fn sync(run: &Account, cfg: impl FnOnce() -> Arc<NodeConfig>, file: &Path) -> Vec<String> {
     let _one = nerve_transport::sync::turn(&SYNCING);
     // The config as it is once this sync's turn has come: one started for
     // an older version would delete the folders of a pairing a newer one
@@ -738,7 +738,7 @@ mod tests {
             centers: vec![center("lab", "n1"), center("home", "n2")],
             ..Default::default()
         };
-        let errors = sync(&run, || cfg.clone(), &file);
+        let errors = sync(&run, || Arc::new(cfg.clone()), &file);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("the node did not make it"), "{errors:?}");
         let record = read_record(&file);
@@ -793,7 +793,7 @@ mod tests {
         let running = SYNCING.lock().unwrap();
         let waiting = {
             let (run, cfg, file) = (run.clone(), cfg.clone(), file.clone());
-            std::thread::spawn(move || sync(&run, || cfg.lock().unwrap().clone(), &file))
+            std::thread::spawn(move || sync(&run, || Arc::new(cfg.lock().unwrap().clone()), &file))
         };
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!file.exists(), "it did not wait");
@@ -816,7 +816,7 @@ mod tests {
             centers: vec![center("alpha", "a1"), center("lab", "n1")],
             ..Default::default()
         };
-        assert!(sync(&run, || before.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(before.clone()), &file).is_empty());
         let lab = Own::of(&run.home, "lab");
         std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
         // The sync sees neither pairing, and waits on alpha's lock.
@@ -824,7 +824,7 @@ mod tests {
         let held = busy.lock().unwrap();
         let syncing = {
             let (run, file) = (run.clone(), file.clone());
-            std::thread::spawn(move || sync(&run, NodeConfig::default, &file))
+            std::thread::spawn(move || sync(&run, Arc::default, &file))
         };
         // It has read its config and the record once it asks for alpha's lock
         // (the map holds one handle, this test one, the sync the third).
@@ -861,18 +861,18 @@ mod tests {
             centers: vec![center("lab", "n1"), center("home", "n2")],
             ..Default::default()
         };
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         let lab = Own::of(&run.home, "lab");
         assert!(lab.home.is_dir() && Own::of(&run.home, "home").temp.is_dir());
         std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
         // Paired again under the same name: a new id, empty folders.
         cfg.centers = vec![center("lab", "n3")];
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         assert!(lab.home.is_dir() && !lab.home.join(".bashrc").exists());
         assert!(!run.home.join("home").exists());
         assert!(run.home.join("bin").is_dir());
         cfg.centers.clear();
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         assert!(!run.home.join("lab").exists());
         assert!(read_record(&file).is_empty());
     }

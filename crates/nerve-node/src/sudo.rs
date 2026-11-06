@@ -100,6 +100,7 @@ impl Shared {
         self.config()
             .machine
             .sudo_path
+            .clone()
             .unwrap_or_else(|| "sudo".into())
     }
 

@@ -729,8 +729,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub fn config(&self) -> NodeConfig {
-        lock(&self.store).config().clone()
+    /// The config in force, shared with the store: a reader takes no copy,
+    /// and a change puts a new one in the store's place.
+    pub fn config(&self) -> Arc<NodeConfig> {
+        lock(&self.store).shared()
     }
 
     /// Waits for the test's hold at `at`, if it set one.
@@ -2212,7 +2214,7 @@ impl Daemon {
     }
 
     /// The config as the daemon holds it now.
-    pub fn config(&self) -> NodeConfig {
+    pub fn config(&self) -> Arc<NodeConfig> {
         self.shared.config()
     }
 
@@ -3145,7 +3147,7 @@ mod every_platform {
         o.owner = Some("alice".into());
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
-        let mut cfg = s.config();
+        let mut cfg = NodeConfig::clone(&s.config());
         cfg.machine.user = Some("alice".into());
         let named = |mode: Mode, as_owner: bool| {
             s.account_name(
@@ -3375,7 +3377,7 @@ mod tests {
     #[tokio::test]
     async fn the_keyring_folder_is_the_nodes_own_with_the_keyring() {
         let (d, daemon) = daemon().await;
-        let mut cfg = daemon.config();
+        let mut cfg = NodeConfig::clone(&daemon.config());
         let keyrings = d.path().join(".local/share/keyrings");
         assert_eq!(daemon.shared.own(&cfg), daemon.paths().own());
         cfg.machine.secret_storage = SecretStorage::Keyring;
@@ -3466,6 +3468,19 @@ mod tests {
         opts.ctl = false;
         opts.log = Some(log.clone());
         opts
+    }
+
+    /// A call reads the config the store holds, not a copy of it: every
+    /// read until the next change is the same one.
+    #[tokio::test]
+    async fn the_config_is_read_without_a_copy() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let (a, b) = (daemon.config(), daemon.shared.config());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(std::ptr::eq(&*a, lock(&daemon.shared.store).config()));
+        daemon.stop().await;
     }
 
     /// A stop sent before the daemon's tasks first ran is not lost: a stop
@@ -3918,7 +3933,7 @@ mod tests {
         let folders = || s.config().centers[0].policy.folders.len();
         let before = s.webui.lock_count();
         // The panic.
-        let mut locked = s.config();
+        let mut locked = NodeConfig::clone(&s.config());
         locked.locked = true;
         let Reply::Ok(_) = control(
             &s,
@@ -4631,7 +4646,7 @@ mod tests {
             );
             // The folders of the folder pairing, then of the user pairing.
             let pairings_each = |f: Vec<Folder>, u: Vec<Folder>| {
-                let mut cfg = s.config();
+                let mut cfg = NodeConfig::clone(&s.config());
                 cfg.centers = [("f", Mode::Folder, f), ("u", Mode::User, u)]
                     .into_iter()
                     .map(|(name, mode, folders)| nerve_policy::CenterEntry {
