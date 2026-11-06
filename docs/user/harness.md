@@ -22,10 +22,10 @@ Point the harness at the endpoint, and send the token as a bearer token:
 
 | Setting | Value |
 |---|---|
-| URL | `http://127.0.0.1:7481/mcp` (`--mcp-listen`) |
+| URL | `http://127.0.0.1:7481/mcp` (`--mcp http`, or `--mcp <address>`) |
 | Header | `Authorization: Bearer <token>` |
 
-A harness on another machine needs `--mcp-listen 0.0.0.0:7481`. The endpoint
+A harness on another machine needs `--mcp 0.0.0.0:7481`. The endpoint
 then uses TLS with the center's self-signed certificate.
 
 ## Tokens
@@ -40,7 +40,7 @@ owner token there too. When the harness gives the agent such tools, run the
 center as the [service](center.md#run-it-as-a-service), which keeps its
 folder to its own account.
 
-- Give one with `--harness-token` or `NERVE_HARNESS_TOKEN`.
+- Give one with `--harness-token` or `NERVE_CENTER_HARNESS_TOKEN`.
 - Or make more in the web UI: Settings, Harness tokens. The token is shown
   once. Delete it there to stop it. The one of the settings is listed there
   too; remove it from the settings.
@@ -226,7 +226,7 @@ You change that on the center, not on the machine
 A harness gives up on a tool call after a while, often a minute, while a
 build or a test run may take longer. So `execute` waits for a result at most
 the center's call wait, 20 seconds unless you set another (`--call-wait`,
-`NERVE_CALL_WAIT`, [center](center.md)). A call still running then becomes a
+`NERVE_CENTER_CALL_WAIT`, [center](center.md)). A call still running then becomes a
 **job**: `execute` answers at once with its id and the calls that follow it
 up, and the call runs on.
 

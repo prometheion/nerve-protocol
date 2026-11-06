@@ -8,8 +8,8 @@ same way and so the owner knows what each setting does.
 
 | What | Default | Override |
 |---|---|---|
-| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_CONFIG_DIR` |
-| control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_STATE_DIR` |
+| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
+| control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_NODE_STATE_DIR` |
 
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
 instead of `keys/` and `config.key` ([where the keys are](#where-the-keys-are)).

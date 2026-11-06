@@ -56,8 +56,8 @@ impl Drop for Follow {
 }
 
 impl Runner {
-    /// This program. The node's folders come from `NERVE_CONFIG_DIR` and
-    /// `NERVE_STATE_DIR` when they are set, which the CLI reads too, else
+    /// This program. The node's folders come from `NERVE_NODE_CONFIG_DIR`
+    /// and `NERVE_NODE_STATE_DIR` when they are set, which the CLI reads too, else
     /// they are the CLI's defaults.
     pub fn this_program() -> Result<Runner, String> {
         let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;

@@ -97,7 +97,7 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     // token that opens nothing.
     if !state.join(crate::store::FILE).exists() && !path(state).exists() {
         return Err(format!(
-            "no center has run in {} yet, and it makes its owner token at its first start; give the state folder with --state-dir (the installed center's is /var/lib/nerve-center)",
+            "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first (`sudo nerve-center install`)",
             state.display()
         ));
     }

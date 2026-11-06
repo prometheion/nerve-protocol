@@ -34,7 +34,7 @@ async fn center(dir: &std::path::Path) -> Running {
         "--ui",
         "127.0.0.1:0",
         "--mcp",
-        "none",
+        "off",
     ])
     .unwrap();
     let lock = nerve_center::attach::try_lock(dir)

@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 fn spawn(state: &std::path::Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_nerve-center"))
         .env_clear()
-        .env("NERVE_STATE_DIR", state)
-        .env("NERVE_LISTEN", "127.0.0.1:0")
-        .env("NERVE_PLAIN_LOOPBACK", "true")
-        .env("NERVE_UI", "off")
-        .env("NERVE_LOG", "warn")
+        .env("NERVE_CENTER_STATE_DIR", state)
+        .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+        .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+        .env("NERVE_CENTER_UI", "off")
+        .env("NERVE_CENTER_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -117,11 +117,11 @@ fn the_first_start_says_the_owner_token_on_stderr() {
     let run = || {
         let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
             .env_clear()
-            .env("NERVE_STATE_DIR", dir.path())
-            .env("NERVE_LISTEN", "127.0.0.1:0")
-            .env("NERVE_PLAIN_LOOPBACK", "true")
-            .env("NERVE_UI", "127.0.0.1:0")
-            .env("NERVE_LOG", "warn")
+            .env("NERVE_CENTER_STATE_DIR", dir.path())
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", "127.0.0.1:0")
+            .env("NERVE_CENTER_LOG", "warn")
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -159,11 +159,11 @@ fn under_systemd_the_owner_token_stays_off_stderr() {
         std::fs::create_dir_all(&state).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
         cmd.env_clear()
-            .env("NERVE_STATE_DIR", &state)
-            .env("NERVE_LISTEN", "127.0.0.1:0")
-            .env("NERVE_PLAIN_LOOPBACK", "true")
-            .env("NERVE_UI", "127.0.0.1:0")
-            .env("NERVE_LOG", "info")
+            .env("NERVE_CENTER_STATE_DIR", &state)
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", "127.0.0.1:0")
+            .env("NERVE_CENTER_LOG", "info")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(err);
@@ -189,11 +189,11 @@ fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
     let run = |ui: &str| {
         Command::new(env!("CARGO_BIN_EXE_nerve-center"))
             .env_clear()
-            .env("NERVE_STATE_DIR", dir.path())
-            .env("NERVE_LISTEN", "127.0.0.1:0")
-            .env("NERVE_PLAIN_LOOPBACK", "true")
-            .env("NERVE_UI", ui)
-            .env("NERVE_LOG", "warn")
+            .env("NERVE_CENTER_STATE_DIR", dir.path())
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", ui)
+            .env("NERVE_CENTER_LOG", "warn")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -223,12 +223,12 @@ fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
     let run = |ui: &str, harness: &str| {
         Command::new(env!("CARGO_BIN_EXE_nerve-center"))
             .env_clear()
-            .env("NERVE_STATE_DIR", dir.path())
-            .env("NERVE_LISTEN", "127.0.0.1:0")
-            .env("NERVE_PLAIN_LOOPBACK", "true")
-            .env("NERVE_UI", ui)
-            .env("NERVE_HARNESS_TOKEN", harness)
-            .env("NERVE_LOG", "warn")
+            .env("NERVE_CENTER_STATE_DIR", dir.path())
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", ui)
+            .env("NERVE_CENTER_HARNESS_TOKEN", harness)
+            .env("NERVE_CENTER_LOG", "warn")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -254,11 +254,11 @@ fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
 fn one_session(state: &std::path::Path, level: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
         .env_clear()
-        .env("NERVE_STATE_DIR", state)
-        .env("NERVE_LISTEN", "127.0.0.1:0")
-        .env("NERVE_PLAIN_LOOPBACK", "true")
-        .env("NERVE_UI", "off")
-        .env("NERVE_LOG", level)
+        .env("NERVE_CENTER_STATE_DIR", state)
+        .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+        .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+        .env("NERVE_CENTER_UI", "off")
+        .env("NERVE_CENTER_LOG", level)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -321,8 +321,8 @@ fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     // The level is a word the center knows.
     let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
         .env_clear()
-        .env("NERVE_STATE_DIR", dir.path())
-        .env("NERVE_LOG", "loud")
+        .env("NERVE_CENTER_STATE_DIR", dir.path())
+        .env("NERVE_CENTER_LOG", "loud")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -335,7 +335,7 @@ fn owner(args: &[&str], state: Option<&std::path::Path>) -> std::process::Output
     let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
     c.env_clear().args(args).stdin(Stdio::null());
     if let Some(s) = state {
-        c.env("NERVE_STATE_DIR", s);
+        c.env("NERVE_CENTER_STATE_DIR", s);
     }
     c.output().unwrap()
 }

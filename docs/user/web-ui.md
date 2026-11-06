@@ -294,7 +294,7 @@ Built like the desktop app's Help: two parts that open and close on their own.
   token deleted while the state file cannot be written stops at once, but
   the page says the delete is not kept yet: unless the file can be written
   before the center stops, the token works again at the next start. The
-  same holds for a removed machine. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
+  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
   `--harness-token`) is listed too, without **Delete**: remove it from the
   settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings

@@ -66,6 +66,24 @@ pub fn try_lock(state: &Path) -> Result<Option<Lock>, String> {
     Ok(Some(Lock { _file: file }))
 }
 
+/// Whether a center runs in `state`: it holds the lock there. `None` where
+/// that cannot be told (no lock file yet: no center ran; or another
+/// platform). Opens the file only, so it never makes one in another's
+/// folder.
+#[cfg(unix)]
+pub fn runs(state: &Path) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(state.join(LOCK_FILE)).ok()?;
+    // SAFETY: flock on a file descriptor this function owns.
+    let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+    Some(r != 0)
+}
+
+#[cfg(not(unix))]
+pub fn runs(_state: &Path) -> Option<bool> {
+    None
+}
+
 /// Takes the center lock for work on the state folder that a running center
 /// must not meet (a restore): `None` when a center runs. Where `try_lock`
 /// has a real lock this is it. On Windows `try_lock` takes none, so a center

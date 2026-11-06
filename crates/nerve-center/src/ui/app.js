@@ -1373,7 +1373,7 @@ function pageSettings() {
         el("label", { class: "field" }, el("span", { class: "label" }, "Pairing code valid for (minutes, at most 1440)"), pairMinutes)),
       el("div", { class: "form-row" }, levelPicker.root),
       el("p", { class: "meta" }, "Debug adds detail for tracking down a problem and makes the log file grow faster. What the log holds is on the Log page."),
-      s.center.log_level_pinned ? el("p", { class: "meta" }, `The --log option (NERVE_LOG) sets the level at every start and wins over this setting. This run keeps the level ${s.center.log_level_now}.`) : null,
+      s.center.log_level_pinned ? el("p", { class: "meta" }, `The --log option (NERVE_CENTER_LOG) sets the level at every start and wins over this setting. This run keeps the level ${s.center.log_level_now}.`) : null,
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "center:save", onclick: act(async () => {
         await api("POST", "/api/center", { name: name.value, retention_days: Number(days.value), pair_code_minutes: Number(pairMinutes.value), log_level: logLevel });
         notify("Saved.");
@@ -1441,7 +1441,7 @@ function drawTokens() {
       el("button", { type: "button", class: "btn ghost sm", onclick: () => copy(state.newToken) }, icon("copy", "sm"), "Copy"),
       el("button", { type: "button", class: "btn ghost sm", "aria-label": "Hide", onclick: () => { state.newToken = null; drawTokens(); } }, icon("x", "sm"))) : null,
     s.tokens.length ? s.tokens.map((t) => t.settings
-      // The token of the settings (NERVE_HARNESS_TOKEN or --harness-token):
+      // The token of the settings (NERVE_CENTER_HARNESS_TOKEN or --harness-token):
       // only a change of the settings and a restart remove it.
       ? el("div", { class: "card" }, el("div", { class: "card-top" },
         icon("key"), el("span", { class: "name mono" }, t.label), el("span", { class: "meta push" }, "From the center's settings; remove it there")))

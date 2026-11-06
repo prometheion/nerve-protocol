@@ -97,15 +97,15 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     }
 
     let mut mcp = None;
-    if args.mcp == McpMode::Http {
-        let tls = !is_loopback(&args.mcp_listen);
-        let server = Server::bind(&args.mcp_listen, &center, !tls).await?;
+    if let McpMode::Http(at) = &args.mcp {
+        let tls = !is_loopback(at);
+        let server = Server::bind(at, &center, !tls).await?;
         mcp = Some(server.local_addr());
         if !has_token {
             center.log().record(
                 Level::Warn,
                 None,
-                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI or set with NERVE_HARNESS_TOKEN",
+                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI (Settings, Harness tokens) or set with NERVE_CENTER_HARNESS_TOKEN",
             );
         }
         tasks.push(tokio::spawn(HttpMcp::new(&center, token).serve(server)));
@@ -274,7 +274,7 @@ pub async fn run(args: Args) -> Result<(), String> {
                 }
             }
         }
-        McpMode::Http | McpMode::None => signal().await,
+        McpMode::Http(_) | McpMode::Off => signal().await,
     }
     running.stop().await;
     Ok(())

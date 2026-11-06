@@ -3,9 +3,9 @@
 //! has them: what both do the same way, `update` among it, is
 //! [`nerve_service`]'s. The service runs `nerve-center` with
 //! MCP over HTTP under a user of its own, `nerve-center`, which owns the
-//! center's state folder and nothing else. Its settings are the `NERVE_*`
-//! variables in a file of root's that the unit reads, so the center cannot
-//! change how it is started.
+//! center's state folder and nothing else. Its settings are the
+//! `NERVE_CENTER_*` variables in a file of root's that the unit reads, so the
+//! center cannot change how it is started.
 //!
 //! What these commands do to the machine beyond the center's files (the
 //! user, systemd, running a program) goes through [`System`], so the tests
@@ -95,7 +95,7 @@ Type=simple
 User={USER}
 Group={USER}
 Environment=HOME={state}
-Environment=NERVE_MCP=http
+Environment=NERVE_CENTER_MCP=http
 EnvironmentFile=-{settings}
 ExecStart={bin} --state-dir {state}
 Restart=on-failure
@@ -140,26 +140,34 @@ WantedBy=multi-user.target
     }
 
     /// The settings file `install` writes when there is none: the harness
-    /// token of the HTTP MCP endpoint, and the other settings as comments
-    /// with their defaults.
-    pub fn settings_text(token: &str) -> String {
+    /// token of the HTTP MCP endpoint, the settings `install` was given
+    /// (`set`, by variable), and the others as comments with their
+    /// defaults.
+    pub fn settings_text(token: &str, set: &[(&str, String)]) -> String {
+        let line = |var: &str, default: &str| match set.iter().find(|(v, _)| *v == var) {
+            Some((_, value)) => format!("{var}={value}"),
+            None => format!("#{var}={default}"),
+        };
         format!(
             "# The settings of the installed center, read by the service at its start:
 # `sudo systemctl restart {UNIT_NAME}` after a change. `nerve-center install`
-# wrote this file once and keeps it. Each variable is a flag of
-# `nerve-center --help`.
+# wrote this file and keeps it; `install --name`, `--public-url` and
+# `--listen` set those here. Each variable is a flag of `nerve-center --help`.
 #
 # The harness token: harnesses send it to the HTTP MCP endpoint. It does not
 # log in to the web UI, which asks for the owner token in
 # /var/lib/nerve-center/owner-token. More can be made in the web UI.
-NERVE_HARNESS_TOKEN={token}
-#NERVE_NAME=nerve-center
-#NERVE_LISTEN=0.0.0.0:7443
-#NERVE_PUBLIC_URL=https://<host name>:7443
-#NERVE_UI=127.0.0.1:7480
-#NERVE_MCP_LISTEN=127.0.0.1:7481
-#NERVE_LOG=info
-"
+NERVE_CENTER_HARNESS_TOKEN={token}
+{}
+{}
+{}
+#NERVE_CENTER_UI=127.0.0.1:7480
+#NERVE_CENTER_MCP=127.0.0.1:7481
+#NERVE_CENTER_LOG=info
+",
+            line("NERVE_CENTER_NAME", "nerve-center"),
+            line("NERVE_CENTER_LISTEN", "0.0.0.0:7443"),
+            line("NERVE_CENTER_PUBLIC_URL", "https://<host name>:7443"),
         )
     }
 }
@@ -276,6 +284,148 @@ pub fn settle_user(state: &Path) -> Result<bool, String> {
     Ok(nerve_transport::net::euid() != before)
 }
 
+/// Runs `f` (a restore) with the installed service stopped, where `state`
+/// is its folder and it runs, and starts it again after, whether `f` did
+/// its work or not. Elsewhere `f` alone, which refuses a running center.
+pub fn with_service_stopped(
+    layout: &Layout,
+    state: &Path,
+    out: &mut dyn Write,
+    f: &dyn Fn(&mut dyn Write) -> Result<(), String>,
+) -> Result<(), String> {
+    let ours = cfg!(target_os = "linux")
+        && layout.installed()
+        && state == layout.state
+        && nerve_transport::net::euid() == 0
+        && crate::attach::runs(state) == Some(true);
+    if !ours {
+        return f(out);
+    }
+    nerve_service::System::systemctl(&Host, &["stop", UNIT_NAME])?;
+    did(out, format!("stopped {UNIT_NAME} for the restore"));
+    let _ = out.flush();
+    // The restore becomes the folder's owner for its work, for good: it
+    // runs in a child, so that this process, root still, starts the service
+    // again. The child finds no center running and restores.
+    let r = std::env::current_exe()
+        .and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .status()
+        })
+        .map_err(|e| format!("the restore did not start: {e}"))
+        .and_then(|s| {
+            s.success()
+                .then_some(())
+                .ok_or_else(|| "the restore failed".to_string())
+        });
+    let started = nerve_service::System::systemctl(&Host, &["start", UNIT_NAME]);
+    match started {
+        Ok(()) => did(out, format!("started {UNIT_NAME} again")),
+        Err(e) => did(
+            out,
+            format!("{UNIT_NAME} did not start again ({e}): `sudo systemctl start {UNIT_NAME}`"),
+        ),
+    }
+    r
+}
+
+/// `nerve-center status`: whether the center runs in `state` and as the
+/// service, where its web UI and harnesses reach it, where its owner token
+/// is, its machines, and where its log is. Of the installed center where it
+/// is installed (crate::config::Args::owner_state_dir).
+pub fn status(layout: &Layout, state: &Path, out: &mut dyn Write) -> Result<(), String> {
+    let installed = layout.installed() && state == layout.state;
+    // Root's file: read as root, before anything else.
+    let file = installed
+        .then(|| std::fs::read_to_string(layout.settings()).ok())
+        .flatten();
+    for line in status_lines(layout, state, installed, file.as_deref()) {
+        let _ = writeln!(out, "{line}");
+    }
+    Ok(())
+}
+
+/// The lines of [`status`], with `file` the installed center's settings
+/// where they could be read.
+fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let runs = crate::attach::runs(state);
+    lines.push(match runs {
+        Some(true) => format!("center: running, in {}", state.display()),
+        Some(false) => format!("center: not running, in {}", state.display()),
+        None if !state.exists() => format!("center: none has run in {} yet", state.display()),
+        None => format!("center: not running, in {}", state.display()),
+    });
+    if installed {
+        let ask = |verb: &str| {
+            std::process::Command::new("systemctl")
+                .args([verb, UNIT_NAME])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let state = ask("is-active").unwrap_or_else(|| "unknown".into());
+        let boot = match ask("is-enabled").as_deref() {
+            Some("enabled") => ", starts with the machine",
+            Some(_) => ", does not start with the machine",
+            None => "",
+        };
+        lines.push(format!("service: {state}{boot}"));
+    } else {
+        lines.push("service: not installed (a harness starts this center)".into());
+    }
+    // Where it is reached: what the settings file sets, else the defaults.
+    let at = |var: &str| file.and_then(|f| setting_in(f, var));
+    let web = |a: &str| match crate::config::is_loopback(a) {
+        true => format!("http://{a}"),
+        false => format!("https://{a}"),
+    };
+    let ui = at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
+    lines.push(match ui.as_str() {
+        "off" => "web UI: off".into(),
+        a => format!("web UI: {}", web(a)),
+    });
+    lines.push(match (installed, at("NERVE_CENTER_MCP").as_deref()) {
+        (true, None | Some("http")) => format!("harnesses: {}/mcp", web(crate::config::MCP_HTTP)),
+        (true, Some("off")) => "harnesses: none (MCP is off)".into(),
+        (true, Some(a)) => format!("harnesses: {}/mcp", web(a)),
+        (false, _) => "harnesses: the one that starts it, over stdio".into(),
+    });
+    if installed && file.is_none() {
+        lines.push(format!(
+            "(these are the defaults: {} says more to root, `sudo nerve-center status`)",
+            layout.settings().display()
+        ));
+    }
+    let sudo = if installed { "sudo " } else { "" };
+    lines.push(format!(
+        "owner token: in {}; `{sudo}nerve-center owner-token` shows it",
+        crate::owner::path(state).display()
+    ));
+    lines.push(match crate::store::Store::load(state) {
+        Ok(Some(s)) if s.nodes.is_empty() => {
+            "machines: none paired yet; the web UI's Overview pairs one".into()
+        }
+        Ok(Some(s)) => {
+            let names: Vec<&str> = s.nodes.values().map(|n| n.name.as_str()).collect();
+            format!("machines: {} paired: {}", names.len(), names.join(", "))
+        }
+        Ok(None) => "machines: none paired yet".into(),
+        Err(_) => format!("machines: {sudo}nerve-center status names them"),
+    });
+    lines.push(match installed {
+        true => format!(
+            "log: `journalctl -u {}`",
+            UNIT_NAME.trim_end_matches(".service")
+        ),
+        false => format!("log: {}", state.join("log.jsonl").display()),
+    });
+    lines
+}
+
 /// Says a step as it is done.
 fn did(out: &mut dyn Write, step: impl std::fmt::Display) {
     let _ = writeln!(out, "{step}");
@@ -295,15 +445,23 @@ pub fn service_files_text(layout: &Layout) -> String {
 /// `given` are the center's settings the owner gave with the command
 /// ([`crate::config::settings_given`]): none of them reaches the service,
 /// whose settings are in its settings file, so they are refused.
-pub async fn execute(cmd: Cmd, given: &[String], out: &mut dyn Write) -> Result<(), String> {
+/// `set` are the settings `install` takes ([`crate::config::INSTALL_SETTINGS`])
+/// with their values, by variable, which it writes into the settings file.
+pub async fn execute(
+    cmd: Cmd,
+    given: &[String],
+    set: &[(&str, String)],
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let node = PathBuf::from(nerve_service::NODE_CTL_SOCKET);
-    execute_on(cmd, given, &Layout::system(), &Host, &node, out).await
+    execute_on(cmd, given, set, &Layout::system(), &Host, &node, out).await
 }
 
 /// [`execute`] on `layout`, with `node` the installed node's control socket.
 async fn execute_on(
     cmd: Cmd,
     given: &[String],
+    set: &[(&str, String)],
     layout: &Layout,
     sys: &dyn System,
     node: &Path,
@@ -314,16 +472,37 @@ async fn execute_on(
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
         // `main` gives these to crate::backup and crate::owner.
-        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } | Cmd::ServiceFiles => {
+        Cmd::Backup { .. }
+        | Cmd::Restore { .. }
+        | Cmd::OwnerToken { .. }
+        | Cmd::Status
+        | Cmd::ServiceFiles => {
             return Err(
-                "backup, restore, owner-token and service-files are not service commands".into(),
+                "backup, restore, owner-token, status and service-files are not service commands"
+                    .into(),
             );
         }
     };
-    if !given.is_empty() {
+    // `install` takes the settings it writes; nothing else reaches the
+    // service, whose settings are in its file.
+    let takes = |g: &String| {
+        what == "install"
+            && crate::config::INSTALL_SETTINGS
+                .iter()
+                .any(|(flag, var)| g == flag || g == var)
+    };
+    let refused: Vec<&String> = given.iter().filter(|g| !takes(g)).collect();
+    if !refused.is_empty() {
+        let names: Vec<&str> = refused.iter().map(|g| g.as_str()).collect();
+        let takes = match what {
+            "install" => {
+                "takes only --name, --public-url and --listen of the center's settings, which it writes into its settings file"
+            }
+            _ => "takes none of the center's settings",
+        };
         return Err(format!(
-            "{what} takes none of the center's settings ({}): the installed center reads them from {} and keeps its state in {}. Run `sudo nerve-center {what}` without them, and set them in that file",
-            given.join(", "),
+            "{what} {takes}, not {}: the installed center reads them from {} and keeps its state in {}. Set them in that file",
+            names.join(", "),
             layout.settings().display(),
             layout.state.display()
         ));
@@ -336,11 +515,15 @@ async fn execute_on(
     match cmd {
         Cmd::Install => {
             let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;
-            install(layout, sys, &exe, out)
+            install_with(layout, sys, &exe, set, out)
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
-        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } | Cmd::ServiceFiles => {
+        Cmd::Backup { .. }
+        | Cmd::Restore { .. }
+        | Cmd::OwnerToken { .. }
+        | Cmd::Status
+        | Cmd::ServiceFiles => {
             unreachable!("refused above")
         }
     }
@@ -355,7 +538,23 @@ pub fn install(
     exe: &Path,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    install_with(layout, sys, exe, &[], out)
+}
+
+/// [`install`] with the settings `set` written into the settings file, by
+/// variable: in a new one with the rest, or in place of the same ones in
+/// the file an earlier install wrote.
+pub fn install_with(
+    layout: &Layout,
+    sys: &dyn System,
+    exe: &Path,
+    set: &[(&str, String)],
+    out: &mut dyn Write,
+) -> Result<(), String> {
     supported(sys, "install")?;
+    for (var, value) in set {
+        check_setting(var, value)?;
+    }
     let mut steps = Steps::new(out);
     let account = nerve_service::system_account(
         sys,
@@ -383,7 +582,7 @@ pub fn install(
     // another uid: everything in it is given to this one.
     sys.give(state, account.uid, account.gid)?;
     steps.did(format!("{} belongs to {USER}", state.display()));
-    settings(layout, sys, steps.out)?;
+    settings(layout, sys, set, steps.out)?;
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -404,21 +603,102 @@ pub fn install(
         &|| sys.wait_running(state),
         &mut steps,
     )?;
-    let _ = writeln!(
-        steps.out,
-        "Next: open the web UI (http://127.0.0.1:7480 unless {} says otherwise) and log in with the owner token:\n\n    {owner_token}\n\nIt is kept in {} (`sudo cat` it, or `sudo nerve-center --state-dir {} owner-token --new` makes a new one). Harnesses use the HTTP MCP endpoint with the harness token in that settings file: `sudo grep NERVE_HARNESS_TOKEN {}`.",
-        layout.settings().display(),
-        crate::owner::path(state).display(),
-        state.display(),
-        layout.settings().display()
-    );
+    let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
+    for line in done_lines(&file, &owner_token, &crate::owner::path(state)) {
+        let _ = writeln!(steps.out, "{line}");
+    }
     Ok(())
+}
+
+/// The three lines `install` ends with: the web UI, the owner token that
+/// logs in to it, and where harnesses connect; from the settings `file`.
+fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
+    let ui = setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
+    let mcp = match setting_in(file, "NERVE_CENTER_MCP").as_deref() {
+        None | Some("http") => crate::config::MCP_HTTP.to_string(),
+        Some(a) => a.to_string(),
+    };
+    let web = |a: &str| match crate::config::is_loopback(a) {
+        true => format!("http://{a}"),
+        false => format!("https://{a}"),
+    };
+    [
+        format!("Web UI:      {}", web(&ui)),
+        format!(
+            "Owner token: {owner_token} (logs in to the web UI; kept in {}, `sudo nerve-center owner-token` shows it again)",
+            kept.display()
+        ),
+        format!(
+            "Harnesses:   {}/mcp, with a harness token: the web UI's Connect a harness card makes one",
+            web(&mcp)
+        ),
+    ]
+}
+
+/// The value of `var` in a settings file, where it is set (not as a
+/// comment).
+fn setting_in(file: &str, var: &str) -> Option<String> {
+    file.lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix(&format!("{var}="))
+                .map(str::to_string)
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// Refuses a setting `install` would write into the file that is not one:
+/// a line break would put another variable there.
+fn check_setting(var: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+        return Err(format!("{var}: one line, not empty"));
+    }
+    match var {
+        "NERVE_CENTER_LISTEN" if value.parse::<std::net::SocketAddr>().is_err() => Err(format!(
+            "--listen {value:?}: an address and a port, like 0.0.0.0:7443"
+        )),
+        "NERVE_CENTER_PUBLIC_URL"
+            if !(value.starts_with("https://") || value.starts_with("http://")) =>
+        {
+            Err(format!(
+                "--public-url {value:?}: the URL nodes reach the center at, like https://center.example:7443"
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `text` with `set` in place: the lines of those variables, set or as
+/// comments, give way to their new values, and one not there is added.
+fn with_settings(text: &str, set: &[(&str, String)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut done = Vec::new();
+    for line in text.lines() {
+        let bare = line.trim_start().trim_start_matches('#');
+        match set.iter().find(|(v, _)| bare.starts_with(&format!("{v}="))) {
+            Some((var, value)) if !done.contains(var) => {
+                out.push(format!("{var}={value}"));
+                done.push(*var);
+            }
+            Some(_) => {}
+            None => out.push(line.to_string()),
+        }
+    }
+    for (var, value) in set.iter().filter(|(v, _)| !done.contains(v)) {
+        out.push(format!("{var}={value}"));
+    }
+    out.join("\n") + "\n"
 }
 
 /// The settings folder, root's and private, and the settings file in it:
 /// made with a new harness token when there is none, else kept as the
 /// owner left it.
-fn settings(layout: &Layout, sys: &dyn System, out: &mut dyn Write) -> Result<(), String> {
+fn settings(
+    layout: &Layout,
+    sys: &dyn System,
+    set: &[(&str, String)],
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let dir = &layout.settings_dir;
     nerve_transport::files::create_private_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -433,11 +713,22 @@ fn settings(layout: &Layout, sys: &dyn System, out: &mut dyn Write) -> Result<()
     set_mode(dir, 0o700)?;
     let file = layout.settings();
     if std::fs::symlink_metadata(&file).is_ok() {
-        did(out, format!("kept the settings in {}", file.display()));
+        if set.is_empty() {
+            did(out, format!("kept the settings in {}", file.display()));
+            return Ok(());
+        }
+        let text =
+            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        write_file(&file, with_settings(&text, set).as_bytes(), 0o600)?;
+        let names: Vec<&str> = set.iter().map(|(v, _)| *v).collect();
+        did(
+            out,
+            format!("set {} in {}", names.join(", "), file.display()),
+        );
         return Ok(());
     }
     let token = format!("nrv_{}", nerve_transport::keys::random_token(40));
-    write_file(&file, Layout::settings_text(&token).as_bytes(), 0o600)?;
+    write_file(&file, Layout::settings_text(&token, set).as_bytes(), 0o600)?;
     did(
         out,
         format!(
@@ -545,6 +836,11 @@ pub async fn update(
                 .into(),
         );
     }
+    // The new program does not start while the settings file names an old
+    // variable: said before anything changes.
+    let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
+    crate::config::refuse_old_names(|k| setting_in(&file, k), &layout.settings())
+        .map_err(|e| format!("{e}; update changed nothing"))?;
     let p = nerve_service::Program {
         name: "nerve-center",
         bin: &layout.bin,
@@ -750,7 +1046,7 @@ mod tests {
         std::fs::read_to_string(l.settings())
             .unwrap()
             .lines()
-            .find_map(|l| l.strip_prefix("NERVE_HARNESS_TOKEN="))
+            .find_map(|l| l.strip_prefix("NERVE_CENTER_HARNESS_TOKEN="))
             .unwrap()
             .to_string()
     }
@@ -769,7 +1065,10 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("made the user nerve-center"), "{out}");
         assert!(out.contains("with a new harness token"), "{out}");
-        assert!(out.contains("sudo grep NERVE_HARNESS_TOKEN"), "{out}");
+        assert!(
+            out.contains("Harnesses:   http://127.0.0.1:7481/mcp"),
+            "{out}"
+        );
         // The owner token is made before the service starts, kept private in
         // the state folder, and said with where it is.
         let owner = crate::owner::read(&l.state)
@@ -778,9 +1077,8 @@ mod tests {
         assert!(owner.starts_with(crate::owner::PREFIX), "{owner}");
         let owner_file = crate::owner::path(&l.state);
         assert_eq!(mode(&owner_file), 0o600);
-        assert!(out.contains(&format!("\n    {owner}\n")), "{out}");
+        assert!(out.contains(&format!("\nOwner token: {owner} (")), "{out}");
         assert!(out.contains(&owner_file.display().to_string()), "{out}");
-        assert!(out.contains("owner-token --new"), "{out}");
         // The user, made once with the state folder as its home.
         assert_eq!(
             sys.calls(),
@@ -808,7 +1106,7 @@ mod tests {
             "{unit}"
         );
         // MCP over HTTP, which the settings may change as they come later.
-        let env = unit.find("Environment=NERVE_MCP=http\n").unwrap();
+        let env = unit.find("Environment=NERVE_CENTER_MCP=http\n").unwrap();
         let file = unit
             .find(&format!("EnvironmentFile=-{}\n", l.settings().display()))
             .unwrap();
@@ -875,13 +1173,21 @@ mod tests {
     #[test]
     fn the_settings_hold_a_token_the_center_takes() {
         use clap::Parser;
-        let text = Layout::settings_text("nrv_abc");
+        let text = Layout::settings_text("nrv_abc", &[]);
         let vars: Vec<(&str, &str)> = text
             .lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
             .map(|l| l.split_once('=').unwrap())
             .collect();
-        assert_eq!(vars, [("NERVE_HARNESS_TOKEN", "nrv_abc")]);
+        assert_eq!(vars, [("NERVE_CENTER_HARNESS_TOKEN", "nrv_abc")]);
+        // What install was given is set, the rest stays a comment.
+        let set = [("NERVE_CENTER_NAME", "lab".to_string())];
+        let text = Layout::settings_text("nrv_abc", &set);
+        assert!(text.contains("\nNERVE_CENTER_NAME=lab\n"), "{text}");
+        assert!(
+            text.contains("\n#NERVE_CENTER_LISTEN=0.0.0.0:7443\n"),
+            "{text}"
+        );
         // Every setting named in a comment is a variable of the center.
         let command = <crate::config::Args as clap::CommandFactory>::command();
         let known: Vec<String> = command
@@ -962,7 +1268,7 @@ mod tests {
             ("update", Cmd::Update { from: None }),
             ("uninstall", Cmd::Uninstall { purge: false }),
         ] {
-            let r = execute_on(cmd, &[], &l, &NotRoot, &node, &mut Vec::new()).await;
+            let r = execute_on(cmd, &[], &[], &l, &NotRoot, &node, &mut Vec::new()).await;
             results.push((what, r));
         }
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -984,12 +1290,13 @@ mod tests {
         let l = layout(d.path());
         let node = d.path().join("node/run/ctl.sock");
         let given = ["--public-url".to_string(), "--state-dir".to_string()];
-        let e = execute_on(Cmd::Install, &given, &l, &sys, &node, &mut Vec::new())
+        let e = execute_on(Cmd::Install, &given, &[], &l, &sys, &node, &mut Vec::new())
             .await
             .unwrap_err();
+        // `install` takes --public-url, which it writes; not --state-dir.
         assert!(
             e.starts_with(
-                "install takes none of the center's settings (--public-url, --state-dir)"
+                "install takes only --name, --public-url and --listen of the center's settings, which it writes into its settings file, not --state-dir"
             ),
             "{e}"
         );
@@ -999,7 +1306,8 @@ mod tests {
         // comes first.
         let e = execute_on(
             Cmd::Uninstall { purge: true },
-            &["NERVE_LISTEN".to_string()],
+            &["NERVE_CENTER_LISTEN".to_string()],
+            &[],
             &l,
             &NotRoot,
             &node,
@@ -1008,6 +1316,148 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.starts_with("uninstall takes none"), "{e}");
+    }
+
+    /// `install --name --public-url --listen` writes them into the settings
+    /// file: a new one, or in place of the same ones in the file it keeps;
+    /// a value that would put another line there is refused. It ends with
+    /// the web UI, the owner token and where harnesses connect.
+    #[test]
+    fn install_writes_the_settings_it_is_given() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("nerve-center-x86_64-linux");
+        std::fs::write(&exe, "nerve-center 1.0.0\n").unwrap();
+        let set = [
+            ("NERVE_CENTER_NAME", "lab".to_string()),
+            (
+                "NERVE_CENTER_PUBLIC_URL",
+                "https://lab.example:7443".to_string(),
+            ),
+        ];
+        let mut out = Vec::new();
+        install_with(&l, &sys, &exe, &set, &mut out).unwrap();
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_NAME").as_deref(),
+            Some("lab")
+        );
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_PUBLIC_URL").as_deref(),
+            Some("https://lab.example:7443")
+        );
+        let out = String::from_utf8(out).unwrap();
+        let token = crate::owner::read(&l.state).unwrap().unwrap();
+        assert!(
+            out.contains("Web UI:      http://127.0.0.1:7480\n"),
+            "{out}"
+        );
+        assert!(out.contains(&format!("Owner token: {token} (")), "{out}");
+        assert!(
+            out.contains("Harnesses:   http://127.0.0.1:7481/mcp, with a harness token"),
+            "{out}"
+        );
+        // Again: the file is kept, its token too, and the one setting changes.
+        let before = setting_in(&file, "NERVE_CENTER_HARNESS_TOKEN");
+        let set = [
+            ("NERVE_CENTER_NAME", "lab-2".to_string()),
+            ("NERVE_CENTER_LISTEN", "0.0.0.0:9443".to_string()),
+        ];
+        install_with(&l, &sys, &exe, &set, &mut Vec::new()).unwrap();
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_NAME").as_deref(),
+            Some("lab-2")
+        );
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_LISTEN").as_deref(),
+            Some("0.0.0.0:9443")
+        );
+        assert_eq!(file.matches("NERVE_CENTER_NAME=").count(), 1, "{file}");
+        assert_eq!(setting_in(&file, "NERVE_CENTER_HARNESS_TOKEN"), before);
+        for (var, bad) in [
+            ("NERVE_CENTER_NAME", "a\nNERVE_CENTER_UI=0.0.0.0:80"),
+            ("NERVE_CENTER_LISTEN", "nowhere"),
+            ("NERVE_CENTER_PUBLIC_URL", "lab.example"),
+        ] {
+            let e = install_with(&l, &sys, &exe, &[(var, bad.to_string())], &mut Vec::new())
+                .unwrap_err();
+            assert!(!e.is_empty(), "{var}");
+        }
+        assert!(
+            !std::fs::read_to_string(l.settings())
+                .unwrap()
+                .contains("0.0.0.0:80")
+        );
+    }
+
+    /// `update` changes nothing while the settings file names an old
+    /// variable, which the new program would not start with.
+    #[tokio::test]
+    async fn update_refuses_a_settings_file_with_an_old_name() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        std::fs::write(l.settings(), "NERVE_HARNESS_TOKEN=nrv_x\n").unwrap();
+        let e = update(&l, &sys, None, &mut Vec::new()).await.unwrap_err();
+        assert!(
+            e.starts_with("rename NERVE_HARNESS_TOKEN to NERVE_CENTER_HARNESS_TOKEN in"),
+            "{e}"
+        );
+        assert!(e.ends_with("update changed nothing"), "{e}");
+    }
+
+    /// `status` of a center that is not installed: where it runs, how
+    /// harnesses reach it, the owner token, the machines and the log.
+    #[test]
+    fn the_status_says_where_the_center_is() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let state = d.path().join("own");
+        let lines = status_lines(&l, &state, false, None);
+        assert_eq!(
+            lines[0],
+            format!("center: none has run in {} yet", state.display())
+        );
+        std::fs::create_dir_all(&state).unwrap();
+        let mut store = crate::store::Store::new("c1".into(), "lab".into());
+        store.nodes.insert(
+            "n1".into(),
+            serde_json::from_value(serde_json::json!({
+                "id": "n1", "name": "web-1", "public_key": "k",
+                "platform": "linux", "arch": "x86_64", "paired_ms": 1
+            }))
+            .unwrap(),
+        );
+        store.save(&state).unwrap();
+        let lines = status_lines(&l, &state, false, None).join("\n");
+        for want in [
+            "service: not installed (a harness starts this center)",
+            "web UI: http://127.0.0.1:7480",
+            "harnesses: the one that starts it, over stdio",
+            "`nerve-center owner-token` shows it",
+            "machines: 1 paired: web-1",
+            "log: ",
+        ] {
+            assert!(lines.contains(want), "{want}: {lines}");
+        }
+        // The installed center: its service, its HTTP MCP and journalctl.
+        let file = "NERVE_CENTER_UI=0.0.0.0:7480\nNERVE_CENTER_MCP=0.0.0.0:7481\n";
+        let lines = status_lines(&l, &state, true, Some(file)).join("\n");
+        assert!(lines.contains("web UI: https://0.0.0.0:7480"), "{lines}");
+        assert!(
+            lines.contains("harnesses: https://0.0.0.0:7481/mcp"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("`sudo nerve-center owner-token` shows it"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("log: `journalctl -u nerve-center`"),
+            "{lines}"
+        );
     }
 
     /// A link in place of the state or the settings folder is refused:

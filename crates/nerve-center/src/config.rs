@@ -1,5 +1,5 @@
-//! Flags and `NERVE_*` variables. A harness starts `nerve-center` from its MCP
-//! entry, so every setting is a flag or a variable there. The only
+//! Flags and `NERVE_CENTER_*` variables. A harness starts `nerve-center` from
+//! its MCP entry, so every setting is a flag or a variable there. The only
 //! subcommands are the owner's: `backup` and `restore`, which run by hand on a
 //! center that is not running (`restore`) or may be (`backup`),
 //! `owner-token` ([`crate::owner`]), and the service's `install`, `update`
@@ -7,17 +7,92 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use nerve_transport::log::Level;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// How harnesses reach the center (`--mcp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpMode {
     /// MCP over this process's stdin and stdout.
     Stdio,
-    /// MCP over Streamable HTTP at `--mcp-listen`.
-    Http,
+    /// MCP over Streamable HTTP at this address.
+    Http(String),
     /// No MCP of its own: the center only, for harnesses that attach.
-    None,
+    Off,
+}
+
+/// The HTTP MCP address of `--mcp http`.
+pub const MCP_HTTP: &str = "127.0.0.1:7481";
+
+impl std::str::FromStr for McpMode {
+    type Err = String;
+
+    /// `stdio`, `off`, `http` (at [`MCP_HTTP`]) or an address and port.
+    fn from_str(s: &str) -> Result<McpMode, String> {
+        match s {
+            "stdio" => Ok(McpMode::Stdio),
+            "off" => Ok(McpMode::Off),
+            "http" => Ok(McpMode::Http(MCP_HTTP.into())),
+            a if a.parse::<std::net::SocketAddr>().is_ok() || a.starts_with("localhost:") => {
+                Ok(McpMode::Http(a.into()))
+            }
+            other => Err(format!(
+                "{other:?}: stdio, off, http ({MCP_HTTP}) or an address and port, like 0.0.0.0:7481"
+            )),
+        }
+    }
+}
+
+/// The variables of the center and the node before they had a prefix of
+/// their own, and their names now. A program refuses to start while one of
+/// its old names is set ([`refuse_old_names`]), so a setting is never lost
+/// without a word.
+pub const OLD_NAMES: &[(&str, &str)] = &[
+    ("NERVE_STATE_DIR", "NERVE_CENTER_STATE_DIR"),
+    ("NERVE_NAME", "NERVE_CENTER_NAME"),
+    ("NERVE_LISTEN", "NERVE_CENTER_LISTEN"),
+    ("NERVE_PUBLIC_URL", "NERVE_CENTER_PUBLIC_URL"),
+    ("NERVE_PLAIN_LOOPBACK", "NERVE_CENTER_PLAIN_LOOPBACK"),
+    ("NERVE_UI", "NERVE_CENTER_UI"),
+    ("NERVE_MCP", "NERVE_CENTER_MCP"),
+    ("NERVE_MCP_LISTEN", "NERVE_CENTER_MCP"),
+    ("NERVE_HARNESS_TOKEN", "NERVE_CENTER_HARNESS_TOKEN"),
+    ("NERVE_CALL_WAIT", "NERVE_CENTER_CALL_WAIT"),
+    ("NERVE_LOG", "NERVE_CENTER_LOG"),
+];
+
+/// Refuses an old name of `OLD_NAMES` that `var` finds set, with what to
+/// do and where: the settings file of the installed center, or where the
+/// center is started.
+pub fn refuse_old_names(
+    var: impl Fn(&str) -> Option<String>,
+    settings: &std::path::Path,
+) -> Result<(), String> {
+    let set: Vec<(&str, &str)> = OLD_NAMES
+        .iter()
+        .copied()
+        .filter(|(old, _)| var(old).is_some())
+        .collect();
+    let Some((old, new)) = set.first() else {
+        return Ok(());
+    };
+    let what = match *old {
+        "NERVE_MCP_LISTEN" => {
+            format!("put the address of {old} into {new} (`{new}=127.0.0.1:7481`)")
+        }
+        _ => format!("rename {old} to {new}"),
+    };
+    let more = match set.len() {
+        1 => String::new(),
+        n => format!(
+            " ({} more old names are set: each NERVE_X is NERVE_CENTER_X now)",
+            n - 1
+        ),
+    };
+    Err(format!(
+        "{what} in {} (the installed center's settings), or where you start nerve-center (the harness's MCP entry, your shell){more}; the center does not start while an old name is set",
+        settings.display()
+    ))
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -27,45 +102,50 @@ pub enum McpMode {
     about = "The Nerve center as an MCP server. Start it from a harness's MCP configuration."
 )]
 pub struct Args {
-    /// The state folder (identity, paired nodes, statistics).
-    #[arg(long, env = "NERVE_STATE_DIR", global = true)]
+    /// The state folder (identity, paired nodes, statistics); the installed
+    /// center's for `owner-token`, `status`, `backup` and `restore` where
+    /// it is installed.
+    #[arg(long, env = "NERVE_CENTER_STATE_DIR", global = true)]
     pub state_dir: Option<PathBuf>,
     /// The center name shown to nodes and in the web UI.
-    #[arg(long, env = "NERVE_NAME")]
+    #[arg(long, env = "NERVE_CENTER_NAME")]
     pub name: Option<String>,
     /// Where nodes reach the center.
-    #[arg(long, env = "NERVE_LISTEN", default_value = "0.0.0.0:7443")]
+    #[arg(long, env = "NERVE_CENTER_LISTEN", default_value = "0.0.0.0:7443")]
     pub listen: String,
     /// The URL put into pairing links; https://<host name>:<port> by default.
-    #[arg(long, env = "NERVE_PUBLIC_URL")]
+    #[arg(long, env = "NERVE_CENTER_PUBLIC_URL")]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP; only on a loopback `--listen`, for tests
     /// and nodes on the same machine.
-    #[arg(long, env = "NERVE_PLAIN_LOOPBACK")]
+    #[arg(long, env = "NERVE_CENTER_PLAIN_LOOPBACK")]
     pub plain_loopback: bool,
     /// The web UI address, or `off`. It always asks for the owner token
     /// (`nerve-center owner-token`).
-    #[arg(long, env = "NERVE_UI", default_value = "127.0.0.1:7480")]
+    #[arg(long, env = "NERVE_CENTER_UI", default_value = "127.0.0.1:7480")]
     pub ui: String,
-    /// How harnesses talk to the center.
-    #[arg(long, env = "NERVE_MCP", value_enum, default_value = "stdio")]
+    /// How harnesses reach the center: `stdio`, `off`, `http`
+    /// (127.0.0.1:7481) or an address and port for HTTP MCP.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_MCP",
+        value_name = "stdio|off|ADDRESS",
+        default_value = "stdio"
+    )]
     pub mcp: McpMode,
-    /// The HTTP MCP address (with `--mcp http`).
-    #[arg(long, env = "NERVE_MCP_LISTEN", default_value = "127.0.0.1:7481")]
-    pub mcp_listen: String,
     /// A harness token: a bearer token of the HTTP MCP endpoint, besides the
     /// tokens made in the web UI. It does not log in to the web UI.
-    #[arg(long, env = "NERVE_HARNESS_TOKEN", hide_env_values = true)]
+    #[arg(long, env = "NERVE_CENTER_HARNESS_TOKEN", hide_env_values = true)]
     pub harness_token: Option<String>,
     /// How long `execute` waits for a call's result: a call still running
     /// then becomes a job, whose id `execute` answers at once (`20`, `20s`
     /// or `500ms`; 10 ms to 600 s). Keep it below your harness's own timeout
     /// for a tool call.
-    #[arg(long, env = "NERVE_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait)]
+    #[arg(long, env = "NERVE_CENTER_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait)]
     pub call_wait: std::time::Duration,
     /// The log level (error, warn, info, debug). Without it the level set in
     /// the web UI holds, info at first; with it this level holds for this run.
-    #[arg(long, env = "NERVE_LOG")]
+    #[arg(long, env = "NERVE_CENTER_LOG")]
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -103,7 +183,9 @@ pub enum Cmd {
         #[arg(long)]
         new: bool,
     },
-    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root).
+    /// Show whether the center runs, its URLs, where its owner token is, and its machines; the installed center's where it is installed.
+    Status,
+    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root). --name, --public-url and --listen go into its settings.
     Install,
     /// Replace the installed program with the latest release and restart the service; the state and the settings stay.
     Update {
@@ -124,7 +206,8 @@ pub enum Cmd {
 
 impl Cmd {
     /// install, update and uninstall: they work on the installed service,
-    /// as root, not on `--state-dir`.
+    /// as root, not on `--state-dir`. `install` takes the settings it
+    /// writes into the service's file ([`INSTALL_SETTINGS`]).
     pub fn is_service(&self) -> bool {
         matches!(
             self,
@@ -133,8 +216,16 @@ impl Cmd {
     }
 }
 
+/// The settings `install` takes and writes into the service's settings
+/// file, by flag and variable.
+pub const INSTALL_SETTINGS: &[(&str, &str)] = &[
+    ("--name", "NERVE_CENTER_NAME"),
+    ("--public-url", "NERVE_CENTER_PUBLIC_URL"),
+    ("--listen", "NERVE_CENTER_LISTEN"),
+];
+
 /// The center's settings given with a command, as the owner wrote them: a
-/// flag (`--public-url`) or a variable (`NERVE_PUBLIC_URL`). Defaults are
+/// flag (`--public-url`) or a variable (`NERVE_CENTER_PUBLIC_URL`). Defaults are
 /// not given.
 pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
     use clap::CommandFactory;
@@ -172,6 +263,18 @@ impl Args {
         self.state_dir.clone().unwrap_or_else(default_state_dir)
     }
 
+    /// The state folder of the owner's commands (`owner-token`, `status`,
+    /// `backup`, `restore`): the one given, else the installed center's
+    /// where it is installed, else the one a harness-started center uses.
+    /// The center a harness starts keeps its own ([`Args::state_dir`]).
+    pub fn owner_state_dir(&self) -> PathBuf {
+        let installed = crate::service::Layout::system();
+        owner_state_of(
+            self.state_dir.clone(),
+            installed.installed().then_some(installed.state),
+        )
+    }
+
     pub fn ui_off(&self) -> bool {
         self.ui.eq_ignore_ascii_case("off")
     }
@@ -186,6 +289,12 @@ impl Args {
         }
         format!("https://{}:{port}", crate::center::host_name())
     }
+}
+
+/// [`Args::owner_state_dir`]: the folder `given`, else the `installed`
+/// center's, else the default.
+fn owner_state_of(given: Option<PathBuf>, installed: Option<PathBuf>) -> PathBuf {
+    given.or(installed).unwrap_or_else(default_state_dir)
 }
 
 /// `$XDG_STATE_HOME/nerve-center`, `~/.local/state/nerve-center`, or on Windows
@@ -216,6 +325,56 @@ pub fn is_loopback(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's commands take the installed center's folder where there
+    /// is one and none is given; the center a harness starts its own.
+    #[test]
+    fn the_owner_s_commands_take_the_installed_center() {
+        let installed = Some(PathBuf::from("/var/lib/nerve-center"));
+        assert_eq!(
+            owner_state_of(None, installed.clone()),
+            PathBuf::from("/var/lib/nerve-center")
+        );
+        assert_eq!(
+            owner_state_of(Some("/srv/c".into()), installed),
+            PathBuf::from("/srv/c")
+        );
+        assert_eq!(owner_state_of(None, None), default_state_dir());
+        let a = Args::try_parse_from(["nerve-center"]).unwrap();
+        assert_eq!(a.state_dir(), default_state_dir());
+    }
+
+    /// A program refuses to start while an old variable name is set, and
+    /// says what to rename and in which file; the new names pass.
+    #[test]
+    fn an_old_variable_name_is_refused_with_its_new_name() {
+        let file = std::path::Path::new("/etc/nerve-center/center.env");
+        let only = |names: &'static [&'static str]| {
+            move |k: &str| names.contains(&k).then(|| "x".to_string())
+        };
+        assert!(refuse_old_names(only(&[]), file).is_ok());
+        assert!(refuse_old_names(only(&["NERVE_CENTER_HARNESS_TOKEN"]), file).is_ok());
+        let e = refuse_old_names(only(&["NERVE_HARNESS_TOKEN"]), file).unwrap_err();
+        assert!(
+            e.starts_with(
+                "rename NERVE_HARNESS_TOKEN to NERVE_CENTER_HARNESS_TOKEN in /etc/nerve-center/center.env"
+            ),
+            "{e}"
+        );
+        let e = refuse_old_names(only(&["NERVE_MCP_LISTEN", "NERVE_LOG"]), file).unwrap_err();
+        assert!(e.contains("NERVE_CENTER_MCP=127.0.0.1:7481"), "{e}");
+        assert!(e.contains("1 more old names are set"), "{e}");
+        // Every flag's variable is a new name.
+        use clap::CommandFactory;
+        for a in Args::command().get_arguments() {
+            if let Some(env) = a.get_env() {
+                assert!(
+                    env.to_string_lossy().starts_with("NERVE_CENTER_"),
+                    "{env:?}"
+                );
+            }
+        }
+    }
 
     /// The settings an owner gives with a command, wherever the flag stands;
     /// none when only defaults hold.
@@ -252,6 +411,17 @@ mod tests {
     fn flags_and_defaults() {
         let a = Args::try_parse_from(["nerve-center"]).unwrap();
         assert_eq!(a.mcp, McpMode::Stdio);
+        // `--mcp` is stdio, off, http or an address; `none` and
+        // `--mcp-listen` are gone.
+        let mcp = |v: &str| Args::try_parse_from(["nerve-center", "--mcp", v]).map(|a| a.mcp);
+        assert_eq!(mcp("http").unwrap(), McpMode::Http(MCP_HTTP.into()));
+        assert_eq!(mcp("off").unwrap(), McpMode::Off);
+        assert_eq!(
+            mcp("0.0.0.0:9481").unwrap(),
+            McpMode::Http("0.0.0.0:9481".into())
+        );
+        assert!(mcp("none").is_err());
+        assert!(Args::try_parse_from(["nerve-center", "--mcp-listen", "127.0.0.1:1"]).is_err());
         assert_eq!(a.listen, "0.0.0.0:7443");
         assert!(!a.ui_off());
         assert_eq!(a.call_wait, crate::jobs::CALL_WAIT);
@@ -264,7 +434,7 @@ mod tests {
             "--ui",
             "off",
             "--mcp",
-            "none",
+            "off",
         ])
         .unwrap();
         assert_eq!(a.public_url(9), "http://127.0.0.1:9");

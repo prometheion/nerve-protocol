@@ -100,7 +100,7 @@ is tried again every 10 seconds.
 
 | Where | How |
 |---|---|
-| Center | **Settings** in the web UI, or `--log` (`NERVE_LOG`) |
+| Center | **Settings** in the web UI, or `--log` (`NERVE_CENTER_LOG`) |
 | Node | `nerve-node config set log.level debug` |
 
 The center keeps the level you set in the web UI for the next start. `--log`

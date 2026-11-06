@@ -225,7 +225,7 @@ from the source `nerve-node` under **Windows Logs > Application**, and
 
 | Message | Cause | Fix |
 |---|---|---|
-| `Wrong owner token.` | The token is not the one in `owner-token` in the center's state folder. A harness token never logs in | `nerve-center owner-token` prints it (`sudo nerve-center --state-dir /var/lib/nerve-center owner-token` for the service) |
+| `Wrong owner token.` | The token is not the one in `owner-token` in the center's state folder. A harness token never logs in | `nerve-center owner-token` prints it (`sudo nerve-center owner-token` for the service) |
 | `This owner token is also a harness token, so it is refused. …` at the login, or at the start `the owner token in … is also a harness token; …` | The `owner-token` file holds the same word as a harness token, so a leaked harness token would open the web UI | `nerve-center owner-token --new` writes a new owner token |
 | `… holds no owner token; …` | The file `owner-token` is empty or holds more than one word | `nerve-center owner-token --new` writes a new one |
 | `no center has run in … yet …` | `owner-token` was run on a state folder without a center, often without `--state-dir` | Give the center's `--state-dir` |

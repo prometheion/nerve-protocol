@@ -284,7 +284,8 @@ there.
 
 ## On a center installed as a service
 
-Name its state folder with `--state-dir /var/lib/nerve-center`. Run with
+Where the center is installed, `backup` and `restore` work on its state
+folder, `/var/lib/nerve-center`, without `--state-dir`. Run with
 `sudo`, the commands work there as the user `nerve-center`, as the node's do
 as `nerve` ([center](center.md#run-it-as-a-service)): root follows no link
 that user put in the folder, and what a restore writes stays the center's.

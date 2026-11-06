@@ -517,7 +517,7 @@ fn a_long_command_becomes_a_job_that_exec_signal_and_job_cancel_end() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_CALL_WAIT", "1")],
+        &[("NERVE_CENTER_CALL_WAIT", "1")],
     );
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
@@ -620,7 +620,7 @@ fn a_jobs_command_streams_its_lines_before_it_ends() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_CALL_WAIT", "1")],
+        &[("NERVE_CENTER_CALL_WAIT", "1")],
     );
     let mut node = Node::new(&root.path().join("node"));
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
@@ -757,7 +757,7 @@ fn a_command_survives_a_dropped_link() {
     let mut mcp = Mcp::start(
         &root.path().join("center"),
         false,
-        &[("NERVE_PUBLIC_URL", &url)],
+        &[("NERVE_CENTER_PUBLIC_URL", &url)],
     );
     *relay.target.lock().unwrap() = mcp.node_port;
     let mut node = Node::new(&root.path().join("node"));

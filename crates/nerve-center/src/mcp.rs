@@ -1494,7 +1494,10 @@ impl HttpMcp {
             .is_some_and(|t| token_ok(&self.center, self.env_token.as_deref(), t));
         if !ok {
             return Some(
-                Response::text(401, "a harness token is needed")
+                Response::text(
+                    401,
+                    "a harness token is needed: send `Authorization: Bearer <token>`; the web UI's Connect a harness card makes one",
+                )
                     .with_header("WWW-Authenticate", "Bearer"),
             );
         }

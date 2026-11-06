@@ -36,6 +36,17 @@ const INDEX: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
 
 const WRONG_TOKEN: &str = "Wrong owner token.";
+
+/// The command that shows the owner token of the center in `state`: with
+/// `sudo` for the installed center, whose folder is its own user's, without
+/// it for a center you started, whose folder is yours.
+fn token_command(state: &std::path::Path) -> &'static str {
+    let installed = crate::service::Layout::system();
+    match installed.installed() && state == installed.state {
+        true => "sudo nerve-center owner-token",
+        false => "nerve-center owner-token",
+    }
+}
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
@@ -194,7 +205,11 @@ impl Ui {
     }
 
     fn login_page(&self) -> Response {
-        webui::login_page("Owner token", "One center for all your machines.")
+        let tagline = format!(
+            "One center for all your machines. <code>{}</code> shows its owner token.",
+            token_command(self.center.dir())
+        );
+        webui::login_page("Owner token", &tagline)
     }
 
     /// Checks the token the login form posted. The answer is the session for
@@ -205,8 +220,12 @@ impl Ui {
         let given = webui::posted_secret(req);
         // A secret that also opens /mcp would give the agent's own token
         // the way into this UI (review round 7 of the center's sign-in).
+        let wrong = format!(
+            "{WRONG_TOKEN} `{}` shows it.",
+            token_command(self.center.dir())
+        );
         let why = if given.is_empty() || !self.owner.ok(&given) {
-            Some(("wrong owner token", WRONG_TOKEN))
+            Some(("wrong owner token", wrong.as_str()))
         } else if crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given) {
             Some(("the owner token is also a harness token", SHARED_TOKEN))
         } else {
@@ -426,10 +445,9 @@ impl Ui {
             // The tokens made here, and the one of the settings, which only
             // a change of the settings removes.
             ("GET", "/api/tokens") => Ok(c.read(|st| {
-                let env = self
-                    .env_token
-                    .is_some()
-                    .then(|| json!({"id": "", "label": "NERVE_HARNESS_TOKEN", "settings": true}));
+                let env = self.env_token.is_some().then(
+                    || json!({"id": "", "label": "NERVE_CENTER_HARNESS_TOKEN", "settings": true}),
+                );
                 json!(
                     env.into_iter()
                         .chain(st.harness_tokens.iter().map(
@@ -2074,7 +2092,25 @@ mod tests {
         let r = sign_in(&ui, "not-the-secret").await;
         assert_eq!(r.status, 401);
         assert!(json(&r).get("session").is_none());
-        assert_eq!(json(&r)["error"], WRONG_TOKEN);
+        assert_eq!(
+            json(&r)["error"],
+            format!("{WRONG_TOKEN} `nerve-center owner-token` shows it.")
+        );
+        // The login page names the command for this center, which runs from
+        // a folder of its own here: no sudo.
+        let page = body(&ui.request(req("GET", "/login", &[HOST], "")).await);
+        assert!(
+            page.contains("<code>nerve-center owner-token</code> shows its owner token"),
+            "{page}"
+        );
+        assert_eq!(
+            token_command(&crate::service::Layout::system().state),
+            if crate::service::Layout::system().installed() {
+                "sudo nerve-center owner-token"
+            } else {
+                "nerve-center owner-token"
+            }
+        );
         assert!(!body(&r).contains("not-the-secret"));
         // An empty post is no better.
         assert_eq!(sign_in(&ui, "").await.status, 401);
@@ -2308,7 +2344,7 @@ mod tests {
             .await;
         let listed = json(&r);
         assert_eq!(listed[0]["settings"], true, "{listed}");
-        assert_eq!(listed[0]["label"], "NERVE_HARNESS_TOKEN");
+        assert_eq!(listed[0]["label"], "NERVE_CENTER_HARNESS_TOKEN");
         assert_eq!(listed[1]["label"], "a");
     }
 

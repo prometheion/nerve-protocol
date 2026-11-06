@@ -65,17 +65,22 @@ fn center_command(state: &Path, tls: bool, extra: &[(&str, &str)]) -> (Command, 
     cmd.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", state)
-        .env("NERVE_STATE_DIR", state)
-        .env("NERVE_NAME", "e2e-center")
-        .env("NERVE_LISTEN", format!("127.0.0.1:{node_port}"))
-        .env("NERVE_UI", "127.0.0.1:0")
-        .env("NERVE_LOG", "info")
-        .env("NERVE_CALL_WAIT", "20");
+        .env("NERVE_CENTER_STATE_DIR", state)
+        .env("NERVE_CENTER_NAME", "e2e-center")
+        .env("NERVE_CENTER_LISTEN", format!("127.0.0.1:{node_port}"))
+        .env("NERVE_CENTER_UI", "127.0.0.1:0")
+        .env("NERVE_CENTER_LOG", "info")
+        .env("NERVE_CENTER_CALL_WAIT", "20");
     if tls {
-        cmd.env("NERVE_PUBLIC_URL", format!("https://127.0.0.1:{node_port}"));
+        cmd.env(
+            "NERVE_CENTER_PUBLIC_URL",
+            format!("https://127.0.0.1:{node_port}"),
+        );
     } else {
-        cmd.env("NERVE_PLAIN_LOOPBACK", "true")
-            .env("NERVE_PUBLIC_URL", format!("http://127.0.0.1:{node_port}"));
+        cmd.env("NERVE_CENTER_PLAIN_LOOPBACK", "true").env(
+            "NERVE_CENTER_PUBLIC_URL",
+            format!("http://127.0.0.1:{node_port}"),
+        );
     }
     for (k, v) in extra {
         cmd.env(k, v);
@@ -131,10 +136,9 @@ impl HttpCenter {
             state,
             false,
             &[
-                ("NERVE_MCP", "http"),
-                ("NERVE_MCP_LISTEN", &mcp_addr),
-                ("NERVE_HARNESS_TOKEN", token),
-                ("NERVE_CALL_WAIT", &wait),
+                ("NERVE_CENTER_MCP", &mcp_addr),
+                ("NERVE_CENTER_HARNESS_TOKEN", token),
+                ("NERVE_CENTER_CALL_WAIT", &wait),
             ],
         );
         let mut child = cmd
@@ -502,8 +506,8 @@ impl Node {
         cmd.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &self.home)
-            .env("NERVE_CONFIG_DIR", &self.config)
-            .env("NERVE_STATE_DIR", &self.state)
+            .env("NERVE_NODE_CONFIG_DIR", &self.config)
+            .env("NERVE_NODE_STATE_DIR", &self.state)
             .current_dir(&self.home);
         cmd
     }

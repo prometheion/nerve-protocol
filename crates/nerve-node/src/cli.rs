@@ -33,10 +33,10 @@ pub use ui::{UiCmd, UiTokenCmd};
     about = "Links this machine to its Nerve centers."
 )]
 pub struct Cli {
-    /// Where node.toml and the keys live [env: NERVE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]
+    /// Where node.toml and the keys live [env: NERVE_NODE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]
     #[arg(long, global = true)]
     pub config_dir: Option<PathBuf>,
-    /// Where the control socket and the audit log live [env: NERVE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]
+    /// Where the control socket and the audit log live [env: NERVE_NODE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]
     #[arg(long, global = true)]
     pub state_dir: Option<PathBuf>,
     /// Print JSON for programs instead of text: the read commands their data, the others the lines they print, an error {"error": ...}

@@ -40,6 +40,11 @@ pub fn main() -> i32 {
     // Events go to stderr. The daemon adds the log file in the state folder and
     // takes its level from `node.toml`.
     nerve_transport::log::install(nerve_transport::log::Level::Info, true);
+    // A folder named by an old variable would be dropped without a word.
+    if let Err(e) = crate::paths::refuse_old_names(|k| std::env::var_os(k)) {
+        eprintln!("{}: {e}", crate::edition::get().program);
+        return 1;
+    }
     // Named after this program, so `--version` and the usage say which one
     // it is (crate::edition).
     let program = crate::edition::get().program;
