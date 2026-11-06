@@ -536,11 +536,12 @@ mod tests {
     /// A peer that reads nothing of its answer is dropped once a part of it
     /// waits [`HEAD_TIMEOUT`]: it would hold the connection, and one of the
     /// listener's slots, for good (issue #150).
-    #[tokio::test]
+    /// The clock is paused: the timeout passes without the test waiting it.
+    #[tokio::test(start_paused = true)]
     async fn a_peer_that_takes_nothing_of_the_response_is_dropped() {
         let (_a, mut b) = tokio::io::duplex(1024);
         let resp = Response::new(200, "text/plain", vec![b'x'; 64 * 1024]);
-        let t = std::time::Instant::now();
+        let t = tokio::time::Instant::now();
         let r = tokio::time::timeout(HEAD_TIMEOUT * 3, resp.write(&mut b))
             .await
             .expect("the write waited on a peer that takes nothing");
@@ -582,8 +583,9 @@ mod tests {
 
     /// A request body sent a byte now and then is dropped after
     /// [`time_for`] its length, though each byte comes within
-    /// [`HEAD_TIMEOUT`] of the last (issue #150).
-    #[tokio::test]
+    /// [`HEAD_TIMEOUT`] of the last (issue #150). The clock is paused, so
+    /// the 2 s between the bytes pass without the test waiting them.
+    #[tokio::test(start_paused = true)]
     async fn a_body_sent_a_byte_at_a_time_is_dropped() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let sender = tokio::spawn(async move {
