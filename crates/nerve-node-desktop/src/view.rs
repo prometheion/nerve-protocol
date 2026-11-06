@@ -1813,7 +1813,7 @@ mod tests {
 
     #[test]
     fn a_new_key_is_said_without_the_command_line() {
-        // What `center rotate-key --json` says (cli.rs, rotate_key).
+        // What `center rotate-key --json` says (cli/center.rs, rotate_key).
         let said = json!({"messages": [
             "center lab took this machine's new key:",
             "  ed25519:AAAA",
@@ -1860,7 +1860,7 @@ mod tests {
     /// names the dialog's choice, never the CLI's flag.
     #[test]
     fn a_backup_says_what_it_holds_in_the_apps_words() {
-        // What `backup --json` says (cli.rs; backup::backup_data).
+        // What `backup --json` says (cli/backup.rs; backup::backup_data).
         let said = json!({"messages": ["backed up to /home/alex/n.backup", "  left out: the node key for lab (it is in the system keyring; --include-keyring takes it out)"],
             "backup": {"file": "/home/alex/n.backup", "centers": ["home", "lab"],
                 "saved": ["the node key for home"],
