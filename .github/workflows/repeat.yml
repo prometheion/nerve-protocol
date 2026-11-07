@@ -172,6 +172,21 @@ jobs:
         run: |
           echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Diagnostics for #105 and #106 (a throwaway branch).
+      - name: What the runner gives a test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          whoami /all
+          "TMP=$env:TMP TEMP=$env:TEMP"
+          "PSModulePath=$env:PSModulePath"
+          Get-ExecutionPolicy -List | Format-Table -AutoSize
+          icacls $env:RUNNER_TEMP
+          icacls (Split-Path $env:RUNNER_TEMP)
+          fsutil 8dot3name query C:
+          fsutil 8dot3name query D:
+          Get-ChildItem Env: | Where-Object Name -match 'PS|PATH|POWERSHELL' | Format-Table -AutoSize
+          $PSVersionTable
       # Doctests are left out: they are no test programs to run again.
       - name: Build the test programs once
         env:
@@ -197,7 +212,7 @@ jobs:
           log=$RUNNER_TEMP/run.log
           for i in $(seq 1 "$COUNT"); do
             echo "::group::run $i of $COUNT"
-            if ! cargo test --locked -p "$PACKAGE" --tests -- "${args[@]}" 2>&1 | tee "$log"; then
+            if ! cargo test --locked --no-fail-fast -p "$PACKAGE" --tests -- "${args[@]}" 2>&1 | tee "$log"; then
               echo "::endgroup::"
               echo "::error::run $i of $COUNT failed"
               exit 1
