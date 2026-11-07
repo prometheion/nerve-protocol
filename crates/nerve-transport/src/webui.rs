@@ -69,7 +69,7 @@ impl WrongSecrets {
     /// Counts a wrong secret, and says how many to tell in the log: the
     /// first of a minute at once, the rest when the next comes after it.
     pub fn note(&self) -> Option<u32> {
-        let mut w = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        let mut w = crate::sync::lock(&self.told);
         w.0 += 1;
         match w.1 {
             Some(t) if t.elapsed() < Duration::from_secs(60) => None,
@@ -112,12 +112,12 @@ impl WrongSecrets {
     /// Makes the last line about wrong secrets older, for a test.
     #[doc(hidden)]
     pub fn age(&self, by: Duration) {
-        let mut w = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        let mut w = crate::sync::lock(&self.told);
         w.1 = w.1.and_then(|t| t.checked_sub(by));
     }
 
     fn late_line(&self) -> std::sync::MutexGuard<'_, VecDeque<Arc<Notify>>> {
-        self.late.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.late)
     }
 }
 
@@ -197,8 +197,9 @@ impl Sessions {
         self.len() == 0
     }
 
+    #[track_caller]
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
-        self.map.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.map)
     }
 
     /// Makes a session older, for a test of its end.

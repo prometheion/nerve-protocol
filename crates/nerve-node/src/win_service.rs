@@ -66,7 +66,7 @@ fn stop_bell() -> &'static tokio::sync::Notify {
 /// as JSON too.
 pub fn serve(body: Body, log: std::path::PathBuf, json: bool) -> i32 {
     let _ = LOG.set(log);
-    *crate::daemon::lock(&BODY) = Some(body);
+    *nerve_transport::sync::lock(&BODY) = Some(body);
     let mut name = wide(SERVICE_NAME);
     let table = [
         SERVICE_TABLE_ENTRYW {
@@ -84,7 +84,7 @@ pub fn serve(body: Body, log: std::path::PathBuf, json: bool) -> i32 {
         return 0;
     }
     let e = std::io::Error::last_os_error();
-    crate::daemon::lock(&BODY).take();
+    nerve_transport::sync::lock(&BODY).take();
     if e.raw_os_error() != Some(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT as i32) {
         return crate::entry::failed(json, &format!("cannot run as a service: {e}"));
     }
@@ -95,7 +95,7 @@ pub fn serve(body: Body, log: std::path::PathBuf, json: bool) -> i32 {
 
 /// Whether this program runs as the service.
 pub fn is_service() -> bool {
-    crate::daemon::lock(&STATUS).is_some()
+    nerve_transport::sync::lock(&STATUS).is_some()
 }
 
 /// Tells the manager the node runs: called once it has started.
@@ -160,8 +160,10 @@ pub fn event(e: Event, text: &str) -> Result<(), String> {
 /// Writes each panic to the Event Log, then does what the hook before did. A
 /// panic in the body's thread ends the program ([`run_body`]), and the
 /// service's recovery settings start it again (three times a day at most);
-/// one elsewhere leaves the node running. The log
-/// file is left alone here: the panic may have come while its lock was held.
+/// one elsewhere leaves the node running, unless it left a lock poisoned:
+/// the next take of that lock ends the program (nerve_transport::sync), and
+/// the recovery settings start it again as well. The log file is left alone
+/// here: the panic may have come while its lock was held.
 fn watch_crashes() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -191,7 +193,7 @@ fn crash_text(info: &std::panic::PanicHookInfo<'_>) -> String {
         )
     } else {
         format!(
-            "A part of the Nerve node panicked{at}: {what}. The node runs on. Its log is {}.",
+            "A part of the Nerve node panicked{at}: {what}. The node runs on. If the panic left a lock poisoned, the node ends when it next takes it, and its recovery settings start it again. Its log is {}.",
             log_path()
         )
     }
@@ -203,7 +205,7 @@ pub async fn stop_requested() {
 }
 
 fn report(state: SERVICE_STATUS_CURRENT_STATE, code: u32) {
-    let Some(h) = *crate::daemon::lock(&STATUS) else {
+    let Some(h) = *nerve_transport::sync::lock(&STATUS) else {
         return;
     };
     let st = SERVICE_STATUS {
@@ -237,10 +239,10 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
     if h.is_null() {
         return;
     }
-    *crate::daemon::lock(&STATUS) = Some(h as usize);
+    *nerve_transport::sync::lock(&STATUS) = Some(h as usize);
     report(SERVICE_START_PENDING, 0);
     watch_crashes();
-    let body = crate::daemon::lock(&BODY).take();
+    let body = nerve_transport::sync::lock(&BODY).take();
     let code = run_body(body);
     report(SERVICE_STOPPED, code);
 }
@@ -251,6 +253,8 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
 /// unwind, it would panic a second time and write a second crash. The
 /// program then ends at once, as a crash does, so the service's failure
 /// actions start it again.
+/// A lock the panic left poisoned is not taken again on the way: the
+/// program aborts before anything here locks.
 fn run_body(body: Option<Body>) -> u32 {
     BODY_THREAD.with(|b| b.set(true));
     let ended = match body {
@@ -279,7 +283,7 @@ fn run_body(body: Option<Body>) -> u32 {
             1
         }
         Ok(()) => {
-            let why = crate::daemon::lock(&ASKED).unwrap_or("its work ended");
+            let why = nerve_transport::sync::lock(&ASKED).unwrap_or("its work ended");
             let _ = event(Event::Stopped, &format!("The Nerve node stopped: {why}."));
             0
         }
@@ -294,7 +298,7 @@ unsafe extern "system" fn control(
 ) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
-            *crate::daemon::lock(&ASKED) = Some(if control == SERVICE_CONTROL_STOP {
+            *nerve_transport::sync::lock(&ASKED) = Some(if control == SERVICE_CONTROL_STOP {
                 "the service control manager asked it to"
             } else {
                 "Windows shuts down"
@@ -447,6 +451,62 @@ mod tests {
         }
         watch_crashes();
         serve_panicking();
+    }
+
+    /// Run by the test below in a program of its own, which it ends.
+    #[test]
+    #[ignore = "a child of a_lock_a_task_poisoned_ends_the_service"]
+    fn poison_a_lock_in_a_task() {
+        static HELD: Mutex<u32> = Mutex::new(0);
+        let Ok(marker) = std::env::var("NERVE_TEST_POISON") else {
+            return;
+        };
+        watch_crashes();
+        run_body(Some(Box::new(move || {
+            // A task panics under the lock and the node runs on, as one
+            // that tokio catches does.
+            let _ = std::thread::spawn(move || {
+                let _g = nerve_transport::sync::lock(&HELD);
+                panic!("test task crash {marker}");
+            })
+            .join();
+            *nerve_transport::sync::lock(&HELD) += 1;
+            Ok(())
+        })));
+    }
+
+    /// A task that panics under a lock leaves the node running; the next
+    /// take of that lock ends it with the poisoned-lock code, before the
+    /// body could say it stopped, so the failure actions start it again.
+    #[test]
+    fn a_lock_a_task_poisoned_ends_the_service() {
+        let marker = nerve_transport::keys::random_token(12);
+        let before = last_index();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "win_service::tests::poison_a_lock_in_a_task",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NERVE_TEST_POISON", &marker)
+            .output()
+            .unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(nerve_transport::sync::POISONED),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let all = entries_after(before);
+        let ours: Vec<&String> = all.iter().filter(|l| l.contains(&marker)).collect();
+        assert_eq!(ours.len(), 1, "{all:#?}");
+        assert!(
+            ours[0].starts_with("Error 4 A part of the Nerve node panicked at ")
+                && ours[0].contains("If the panic left a lock poisoned"),
+            "{}",
+            ours[0]
+        );
     }
 
     /// A panic in the body ends the program and writes one crash, not a

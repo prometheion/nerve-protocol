@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use nerve_transport::sync::lock;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -78,8 +79,8 @@ struct Unsent<'a> {
 impl Drop for Unsent<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id {
-            self.link.pending.lock().unwrap().remove(&id);
-            self.link.opening.lock().unwrap().remove(&id);
+            lock(&self.link.pending).remove(&id);
+            lock(&self.link.opening).remove(&id);
         }
     }
 }
@@ -102,7 +103,7 @@ impl Drop for Asked {
         let Some(rx) = self.rx.take() else {
             return;
         };
-        if let Some(o) = self.link.opening.lock().unwrap().get_mut(&self.id) {
+        if let Some(o) = lock(&self.link.opening).get_mut(&self.id) {
             o.ring.take();
         }
         let place = self.place.take();
@@ -239,7 +240,7 @@ impl Link {
 
     /// The node key the hello of the connection now was signed with.
     pub fn auth_key(&self) -> String {
-        self.auth_key.lock().unwrap().clone()
+        lock(&self.auth_key).clone()
     }
 
     /// Notes that a frame came.
@@ -261,12 +262,12 @@ impl Link {
 
     /// Whether the link is on a connection now: neither ended nor parked.
     pub fn is_live(&self) -> bool {
-        !self.is_closed() && !self.wire.lock().unwrap().parked
+        !self.is_closed() && !lock(&self.wire).parked
     }
 
     /// How many calls wait for their reply.
     pub fn waiting(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        lock(&self.pending).len()
     }
 
     /// Sends a counted text frame, waiting for room in the queue. While the
@@ -287,14 +288,14 @@ impl Link {
             // Kept under the same lock that saw the link parked, so a resume
             // that comes in between sends it.
             let out = {
-                let mut w = self.wire.lock().unwrap();
+                let mut w = lock(&self.wire);
                 match w.out.clone() {
                     Some(o) => o,
                     None => return w.keep(&text) && !self.is_closed(),
                 }
             };
             let permit = out.reserve().await;
-            let mut w = self.wire.lock().unwrap();
+            let mut w = lock(&self.wire);
             // A resume moved the link to another connection meanwhile.
             if !w.out.as_ref().is_some_and(|o| o.same_channel(&out)) {
                 continue;
@@ -304,7 +305,7 @@ impl Link {
             // would open a stream on the node that nobody reads or closes.
             // Under the wire's lock, as `resume` takes it before `pending`.
             if let Some(id) = request
-                && !self.pending.lock().unwrap().contains_key(&id)
+                && !lock(&self.pending).contains_key(&id)
             {
                 return false;
             }
@@ -323,7 +324,7 @@ impl Link {
 
     /// Sends a frame of the connection now only (a ping, a `bye`).
     async fn send_out(&self, o: Out) -> bool {
-        let out = self.wire.lock().unwrap().out.clone();
+        let out = lock(&self.wire).out.clone();
         match out {
             Some(out) => out.send(o).await.is_ok(),
             None => false,
@@ -334,7 +335,7 @@ impl Link {
     /// `counted`. `false` when a resume moved the link to a newer connection:
     /// the frame is not the link's any more.
     fn take_frame(&self, conn: u64, counted: bool) -> bool {
-        let mut w = self.wire.lock().unwrap();
+        let mut w = lock(&self.wire);
         if w.conn != conn {
             return false;
         }
@@ -346,12 +347,12 @@ impl Link {
 
     /// Whether connection `conn` still carries the link.
     pub(crate) fn current(&self, conn: u64) -> bool {
-        self.wire.lock().unwrap().conn == conn
+        lock(&self.wire).conn == conn
     }
 
     /// The node read the first `got` frames of the link.
     fn acked(&self, got: u64) -> Result<(), String> {
-        match &mut self.wire.lock().unwrap().replay {
+        match &mut lock(&self.wire).replay {
             Some(r) => r.acked_to(got),
             None => Ok(()),
         }
@@ -359,7 +360,7 @@ impl Link {
 
     /// Sends `ack {got}` when the count moved since the last one.
     fn send_ack(&self) {
-        let mut w = self.wire.lock().unwrap();
+        let mut w = lock(&self.wire);
         let Wire {
             out: Some(out),
             replay: Some(r),
@@ -382,13 +383,13 @@ impl Link {
     /// Whether the link's connection dropped and the link waits for its
     /// resume.
     pub fn is_parked(&self) -> bool {
-        self.wire.lock().unwrap().parked
+        lock(&self.wire).parked
     }
 
     /// Parks the link after connection `conn` dropped, if the node can
     /// resume it: it still keeps every frame the node may not have read.
     fn park(&self, conn: u64) -> bool {
-        let mut w = self.wire.lock().unwrap();
+        let mut w = lock(&self.wire);
         let can =
             w.conn == conn && !self.is_closed() && w.replay.as_ref().is_some_and(Replay::complete);
         if can {
@@ -407,7 +408,7 @@ impl Link {
     /// frames of it. Gives the new connection's number and the frames to
     /// send first; an error when the link cannot resume from there.
     fn resume(&self, out: mpsc::Sender<Out>, got: u64) -> Result<(u64, Vec<String>), String> {
-        let mut w = self.wire.lock().unwrap();
+        let mut w = lock(&self.wire);
         if self.is_closed() {
             return Err("the link ended".into());
         }
@@ -424,14 +425,8 @@ impl Link {
         // its answer may still come with what the node sends again: a
         // `stream.open` in flight fails now (its opener asks again), and
         // goes as `withdrawn` below if the node never read it.
-        let opening: Vec<u64> = self
-            .opening
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(id, _)| id)
-            .collect();
-        let mut pending = self.pending.lock().unwrap();
+        let opening: Vec<u64> = lock(&self.opening).drain().map(|(id, _)| id).collect();
+        let mut pending = lock(&self.pending);
         for id in opening {
             if let Some(tx) = pending.remove(&id) {
                 let _ = tx.send(Err(RpcError::new(
@@ -467,7 +462,7 @@ impl Link {
     /// grace is over.
     pub(crate) fn expire(&self, conn: u64) -> bool {
         {
-            let mut w = self.wire.lock().unwrap();
+            let mut w = lock(&self.wire);
             if !(w.parked && w.conn == conn && !self.is_closed()) {
                 return false;
             }
@@ -479,12 +474,7 @@ impl Link {
 
     /// The count of frames read from the node, for `welcome`.
     fn got(&self) -> u64 {
-        self.wire
-            .lock()
-            .unwrap()
-            .replay
-            .as_ref()
-            .map_or(0, Replay::got)
+        lock(&self.wire).replay.as_ref().map_or(0, Replay::got)
     }
 
     /// Sends a request; `wait` bounds the wait for its reply.
@@ -516,9 +506,9 @@ impl Link {
         }
         let (tx, rx) = oneshot::channel();
         // One lock at a time, as everywhere: the count may be a moment old.
-        let opening = self.opening.lock().unwrap().len();
+        let opening = lock(&self.opening).len();
         let id = {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = lock(&self.pending);
             if pending.len().saturating_sub(opening) >= most {
                 return Err(RpcError::new(ErrorCode::Busy, "too many calls in flight"));
             }
@@ -552,7 +542,7 @@ impl Link {
             Some(w) => match tokio::time::timeout(w, rx).await {
                 Ok(r) => r,
                 Err(_) => {
-                    self.pending.lock().unwrap().remove(&id);
+                    lock(&self.pending).remove(&id);
                     self.notify(method::CANCEL, json!({"id": id})).await;
                     return Err(RpcError::new(
                         ErrorCode::Timeout,
@@ -566,7 +556,7 @@ impl Link {
 
     /// Stops waiting for request `id` and tells the node to cancel it.
     pub async fn cancel(&self, id: u64) {
-        self.pending.lock().unwrap().remove(&id);
+        lock(&self.pending).remove(&id);
         self.notify(method::CANCEL, json!({"id": id})).await;
     }
 
@@ -601,7 +591,7 @@ impl Link {
     pub(crate) fn end(&self, reason: ByeReason) {
         self.ended_on_purpose.store(true, Ordering::SeqCst);
         let out = {
-            let mut w = self.wire.lock().unwrap();
+            let mut w = lock(&self.wire);
             let out = w.out.clone();
             self.close(&mut w);
             out
@@ -616,7 +606,7 @@ impl Link {
 
     /// Ends the link: every call waiting on it fails with `connection_lost`.
     pub(crate) fn fail_all(&self) {
-        self.close(&mut self.wire.lock().unwrap());
+        self.close(&mut lock(&self.wire));
         self.fail_pending();
     }
 
@@ -632,20 +622,14 @@ impl Link {
         self.end_streams("the link to the node ended");
         // The node's subscriptions end with the link; a resumed link keeps
         // them, as it keeps the events it sent meanwhile.
-        let subs: Vec<Arc<Ring>> = self
-            .subs
-            .lock()
-            .unwrap()
-            .drain()
-            .flat_map(|(_, r)| r)
-            .collect();
+        let subs: Vec<Arc<Ring>> = lock(&self.subs).drain().flat_map(|(_, r)| r).collect();
         for r in subs {
             r.end("the link to the node ended");
         }
     }
 
     fn fail_pending(&self) {
-        let pending: Vec<_> = self.pending.lock().unwrap().drain().collect();
+        let pending: Vec<_> = lock(&self.pending).drain().collect();
         for (_, tx) in pending {
             let _ = tx.send(Err(lost()));
         }
@@ -658,15 +642,15 @@ impl Link {
         // An opened stream is known before its first frame is read, which
         // may follow the answer at once. One lock at a time: `open_stream`
         // takes them the other way round.
-        let opened = self.opening.lock().unwrap().remove(n).and_then(|o| o.ring);
-        let waited = self.pending.lock().unwrap().contains_key(n);
+        let opened = lock(&self.opening).remove(n).and_then(|o| o.ring);
+        let waited = lock(&self.pending).contains_key(n);
         if let Some(ring) = opened.filter(|_| waited)
             && let Ok(v) = &r
             && let Some(sid) = sid_of(v)
         {
-            self.streams.lock().unwrap().insert(sid, ring);
+            lock(&self.streams).insert(sid, ring);
         }
-        if let Some(tx) = self.pending.lock().unwrap().remove(n) {
+        if let Some(tx) = lock(&self.pending).remove(n) {
             let _ = tx.send(r);
         }
     }
@@ -700,7 +684,7 @@ impl Link {
         // The ring is in place before the request can be answered.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         {
-            let mut opening = self.opening.lock().unwrap();
+            let mut opening = lock(&self.opening);
             // Each one left unanswered holds a request and a task here
             // until the link ends: a node that does not answer gets no more.
             let now = Instant::now();
@@ -719,7 +703,7 @@ impl Link {
                 },
             );
         }
-        self.pending.lock().unwrap().insert(id, tx);
+        lock(&self.pending).insert(id, tx);
         let mut unsent = Unsent {
             link: self,
             id: Some(id),
@@ -744,7 +728,7 @@ impl Link {
         let r = match tokio::time::timeout(wait, &mut *rx).await {
             Ok(r) => r.unwrap_or_else(|_| Err(lost())),
             Err(_) => {
-                let abandoned = match self.opening.lock().unwrap().get(&id) {
+                let abandoned = match lock(&self.opening).get(&id) {
                     Some(o) => o.ring.is_some(),
                     None => false,
                 };
@@ -760,16 +744,14 @@ impl Link {
             }
         };
         asked.rx = None;
-        self.opening.lock().unwrap().remove(&id);
+        lock(&self.opening).remove(&id);
         sid_of(&r?).ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
     }
 
     /// How many `stream.open`s the node left unanswered past their wait.
     pub fn unanswered_opens(&self) -> usize {
         let now = Instant::now();
-        self.opening
-            .lock()
-            .unwrap()
+        lock(&self.opening)
             .values()
             .filter(|o| o.unanswered(now))
             .count()
@@ -778,7 +760,7 @@ impl Link {
     /// A stream frame from the node: data or a gap for its ring. A frame
     /// of a stream the center does not hold (closed meanwhile) is dropped.
     fn stream_frame(&self, f: &Frame) {
-        let ring = self.streams.lock().unwrap().get(&f.id).cloned();
+        let ring = lock(&self.streams).get(&f.id).cloned();
         let Some(ring) = ring else {
             return;
         };
@@ -792,7 +774,7 @@ impl Link {
     /// can still be read. Whether the center held it. The node's reason is
     /// not passed on: the model reads the end in the center's words.
     fn stream_closed(&self, sid: u32, reason: &str) -> bool {
-        let ring = self.streams.lock().unwrap().remove(&sid);
+        let ring = lock(&self.streams).remove(&sid);
         match ring {
             Some(ring) => {
                 ring.end(ring.closed_words(reason == "ended"));
@@ -805,7 +787,7 @@ impl Link {
     /// Forgets the stream `sid` on the center's side; whether it was still
     /// open.
     pub fn forget_stream(&self, sid: u32) -> bool {
-        self.streams.lock().unwrap().remove(&sid).is_some()
+        lock(&self.streams).remove(&sid).is_some()
     }
 
     /// Tells the node to stop the stream `sid`.
@@ -821,13 +803,7 @@ impl Link {
 
     /// Ends every stream of the connection: it is gone (`why`).
     fn end_streams(&self, why: &str) {
-        let rings: Vec<Arc<Ring>> = self
-            .streams
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, r)| r)
-            .collect();
+        let rings: Vec<Arc<Ring>> = lock(&self.streams).drain().map(|(_, r)| r).collect();
         for r in rings {
             r.end(why);
         }
@@ -835,13 +811,13 @@ impl Link {
 
     /// How many streams the link holds.
     pub fn stream_count(&self) -> usize {
-        self.streams.lock().unwrap().len()
+        lock(&self.streams).len()
     }
 
     /// The events of `topic` go to `ring` too, until [`Link::unsubscribe`].
     /// A link that ended takes none: the ring ends at once.
     pub fn subscribe(&self, topic: &str, ring: Arc<Ring>) {
-        let mut subs = self.subs.lock().unwrap();
+        let mut subs = lock(&self.subs);
         if self.is_closed() {
             drop(subs);
             ring.end("the link to the node ended");
@@ -854,7 +830,7 @@ impl Link {
     /// ends once no ring takes them (its `unsub` is not waited for).
     pub fn unsubscribe(self: &Arc<Self>, topic: &str, ring: &Arc<Ring>) {
         let last = {
-            let mut subs = self.subs.lock().unwrap();
+            let mut subs = lock(&self.subs);
             let Some(rings) = subs.get_mut(topic) else {
                 return;
             };
@@ -898,7 +874,7 @@ impl Link {
 
     /// How many sessions' streams take the events of `topic`.
     pub fn subscribers(&self, topic: &str) -> usize {
-        self.subs.lock().unwrap().get(topic).map_or(0, Vec::len)
+        lock(&self.subs).get(topic).map_or(0, Vec::len)
     }
 
     /// An event from the node for the subscriptions of its topic: one JSON
@@ -906,7 +882,7 @@ impl Link {
     /// took it.
     pub fn event(&self, ev: &msg::Event) -> bool {
         let topic = format!("{}/{}", ev.cap, ev.name);
-        let rings = self.subs.lock().unwrap().get(&topic).cloned();
+        let rings = lock(&self.subs).get(&topic).cloned();
         let Some(rings) = rings else {
             return false;
         };
@@ -1205,7 +1181,7 @@ pub async fn run(
     let (link, conn, again) = match carried {
         Some(c) => {
             // The link goes on under the key this hello was signed with.
-            *c.0.auth_key.lock().unwrap() = auth_key;
+            *lock(&c.0.auth_key) = auth_key;
             c
         }
         None => {
@@ -1500,7 +1476,7 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                     && st.cap == "node"
                     && let Some(s) = st.changed.get("status").and_then(Value::as_str)
                 {
-                    *link.status.lock().unwrap() = s.to_string();
+                    *lock(&link.status) = s.to_string();
                     center.changed(crate::center::Change::Nodes);
                 }
             }

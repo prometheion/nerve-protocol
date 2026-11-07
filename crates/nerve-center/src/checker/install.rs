@@ -18,6 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use nerve_transport::sync::lock;
 use serde::Serialize;
 
 use super::config::LocalModel;
@@ -383,7 +384,7 @@ pub struct Status {
 pub type Shared = Arc<Mutex<Status>>;
 
 fn set(shared: &Shared, f: impl FnOnce(&mut Status)) {
-    f(&mut shared.lock().unwrap());
+    f(&mut lock(shared));
 }
 
 /// Downloads, verifies and swaps in llama.cpp and the chosen model in one go:

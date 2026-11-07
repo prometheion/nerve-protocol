@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nerve_transport::sync::lock;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -76,17 +77,17 @@ impl Engine {
     }
 
     pub fn session(&self) -> Arc<Session> {
-        self.session.lock().unwrap().clone()
+        lock(&self.session).clone()
     }
 
     /// The live session; a session ended from the web UI is replaced by a
     /// fresh one, so a long-running stdio harness keeps working.
     fn live_session(&self) -> Arc<Session> {
-        let mut s = self.session.lock().unwrap();
+        let mut s = lock(&self.session);
         if s.ended() {
-            let client = s.client.lock().unwrap().clone();
+            let client = lock(&s.client).clone();
             *s = self.center.new_session(&self.transport);
-            *s.client.lock().unwrap() = client;
+            *lock(&s.client) = client;
         }
         s.clone()
     }
@@ -138,7 +139,7 @@ impl Engine {
                 // The call stops waiting, which cancels it on its node.
                 "notifications/cancelled" => {
                     if let Some(req) = params.get("requestId")
-                        && let Some((_, stop)) = self.calls.lock().unwrap().remove(&req.to_string())
+                        && let Some((_, stop)) = lock(&self.calls).remove(&req.to_string())
                     {
                         let _ = stop.send(());
                     }
@@ -155,12 +156,12 @@ impl Engine {
                 let key = id.to_string();
                 let n = self.next_call.fetch_add(1, Ordering::SeqCst);
                 let (stop, stopped) = oneshot::channel();
-                self.calls.lock().unwrap().insert(key.clone(), (n, stop));
+                lock(&self.calls).insert(key.clone(), (n, stop));
                 let out = tokio::select! {
                     r = self.call(&params) => Some(r),
                     Ok(()) = stopped => None,
                 };
-                let mut calls = self.calls.lock().unwrap();
+                let mut calls = lock(&self.calls);
                 if calls.get(&key).is_some_and(|(m, _)| *m == n) {
                     calls.remove(&key);
                 }
@@ -193,8 +194,7 @@ impl Engine {
         if let Some(info) = params.get("clientInfo") {
             let name = info.get("name").and_then(Value::as_str).unwrap_or("");
             let ver = info.get("version").and_then(Value::as_str).unwrap_or("");
-            *self.session().client.lock().unwrap() =
-                util::clip_bytes(format!("{name} {ver}").trim(), 100);
+            *lock(&self.session().client) = util::clip_bytes(format!("{name} {ver}").trim(), 100);
             self.center.changed(Change::Sessions);
         }
         result(
@@ -507,11 +507,7 @@ impl Engine {
                 return Ran::Done(Err(self.center.refused(sess, route, e)));
             }
         };
-        let target = sess
-            .jobs
-            .lock()
-            .unwrap()
-            .signal_target(&job, &route.node_id);
+        let target = lock(&sess.jobs).signal_target(&job, &route.node_id);
         let (link, invoke) = match target {
             Ok(t) => t,
             Err(why) => {
@@ -551,7 +547,7 @@ impl Engine {
         let job = args.get("job").and_then(Value::as_str).unwrap_or_default();
         let node = &route.node_id;
         if route.action == "cancel" {
-            let cancelled = sess.jobs.lock().unwrap().cancel(job, node, Instant::now());
+            let cancelled = lock(&sess.jobs).cancel(job, node, Instant::now());
             return match cancelled {
                 None => text_result(
                     &format!(
@@ -593,11 +589,11 @@ impl Engine {
         // no call holds the harness longer than an `execute` does.
         let asked = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
         let wait = Duration::from_millis(asked).min(self.center.call_wait());
-        let done = sess.jobs.lock().unwrap().done(job, node);
+        let done = lock(&sess.jobs).done(job, node);
         if let Some(mut done) = done.filter(|_| !wait.is_zero()) {
             let _ = tokio::time::timeout(wait, done.wait_for(|d| *d)).await;
         }
-        let view = sess.jobs.lock().unwrap().status(job, node, Instant::now());
+        let view = lock(&sess.jobs).status(job, node, Instant::now());
         let Some(view) = view else {
             return text_result(
                 &format!(
@@ -614,7 +610,7 @@ impl Engine {
         let mut kept_id = None;
         if let Some(outcome) = &view.outcome {
             let whole = matches!(outcome, Outcome::Done { value, cut: false } if value["truncated"] != json!(true));
-            let (id, closer) = sess.streams.lock().unwrap().result_read(job, whole);
+            let (id, closer) = lock(&sess.streams).result_read(job, whole);
             if let Some(c) = closer {
                 c.close("its job's result was read");
             }
@@ -709,7 +705,7 @@ impl Engine {
             )
         };
         if route.action == "close" {
-            let closed = sess.streams.lock().unwrap().close(id, node);
+            let closed = lock(&sess.streams).close(id, node);
             let Some(c) = closed else {
                 return unknown();
             };
@@ -721,7 +717,7 @@ impl Engine {
             v["structuredContent"] = json!({"stream": id, "state": "closed"});
             return v;
         }
-        let (found, gone) = sess.streams.lock().unwrap().get(id, node, Instant::now());
+        let (found, gone) = lock(&sess.streams).get(id, node, Instant::now());
         for c in gone {
             c.close("it ended 10 minutes ago and was not read");
         }
@@ -873,7 +869,7 @@ fn busy_jobs(sess: &Session, e: &RpcError) -> String {
     if e.kind() != ErrorCode::Busy {
         return String::new();
     }
-    sess.jobs.lock().unwrap().named(Instant::now())
+    lock(&sess.jobs).named(Instant::now())
 }
 
 /// [`call_error`] with `lead` (what the call was) before the words, and
@@ -1313,7 +1309,7 @@ struct Active<'a> {
 
 impl Drop for Active<'_> {
     fn drop(&mut self) {
-        let mut map = self.http.active.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = lock(&self.http.active);
         if let Some(n) = map.get_mut(&self.via) {
             *n -= 1;
             if *n == 0 {
@@ -1347,7 +1343,7 @@ impl HttpMcp {
     /// Another idle time, for a test.
     #[doc(hidden)]
     pub fn set_idle(&self, d: Duration) {
-        *self.idle.lock().unwrap() = d;
+        *lock(&self.idle) = d;
     }
 
     /// Another bound on a token's requests in flight, for a test.
@@ -1360,7 +1356,7 @@ impl HttpMcp {
     /// A place among `via`'s requests in flight, if one is free.
     fn enter(&self, via: &str) -> Option<Active<'_>> {
         let max = self.active_max.load(std::sync::atomic::Ordering::Relaxed);
-        let mut map = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = lock(&self.active);
         let n = map.entry(via.to_string()).or_insert(0);
         if *n >= max {
             return None;
@@ -1374,15 +1370,15 @@ impl HttpMcp {
 
     /// How many HTTP sessions are open.
     pub fn session_count(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        lock(&self.sessions).len()
     }
 
     /// Ends the sessions that went idle, whose token is gone, or that the
     /// web UI ended.
     pub async fn sweep(&self) {
-        let idle = *self.idle.lock().unwrap();
+        let idle = *lock(&self.idle);
         let gone: Vec<(Arc<Engine>, &str)> = {
-            let mut map = self.sessions.lock().unwrap();
+            let mut map = lock(&self.sessions);
             let mut gone = Vec::new();
             map.retain(|_, h| {
                 let why = if h.engine.session().ended() {
@@ -1420,10 +1416,7 @@ impl HttpMcp {
     /// and whenever the harness tokens change.
     pub async fn serve(self: Arc<Self>, server: crate::listen::Server) {
         let me = self.clone();
-        let mut changes = self
-            .changes
-            .lock()
-            .unwrap()
+        let mut changes = lock(&self.changes)
             .take()
             .unwrap_or_else(|| self.center.subscribe());
         let sweeper = tokio::spawn(async move {
@@ -1535,7 +1528,7 @@ impl HttpMcp {
             "POST" => self.post(req, sid, via).await,
             "DELETE" => {
                 let held = sid.and_then(|s| {
-                    let mut map = self.sessions.lock().unwrap();
+                    let mut map = lock(&self.sessions);
                     match map.get(&s) {
                         Some(h) if util::ct_eq(h.via.as_bytes(), via.as_bytes()) => map.remove(&s),
                         _ => None,
@@ -1572,7 +1565,7 @@ impl HttpMcp {
             let e = Arc::new(Engine::new(&self.center, "http"));
             let id = e.session().id.clone();
             let oldest = {
-                let mut map = self.sessions.lock().unwrap();
+                let mut map = lock(&self.sessions);
                 // Past its share, a token's longest idle session ends for
                 // the new one: a harness that starts a session per request
                 // goes on working, and no token holds the center's engines
@@ -1615,7 +1608,7 @@ impl HttpMcp {
             let Some(sid) = sid else {
                 return Response::text(400, "Mcp-Session-Id is missing");
             };
-            let e = self.sessions.lock().unwrap().get_mut(&sid).and_then(|h| {
+            let e = lock(&self.sessions).get_mut(&sid).and_then(|h| {
                 if !util::ct_eq(h.via.as_bytes(), via.as_bytes()) {
                     return None;
                 }
@@ -1627,7 +1620,7 @@ impl HttpMcp {
                 // start a new one.
                 Some(e) if !e.session().ended() => (e, None),
                 Some(_) => {
-                    self.sessions.lock().unwrap().remove(&sid);
+                    lock(&self.sessions).remove(&sid);
                     return Response::text(404, "no such session");
                 }
                 None => return Response::text(404, "no such session"),

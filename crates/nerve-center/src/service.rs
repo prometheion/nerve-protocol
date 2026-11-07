@@ -1233,6 +1233,13 @@ mod tests {
             .find(&format!("EnvironmentFile=-{}\n", l.settings().display()))
             .unwrap();
         assert!(env < file, "{unit}");
+        // A center that ends with an error or a signal is started again: one
+        // that found a lock poisoned ends so (nerve_transport::sync).
+        assert!(unit.contains("\nRestart=on-failure\n"), "{unit}");
+        assert!(
+            !unit.contains("SuccessExitStatus") && !unit.contains("RestartPrevent"),
+            "{unit}"
+        );
         // No privilege, and the state folder is the one place it writes.
         for line in [
             "NoNewPrivileges=yes",

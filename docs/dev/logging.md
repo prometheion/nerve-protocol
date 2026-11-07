@@ -71,6 +71,36 @@ not the daemon writes no log file.
   from the config it holds on every pass, so any writer (the CLI, a reload)
   is followed within a second.
 
+## A poisoned lock
+
+A thread that panics while it holds a std lock leaves the lock poisoned, and
+what it guards may be half changed. The center and the node take every lock
+through `nerve_transport::sync` (`lock`, `try_lock`, `read`, `write`,
+`into_inner`): on a poisoned one it writes one error line that names the lock
+(the type it holds and where it was taken), then ends the process with exit
+code 70. The service starts it again with clean state: systemd's
+`Restart=on-failure` on Linux, the service's failure actions on Windows
+([service](service.md#start-and-stop)). It ends with an exit code, not an
+abort, so no core dump holds the keys and passwords the program has in
+memory. When the log's own lock is the poisoned one, the line goes to stderr
+only. A lock that guards no data and only takes turns (`sync::turn`, such as
+the grant walk's) holds nothing a panic could leave half changed, so its
+poisoning is cleared and the program goes on. The center's `rotating` lock
+looks like one but is not: it orders a key change of several steps, so it is
+a `lock`. A test (`sync::tests::no_lock_of_the_programs_is_taken_around_the_rule`)
+fails when production code of the center, the node, the policy or the
+transport crate (test items left out) handles a std lock's poisoning itself or
+takes a lock in a form that does: `PoisonError`, `clear_poison`, the `try_`
+takes, and a `lock`, `read` or `write` that is unwrapped, turned into an
+`Option` or an error, or matched on. It goes by the names, so a plain
+`.lock().await` or an own method that returns a guard passes.
+
+The exception is the window part of `nerve-node-desktop` (`broker.rs`,
+`runner.rs`, `instance.rs`, `app/live.rs`): its locks still shrug off a
+poisoning and go on, so a panic there does not end the service. They guard
+the app's own windows and the elevated broker's pipes, not the node's rules or
+keys. Whether they take the rule too is an open owner question.
+
 ## The Windows Event Log
 
 The installed node on Windows also writes its start, its stop, a start that
@@ -86,7 +116,9 @@ the body's thread (`run_body`) is caught there and ends the program with
 at most, as `install` sets them; the entry says so) and the frame of
 `service_main`, which cannot unwind, adds no second panic. A panic on another
 thread, such as a task tokio catches, is written as a part of the node that
-panicked; the node runs on. The text goes through `log::scrub`, as a line of
+panicked; the node runs on, unless the panic left a lock poisoned: the next
+take of that lock ends the program ([above](#a-poisoned-lock)), and the
+failure actions start it again. The text goes through `log::scrub`, as a line of
 the log does: one line, redacted, cut. Every user may read the Application
 log.
 
@@ -506,6 +538,14 @@ At 10 MiB the node moves it to `audit.jsonl.1` and replaces the older copy, so
 the log stays below about 20 MiB. A center that makes many refused calls cannot
 push out what the node allowed or changed: refusals take at most half of a full
 file, and the oldest refusals go first.
+
+The node keeps the file open and writes each entry under a lock of the log's
+own, so an entry never waits for the config, nor a call for the file. It
+counts the bytes of refused calls as it writes them, and reads the full file
+only to drop the oldest refusals, or once to count them where it did not see
+the file from its start. A line another program wrote, or a move of the file
+(`audit clear`), is noticed by the file's length, and the node opens the file
+at its place again.
 
 ### Clear it
 

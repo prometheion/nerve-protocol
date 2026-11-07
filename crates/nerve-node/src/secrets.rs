@@ -487,7 +487,7 @@ pub(crate) mod for_tests {
     static NODES: LazyLock<Mutex<HashMap<PathBuf, Pretended>>> = LazyLock::new(Mutex::default);
 
     fn with<T>(paths: &NodePaths, f: impl FnOnce(&mut Pretended) -> T) -> T {
-        let mut nodes = NODES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut nodes = nerve_transport::sync::lock(&NODES);
         f(nodes.entry(paths.config_dir.clone()).or_default())
     }
 
@@ -1296,7 +1296,7 @@ pub(crate) mod store {
             FAILED.with(|f| f.set(true));
             return Err(NO_SERVICE.into());
         }
-        Ok(ENTRIES.lock().unwrap_or_else(|e| e.into_inner()))
+        Ok(nerve_transport::sync::lock(&ENTRIES))
     }
 
     pub fn get(account: &str) -> Result<Option<String>, String> {

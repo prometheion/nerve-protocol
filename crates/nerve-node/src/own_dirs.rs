@@ -16,7 +16,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use nerve_policy::NodeConfig;
 
@@ -61,13 +61,13 @@ static RECORD: Mutex<()> = Mutex::new(());
 static NAMES: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 fn name_lock(name: &str) -> Arc<Mutex<()>> {
-    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut names = nerve_transport::sync::lock(&NAMES);
     names.entry(name.to_string()).or_default().clone()
 }
 
 /// The node's id at the center `name` that the record has folders for.
 fn recorded(file: &Path, name: &str) -> Option<String> {
-    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = nerve_transport::sync::turn(&RECORD);
     read_record(file).remove(name)
 }
 
@@ -75,7 +75,7 @@ fn change_record(
     file: &Path,
     change: impl FnOnce(&mut BTreeMap<String, String>),
 ) -> Result<(), String> {
-    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = nerve_transport::sync::turn(&RECORD);
     let mut record = read_record(file);
     change(&mut record);
     write_record(file, &record)
@@ -88,8 +88,8 @@ fn change_record(
 /// record keeps a pairing whose folders could not all be deleted, so the
 /// next sync tries again. A pairing's folders are handled under its own
 /// lock, so the commands of the others do not wait for a long delete.
-pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec<String> {
-    let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+pub fn sync(run: &Account, cfg: impl FnOnce() -> Arc<NodeConfig>, file: &Path) -> Vec<String> {
+    let _one = nerve_transport::sync::turn(&SYNCING);
     // The config as it is once this sync's turn has come: one started for
     // an older version would delete the folders of a pairing a newer one
     // made.
@@ -101,7 +101,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
         .map(|c| (c.name.as_str(), c.node_id.as_str()))
         .collect();
     let gone: Vec<(String, String)> = {
-        let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+        let _one = nerve_transport::sync::turn(&RECORD);
         read_record(file)
             .into_iter()
             .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
@@ -109,7 +109,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
     };
     for (name, old) in gone {
         let lock = name_lock(&name);
-        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _name = nerve_transport::sync::turn(&lock);
         // A command may have made the pairing's folders again while this
         // waited for its lock, also for a pairing made after this sync read
         // its config: only the folders of the id it saw are its to delete.
@@ -131,7 +131,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
     }
     for (name, id) in now {
         let lock = name_lock(name);
-        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _name = nerve_transport::sync::turn(&lock);
         if recorded(file, name).is_some() {
             // Made again only where a command found them gone.
             continue;
@@ -158,7 +158,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
 /// on this pairing's own folders.
 pub fn ready(run: &Account, center: &str, node_id: &str, file: &Path) -> Result<Own, String> {
     let lock = name_lock(center);
-    let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let _name = nerve_transport::sync::turn(&lock);
     match recorded(file, center) {
         Some(id) if id == node_id => return make(run, center),
         Some(_) => {
@@ -738,7 +738,7 @@ mod tests {
             centers: vec![center("lab", "n1"), center("home", "n2")],
             ..Default::default()
         };
-        let errors = sync(&run, || cfg.clone(), &file);
+        let errors = sync(&run, || Arc::new(cfg.clone()), &file);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("the node did not make it"), "{errors:?}");
         let record = read_record(&file);
@@ -793,7 +793,7 @@ mod tests {
         let running = SYNCING.lock().unwrap();
         let waiting = {
             let (run, cfg, file) = (run.clone(), cfg.clone(), file.clone());
-            std::thread::spawn(move || sync(&run, || cfg.lock().unwrap().clone(), &file))
+            std::thread::spawn(move || sync(&run, || Arc::new(cfg.lock().unwrap().clone()), &file))
         };
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!file.exists(), "it did not wait");
@@ -816,7 +816,7 @@ mod tests {
             centers: vec![center("alpha", "a1"), center("lab", "n1")],
             ..Default::default()
         };
-        assert!(sync(&run, || before.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(before.clone()), &file).is_empty());
         let lab = Own::of(&run.home, "lab");
         std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
         // The sync sees neither pairing, and waits on alpha's lock.
@@ -824,7 +824,7 @@ mod tests {
         let held = busy.lock().unwrap();
         let syncing = {
             let (run, file) = (run.clone(), file.clone());
-            std::thread::spawn(move || sync(&run, NodeConfig::default, &file))
+            std::thread::spawn(move || sync(&run, Arc::default, &file))
         };
         // It has read its config and the record once it asks for alpha's lock
         // (the map holds one handle, this test one, the sync the third).
@@ -861,18 +861,18 @@ mod tests {
             centers: vec![center("lab", "n1"), center("home", "n2")],
             ..Default::default()
         };
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         let lab = Own::of(&run.home, "lab");
         assert!(lab.home.is_dir() && Own::of(&run.home, "home").temp.is_dir());
         std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
         // Paired again under the same name: a new id, empty folders.
         cfg.centers = vec![center("lab", "n3")];
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         assert!(lab.home.is_dir() && !lab.home.join(".bashrc").exists());
         assert!(!run.home.join("home").exists());
         assert!(run.home.join("bin").is_dir());
         cfg.centers.clear();
-        assert!(sync(&run, || cfg.clone(), &file).is_empty());
+        assert!(sync(&run, || Arc::new(cfg.clone()), &file).is_empty());
         assert!(!run.home.join("lab").exists());
         assert!(read_record(&file).is_empty());
     }

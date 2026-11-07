@@ -1,5 +1,7 @@
 //! The agents' sessions, and what each is offered of the nodes.
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 impl Center {
@@ -8,9 +10,7 @@ impl Center {
     /// The ids of the nodes with a live link, read before the state is
     /// locked (see `Inner::store`).
     fn online_ids(&self) -> BTreeSet<String> {
-        self.links
-            .lock()
-            .unwrap()
+        lock(&self.links)
             .iter()
             .filter(|(_, l)| l.is_live())
             .map(|(id, _)| id.clone())
@@ -94,10 +94,7 @@ impl Center {
             jobs: Mutex::new(Jobs::default()),
             streams: Mutex::new(Streams::default()),
         });
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(s.id.clone(), s.clone());
+        lock(&self.sessions).insert(s.id.clone(), s.clone());
         self.log.record(
             Level::Info,
             None,
@@ -108,22 +105,22 @@ impl Center {
     }
 
     pub fn session(&self, id: &str) -> Option<Arc<Session>> {
-        self.sessions.lock().unwrap().get(id).cloned()
+        lock(&self.sessions).get(id).cloned()
     }
 
     /// Ends a session: every node it used gets `session.end`.
     pub async fn end_session(&self, id: &str) -> bool {
-        let Some(s) = self.sessions.lock().unwrap().remove(id) else {
+        let Some(s) = lock(&self.sessions).remove(id) else {
             return false;
         };
         s.ended.store(true, Ordering::SeqCst);
         // Its calls and jobs stop, and their results are dropped.
-        let stops = s.jobs.lock().unwrap().end();
+        let stops = lock(&s.jobs).end();
         for stop in stops {
             let _ = stop.send(Stop::SessionEnded);
         }
         // Its streams are dropped; one still running on its node stops.
-        let closers = s.streams.lock().unwrap().end();
+        let closers = lock(&s.streams).end();
         for c in closers {
             c.close("the session ended");
         }
@@ -136,7 +133,7 @@ impl Center {
                 s.calls.load(Ordering::SeqCst)
             ),
         );
-        let nodes: Vec<String> = s.nodes.lock().unwrap().iter().cloned().collect();
+        let nodes: Vec<String> = lock(&s.nodes).iter().cloned().collect();
         for n in nodes {
             // A parked link gets it when it resumes.
             if let Some(l) = self.held(&n) {
@@ -149,18 +146,18 @@ impl Center {
     }
 
     pub fn sessions_json(&self) -> Value {
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+        let sessions: Vec<Arc<Session>> = lock(&self.sessions).values().cloned().collect();
         let list: Vec<Value> = sessions
             .iter()
             .map(|s| {
                 // Copied out before the names are read: the state is never
                 // locked under a session's lock (see `Inner::store`).
-                let ids: Vec<String> = s.nodes.lock().unwrap().iter().cloned().collect();
+                let ids: Vec<String> = lock(&s.nodes).iter().cloned().collect();
                 let nodes: Vec<String> = ids.iter().map(|n| self.node_name(n)).collect();
                 json!({
                     "id": s.id,
                     "transport": s.transport,
-                    "client": s.client.lock().unwrap().clone(),
+                    "client": lock(&s.client).clone(),
                     "started_ms": s.started_ms,
                     "calls": s.calls.load(Ordering::SeqCst),
                     "nodes": nodes,
@@ -172,7 +169,7 @@ impl Center {
     }
 
     pub fn session_count(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        lock(&self.sessions).len()
     }
 }
 

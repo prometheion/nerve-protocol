@@ -19,6 +19,7 @@
 //! `machine.secret_storage` changes.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nerve_transport::keys::MacKey;
 use serde_json::Value;
@@ -278,7 +279,10 @@ pub struct SettingsStore {
     key: MacKey,
     secrets: Box<dyn Secrets>,
     audit: AuditLog,
-    config: NodeConfig,
+    /// The config in force. A change puts a new one in its place, so a
+    /// reader that took it ([`SettingsStore::shared`]) keeps the one it read
+    /// without a copy.
+    config: Arc<NodeConfig>,
     observer: Option<Observer>,
     /// The account of the person whose local changes these are, for the
     /// audit ([`SettingsStore::set_user`]).
@@ -314,7 +318,7 @@ impl SettingsStore {
             key,
             secrets,
             audit,
-            config: NodeConfig::default(),
+            config: Arc::default(),
             observer: None,
             user: None,
         };
@@ -323,7 +327,7 @@ impl SettingsStore {
         // start.
         let last = s.secrets.accepted_version()?.unwrap_or(0);
         let Some(text) = text else {
-            s.config.version = last;
+            Arc::make_mut(&mut s.config).version = last;
             return Ok(s);
         };
         if first && unseal(&text).0.is_none() {
@@ -331,7 +335,7 @@ impl SettingsStore {
                 NodeConfig::parse(&text).map_err(|e| format!("{}: {e}", s.path.display()))?;
             c.version = c.version.max(last);
             s.write(&c, None).map_err(|e| e.to_string())?;
-            s.config = c;
+            s.config = Arc::new(c);
             let _ = s
                 .audit
                 .config("signed", &s.path, "has no MAC; signed as it was");
@@ -342,7 +346,7 @@ impl SettingsStore {
         // A file saved without a record (a state folder made new, or a
         // record that could not be written).
         s.remember(cfg.version);
-        s.config = cfg;
+        s.config = Arc::new(cfg);
         Ok(s)
     }
 
@@ -369,7 +373,7 @@ impl SettingsStore {
             key: secrets.mac_key_or_new()?,
             secrets,
             audit,
-            config: NodeConfig::default(),
+            config: Arc::default(),
             observer: None,
             user: None,
         };
@@ -446,6 +450,11 @@ impl SettingsStore {
         &self.config
     }
 
+    /// The config in force, to read after the store is let go: no copy.
+    pub fn shared(&self) -> Arc<NodeConfig> {
+        self.config.clone()
+    }
+
     pub fn version(&self) -> u64 {
         self.config.version
     }
@@ -475,9 +484,9 @@ impl SettingsStore {
             self.secrets.may_reload(&fresh)?;
             self.secrets.moved(&fresh);
         }
-        let changed = fresh != self.config;
+        let changed = fresh != *self.config;
         self.remember(fresh.version);
-        self.config = fresh;
+        self.config = Arc::new(fresh);
         Ok(changed)
     }
 
@@ -513,7 +522,7 @@ impl SettingsStore {
         self.write(&new, None)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
-        self.config = new;
+        self.config = Arc::new(new);
         let _ = self
             .audit
             .config("accepted", &self.path, "the owner took the file as it was");
@@ -625,7 +634,7 @@ impl SettingsStore {
         &mut self,
         f: impl FnOnce(&mut NodeConfig) -> Result<(), String>,
     ) -> Result<u64, SetError> {
-        let mut new = self.config.clone();
+        let mut new = NodeConfig::clone(&self.config);
         f(&mut new).map_err(SetError::Invalid)?;
         self.commit(Writer::Local, new)
     }
@@ -633,15 +642,15 @@ impl SettingsStore {
     /// Updates bookkeeping the node itself sets (revoked, unknown) without
     /// counting it as a settings change by anyone.
     pub fn mark(&mut self, f: impl FnOnce(&mut NodeConfig)) -> Result<(), String> {
-        let mut new = self.config.clone();
+        let mut new = NodeConfig::clone(&self.config);
         f(&mut new);
-        if new == self.config {
+        if new == *self.config {
             return Ok(());
         }
         new.version = self.next_version();
         self.write(&new, Some(self.config.version))
             .map_err(|e| e.to_string())?;
-        self.config = new;
+        self.config = Arc::new(new);
         Ok(())
     }
 
@@ -703,7 +712,7 @@ impl SettingsStore {
         };
         client_only(&old, &new, &entry.capabilities, &owner_only, &protected)
             .map_err(SetError::Forbidden)?;
-        let mut cfg = self.config.clone();
+        let mut cfg = NodeConfig::clone(&self.config);
         let e = cfg.center_mut(center).expect("checked above");
         e.paused = new.paused;
         e.policy = new.policy;
@@ -717,7 +726,7 @@ impl SettingsStore {
         if let Writer::Center(center) = by {
             self.granted(center)?;
         }
-        let mut cfg = self.config.clone();
+        let mut cfg = NodeConfig::clone(&self.config);
         cfg.machine.sudo = sudo;
         self.commit(by, cfg)
     }
@@ -733,7 +742,7 @@ impl SettingsStore {
         f: impl FnOnce(&mut NodeConfig) -> Result<(), SetError>,
     ) -> Result<u64, SetError> {
         self.granted(center)?;
-        let mut cfg = self.config.clone();
+        let mut cfg = NodeConfig::clone(&self.config);
         f(&mut cfg)?;
         self.commit(Writer::Center(center), cfg)
     }
@@ -777,14 +786,14 @@ impl SettingsStore {
         }
         new.version = self.config.version;
         new.validate().map_err(SetError::Invalid)?;
-        if new == self.config {
+        if new == *self.config {
             return Ok(self.config.version);
         }
         new.version = self.next_version();
         self.write(&new, Some(self.config.version))?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
-        self.config = new;
+        self.config = Arc::new(new);
         self.changed(&by.label(), version, &changes);
         Ok(version)
     }
@@ -1046,6 +1055,29 @@ mod tests {
         })
         .unwrap();
         s
+    }
+
+    /// Readers share the config in force without a copy; a change puts a
+    /// new one in its place and leaves the one a reader holds as it was.
+    #[test]
+    fn readers_share_the_config_and_a_change_replaces_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let read = s.shared();
+        assert!(Arc::ptr_eq(&read, &s.shared()));
+        assert!(std::ptr::eq(&*read, s.config()));
+        s.mark(|c| c.centers[0].revoked = true).unwrap();
+        let now = s.shared();
+        assert!(!Arc::ptr_eq(&read, &now));
+        assert!(!read.centers[0].revoked && now.centers[0].revoked);
+        assert!(read.version < now.version);
+        s.update(|c| {
+            c.log.level = nerve_transport::log::Level::Debug;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(now.log.level, nerve_transport::log::Level::Info);
+        assert_eq!(s.shared().log.level, nerve_transport::log::Level::Debug);
     }
 
     /// The daemon hangs its log on this: each saved change is reported with
