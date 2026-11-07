@@ -2691,6 +2691,7 @@ pub(crate) async fn pipe_control(
     match method {
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.rm" => pipe_folder_change(shared, method, params).await,
+        "folder.grants" => pipe_folder_grants(shared, &params).await,
         // Checking the password takes a logon, so it cannot block inside
         // `control`.
         "sudo.on" => sudo_on(shared, params, false).await,
@@ -2711,6 +2712,13 @@ async fn pipe_folder_change(
         Ok(r) => r,
         Err(e) => return Reply::Err(e),
     };
+    // What the node, in its own session, cannot reach: a network folder,
+    // a drive mapped at a person's sign-in (crate::drives).
+    if let crate::folder_change::FolderChange::Add { path, .. } = &change
+        && let Some(why) = crate::drives::refusal(path)
+    {
+        return Reply::Err(why);
+    }
     let mut applied = None;
     let r = {
         let mut store = lock(&shared.store);
@@ -2759,6 +2767,35 @@ async fn pipe_folder_change(
     let mut answer = serde_json::to_value(applied).unwrap_or_default();
     answer["version"] = json!(version);
     Reply::Ok(answer)
+}
+
+/// `folder.grants {every}` on the control pipe: the folder grants brought in
+/// line with the config now, with `every` (`folder sync`) each one walked
+/// again into every folder below it, so what was moved into a granted
+/// folder gets its grant (crate::grants::walk_every); and what that left.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn pipe_folder_grants(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let every = params.get("every").and_then(Value::as_bool) == Some(true);
+    let s = shared.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        let walked = if every {
+            crate::grants::walk_every(&crate::grants::record_file(&s.paths))?
+        } else {
+            0
+        };
+        let cfg = s.config();
+        let synced = crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
+            tracing::info!("folder grants: {m}")
+        });
+        Ok::<Value, String>(synced.json(walked))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Reply::Ok(v),
+        Ok(Err(e)) => Reply::Err(e),
+        Err(e) => Reply::Err(e.to_string()),
+    }
 }
 
 /// `center.rotate-key {center, end_grace}`: the owner rotates the node's key
@@ -5182,6 +5219,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("not absolute"), "{e}");
+        // A network folder, which the node cannot hold (crate::drives).
+        #[cfg(windows)]
+        {
+            let unc = json!({"path": r"\\server\share\work", "access": "r"});
+            let e = call(1000, "folder.add", unc).await.unwrap_err();
+            assert!(e.contains("is a network folder"), "{e}");
+        }
         assert_eq!(folders()[0].access.to_chmod(), "rw-");
         let rm = FolderChange::Rm {
             path: folder.clone(),
@@ -5192,6 +5236,15 @@ mod tests {
         assert!(folders().is_empty());
         assert!(places().is_empty());
         assert!(call(1000, "status", json!({})).await.is_ok());
+        // `folder sync`: the grants walked again, and what that left.
+        let v = call(1000, "folder.grants", json!({"every": true}))
+            .await
+            .unwrap();
+        assert_eq!(v["errors"], json!([]), "{v}");
+        let e = call(4242, "folder.grants", json!({"every": true}))
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_A_COMMAND);
         // What the CLI asks before install, backup and the rest, and the
         // switch's state.
         assert_eq!(

@@ -17,6 +17,7 @@ pub mod cli;
 mod config_cap;
 pub mod daemon;
 pub mod descriptor;
+pub mod drives;
 pub mod edition;
 pub mod entry;
 use nerve_service::eventlog;

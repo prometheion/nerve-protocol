@@ -349,6 +349,15 @@ component FolderSection inherits Section {
             if Perm.built-in == "": Rectangle {
                 horizontal-stretch: 1;
             }
+            if Perm.folders.length > 0: Button {
+                text: "Sync folders";
+                icon: @image-url("icons/refresh.svg");
+                small: true;
+                busy: Perm.folder-sync-busy;
+                clicked => {
+                    Perm.folder-sync();
+                }
+            }
             Button {
                 text: "Add a folder…";
                 icon: @image-url("icons/plus.svg");

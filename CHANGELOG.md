@@ -18,6 +18,9 @@ Built and tested, not released: the releases before 0.1.0 publish the Linux prog
 - The running node saves nothing over a `node.toml` newer than the config it runs (a change made while it was thought stopped), on Linux too: a center's write, a timed mode or a key rotation can no longer undo such a change, a panic included.
 - On Windows each command is held to its limits (Settings › Limits › Each command) by its job object, as by its cgroup on Linux: past its memory the node ends it and the result says `killed: "memory"`, its CPU is capped (the limit stays in percent of one CPU), and it starts no more processes past its limit, which on Windows counts processes, not threads. `status` and the app say the limits hold.
 - In folder mode on Windows, PowerShell loads modules only from its own folders (Program Files' and Windows'), so it finds its cmdlets and starts at once on a machine whose module path holds PowerShell 7's, SQL Server's or Azure's folders.
+- On Windows the guard also refuses a change of the registry keys that start a program at sign-in or boot (`Run`, `RunOnce`, `Winlogon`, `Image File Execution Options`) and of the node's Event Log source, with `reg` or PowerShell's item cmdlets.
+- On Windows a network folder (`\\server\share`) or a folder on a network drive is refused at once, with the reason, by the folder picker and by the node: the node runs in a session of its own, where a drive mapped at your sign-in does not exist.
+- **Sync folders** under Permissions › Folders, in the app on Linux and Windows: the node gives the folders' entries again to what was moved into them (`folder sync`). On Windows `folder sync` now walks every folder grant of the pairings again, where it did nothing before.
 
 ## 0.0.8
 

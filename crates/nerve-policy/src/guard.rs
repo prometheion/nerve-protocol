@@ -24,7 +24,9 @@ pub enum Guard {
     /// folders.
     Paths,
     /// A command that stops, restarts, disables or kills the node's service
-    /// or process.
+    /// or process, or that changes what Windows starts at sign-in or boot
+    /// (the registry's Run keys, Winlogon, Image File Execution Options),
+    /// where a command would start again outside the node's hold.
     Service,
 }
 
@@ -404,6 +406,81 @@ fn is_service_key(key: &str) -> bool {
     })
 }
 
+/// Whether a registry key is one the guard keeps a command from changing:
+/// the node's service ([`is_service_key`]), its source in the Event Log, or
+/// a key that starts a program at sign-in or boot ([`is_autostart_key`]).
+fn is_guarded_key(key: &str) -> bool {
+    is_service_key(key)
+        || registry_key(key).is_some_and(|k| {
+            is_autostart_key(&k)
+                || under(
+                    &k,
+                    r"system\currentcontrolset\services\eventlog\application\nerve-node",
+                )
+        })
+}
+
+/// `key` below its hive, lower case, with `\` between its names, when it is
+/// a registry key as `reg` or PowerShell's registry provider spell one:
+/// `HKLM\…`, `HKEY_CURRENT_USER\…`, `HKCU:\…`, `Registry::HKEY_USERS\<SID>\…`,
+/// `\\machine\HKLM\…`. A key of a user (`HKU\<SID>`) is given below the
+/// SID, as `HKCU` gives it; numbered control sets read as the current one.
+fn registry_key(key: &str) -> Option<String> {
+    let k = key.replace('/', "\\").to_lowercase();
+    let k = k.trim_end_matches('\\');
+    let k = k
+        .strip_prefix(r"microsoft.powershell.core\registry::")
+        .or_else(|| k.strip_prefix("registry::"))
+        .unwrap_or(k);
+    // `reg` takes a key of another machine as `\\machine\HKLM\…`.
+    let k = match k.strip_prefix(r"\\") {
+        Some(rest) => rest.split_once('\\')?.1,
+        None => k,
+    };
+    let (hive, rest) = k.split_once('\\').unwrap_or((k, ""));
+    let rest = match hive.trim_end_matches(':') {
+        "hklm" | "hkey_local_machine" | "hkcu" | "hkey_current_user" => rest,
+        "hku" | "hkey_users" => rest.split_once('\\').map_or("", |(_, r)| r),
+        _ => return None,
+    };
+    let mut names: Vec<&str> = rest.split('\\').filter(|n| !n.is_empty()).collect();
+    if names.len() > 1
+        && names[0] == "system"
+        && names[1]
+            .strip_prefix("controlset")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        names[1] = "currentcontrolset";
+    }
+    Some(names.join("\\"))
+}
+
+/// Whether the key `key` ([`registry_key`]) is `place` or below it.
+fn under(key: &str, place: &str) -> bool {
+    key.strip_prefix(place)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
+}
+
+/// The keys that start a program at sign-in or boot, of the machine
+/// (`HKLM`) or of a user (`HKCU`), also the 32-bit view (`Wow6432Node`):
+/// the Run keys, Winlogon (`Shell`, `Userinit`) and Image File Execution
+/// Options (a `Debugger` starts in place of any program).
+fn is_autostart_key(key: &str) -> bool {
+    const PLACES: [&str; 8] = [
+        r"microsoft\windows\currentversion\run",
+        r"microsoft\windows\currentversion\runonce",
+        r"microsoft\windows\currentversion\runonceex",
+        r"microsoft\windows\currentversion\runservices",
+        r"microsoft\windows\currentversion\runservicesonce",
+        r"microsoft\windows\currentversion\policies\explorer\run",
+        r"microsoft\windows nt\currentversion\winlogon",
+        r"microsoft\windows nt\currentversion\image file execution options",
+    ];
+    ["software", r"software\wow6432node"]
+        .iter()
+        .any(|root| PLACES.iter().any(|p| under(key, &format!(r"{root}\{p}"))))
+}
+
 /// The node's service (systemd's unit, Windows' service).
 fn is_service(word: &str, win: bool) -> bool {
     let w = if win {
@@ -594,7 +671,7 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 matches!(
                     verb.to_lowercase().as_str(),
                     "add" | "delete" | "copy" | "restore"
-                ) && keys.iter().any(|k| is_service_key(k))
+                ) && keys.iter().any(|k| is_guarded_key(k))
             })
         }
         // The same key through PowerShell's registry provider, with the
@@ -633,7 +710,7 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
             if win =>
         {
             // `-Path:HKLM:\…` holds the key as well as `-Path HKLM:\…`.
-            args.iter().any(|w| is_service_key(&w.text))
+            args.iter().any(|w| is_guarded_key(&w.text))
         }
         "pkill" | "killall" => {
             let values: &[&str] = if name == "pkill" {
@@ -911,6 +988,40 @@ mod tests {
             "\\Services\\nerve-node",
         ] {
             assert!(!is_service_key(key), "{key:?}");
+        }
+    }
+
+    /// The keys that start a program at sign-in or boot, and the node's
+    /// service and Event Log source, in each way `reg` and PowerShell spell
+    /// a key; their neighbours and folders of the same names are not.
+    #[test]
+    fn autostart_keys_and_the_nodes_keys_are_guarded() {
+        for key in [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce\",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+            r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run",
+            r"Registry::HKEY_USERS\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows\CurrentVersion\Run",
+            r"Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+            r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe",
+            r"\\pc1\HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices",
+            "HKLM/SOFTWARE/Microsoft/Windows/CurrentVersion/RunOnceEx/0001",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node",
+            r"HKLM\SYSTEM\ControlSet001\Services\EventLog\Application\Nerve-Node",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\nerve-node",
+        ] {
+            assert!(is_guarded_key(key), "{key:?}");
+        }
+        for key in [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Runner",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\Other",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\spooler",
+            r"C:\Software\Microsoft\Windows\CurrentVersion\Run",
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            r"HKCR\Software\Microsoft\Windows\CurrentVersion\Run",
+        ] {
+            assert!(!is_guarded_key(key), "{key:?}");
         }
     }
 

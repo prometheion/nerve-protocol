@@ -361,6 +361,15 @@ folders.
   refused, the pairing's commands do not run. A change that takes more than a few seconds says
   how far it is: the CLI prints it, a running node writes it to its log,
   and a command waits for it.
+- A file or folder moved into a granted folder keeps the access list it
+  had, without the entry. **Sync folders** under **Permissions ›
+  Folders** walks every grant again into every folder below it, which gives
+  it the entry (`folder sync`; the running node does it, or the app's
+  command when none runs).
+- A network folder (`\\server\share`) or a folder on a network drive is
+  refused when it is added, in the app's folder picker too: the service
+  runs in a session of its own, where a drive mapped at your sign-in does
+  not exist, and the container reaches no network folder by its grants.
 - `folder rm` and `folder add` change the entry, and removing the pairing
   takes it off. That is the node's entry on the folder: permissions a
   command gave what it made there stay (see "What the AppContainer does not

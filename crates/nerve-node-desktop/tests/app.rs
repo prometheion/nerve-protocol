@@ -534,6 +534,20 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // Sync folders walks the grants again. No node runs here: on Linux the
+    // node walks them when it starts, on Windows this command does.
+    perm.invoke_folder_sync();
+    assert!(!perm.get_folder_sync_busy());
+    let said = store.get_toast();
+    if cfg!(windows) {
+        assert!(
+            said.starts_with("every pairing's commands reach")
+                || said.starts_with("nothing to sync"),
+            "{said}"
+        );
+    } else {
+        assert!(said.contains("walks the folders when it starts"), "{said}");
+    }
     // The network switch of its folder-mode commands, off and on again.
     perm.invoke_no_network_set(true);
     assert!(config(&paths).centers[0].policy.no_network);

@@ -906,6 +906,29 @@ const SERVICE_FORMS: &[Case] = &[
         PS,
         SERVICE,
     ),
+    // The keys that start a program at sign-in or boot, where a command
+    // would start again outside the node's hold, and the node's source in
+    // the Event Log.
+    (
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\Users\a\x.exe /f",
+        WIN,
+        SERVICE,
+    ),
+    (
+        r#"Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe' -Name Debugger -Value cmd.exe"#,
+        PS,
+        SERVICE,
+    ),
+    (
+        r"New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce -Name x -Value y",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"reg delete HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node /f",
+        WIN,
+        SERVICE,
+    ),
     // The registry cmdlets on the service's key itself.
     (
         r"New-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node -Name Start -Value 4",
@@ -1960,6 +1983,12 @@ const DATA: &[Case] = &[
     ),
     (
         "reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler /v Start /d 4 /f",
+        WIN,
+        None,
+    ),
+    // Reading what starts at sign-in is not changing it.
+    (
+        r"reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
         WIN,
         None,
     ),

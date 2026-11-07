@@ -134,6 +134,11 @@ pub(super) async fn add_folder(
             .map_err(|e| e.to_string())?
             .join(path)
     };
+    // A network folder or drive, which the node cannot hold, is refused
+    // before anything looks at it.
+    if let Some(why) = crate::drives::refusal(&given.display().to_string()) {
+        return Err(why);
+    }
     let given = nerve_policy::paths::normal_folder(&given.display().to_string())?;
     // A running node judges the path as the account the commands run as,
     // which this command may not be (the installed node's CLI runs as the
@@ -279,8 +284,30 @@ fn sync_failed(error: String) -> String {
 }
 
 /// `folder sync`: the running installed Linux node walks every grant now,
-/// as it does at its start, and says what that left.
+/// as it does at its start, and says what that left. On Windows the running
+/// node, or this command when none runs, walks every folder grant of the
+/// pairings' AppContainers again (crate::grants::walk_every).
 pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let v = match crate::cli::node_call(paths, "folder.grants", json!({ "every": true })).await
+        {
+            Ok(v) => v,
+            Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
+                let walked = crate::grants::walk_every(&crate::grants::record_file(paths))?;
+                let (cfg, _) = read_config(paths).await?;
+                crate::grants::apply_outside(paths, &cfg, &crate::paths::home_dir(), &mut |m| {
+                    eprintln!("{m}")
+                })
+                .json(walked)
+            }
+            Err(e) => return Err(e),
+        };
+        for line in windows_sync_lines(&v) {
+            let _ = writeln!(out, "{line}");
+        }
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     {
         let v = nerve_transport::ctl::call(
@@ -304,7 +331,7 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
         }
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = paths;
         let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
@@ -312,8 +339,30 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
     }
 }
 
+/// What `folder sync` says on Windows of the answer `v`
+/// (crate::grants::Synced::json): each error as a warning, or that every
+/// pairing's commands reach what their folders give them.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_sync_lines(v: &Value) -> Vec<String> {
+    let errors = texts(&v["errors"]);
+    let stale = texts(&v["stale"]);
+    if !errors.is_empty() || !stale.is_empty() {
+        let mut lines: Vec<String> = errors.iter().map(|e| format!("warning: {e}")).collect();
+        lines.extend(stale.iter().map(|p| {
+            format!("warning: {p} keeps a grant its folders no longer give; that pairing's commands do not run until it is taken off")
+        }));
+        return lines;
+    }
+    if v["walked"].as_u64() == Some(0) {
+        return vec!["nothing to sync: no folder of a pairing carries a grant here".into()];
+    }
+    vec!["every pairing's commands reach everything in the folders given to them".into()]
+}
+
 /// What `folder sync` says where no ACL gives the folders: a node run by
-/// hand runs its commands as its own user, and Windows gives them otherwise.
+/// hand runs its commands as its own user. Windows walks its pairings'
+/// grants instead ([`windows_sync_lines`]).
+#[cfg_attr(windows, allow(dead_code))]
 const FOLDERS_WITHOUT_ACL: &str =
     "nothing to sync: only the installed node on Linux gives nerve-run its folders by their ACLs";
 
@@ -456,6 +505,30 @@ fn resolve_folder(p: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What Windows' `folder sync` says: each error and stale grant as a
+    /// warning, else that the grants hold, or that there are none.
+    #[test]
+    fn windows_folder_sync_says_what_the_walk_left() {
+        let ok = windows_sync_lines(&json!({"errors": [], "stale": [], "walked": 3}));
+        assert_eq!(
+            ok,
+            ["every pairing's commands reach everything in the folders given to them"]
+        );
+        let none = windows_sync_lines(&json!({"errors": [], "stale": [], "walked": 0}));
+        assert!(none[0].starts_with("nothing to sync"), "{none:?}");
+        let bad = windows_sync_lines(&json!({
+            "errors": ["cannot take the grant off C:\\a: denied"],
+            "stale": ["C:\\a"],
+            "walked": 1,
+        }));
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        assert!(bad.iter().all(|l| l.starts_with("warning: ")), "{bad:?}");
+        assert!(
+            bad[1].contains("keeps a grant its folders no longer give"),
+            "{bad:?}"
+        );
+    }
     use crate::cli::tests::{load, run, setup};
     use nerve_policy::config::Access;
 

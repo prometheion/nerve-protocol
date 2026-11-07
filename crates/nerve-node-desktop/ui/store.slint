@@ -256,6 +256,10 @@ export global Perm {
     callback no-network-set(bool);
     callback folder-choose();
     callback folder-add();
+    // Walks every folder grant again (`folder sync`): what was moved into a
+    // folder since gets the folder's rights.
+    callback folder-sync();
+    in-out property <bool> folder-sync-busy;
     callback folder-set(string, bool, bool, bool);
     callback folder-remove(string);
     callback rule-add(int);

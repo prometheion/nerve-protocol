@@ -238,6 +238,39 @@ impl Synced {
             )
         })
     }
+
+    /// What `folder sync` hears of the sync: its errors, the folders of the
+    /// grants left stale, and how many grants it walked (`walked`).
+    pub fn json(&self, walked: usize) -> serde_json::Value {
+        serde_json::json!({
+            "errors": self.errors,
+            "stale": self.stale.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
+            "walked": walked,
+        })
+    }
+}
+
+/// Has the next sync walk every grant of the record `file` again, into
+/// every folder below it, as after a change that stopped part way: what was
+/// moved into a granted folder since, which keeps the list it had, gets the
+/// grant then (`folder sync`). How many grants there are.
+pub fn walk_every(file: &Path) -> Result<usize, String> {
+    let _one = nerve_transport::sync::turn(&SYNC);
+    let _held =
+        RecordLock::take(file).map_err(|e| format!("{}: {e}", lock_file(file).display()))?;
+    let record = read_record(file)?;
+    if record.is_empty() {
+        return Ok(0);
+    }
+    let marked: Vec<Grant> = record
+        .iter()
+        .map(|g| Grant {
+            unfinished: true,
+            ..g.clone()
+        })
+        .collect();
+    write_record(file, &marked)?;
+    Ok(record.len())
 }
 
 /// What a sync looks at and changes on the folders: on Windows their
@@ -2808,6 +2841,46 @@ mod tests {
         assert!(node_ids(&paths).unwrap_err().contains("node.toml"));
     }
 
+    /// `folder sync`: once every grant is marked for a walk, the next sync
+    /// puts each on again into every folder below it, and the marks go; a
+    /// sync after that walks nothing.
+    #[test]
+    fn folder_sync_walks_every_grant_once() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let (a, b) = (PathBuf::from("/srv/a"), PathBuf::from("/srv/b"));
+        let mut f = Fake::default();
+        f.make("/srv/a");
+        f.make("/srv/b");
+        let want = [grant("lab", "/srv/a", "rw"), grant("lab", "/srv/b", "r")];
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        f.changes.clear();
+        // Nothing changed: a plain sync walks nothing.
+        sync(&file, &want, &mut f);
+        assert!(f.changes.is_empty(), "{:?}", f.changes);
+        assert_eq!(walk_every(&file), Ok(2));
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.stale.is_empty(), "{s:?}");
+        let mut walked: Vec<_> = f
+            .changes
+            .iter()
+            .filter(|c| c.2)
+            .map(|c| c.0.clone())
+            .collect();
+        walked.sort();
+        assert_eq!(walked, [a.clone(), b.clone()]);
+        assert!(recorded(&file).iter().all(|g| !g.unfinished));
+        f.changes.clear();
+        sync(&file, &want, &mut f);
+        assert!(f.changes.is_empty(), "{:?}", f.changes);
+        let json = s.json(2);
+        assert_eq!(json["walked"], 2);
+        assert_eq!(json["errors"], serde_json::json!([]));
+        // No record yet: nothing to walk.
+        assert_eq!(walk_every(&d.path().join("none.json")), Ok(0));
+    }
+
     /// Profiles by name, as an account has them.
     #[derive(Default)]
     struct FakeProfiles {
@@ -3867,6 +3940,56 @@ mod tests {
             sorted(vec![g(&real_work, "rw"), g(&outbox, "w")]),
             "the outbox must not gain the nested folder's flags"
         );
+    }
+
+    /// The same on Windows (#82): the owner gives the write folder through a
+    /// junction of their own and the folder inside it by its real path, in
+    /// another case. A command's junction in place of the nested folder is
+    /// still caught, because the boundary is judged by resolved places
+    /// (`exec::led_away`): the outbox does not gain the nested folder's
+    /// flags.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_with_two_spellings_gets_no_grant_on_windows() {
+        use nerve_sandbox::acl::same_path;
+        let d = tempfile::tempdir().unwrap();
+        let root = canonical(d.path());
+        let (real_work, outbox) = (root.join("real-work"), root.join("outbox"));
+        let work = root.join("work");
+        let bin = real_work.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&outbox).unwrap();
+        junction(&work, &real_work);
+        let spelled = root.join("REAL-WORK").join("BIN");
+        let paths = NodePaths::new(root.join("cfg"), root.join("state"));
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(center(
+            "lab",
+            &[(&work, "rw"), (&spelled, "rwx"), (&outbox, "w")],
+        ));
+        let platform = crate::paths::platform();
+        let on = |want: &[Grant], p: &Path| -> Vec<String> {
+            let p = p.display().to_string();
+            want.iter()
+                .filter(|g| same_path(&g.path.display().to_string(), &p))
+                .map(|g| g.access.to_string())
+                .collect()
+        };
+        let want = wanted(&cfg, &paths, &root, &platform);
+        assert_eq!(on(&want, &bin), ["rwx"], "{want:?}");
+        assert_eq!(on(&want, &outbox), ["w"], "{want:?}");
+
+        // A command swaps the real nested folder for a junction to the
+        // outbox.
+        std::fs::remove_dir(&bin).unwrap();
+        junction(&bin, &outbox);
+        let swapped = wanted(&cfg, &paths, &root, &platform);
+        assert_eq!(
+            on(&swapped, &outbox),
+            ["w"],
+            "the outbox must not gain the nested folder's flags: {swapped:?}"
+        );
+        assert!(on(&swapped, &bin).is_empty(), "{swapped:?}");
     }
 
     /// Issue #77: a link a command put in place of a nested folder while the

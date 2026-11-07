@@ -98,8 +98,9 @@ The node gives `nerve-run` its folders as access list entries (ACLs). What
 you make in a folder later gets them. What you move into it keeps its own.
 
 - A file you move into a granted folder (`mv` of a download or a clone)
-  keeps its own access list. Run this, and the node gives the folder's
-  entries again:
+  keeps its own access list. Press **Sync folders** under
+  **Permissions › Folders** in the app, or run this, and the node gives the
+  folder's entries again:
 
   ```sh
   nerve-node folder sync

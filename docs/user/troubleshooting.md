@@ -31,7 +31,8 @@ Audit and Log pages. Every message, with its cause and fix, is in
 <details>
 <summary>A file in a granted folder gives <code>Permission denied</code></summary>
 
-The file was moved there (`mv`) and kept its own access list. Run
+The file was moved there (`mv`) and kept its own access list. Press
+**Sync folders** under **Permissions › Folders**, or run
 `nerve-node folder sync`.
 
 </details>
