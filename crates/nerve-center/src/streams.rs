@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use nerve_proto::ErrorCode;
+use nerve_transport::sync::lock;
 use serde_json::json;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
@@ -153,7 +154,7 @@ impl Ring {
     /// Data of the stream came.
     pub fn push(&self, data: &[u8]) {
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock(&self.state);
             if s.end.is_some() {
                 return;
             }
@@ -180,19 +181,19 @@ impl Ring {
     /// Keeps what the ring takes from its readers until [`Ring::show`], and
     /// drops it if the ring ends before.
     pub fn hide(&self) {
-        self.state.lock().unwrap().hidden = true;
+        lock(&self.state).hidden = true;
     }
 
     /// What the ring took can be read: its subscription was taken.
     pub fn show(&self) {
-        self.state.lock().unwrap().hidden = false;
+        lock(&self.state).hidden = false;
         self.moved();
     }
 
     /// The node dropped `n` bytes of the stream, after what came so far.
     pub fn gap(&self, n: u64) {
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock(&self.state);
             let pos = s.at + s.buf.len() as u64;
             if s.buf.is_empty() {
                 s.dropped += n;
@@ -223,7 +224,7 @@ impl Ring {
     /// and only the words why remain. Only the first end counts.
     pub fn end(&self, why: &str) {
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock(&self.state);
             if s.end.is_some() {
                 return;
             }
@@ -240,29 +241,22 @@ impl Ring {
 
     /// Why the stream ended, once it did.
     pub fn why(&self) -> Option<String> {
-        self.state
-            .lock()
-            .unwrap()
-            .end
-            .as_ref()
-            .map(|(why, _)| why.clone())
+        lock(&self.state).end.as_ref().map(|(why, _)| why.clone())
     }
 
     /// Whether the stream ended.
     pub fn ended(&self) -> bool {
-        self.state.lock().unwrap().end.is_some()
+        lock(&self.state).end.is_some()
     }
 
     /// The bytes it holds.
     pub fn held(&self) -> usize {
-        self.state.lock().unwrap().buf.len()
+        lock(&self.state).buf.len()
     }
 
     /// Whether it ended longer than [`KEEP_FOR`] before `now`.
     fn stale(&self, now: Instant) -> bool {
-        self.state
-            .lock()
-            .unwrap()
+        lock(&self.state)
             .end
             .as_ref()
             .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= KEEP_FOR)
@@ -285,12 +279,12 @@ impl Ring {
                     || !s.gaps.is_empty()
                     || s.end.is_some())
         };
-        if ready(&self.state.lock().unwrap()) {
+        if ready(&lock(&self.state)) {
             return;
         }
         let _ = tokio::time::timeout(wait, async {
             while rx.changed().await.is_ok() {
-                if ready(&self.state.lock().unwrap()) {
+                if ready(&lock(&self.state)) {
                     return;
                 }
             }
@@ -302,7 +296,7 @@ impl Ring {
     /// gives has nothing missing inside it. A character the cut would split
     /// stays for the next read, unless nothing more can come.
     pub fn read(&self, max: usize) -> Read {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         if s.hidden {
             return Read {
                 text: String::new(),
@@ -498,7 +492,7 @@ impl Place {
     /// whichever comes first. None when the session no longer holds the
     /// stream or it ended: it is not to be opened.
     pub fn take(sess: &Arc<Session>, id: &str) -> Option<Place> {
-        let mut streams = sess.streams.lock().unwrap();
+        let mut streams = lock(&sess.streams);
         let e = streams.entries.get_mut(id).filter(|e| !e.ring.ended())?;
         e.placed = true;
         let node_id = e.node_id.clone();
@@ -516,7 +510,7 @@ impl Drop for Place {
         let Some(s) = self.sess.upgrade() else {
             return;
         };
-        let mut streams = s.streams.lock().unwrap();
+        let mut streams = lock(&s.streams);
         if let Some(n) = streams.placed.get_mut(&self.node_id) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -905,7 +899,7 @@ pub async fn open_on_node(
         let Some(s) = sess.upgrade() else {
             return;
         };
-        let target = s.jobs.lock().unwrap().signal_target(&job, &node_id);
+        let target = lock(&s.jobs).signal_target(&job, &node_id);
         let session = s.id.clone();
         drop(s);
         match target {
@@ -922,7 +916,7 @@ pub async fn open_on_node(
                 let share = node_share(link.limits.streams);
                 let asked = sess
                     .upgrade()
-                    .is_some_and(|s| s.streams.lock().unwrap().ask(&id, share));
+                    .is_some_and(|s| lock(&s.streams).ask(&id, share));
                 // Waiting for room is not waiting for the command to start.
                 if !asked {
                     sent_at = None;
@@ -951,13 +945,13 @@ pub async fn open_on_node(
                 if tried.is_err()
                     && let Some(s) = sess.upgrade()
                 {
-                    s.streams.lock().unwrap().not_asked(&id);
+                    lock(&s.streams).not_asked(&id);
                 }
                 match tried {
                     Ok(sid) => {
                         let kept = sess
                             .upgrade()
-                            .is_some_and(|s| s.streams.lock().unwrap().opened(&id, &link, sid));
+                            .is_some_and(|s| lock(&s.streams).opened(&id, &link, sid));
                         if !kept {
                             Closer {
                                 node: Some((Arc::downgrade(&link), sid)),

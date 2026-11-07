@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nerve_transport::sync::lock;
 use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 
@@ -97,7 +98,9 @@ pub struct Inner {
     /// both at the end of its grace.
     identity: Mutex<Arc<ServerIdentity>>,
     server_config: Mutex<Arc<rustls::ServerConfig>>,
-    /// Held while a rotation of the center's key starts or ends.
+    /// Held while a rotation of the center's key starts or ends. It guards a
+    /// change of several steps, so its poisoning ends the center like a
+    /// data lock's.
     rotating: Mutex<()>,
     /// The end of a rotation failed and said so; it says so again once it
     /// worked.
@@ -280,7 +283,7 @@ impl Session {
     /// node `node_id`, whose hash was `hash`.
     pub fn listed(&self, node_id: &str, unit: &str, hash: u64) {
         let key = (node_id.to_string(), unit.to_string());
-        let mut f = self.fetched.lock().unwrap();
+        let mut f = lock(&self.fetched);
         if f.hashes.insert(key.clone(), hash).is_some() {
             f.order.retain(|k| *k != key);
         }
@@ -296,7 +299,7 @@ impl Session {
     /// session its details; none when it never did (or it was forgotten).
     pub fn listed_hash(&self, node_id: &str, unit: &str) -> Option<u64> {
         let key = (node_id.to_string(), unit.to_string());
-        self.fetched.lock().unwrap().hashes.get(&key).copied()
+        lock(&self.fetched).hashes.get(&key).copied()
     }
 
     pub fn ended(&self) -> bool {
@@ -325,7 +328,7 @@ struct Held {
 impl Drop for Held {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
-            let stop = self.sess.jobs.lock().unwrap().abandon(&id);
+            let stop = lock(&self.sess.jobs).abandon(&id);
             if let Some(stop) = stop {
                 let _ = stop.send(self.why);
             }
@@ -548,7 +551,7 @@ impl Center {
     /// test need not wait 40 s and a minute for the center to give up.
     #[doc(hidden)]
     pub fn set_stream_waits(&self, open: Duration, start: Duration) {
-        *self.stream_waits.lock().unwrap() = (open, start);
+        *lock(&self.stream_waits) = (open, start);
     }
 
     /// Shortens the grace, so that a test need not wait 30 s for the calls
@@ -647,11 +650,11 @@ impl Center {
     }
 
     pub fn id(&self) -> String {
-        self.store.lock().unwrap().center_id.clone()
+        lock(&self.store).center_id.clone()
     }
 
     pub fn name(&self) -> String {
-        self.store.lock().unwrap().center_name.clone()
+        lock(&self.store).center_name.clone()
     }
 
     pub fn public_url(&self) -> &CenterUrl {
@@ -660,17 +663,17 @@ impl Center {
 
     /// The pin of the key served now, with a TLS public URL.
     pub fn pin(&self) -> Option<String> {
-        self.pin.lock().unwrap().clone()
+        lock(&self.pin).clone()
     }
 
     /// The TLS configuration with the key served now, for each new
     /// connection: a rotation that ends changes it for the next one.
     pub fn server_config(&self) -> Arc<rustls::ServerConfig> {
-        self.server_config.lock().unwrap().clone()
+        lock(&self.server_config).clone()
     }
 
     fn identity(&self) -> Arc<ServerIdentity> {
-        self.identity.lock().unwrap().clone()
+        lock(&self.identity).clone()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
@@ -698,7 +701,7 @@ impl Center {
         f: impl FnOnce(&mut Store) -> T,
     ) -> (T, Result<(), String>) {
         let (out, snap) = {
-            let mut s = self.store.lock().unwrap();
+            let mut s = lock(&self.store);
             let out = f(&mut s);
             self.dirty.store(false, Ordering::SeqCst);
             (out, self.snapshot(&s))
@@ -735,7 +738,7 @@ impl Center {
     fn write_snapshot(&self, snap: Snapshot) -> std::io::Result<()> {
         let text = snap.text?;
         {
-            let mut w = self.saves.lock().unwrap();
+            let mut w = lock(&self.saves);
             if w.written >= snap.n {
                 return Ok(());
             }
@@ -744,13 +747,13 @@ impl Center {
             }
         }
         off_the_workers(|| {
-            let _one = self.writing.lock().unwrap();
+            let _one = nerve_transport::sync::turn(&self.writing);
             // Only a snapshot at least as new as this one is written here, so
             // Ok always means the file holds this change. When none waits, a
             // write that took this one away has ended, and failed (else it
             // covered it). An older one that waits is left to its own save.
             let (n, text) = {
-                let mut w = self.saves.lock().unwrap();
+                let mut w = lock(&self.saves);
                 if w.written >= snap.n {
                     return Ok(());
                 }
@@ -767,7 +770,7 @@ impl Center {
                 ));
             }
             let r = Store::write_file(&self.dir, &text);
-            let mut w = self.saves.lock().unwrap();
+            let mut w = lock(&self.saves);
             match &r {
                 Ok(()) => w.written = w.written.max(n),
                 Err(e) => w.failed = e.to_string(),
@@ -784,7 +787,7 @@ impl Center {
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut s = self.store.lock().unwrap();
+        let mut s = lock(&self.store);
         let before = s.clone();
         let out = match f(&mut s) {
             Ok(v) => v,
@@ -810,10 +813,7 @@ impl Center {
     /// It does not wait on the link ([`Link::end`]), so a peer that reads
     /// nothing cannot hold up the caller (the sweep).
     pub(crate) fn end_link_of_key(&self, node_id: &str, key: &str) {
-        let link = self
-            .links
-            .lock()
-            .unwrap()
+        let link = lock(&self.links)
             .get(node_id)
             .filter(|l| !l.is_closed() && l.auth_key() == key)
             .cloned();
@@ -829,19 +829,19 @@ impl Center {
 
     /// Runs `f` on the stored state and saves it later (statistics).
     fn update_soon(&self, f: impl FnOnce(&mut Store)) {
-        f(&mut self.store.lock().unwrap());
+        f(&mut lock(&self.store));
         self.dirty.store(true, Ordering::SeqCst);
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
-        f(&self.store.lock().unwrap())
+        f(&lock(&self.store))
     }
 
     /// Writes pending statistics. Called on a timer and on shutdown.
     pub fn flush(&self) {
         if self.dirty.swap(false, Ordering::SeqCst) {
             let snap = {
-                let mut s = self.store.lock().unwrap();
+                let mut s = lock(&self.store);
                 s.prune_stats(now_ms());
                 self.snapshot(&s)
             };
@@ -866,9 +866,7 @@ impl Center {
 
     /// The node's link while it is up.
     pub fn link(&self, node_id: &str) -> Option<Arc<Link>> {
-        self.links
-            .lock()
-            .unwrap()
+        lock(&self.links)
             .get(node_id)
             .filter(|l| l.is_live())
             .cloned()
@@ -876,9 +874,7 @@ impl Center {
 
     /// The node's link that dropped and waits for its resume.
     pub(crate) fn parked(&self, node_id: &str) -> Option<Arc<Link>> {
-        self.links
-            .lock()
-            .unwrap()
+        lock(&self.links)
             .get(node_id)
             .filter(|l| !l.is_closed() && !l.is_live())
             .cloned()
@@ -886,9 +882,7 @@ impl Center {
 
     /// The node's link, up or waiting for its resume.
     fn held(&self, node_id: &str) -> Option<Arc<Link>> {
-        self.links
-            .lock()
-            .unwrap()
+        lock(&self.links)
             .get(node_id)
             .filter(|l| !l.is_closed())
             .cloned()
@@ -896,7 +890,7 @@ impl Center {
 
     /// Closes every link with `bye shutdown`.
     pub async fn shutdown(&self) {
-        let links: Vec<Arc<Link>> = self.links.lock().unwrap().values().cloned().collect();
+        let links: Vec<Arc<Link>> = lock(&self.links).values().cloned().collect();
         self.log.record(
             Level::Info,
             None,
@@ -979,10 +973,7 @@ pub(crate) mod tests {
     /// Puts a live link for `node` in place, so its calls get past the
     /// offline check; one that reaches the send ends as `connection_lost`.
     pub(super) fn online(c: &Center, node: &str) {
-        c.links
-            .lock()
-            .unwrap()
-            .insert(node.into(), Arc::new(Link::for_test(node)));
+        lock(&c.links).insert(node.into(), Arc::new(Link::for_test(node)));
     }
 
     pub(super) fn exec_route(node: &str) -> Route {
@@ -1127,7 +1118,7 @@ pub(crate) mod tests {
         at(50);
         // Taken under the lock, and not at the queue yet.
         let late = {
-            let mut s = c.store.lock().unwrap();
+            let mut s = lock(&c.store);
             s.center_name = "three".into();
             c.snapshot(&s)
         };
@@ -1162,7 +1153,7 @@ pub(crate) mod tests {
     #[test]
     fn a_save_whose_covering_write_failed_does_not_write_an_older_one() {
         let (r, on_disk) = a_failed_covering_write(|c| {
-            let mut s = c.store.lock().unwrap();
+            let mut s = lock(&c.store);
             s.center_name = "four".into();
             let snap = c.snapshot(&s);
             drop(s);
@@ -1222,7 +1213,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(dir.path(), None);
         let snap = |name: &str| {
-            let mut s = c.store.lock().unwrap();
+            let mut s = lock(&c.store);
             s.center_name = name.into();
             c.snapshot(&s)
         };

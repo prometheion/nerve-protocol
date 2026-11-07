@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nerve_transport::sync::lock;
 use serde_json::{Value, json};
 
 use nerve_proto::link::CenterUrl;
@@ -112,7 +113,7 @@ struct Counting<'a>(&'a ReadBudget);
 
 impl Drop for Counting<'_> {
     fn drop(&mut self) {
-        self.0.state.lock().unwrap().counting -= 1;
+        lock(&self.0.state).counting -= 1;
     }
 }
 
@@ -178,7 +179,7 @@ impl ReadBudget {
     /// answered a call it is held to the assumed speed again. A call the old
     /// process took teaches nothing (review T1 of #178).
     pub(super) fn restart(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         s.speeds.clear();
         s.started += 1;
         s.process += 1;
@@ -191,19 +192,19 @@ impl ReadBudget {
     /// process that took it after a crash would be sent the key and the
     /// text of every call the window of a restart lets through.
     pub(super) fn vet_calls(&self) {
-        self.state.lock().unwrap().vet = true;
+        lock(&self.state).vet = true;
     }
 
     /// The process answering is the server's own (it refuses a key it was
     /// not given, and said it listens): calls may be sent to it.
     pub(super) fn vetted(&self) {
-        self.state.lock().unwrap().vetted = true;
+        lock(&self.state).vetted = true;
     }
 
     /// Whether a call may be sent: always, but on a port it has to wait for
     /// the current process to be [`vetted`](Self::vetted).
     fn may_send(&self) -> bool {
-        let s = self.state.lock().unwrap();
+        let s = lock(&self.state);
         !s.vet || s.vetted
     }
 
@@ -212,7 +213,7 @@ impl ReadBudget {
     /// lost: the server is not just down, it ended on a call, and that call
     /// may be why (review T2 of #178).
     pub(crate) fn died_on_call(&self) -> bool {
-        self.state.lock().unwrap().died_on_call
+        lock(&self.state).died_on_call
     }
 
     /// Whether a call is in the server (it holds the slot).
@@ -233,7 +234,7 @@ impl ReadBudget {
     /// see its connection end: the calls in between would meet a server
     /// that is neither ready nor marked (review T3 of #178).
     pub(super) fn ended(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         s.ready = false;
         s.vetted = false;
         if self.reading() || s.counting > 0 {
@@ -248,7 +249,7 @@ impl ReadBudget {
     /// goes: the model is down, which is not the same as ended on a call
     /// (review T3 and T4 of #178).
     pub(super) fn ended_before_ready(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         s.vetted = false;
         if self.reading() || s.counting > 0 {
             s.mark();
@@ -263,7 +264,7 @@ impl ReadBudget {
     /// (a failed connect while it runs is cleared by the next count, now
     /// that it is ready; review T5 of #178).
     pub(super) fn became_ready(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         s.ready = true;
         if s.marked_in < s.process {
             s.died_on_call = false;
@@ -275,14 +276,14 @@ impl ReadBudget {
     /// off meets a model that is down, not one that failed (review T6 of
     /// #178). A call in it marks itself.
     pub(super) fn stopped(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         s.ready = false;
         s.vetted = false;
     }
 
     /// A count is in flight until the returned guard drops.
     fn counting(&self) -> Counting<'_> {
-        self.state.lock().unwrap().counting += 1;
+        lock(&self.state).counting += 1;
         Counting(self)
     }
 
@@ -294,7 +295,7 @@ impl ReadBudget {
     /// of #178). Decided under one lock, so a stop or an end in between is
     /// seen.
     pub(super) fn count_failed(&self, connection_lost: bool) -> bool {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         if !s.ready {
             return false;
         }
@@ -307,13 +308,13 @@ impl ReadBudget {
     /// The mark no longer stands: there is no process, and the model is
     /// down, which is not the same as ended on a call (review T3 of #178).
     pub(super) fn settled(&self) {
-        self.state.lock().unwrap().died_on_call = false;
+        lock(&self.state).died_on_call = false;
     }
 
     /// How often the mark was set. A count reads it before it asks the
     /// server and hands it to [`counted`](Self::counted).
     fn marks(&self) -> u64 {
-        self.state.lock().unwrap().marks
+        lock(&self.state).marks
     }
 
     /// A count the server answered, after `marks` marks: if the server is
@@ -323,7 +324,7 @@ impl ReadBudget {
     /// process answers before its next probe, and the calls in between would
     /// meet a server that is neither ready nor marked (review T4 of #178).
     fn counted(&self, marks: u64) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         if s.ready && s.marks == marks {
             s.died_on_call = false;
         }
@@ -333,13 +334,13 @@ impl ReadBudget {
     /// connection does.
     #[cfg(test)]
     pub(crate) fn die_on_call(&self) {
-        self.state.lock().unwrap().mark();
+        lock(&self.state).mark();
     }
 
     /// Holds the budget's lock, so a step that needs it waits.
     #[cfg(test)]
     pub(super) fn hold_state(&self) -> impl Sized + '_ {
-        self.state.lock().unwrap()
+        lock(&self.state)
     }
 
     /// Takes the slot, as a call in the server does.
@@ -378,7 +379,7 @@ impl ReadBudget {
     /// Milliseconds per token of a short call: the slowest recent call's,
     /// or the assumed speed before the first.
     pub fn ms_per_token(&self) -> f64 {
-        let s = self.state.lock().unwrap();
+        let s = lock(&self.state);
         s.speeds
             .iter()
             .copied()
@@ -456,7 +457,7 @@ impl ReadBudget {
 
     /// Marks a call as sent; its [`Flight`] takes its speed when it lands.
     fn take_off(&self) -> Flight<'_> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock(&self.state);
         let alone = s.in_flight == 0;
         s.in_flight += 1;
         s.started += 1;
@@ -497,7 +498,7 @@ impl Flight<'_> {
     /// The server went away while it read this call. A call that a restart
     /// came between does not say anything about the new process.
     fn died(&self) {
-        let mut s = self.budget.state.lock().unwrap();
+        let mut s = lock(&self.budget.state);
         if s.started == self.number {
             s.mark();
         }
@@ -505,7 +506,7 @@ impl Flight<'_> {
 
     fn take(&self, tokens: usize, ms: f64, timed_out: bool) {
         let work = self.budget.work(tokens);
-        let mut s = self.budget.state.lock().unwrap();
+        let mut s = lock(&self.budget.state);
         if self.alone && s.started == self.number && tokens > 0 {
             let mut speed = ms / work;
             if timed_out {
@@ -522,7 +523,7 @@ impl Flight<'_> {
 
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
-        self.budget.state.lock().unwrap().in_flight -= 1;
+        lock(&self.budget.state).in_flight -= 1;
     }
 }
 

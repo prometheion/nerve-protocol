@@ -110,7 +110,7 @@ pub(super) async fn rm(
     // follow: the pairing is gone then, so its key and profile go
     // now, or nothing names them later.
     let saved = edit_saved(&paths, |c| {
-        let mut g = gone.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = nerve_transport::sync::lock(&gone);
         g.clear();
         g.extend(
             c.centers
@@ -134,7 +134,7 @@ pub(super) async fn rm(
     // starts again, so there it stays.
     let mut p = saved.grants.profiles.clone();
     let mut ours = Vec::new();
-    for id in gone.into_inner().unwrap_or_else(|p| p.into_inner()) {
+    for id in nerve_transport::sync::into_inner(gone) {
         if cfg.centers.iter().any(|c| c.node_id == id) {
             continue;
         }

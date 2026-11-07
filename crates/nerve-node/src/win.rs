@@ -197,7 +197,7 @@ pub struct Job(Handle);
 static LIVE: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 fn live() -> std::sync::MutexGuard<'static, Vec<usize>> {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+    nerve_transport::sync::lock(&LIVE)
 }
 
 /// Whether `caller` may be a process of a command the node runs

@@ -389,14 +389,14 @@ mod linux {
                 pid,
             },
         };
-        *KEPT.lock().unwrap_or_else(|p| p.into_inner()) = Some(kept);
+        *nerve_transport::sync::lock(&KEPT) = Some(kept);
         Ok(())
     }
 
     /// What [`prepare`] read of `path`, once; `None` when it read nothing
     /// or another file.
     pub fn take_read(path: &Path) -> Option<Result<Vec<u8>, String>> {
-        let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+        let mut kept = nerve_transport::sync::lock(&KEPT);
         match kept.take() {
             Some(Kept::Read { path: p, bytes }) if p == path => Some(bytes),
             other => {
@@ -409,7 +409,7 @@ mod linux {
     /// Writes `bytes` through the process [`prepare`] started for `path`;
     /// `None` when there is none for that file.
     pub fn take_write(path: &Path, bytes: &[u8], overwrite: bool) -> Option<Result<(), String>> {
-        let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+        let mut kept = nerve_transport::sync::lock(&KEPT);
         match kept.take() {
             Some(Kept::Write {
                 path: p,

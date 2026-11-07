@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The center and the node end, and their service starts them again with clean state, when a part of them failed while it held a lock (a poisoned lock). Until now the center stopped answering without ending, and the node went on with state that may have been half changed. The log says which lock it was.
+
 ### Windows (with 0.1.0)
 
 Built and tested, not released: 0.0.7 publishes the Linux programs only.

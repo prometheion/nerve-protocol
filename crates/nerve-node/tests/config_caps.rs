@@ -1183,7 +1183,18 @@ async fn a_program_runs_whole_through_the_shim_under_landlock() {
     };
     let opts = RunOptions {
         shell: None,
-        landlock: Some(exec::landlock_spec(&policy, &root, &[], &[])),
+        landlock: Some(exec::landlock_spec(
+            &policy,
+            &root,
+            &[],
+            &[],
+            &nerve_policy::protected::Protected::new(
+                &nerve_policy::protected::Platform::Unix,
+                &root,
+                &[],
+                &policy.protected,
+            ),
+        )),
         container: None,
         exe: env!("CARGO_BIN_EXE_nerve-node").into(),
         output_cap: 64 * 1024,

@@ -185,8 +185,8 @@ fn object(v: Value) -> Map<String, Value> {
 
 /// Parses `params` into `T`, mapping serde's complaints to `invalid_args`.
 pub fn params<T: serde::de::DeserializeOwned>(p: &Map<String, Value>) -> Result<T, RpcError> {
-    serde_json::from_value(Value::Object(p.clone()))
-        .map_err(|e| RpcError::invalid_args(format!("invalid params: {e}")))
+    // Read from the map in place: a call's arguments may be megabytes.
+    T::deserialize(p).map_err(|e| RpcError::invalid_args(format!("invalid params: {e}")))
 }
 
 #[cfg(test)]

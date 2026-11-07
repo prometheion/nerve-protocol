@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use nerve_transport::sync::lock;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::OwnedSemaphorePermit;
@@ -38,7 +39,7 @@ use nerve_transport::net::BoxIo;
 use nerve_transport::tls::Acceptor;
 use nerve_transport::webui::{self, Sessions, host_is_address, host_is_loopback, origin_matches};
 
-use crate::daemon::{Shared, lock};
+use crate::daemon::Shared;
 use crate::owner::{Endpoint, Owners};
 
 mod pages;

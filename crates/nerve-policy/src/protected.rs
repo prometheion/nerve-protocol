@@ -15,6 +15,7 @@
 //! [`Platform`], so the Windows ones are tested on Linux as well.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::{Access, Folder, ProtectedOptions};
 use crate::paths::{resolve, win};
@@ -764,6 +765,16 @@ impl Prefixes {
     }
 }
 
+/// How many lists [`Protected::new`] built in this process.
+static BUILT: AtomicU64 = AtomicU64::new(0);
+
+/// How many lists [`Protected::new`] built in this process, for a test that
+/// a call builds its list once: each build resolves every entry.
+#[doc(hidden)]
+pub fn built() -> u64 {
+    BUILT.load(Ordering::Relaxed)
+}
+
 impl Protected {
     /// `own` are the node's own config and state directories: a command or a
     /// write must not change the node's policy behind its back, nor read the
@@ -774,6 +785,7 @@ impl Protected {
         own: &[PathBuf],
         opts: &ProtectedOptions,
     ) -> Protected {
+        BUILT.fetch_add(1, Ordering::Relaxed);
         let allow: Vec<PathBuf> = opts
             .allow
             .iter()

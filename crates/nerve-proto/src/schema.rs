@@ -719,15 +719,37 @@ pub fn check_stream_params(params: &Value) -> Result<(), SchemaError> {
 /// Keywords `check` refuses are not looked at, so an unchecked schema is not
 /// a reliable guard.
 pub fn validate(schema: &Value, args: &Value) -> Result<(), ArgError> {
-    // The path to the value at hand; a field's path is only written out
-    // when it does not fit.
-    let mut steps: Vec<Step> = Vec::new();
-    let mut stack = vec![Todo::One {
+    walk(vec![Todo::One {
         schema,
         value: args,
         depth: 0,
         step: None,
-    }];
+    }])
+}
+
+/// [`validate`] for arguments held as a map, as a call's are: the same
+/// answer as for `Value::Object(args)`, without copying them into one.
+pub fn validate_map(schema: &Value, args: &Map<String, Value>) -> Result<(), ArgError> {
+    let Some(m) = schema.as_object() else {
+        return Ok(());
+    };
+    if !fits_map(m, args) {
+        return Err(ArgError {
+            field: path(&[], None),
+            expected: expected(m),
+        });
+    }
+    let mut stack = Vec::new();
+    members(m, args, &[], 0, &mut stack)?;
+    walk(stack)
+}
+
+/// Looks at what is left on `stack` until it is empty or a value does not
+/// fit.
+fn walk(mut stack: Vec<Todo<'_>>) -> Result<(), ArgError> {
+    // The path to the value at hand; a field's path is only written out
+    // when it does not fit.
+    let mut steps: Vec<Step> = Vec::new();
     while let Some(todo) = stack.pop() {
         let (s, v, depth, step) = match todo {
             Todo::One {
@@ -764,54 +786,7 @@ pub fn validate(schema: &Value, args: &Value) -> Result<(), ArgError> {
         }
         let depth = steps.len();
         match v {
-            Value::Object(o) => {
-                let props = m.get("properties").and_then(Value::as_object);
-                let required = m.get("required").and_then(Value::as_array);
-                for name in required.into_iter().flatten().filter_map(Value::as_str) {
-                    if !o.contains_key(name) {
-                        let what = props
-                            .and_then(|p| p.get(name))
-                            .and_then(Value::as_object)
-                            .map_or_else(|| "a value".into(), expected);
-                        return Err(ArgError {
-                            field: path(&steps, Some(name)),
-                            expected: format!("{what} (required)"),
-                        });
-                    }
-                }
-                let closed = m.get("additionalProperties") == Some(&Value::Bool(false));
-                // At most one entry per property the schema names, so this
-                // stays small however many fields the value has.
-                let mut next = Vec::new();
-                for (k, x) in o {
-                    match props.and_then(|p| p.get(k)) {
-                        Some(s) => next.push(Todo::One {
-                            schema: s,
-                            value: x,
-                            depth,
-                            step: Some(Step::Name(k)),
-                        }),
-                        None if closed => {
-                            let known: Vec<&str> = props
-                                .into_iter()
-                                .flatten()
-                                .map(|(k, _)| k.as_str())
-                                .collect();
-                            let expected = if known.is_empty() {
-                                "no field of this name; this takes none".into()
-                            } else {
-                                format!("no field of this name; known: {}", known.join(", "))
-                            };
-                            return Err(ArgError {
-                                field: path(&steps, Some(k)),
-                                expected,
-                            });
-                        }
-                        None => {}
-                    }
-                }
-                stack.extend(next.into_iter().rev());
-            }
+            Value::Object(o) => members(m, o, &steps, depth, &mut stack)?,
             Value::Array(a) => {
                 if let Some(items) = m.get("items")
                     && !a.is_empty()
@@ -828,6 +803,82 @@ pub fn validate(schema: &Value, args: &Value) -> Result<(), ArgError> {
         }
     }
     Ok(())
+}
+
+/// The members of the object `o` against the object schema `m`: a required
+/// one missing or one a closed schema does not name is the error; each one
+/// the schema names goes on `stack`, at the path `steps`.
+fn members<'a>(
+    m: &'a Map<String, Value>,
+    o: &'a Map<String, Value>,
+    steps: &[Step<'a>],
+    depth: usize,
+    stack: &mut Vec<Todo<'a>>,
+) -> Result<(), ArgError> {
+    let props = m.get("properties").and_then(Value::as_object);
+    let required = m.get("required").and_then(Value::as_array);
+    for name in required.into_iter().flatten().filter_map(Value::as_str) {
+        if !o.contains_key(name) {
+            let what = props
+                .and_then(|p| p.get(name))
+                .and_then(Value::as_object)
+                .map_or_else(|| "a value".into(), expected);
+            return Err(ArgError {
+                field: path(steps, Some(name)),
+                expected: format!("{what} (required)"),
+            });
+        }
+    }
+    let closed = m.get("additionalProperties") == Some(&Value::Bool(false));
+    // At most one entry per property the schema names, so this
+    // stays small however many fields the value has.
+    let mut next = Vec::new();
+    for (k, x) in o {
+        match props.and_then(|p| p.get(k)) {
+            Some(s) => next.push(Todo::One {
+                schema: s,
+                value: x,
+                depth,
+                step: Some(Step::Name(k)),
+            }),
+            None if closed => {
+                let known: Vec<&str> = props
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                let expected = if known.is_empty() {
+                    "no field of this name; this takes none".into()
+                } else {
+                    format!("no field of this name; known: {}", known.join(", "))
+                };
+                return Err(ArgError {
+                    field: path(steps, Some(k)),
+                    expected,
+                });
+            }
+            None => {}
+        }
+    }
+    stack.extend(next.into_iter().rev());
+    Ok(())
+}
+
+/// [`fits`] for an object held as a map.
+fn fits_map(m: &Map<String, Value>, o: &Map<String, Value>) -> bool {
+    let same_map = |c: &Value| {
+        c.as_object().is_some_and(|c| {
+            c.len() == o.len() && c.iter().all(|(k, v)| o.get(k).is_some_and(|w| same(v, w)))
+        })
+    };
+    m.get("type")
+        .map(types)
+        .is_none_or(|t| !matches!(t, Ok(t) if t.ty != Ty::Object))
+        && match m.get("enum") {
+            Some(Value::Array(e)) => e.iter().any(same_map),
+            _ => true,
+        }
+        && m.get("const").is_none_or(same_map)
 }
 
 /// Whether `v` meets the keywords of `m` that concern `v` itself, not its
@@ -1664,6 +1715,41 @@ mod tests {
         assert!(shallow.is_err());
     }
 
+    /// A map is judged at the top as the object it would be: its type, an
+    /// `enum` or `const` of objects (numbers by their value), and a schema
+    /// that is no object takes anything.
+    #[test]
+    fn validate_map_judges_the_top_as_an_object() {
+        let cases = [
+            (json!({"type": "string"}), json!({"a": 1})),
+            (json!({"type": ["object", "null"]}), json!({"a": 1})),
+            (json!({"type": "object"}), json!({})),
+            (json!({"enum": [{"a": 1}, {"a": 2.0}]}), json!({"a": 2})),
+            (json!({"enum": [{"a": 1}, {"a": 2.0}]}), json!({"a": 3})),
+            (json!({"enum": [{"a": 1}]}), json!({"a": 1, "b": 1})),
+            (json!({"enum": ["a"]}), json!({})),
+            (
+                json!({"const": {"a": [1, {"b": 1.0}]}}),
+                json!({"a": [1, {"b": 1}]}),
+            ),
+            (json!({"const": {"a": 1}}), json!({"a": 1, "b": 2})),
+            (json!({"const": {"a": 1, "b": 2}}), json!({"a": 1})),
+            (json!({"const": {"a": 1}}), json!({"b": 1})),
+            (json!(true), json!({"a": 1})),
+        ];
+        let mut fit = 0;
+        for (schema, args) in cases {
+            let want = validate(&schema, &args);
+            fit += usize::from(want.is_ok());
+            assert_eq!(
+                validate_map(&schema, args.as_object().unwrap()),
+                want,
+                "{schema} {args}"
+            );
+        }
+        assert_eq!(fit, 5);
+    }
+
     /// A schema like the node's own: `obj` with closed properties.
     fn run_schema() -> Value {
         json!({"type": "object", "additionalProperties": false, "required": ["command"],
@@ -1694,16 +1780,22 @@ mod tests {
         // read the same either way.
         let s = run_schema();
         assert_eq!(check(&s, Role::Result), Ok(()));
-        let ok = |args: Value| assert_eq!(validate(&s, &args), Ok(()), "{args}");
+        // Arguments held as a map get the same answer.
+        let ok = |args: Value| {
+            assert_eq!(validate(&s, &args), Ok(()), "{args}");
+            if let Value::Object(o) = &args {
+                assert_eq!(validate_map(&s, o), Ok(()), "{args}");
+            }
+        };
         let bad = |args: Value, field: &str, expected: &str| {
-            assert_eq!(
-                validate(&s, &args),
-                Err(ArgError {
-                    field: field.into(),
-                    expected: expected.into()
-                }),
-                "{args}"
-            );
+            let want = Err(ArgError {
+                field: field.into(),
+                expected: expected.into(),
+            });
+            assert_eq!(validate(&s, &args), want, "{args}");
+            if let Value::Object(o) = &args {
+                assert_eq!(validate_map(&s, o), want, "{args}");
+            }
         };
         ok(json!({"command": "ls"}));
         ok(

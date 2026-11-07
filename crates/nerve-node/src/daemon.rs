@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -21,6 +21,7 @@ use nerve_proto::resume::{self, Replay};
 use nerve_proto::{Effect, Message};
 use nerve_sandbox::Confinement;
 use nerve_transport::log::{Level, Log};
+use nerve_transport::sync::lock;
 use nerve_transport::ws::WsMessage;
 
 use crate::descriptor::IMPLICIT;
@@ -158,12 +159,6 @@ impl NodeOptions {
             hold: None,
         }
     }
-}
-
-/// Locks a std mutex, shrugging off poisoning: every holder keeps its state
-/// consistent before anything can panic.
-pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where the params of an awaited notification go.
@@ -724,6 +719,9 @@ pub(crate) struct Shared {
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
     pub store: Mutex<SettingsStore>,
+    /// The store's audit log, written without the store's lock: an entry
+    /// waits only for the log's own.
+    pub audit: AuditLog,
     /// Ticks whenever the config may have changed; links re-check their
     /// center, the supervisor its link tasks.
     pub changed: watch::Sender<u64>,
@@ -794,8 +792,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub fn config(&self) -> NodeConfig {
-        lock(&self.store).config().clone()
+    /// The config in force, shared with the store: a reader takes no copy,
+    /// and a change puts a new one in the store's place.
+    pub fn config(&self) -> Arc<NodeConfig> {
+        lock(&self.store).shared()
     }
 
     /// Waits for the test's hold at `at`, if it set one.
@@ -1150,14 +1150,13 @@ impl Shared {
         if walk == AclWalk::IfBehind && !behind(want, true) {
             return;
         }
-        let _walking = match self.acl_walk.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
+        let _walking = match nerve_transport::sync::try_turn(&self.acl_walk) {
+            Some(g) => g,
+            None => {
                 if walk == AclWalk::IfBehind && !behind(want, false) {
                     return;
                 }
-                lock(&self.acl_walk)
+                nerve_transport::sync::turn(&self.acl_walk)
             }
         };
         let Some(want) = fresh() else {
@@ -1666,7 +1665,7 @@ impl Shared {
 
     /// Records a rotation of a key in the audit log (crate::rotate).
     pub fn audit_key(&self, center: &str, event: &str, detail: &str) {
-        if let Err(err) = lock(&self.store).audit().key(center, event, detail) {
+        if let Err(err) = self.audit.key(center, event, detail) {
             tracing::error!("the audit log cannot be written: {err}");
         }
     }
@@ -1685,7 +1684,7 @@ impl Shared {
             }
         }
         let e = &e;
-        if let Err(err) = lock(&self.store).audit().decision(e) {
+        if let Err(err) = self.audit.decision(e) {
             tracing::error!("the audit log cannot be written: {err}");
         }
         self.emit(&e.center, "audit", "decision", e.event_data());
@@ -2179,6 +2178,7 @@ impl Daemon {
             hold: opts.hold,
             full_rights,
             cgroups,
+            audit: store.audit().clone(),
             store: Mutex::new(store),
             changed,
             centers: Mutex::default(),
@@ -2305,7 +2305,7 @@ impl Daemon {
     }
 
     /// The config as the daemon holds it now.
-    pub fn config(&self) -> NodeConfig {
+    pub fn config(&self) -> Arc<NodeConfig> {
         self.shared.config()
     }
 
@@ -3238,7 +3238,7 @@ mod every_platform {
         o.owner = Some("alice".into());
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
-        let mut cfg = s.config();
+        let mut cfg = NodeConfig::clone(&s.config());
         cfg.machine.user = Some("alice".into());
         let named = |mode: Mode, as_owner: bool| {
             s.account_name(
@@ -3468,7 +3468,7 @@ mod tests {
     #[tokio::test]
     async fn the_keyring_folder_is_the_nodes_own_with_the_keyring() {
         let (d, daemon) = daemon().await;
-        let mut cfg = daemon.config();
+        let mut cfg = NodeConfig::clone(&daemon.config());
         let keyrings = d.path().join(".local/share/keyrings");
         assert_eq!(daemon.shared.own(&cfg), daemon.paths().own());
         cfg.machine.secret_storage = SecretStorage::Keyring;
@@ -3499,7 +3499,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[]);
+        let p = nerve_policy::protected::Protected::new(
+            &nerve_policy::protected::Platform::Unix,
+            &home,
+            &own,
+            &policy.protected,
+        );
+        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[], &p);
         let keyrings = std::fs::canonicalize(&keyrings).unwrap();
         for set in [&spec.read, &spec.write, &spec.exec] {
             assert!(!set.iter().any(|r| keyrings.starts_with(r)), "{set:?}");
@@ -3559,6 +3565,54 @@ mod tests {
         opts.ctl = false;
         opts.log = Some(log.clone());
         opts
+    }
+
+    /// A decision goes to the audit log while the settings store is held:
+    /// an entry waits only for the log's own lock.
+    #[tokio::test]
+    async fn an_audit_entry_does_not_wait_for_the_store() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let held = lock(&s.store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = s.clone();
+        std::thread::spawn(move || {
+            writer.audit(&Entry {
+                ts: 1,
+                center: "lab".into(),
+                cap: "fs".into(),
+                action: "read".into(),
+                target: "/w/a".into(),
+                decision: "allowed".into(),
+                code: None,
+                session: None,
+                reason: None,
+                command: None,
+                args: None,
+            });
+            let _ = tx.send(());
+        });
+        let written = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        drop(held);
+        assert!(written, "the entry waited for the store");
+        let read = s.audit.read().unwrap();
+        assert!(read.iter().any(|e| e["target"] == "/w/a"), "{read:?}");
+        daemon.stop().await;
+    }
+
+    /// A call reads the config the store holds, not a copy of it: every
+    /// read until the next change is the same one.
+    #[tokio::test]
+    async fn the_config_is_read_without_a_copy() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let (a, b) = (daemon.config(), daemon.shared.config());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(std::ptr::eq(&*a, lock(&daemon.shared.store).config()));
+        daemon.stop().await;
     }
 
     /// A stop sent before the daemon's tasks first ran is not lost: a stop
@@ -4011,7 +4065,7 @@ mod tests {
         let folders = || s.config().centers[0].policy.folders.len();
         let before = s.webui.lock_count();
         // The panic.
-        let mut locked = s.config();
+        let mut locked = NodeConfig::clone(&s.config());
         locked.locked = true;
         let Reply::Ok(_) = control(
             &s,
@@ -4780,7 +4834,7 @@ mod tests {
             );
             // The folders of the folder pairing, then of the user pairing.
             let pairings_each = |f: Vec<Folder>, u: Vec<Folder>| {
-                let mut cfg = s.config();
+                let mut cfg = NodeConfig::clone(&s.config());
                 cfg.centers = [("f", Mode::Folder, f), ("u", Mode::User, u)]
                     .into_iter()
                     .map(|(name, mode, folders)| nerve_policy::CenterEntry {

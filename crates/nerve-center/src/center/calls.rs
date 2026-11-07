@@ -1,6 +1,8 @@
 //! Calls to the nodes: a unit's call, its streams and events, through
 //! the action checker and the call wait.
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 /// How a call of a unit (an `execute`) came out within its wait.
@@ -67,7 +69,7 @@ impl Adding {
 impl Drop for Adding {
     fn drop(&mut self) {
         if let Some(id) = self.id.take()
-            && let Some(c) = self.sess.streams.lock().unwrap().close(&id, &self.node_id)
+            && let Some(c) = lock(&self.sess.streams).close(&id, &self.node_id)
         {
             c.close(self.why);
         }
@@ -184,7 +186,7 @@ impl Center {
         dropped: Stop,
     ) -> Ran {
         let id = jobs::new_id();
-        let started = sess.jobs.lock().unwrap().start(&id, route, on.is_some());
+        let started = lock(&sess.jobs).start(&id, route, on.is_some());
         let (mut result, stop) = match started {
             Ok(s) => s,
             Err(e) => return Ran::Done(Err(self.refused(sess, route, e))),
@@ -204,7 +206,7 @@ impl Center {
         let got = match got {
             Some(got) => got,
             None => {
-                let became = sess.jobs.lock().unwrap().detach(&id);
+                let became = lock(&sess.jobs).detach(&id);
                 held.id = None;
                 if became {
                     return Ran::Job(id);
@@ -232,7 +234,7 @@ impl Center {
         route: &Route,
         job: &str,
     ) -> Result<String, String> {
-        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        let (room, gone) = lock(&sess.streams).room(Instant::now());
         for c in gone {
             c.close("too many streams");
         }
@@ -244,15 +246,10 @@ impl Center {
         }
         let ring = Arc::new(Ring::default());
         let id = streams::new_id();
-        if !sess
-            .streams
-            .lock()
-            .unwrap()
-            .add(&id, &route.node_id, job, ring.clone())
-        {
+        if !lock(&sess.streams).add(&id, &route.node_id, job, ring.clone()) {
             return Err("the session ended".into());
         }
-        let waits = *self.stream_waits.lock().unwrap();
+        let waits = *lock(&self.stream_waits);
         tokio::spawn(streams::open_on_node(
             Arc::downgrade(sess),
             route.node_id.clone(),
@@ -297,7 +294,7 @@ impl Center {
         // Stats, taint and the log of a failure come with the end of the
         // call, also of one that became a job.
         self.count_call(sess, route, out.as_ref().err(), started);
-        let handed = sess.jobs.lock().unwrap().finish(id, out, Instant::now());
+        let handed = lock(&sess.jobs).finish(id, out, Instant::now());
         match handed {
             Some((waiter, out)) => {
                 let _ = waiter.send(out);
@@ -310,9 +307,9 @@ impl Center {
                 tokio::spawn(async move {
                     tokio::time::sleep(jobs::KEEP_FOR).await;
                     if let Some(s) = weak.upgrade() {
-                        s.jobs.lock().unwrap().expire(&id);
+                        lock(&s.jobs).expire(&id);
                         // Its output stream goes with it.
-                        let stream = s.streams.lock().unwrap().of_job(&id);
+                        let stream = lock(&s.streams).of_job(&id);
                         if let Some(c) = stream {
                             c.close("its job was forgotten");
                         }
@@ -357,7 +354,7 @@ impl Center {
         // was given (Center::within_call_wait): then the link did not end.
         if route.kind == UnitKind::Event {
             let topic = format!("{}/{}", route.cap, route.action);
-            let on = sess.streams.lock().unwrap().subscribed_on(&link, &topic);
+            let on = lock(&sess.streams).subscribed_on(&link, &topic);
             match on {
                 streams::Subscribed::Here => {}
                 streams::Subscribed::Closed => return Err(Stop::Closed.error().into()),
@@ -371,8 +368,8 @@ impl Center {
             }
         }
         let ctx = json!({"session": sess.id});
-        sess.nodes.lock().unwrap().insert(route.node_id.clone());
-        link.sessions.lock().unwrap().insert(sess.id.clone());
+        lock(&sess.nodes).insert(route.node_id.clone());
+        lock(&link.sessions).insert(sess.id.clone());
         // The agents' calls leave a few of the node's call places free, for
         // the owner's settings changes from the center and for a job's
         // `exec.signal`: jobs of many sessions could fill them all.
@@ -416,7 +413,7 @@ impl Center {
                     ),
                 )
             })?;
-        sess.jobs.lock().unwrap().sent(job, &link, id);
+        lock(&sess.jobs).sent(job, &link, id);
         let mut waiting = Waiting {
             link: Some(link),
             id,
@@ -549,7 +546,7 @@ impl Center {
 
     /// Room for one more stream in `sess`, or why there is none.
     fn stream_room(&self, sess: &Session) -> Result<(), String> {
-        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        let (room, gone) = lock(&sess.streams).room(Instant::now());
         for c in gone {
             c.close("too many streams");
         }
@@ -577,14 +574,8 @@ impl Center {
         ring: Arc<Ring>,
         share: Option<usize>,
     ) -> Result<(), CallError> {
-        let (added, gone) = sess.streams.lock().unwrap().add_unit(
-            id,
-            &route.node_id,
-            what,
-            ring,
-            share,
-            Instant::now(),
-        );
+        let (added, gone) =
+            lock(&sess.streams).add_unit(id, &route.node_id, what, ring, share, Instant::now());
         for c in gone {
             c.close("too many streams");
         }
@@ -644,7 +635,7 @@ impl Center {
         self.add_unit_stream(sess, route, &id, what, ring.clone(), None)
             .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
         link.subscribe(&topic, ring.clone());
-        if !sess.streams.lock().unwrap().subscribed(&id, &link, &topic) {
+        if !lock(&sess.streams).subscribed(&id, &link, &topic) {
             // Taken out meanwhile (the session ended, or the node was
             // disabled): its streams went without this subscription.
             link.unsubscribe(&topic, &ring);
@@ -743,23 +734,18 @@ impl Center {
         let Some(place) = streams::Place::take(sess, id) else {
             return Err(closed_while_opening(&ring).into());
         };
-        sess.nodes.lock().unwrap().insert(route.node_id.clone());
-        link.sessions.lock().unwrap().insert(sess.id.clone());
+        lock(&sess.nodes).insert(route.node_id.clone());
+        lock(&link.sessions).insert(sess.id.clone());
         let params = json!({"cap": route.cap, "stream": route.action, "params": args,
                             "ctx": {"session": sess.id}});
         // A program may take its time to answer (the node waits for it up
         // to its own limit), unlike a node opening a command's output. The
         // `execute` does not wait that long (Center::within_call_wait).
-        let wait = self
-            .stream_waits
-            .lock()
-            .unwrap()
-            .0
-            .max(streams::PROGRAM_OPEN_WAIT);
+        let wait = lock(&self.stream_waits).0.max(streams::PROGRAM_OPEN_WAIT);
         let sid = link
             .open_stream_in(params, ring.clone(), wait, Some(place))
             .await?;
-        if !sess.streams.lock().unwrap().opened(id, &link, sid) {
+        if !lock(&sess.streams).opened(id, &link, sid) {
             // Closed meanwhile (by the agent, the session's end, a
             // disable): so is the stream.
             if link.forget_stream(sid) {
@@ -808,7 +794,7 @@ impl Center {
                 let mut adding = adding;
                 let out = open.await;
                 let given = {
-                    let mut p = phase.lock().unwrap();
+                    let mut p = lock(&phase);
                     if *p == Phase::Waited {
                         *p = Phase::Done;
                     }
@@ -820,7 +806,7 @@ impl Center {
                     }
                     (Err(CallError::Rpc(e)), true) => {
                         adding.keep();
-                        let c = s.streams.lock().unwrap().not_opened(&i);
+                        let c = lock(&s.streams).not_opened(&i);
                         if let Some(c) = c {
                             c.close(&not_opened_words(&r, e));
                         }
@@ -839,7 +825,7 @@ impl Center {
             Ok(out) => out,
             Err(_) => {
                 let done = {
-                    let mut p = phase.lock().unwrap();
+                    let mut p = lock(&phase);
                     if *p == Phase::Waited {
                         *p = Phase::Given;
                     }
@@ -849,7 +835,7 @@ impl Center {
                     // From now on the agent can close the stream, which
                     // stops its open (streams::Closer::close).
                     if let Some(h) = stop.0.take()
-                        && !sess.streams.lock().unwrap().given(&id, h.clone())
+                        && !lock(&sess.streams).given(&id, h.clone())
                     {
                         h.abort();
                     }

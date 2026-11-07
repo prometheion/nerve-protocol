@@ -13,6 +13,7 @@ use std::time::Duration;
 use nerve_node::exec::{self, RunCall, RunOptions};
 use nerve_node::service::Account;
 use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
+use nerve_policy::protected::{Platform, Protected};
 
 fn set_mode(p: &Path, mode: u32) {
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -31,10 +32,21 @@ fn me(home: &Path) -> Account {
     }
 }
 
+/// The protected list a call builds once for its gate and its sandbox.
+fn protected(policy: &CenterPolicy, home: &Path, own: &[PathBuf]) -> Protected {
+    Protected::new(&Platform::Unix, home, own, &policy.protected)
+}
+
 fn opts(policy: &CenterPolicy, account: &Account, own: &[PathBuf]) -> RunOptions {
     RunOptions {
         shell: None,
-        landlock: Some(exec::landlock_spec(policy, &account.home, own, &[])),
+        landlock: Some(exec::landlock_spec(
+            policy,
+            &account.home,
+            own,
+            &[],
+            &protected(policy, &account.home, own),
+        )),
         container: None,
         exe: env!("CARGO_BIN_EXE_nerve-node").into(),
         output_cap: 64 * 1024,
@@ -197,7 +209,13 @@ async fn a_command_of_nerve_run_has_its_pairings_home_and_the_temporary_folders(
     let account = me(&run_home);
     let mut o = opts(&policy, &account, &[]);
     // `~` of the folders and rules is the owner's, not the account's.
-    let spec = exec::landlock_spec(&policy, owner_home, &[], &[]);
+    let spec = exec::landlock_spec(
+        &policy,
+        owner_home,
+        &[],
+        &[],
+        &protected(&policy, owner_home, &[]),
+    );
     for t in ["/tmp", "/var/tmp"] {
         assert!(spec.write.iter().any(|w| w == Path::new(t)), "{spec:?}");
     }

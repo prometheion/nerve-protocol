@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nerve_transport::sync::lock;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -222,7 +223,7 @@ impl LocalServer {
     }
 
     fn listen(&self) -> Listen {
-        self.listen.lock().unwrap().clone()
+        lock(&self.listen).clone()
     }
 
     /// Whether the server ended while it read a call and has not come up
@@ -232,7 +233,7 @@ impl LocalServer {
     }
 
     pub fn ready(&self) -> bool {
-        self.inner.lock().unwrap().phase == Some(Phase::Ready)
+        lock(&self.inner).phase == Some(Phase::Ready)
     }
 
     /// Whether calls are sent to the server: it is ready, or it ended on a
@@ -241,12 +242,12 @@ impl LocalServer {
     /// call never meets the moment between "not ready" and "marked", or
     /// between "ready" and "unmarked" (review T3 of #178).
     pub fn takes_calls(&self) -> bool {
-        let i = self.inner.lock().unwrap();
+        let i = lock(&self.inner);
         i.phase == Some(Phase::Ready) || self.budget.died_on_call()
     }
 
     pub fn status(&self) -> Status {
-        let i = self.inner.lock().unwrap();
+        let i = lock(&self.inner);
         Status {
             phase: i.phase.unwrap_or(Phase::Starting),
             url: i.url.clone(),
@@ -347,7 +348,7 @@ async fn supervise(
         // new port: another process may have bound the old one while the
         // server was down, and the server would then end on every try.
         let at = {
-            let mut l = listen.lock().unwrap();
+            let mut l = lock(&listen);
             match (&*l, first) {
                 (Listen::Port(_), false) => free_port().map(|p| *l = Listen::Port(p)),
                 _ => Ok(()),
@@ -617,7 +618,7 @@ fn push_line(buf: &mut std::collections::VecDeque<String>, line: String) {
 }
 
 fn set(inner: &Arc<Mutex<Inner>>, f: impl FnOnce(&mut Inner)) {
-    f(&mut inner.lock().unwrap());
+    f(&mut lock(inner));
 }
 
 /// Test helpers the center's own tests share.

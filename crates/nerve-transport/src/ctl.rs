@@ -491,7 +491,7 @@ mod unix {
 
         /// A place for a connection of `uid`, if it has one left.
         fn take(self: &Arc<Self>, uid: u32) -> Option<Place> {
-            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            let mut held = crate::sync::lock(&self.held);
             let n = held.entry(uid).or_insert(0);
             if *n >= PER_ACCOUNT {
                 return None;
@@ -515,7 +515,7 @@ mod unix {
     impl Drop for Place {
         fn drop(&mut self) {
             if let Some((others, uid)) = self.of.take() {
-                let mut held = others.held.lock().unwrap_or_else(|e| e.into_inner());
+                let mut held = crate::sync::lock(&others.held);
                 if let Some(n) = held.get_mut(&uid) {
                     *n -= 1;
                     if *n == 0 {
