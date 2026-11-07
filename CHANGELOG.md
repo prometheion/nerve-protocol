@@ -28,6 +28,10 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - The desktop app no longer keeps a `nerve://` link on its own command line while its window is open: the start the link opens hands it to a new start on stdin and ends ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
 - On Linux each folder-mode command, and each command of `nerve-run`, runs in a PID namespace with a `/proc` of its own: `ps` there shows its own processes, never another pairing's running commands. `install` on Ubuntu 24.04 adds an AppArmor profile that allows it for the service only (the unit puts it in the profile; a program anyone runs by hand, and a command, is not in it), and `status` warns where the kernel cannot, also on a node run by hand. `update` puts the profile from this release on; updating from 0.0.7 on Ubuntu 24.04, run `sudo nerve-node install` once after it (`status` says so) ([#199](https://github.com/prometheion/nerve-protocol/issues/199)).
 
+### Fixed
+
+- `install`, `update` and `nerve-node service start` or `restart` return only once the node answers its owner: a command typed right after them no longer hears that the node does not run. On Linux the node's unit is `Type=notify` and the node says when it is ready, and the programs it starts no longer get its `NOTIFY_SOCKET`; on Windows the service reports that it runs only once the node's pipes are made ([#180](https://github.com/prometheion/nerve-protocol/issues/180)).
+
 ## 0.0.7
 
 The finished Linux version: `nerve-center` and `nerve-node` for Linux x86_64

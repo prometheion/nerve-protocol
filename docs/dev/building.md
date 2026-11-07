@@ -56,6 +56,14 @@ by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
 | `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
 | `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths) |
 
+A test that fails now and then is shown fixed (or caught) by the `Repeat tests`
+workflow (`.github/workflows/repeat.yml`): it runs chosen tests of one package
+again and again on a hosted runner, and with `load` workers keeps the runner
+as busy as the whole `windows` or `linux` job does, which is what makes the
+tests that wait on a process start fail. Start it from the Actions tab, or by
+pushing a branch `repeat/<name>` that has a `.github/repeat.env`
+(`os`, `package`, `filter`, `count`, `load`, one `key=value` a line).
+
 The web UIs' smoke test (`.github/scripts/web-ui-smoke.mjs`) needs only
 Chrome and Node.js 22 or newer: it signs in with a token on the login page,
 opens every page of the sidebar, and fails on a script error, an error in the

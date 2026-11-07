@@ -196,6 +196,10 @@ impl Layout {
     /// AppArmor profile ([`apparmor_profile_text`]); the `-` lets it start
     /// where the profile is not loaded, and `After=apparmor.service` loads
     /// it first at boot.
+    /// The node tells systemd when it answers
+    /// (`Type=notify`, crate::daemon::notify): `systemctl start` returns only
+    /// then, so a command typed right after `install` or `service start`
+    /// finds it.
     pub fn unit_text(&self, owner: Option<&str>) -> String {
         let owner = owner.map_or_else(String::new, |o| {
             format!("Environment={}={o}\n", crate::owner::OWNER_VAR)
@@ -209,7 +213,7 @@ Wants=network-online.target
 After=network-online.target apparmor.service
 
 [Service]
-Type=simple
+Type=notify
 User={USER}
 Group={USER}
 Environment=HOME={home}
@@ -2734,6 +2738,9 @@ pub(crate) mod tests {
         let unit = std::fs::read_to_string(&l.unit).unwrap();
         assert_eq!(unit, l.unit_text(Some("alice")));
         assert!(unit.contains("\nUser=nerve\nGroup=nerve\n"), "{unit}");
+        // systemd waits for the node to say it answers (crate::daemon::notify),
+        // so install returns only then.
+        assert!(unit.contains("\nType=notify\n"), "{unit}");
         assert!(!unit.contains("SupplementaryGroups"), "{unit}");
         // The owner is named where everyone reads and only root writes.
         assert!(

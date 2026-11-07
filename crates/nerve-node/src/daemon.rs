@@ -96,6 +96,10 @@ pub struct NodeOptions {
     /// changes the config there (the owner turns the network off while the
     /// call waits).
     pub hold: Option<Hold>,
+    /// Linux: the service manager's socket (`NOTIFY_SOCKET`), told once the
+    /// node answers ([`Daemon::run_until`]). `run` takes it from its
+    /// environment; a test gives one of its own.
+    pub notify: Option<std::ffi::OsString>,
 }
 
 /// Where a call to run a command can be held ([`NodeOptions::hold`]).
@@ -157,6 +161,7 @@ impl NodeOptions {
             program_wait: crate::link::PROGRAM_WAIT,
             aside: None,
             hold: None,
+            notify: None,
         }
     }
 }
@@ -2402,7 +2407,6 @@ impl Daemon {
         // Under the service control manager, its stop request ends the node.
         #[cfg(windows)]
         {
-            crate::win_service::running();
             tokio::spawn(async move {
                 if crate::win_service::is_service() {
                     crate::win_service::stop_requested().await;
@@ -2427,6 +2431,21 @@ impl Daemon {
         let (tx, mut asides) = tokio::sync::mpsc::unbounded_channel();
         opts.aside = Some(tx);
         let mut d = Daemon::start(opts.clone()).await?;
+        // The service control manager hears that the node runs only now,
+        // with its control and owner pipes made: `install`, `update` and
+        // `service start` wait for that state, and answer after it.
+        #[cfg(windows)]
+        crate::win_service::running();
+        // The unit is `Type=notify` (crate::service): systemd counts the node
+        // as started from here, where its control and owner sockets answer,
+        // so `systemctl start`, and `install` with it, return only then and
+        // the owner's next command finds the node.
+        #[cfg(target_os = "linux")]
+        if let Some(at) = &opts.notify
+            && let Err(e) = notify(at, "READY=1")
+        {
+            tracing::warn!("cannot tell the service manager that the node runs: {e}");
+        }
         loop {
             let job = tokio::select! {
                 e = events.recv() => match e {
@@ -2446,6 +2465,30 @@ impl Daemon {
         d.stop().await;
         Ok(())
     }
+}
+
+/// The variable that names the service manager's socket for the node's
+/// readiness. The node reads it and takes it away from every program it
+/// starts: such a program would send to PID 1, which drops it (the unit's
+/// `NotifyAccess=main`) and logs a complaint.
+pub const NOTIFY_ENV: &str = "NOTIFY_SOCKET";
+
+/// Sends `state` to the service manager's socket `at` (`NOTIFY_SOCKET`), as
+/// `sd_notify` does: one datagram, to a path or, for an `at` that starts
+/// with `@`, to an abstract name. Only the main process is heard there
+/// (`NotifyAccess=main`, the default), so a command the node starts cannot
+/// say it for the node.
+#[cfg(target_os = "linux")]
+pub fn notify(at: &std::ffi::OsStr, state: &str) -> std::io::Result<()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let addr = match at.as_bytes().strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(at)?,
+    };
+    UnixDatagram::unbound()?.send_to_addr(state.as_bytes(), &addr)?;
+    Ok(())
 }
 
 /// Keeps one link task per center that should be linked. It works from the
@@ -5978,5 +6021,43 @@ mod old_pin_tests {
         assert!(crate::rotate::drop_old_pin(&s, "lab"));
         assert!(old_pin().is_none());
         drop(daemon);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod notify_tests {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+    /// What `socket` got, one datagram.
+    fn got(socket: &UnixDatagram) -> String {
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut b = [0u8; 64];
+        let n = socket.recv(&mut b).expect("the datagram");
+        String::from_utf8_lossy(&b[..n]).into_owned()
+    }
+
+    /// The datagram goes to a socket at a path, as systemd's
+    /// `/run/systemd/notify`, and to an abstract name `@...`, as other
+    /// service managers give.
+    #[test]
+    fn the_node_tells_the_service_manager_on_its_socket() {
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("notify");
+        let socket = UnixDatagram::bind(&at).unwrap();
+        super::notify(at.as_os_str(), "READY=1").unwrap();
+        assert_eq!(got(&socket), "READY=1");
+
+        let name = format!("nerve-node-notify-test-{}", std::process::id());
+        let socket =
+            UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap())
+                .unwrap();
+        super::notify(format!("@{name}").as_ref(), "READY=1").unwrap();
+        assert_eq!(got(&socket), "READY=1");
+
+        // Nobody there: an error to log, never a hang or a panic.
+        assert!(super::notify(d.path().join("gone").as_os_str(), "READY=1").is_err());
     }
 }

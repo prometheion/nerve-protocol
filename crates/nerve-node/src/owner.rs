@@ -1742,6 +1742,7 @@ fn spawn<F: HandedFd>(
             .env_remove(TERMINAL_ENV)
             .env_remove(VIA_ENV)
             .env_remove(EPOCH_ENV)
+            .env_remove(crate::daemon::NOTIFY_ENV)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2253,6 +2254,49 @@ mod tests {
             assert_eq!(told_terminal(false, Some("1"), stdin), stdin);
             assert_eq!(told_terminal(false, None, stdin), stdin);
         }
+    }
+
+    /// The node's readiness socket (`NOTIFY_SOCKET`) does not reach the
+    /// program it starts for an owner: run again in a process of its own
+    /// with it set, as the installed node has it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_node_s_readiness_socket_stays_with_the_node() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str = "owner::tests::the_node_s_readiness_socket_stays_with_the_node";
+        let d = tempfile::tempdir().unwrap();
+        let prog = d.path().join("prog");
+        let out = d.path().join("out");
+        if let Some(dir) = std::env::var_os("NERVE_TEST_SPAWN_DIR") {
+            let dir = PathBuf::from(dir);
+            let paths = NodePaths::new(dir.join("config"), dir.join("state"));
+            let mut c = super::spawn(
+                &paths,
+                &dir.join("prog"),
+                "alice",
+                &[],
+                None,
+                &[],
+                None::<std::os::fd::OwnedFd>,
+            )
+            .unwrap();
+            c.wait().await.unwrap();
+            return;
+        }
+        std::fs::write(
+            &prog,
+            format!("#!/bin/sh\necho \"[$NOTIFY_SOCKET]\" > {}\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env("NERVE_TEST_SPAWN_DIR", d.path())
+            .env(crate::daemon::NOTIFY_ENV, "/run/systemd/notify")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "[]\n");
     }
 
     /// [`super::at_terminal`] reads the node's variables: run again in a
