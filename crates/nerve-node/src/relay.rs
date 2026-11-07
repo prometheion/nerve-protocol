@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nerve_transport::sync::lock;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -43,7 +44,7 @@ use nerve_transport::http::{Request, Response, read_request_head};
 use nerve_transport::log::span;
 use nerve_transport::tls::Acceptor;
 
-use crate::daemon::{Shared, lock};
+use crate::daemon::Shared;
 
 /// Connections whose `CONNECT` is not decided yet, at once. Past it a new
 /// connection is closed at once, so a peer without a token cannot hold the
@@ -1014,7 +1015,7 @@ async fn connection(
         up,
         down,
     };
-    if let Err(e) = lock(&shared.store).audit().relay(&entry) {
+    if let Err(e) = shared.audit.relay(&entry) {
         tracing::warn!("relay: the audit log did not take the tunnel's entry: {e}");
     }
 }
@@ -1870,6 +1871,9 @@ mod tests {
             crate::pair::pair(&o.paths, &link, Some("home")).await?;
             crate::cli::edit(&o.paths, |c| {
                 c.centers[0].settings = nerve_policy::config::SettingsGrant::Write;
+                // A center may not put it on the sudo list; the owner does.
+                c.centers[0].policy.sudo_allow =
+                    vec![nerve_conformance::node_part::SUDO_ALLOWED.into()];
                 Ok(())
             })
             .await?;

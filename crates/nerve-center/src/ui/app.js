@@ -141,11 +141,16 @@ function harnessCard(mcp) {
   return el("div", { class: "card", id: "harness" }, parts);
 }
 
+// The command the pairing card gives a Linux machine: the link comes on its
+// stdin, pasted on the next line, so the unused code never sits in the
+// process list while `center add` waits for the owner's yes.
+const PAIR_COMMAND = "nerve-node center add -";
+
 function pairingCard(p) {
-  const command = `nerve-node center add '${p.link}'`;
-  // The two ways a machine takes it, each with its own copy button: the
-  // command for a terminal, the bare link for the desktop app. The link
-  // holds the center, the code and the pin, so they are not shown apart.
+  // The command and the bare link, each with its own copy button: on Linux
+  // the command reads the link pasted under it, the desktop app takes the
+  // link alone; on Windows the app opens the link. The link holds the
+  // center, the code and the pin, so they are not shown apart.
   const row = (label, value) => el("div", { class: "pair-row" },
     el("span", { class: "pair-label" }, label),
     el("code", { class: "pair-value mono" }, value),
@@ -153,10 +158,11 @@ function pairingCard(p) {
   return el("div", { class: "card", id: "pairing" },
     el("div", { class: "card-top" }, itile("link", "accent"), el("span", { class: "name" }, "Pair a machine"),
       el("button", { type: "button", class: "btn ghost icon sm push", "aria-label": "Dismiss", "data-focus": "pair:dismiss", onclick: () => { state.pairing = null; draw(true); } }, icon("x", "sm"))),
-    el("p", { class: "meta" }, "On the machine, run the command, or paste the link in the Nerve app (Centers, Pair a center)."),
+    el("p", { class: "meta" }, "On a Linux machine, run the command, then paste the link on the next line, or paste it in the Nerve app."),
     el("div", { class: "pair-rows" },
-      row("Command", command),
+      row("Command", PAIR_COMMAND),
       row("Link", p.link)),
+    el("p", { class: "meta" }, "On a Windows machine, open this link on the machine: the Nerve app pairs with it."),
     el("p", { class: "meta" }, `The code is valid until ${when(p.expires_ms)} and works for one machine.`),
     el("p", { class: "meta" }, "Then give it a folder on that machine:"),
     el("div", { class: "pair-rows" }, row("Then", FOLDER_STEP)),
@@ -436,7 +442,7 @@ function auditRow(d, n) {
   const why = !n ? "The machine is no longer paired." : !write ? "This machine did not give this center the settings grant." : "";
   const rule = (list, wildcard, pin) => act(async () => {
     const r = await api("POST", "/api/audit/rule", { node_id: d.node_id, list, cap: d.cap, action: d.action, target: d.target || "", wildcard, pin: pin ? pin() : null });
-    notify(`Added to the ${list === "sudo" ? "sudo allow" : list} list: ${r.rule}`);
+    notify(`Added to the ${list} list: ${r.rule}`);
   });
   // A decision has no id; its time, machine and call name it.
   const auditKey = `audit:${d.ts}:${d.node_id}:${d.cap}.${d.action}`;
@@ -452,9 +458,10 @@ function auditRow(d, n) {
   // only matters where the rule names the target (a command line or a path).
   const cut = (d.cap === "fs" || (d.cap === "exec" && d.action === "run")) && /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
   const known = d.cap && d.action && !cut && (d.target || !["exec", "fs"].includes(d.cap));
-  // A sudo command has its own allow list; deny rules take it as any other.
+  // A sudo command has its own allow list, which only the machine's owner
+  // adds to (the machine refuses a center's addition): the row says where.
+  // Deny rules take it as any other.
   const sudo = d.cap === "exec" && d.action === "run" && /^\s*(\S*\/)?sudo(\s|$)/.test(d.target || "");
-  const allow = sudo ? "sudo" : "allow";
   return el("div", { class: "card audit-row" },
     itile(k.ic, k.tone || "neutral"),
     el("div", { class: "line" },
@@ -463,12 +470,49 @@ function auditRow(d, n) {
       el("span", { class: "when", title: when(d.ts) }, ago(d.ts))),
     d.target ? el("code", { class: "target mono" }, d.target) : null,
     known ? el("div", { class: "actions" },
-      ruleBtn("Allow", "", allow, false, "check"), ruleBtn("Allow as wildcard", "", allow, true),
+      sudo ? null : ruleBtn("Allow", "", "allow", false, "check"), sudo ? null : ruleBtn("Allow as wildcard", "", "allow", true),
       ruleBtn("Deny", "danger-soft", "deny", false, "ban"), ruleBtn("Deny as wildcard", "danger-soft", "deny", true)) : null,
+    known && sudo ? sudoListHint(n, d.target, auditKey) : null,
     known && pins ? el("div", { class: "actions pins" }, pins.root,
       ruleBtn("Allow with this value", "", "allow", false, null, pins.pin), ruleBtn("Deny with this value", "danger-soft", "deny", false, null, pins.pin)) : null,
     known && !write ? el("p", { class: "meta" }, why) : null,
     cut ? el("p", { class: "meta" }, "The target was cut to its start, so no rule can name it.") : null);
+}
+
+// Where the owner of machine `n` puts the sudo command `command` on this
+// center's sudo list: its commands run as root, so the machine takes that
+// list from its owner only. On Linux the nerve-node command, with its own
+// Copy button; on Windows the Nerve app's place.
+function sudoListHint(n, command, key) {
+  if (n && n.platform === "windows") {
+    return el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list: in the Nerve app on that machine, Permissions, Sudo.");
+  }
+  const line = sudoRuleLine(command);
+  // A command with a quote, backslash or line break has no line that every
+  // shell reads the same: the owner types it, a server has no app to use.
+  if (!line) {
+    return el("div", {},
+      el("p", { class: "meta" }, "Only the machine's owner adds a sudo command, quoted for the shell, or in the Nerve app, Permissions, Sudo:"),
+      el("code", { class: "pair-value mono" }, "nerve-node rule add allow --action exec.run --exact 'COMMAND'"));
+  }
+  return el("div", {},
+    el("p", { class: "meta" }, "Only the machine's owner adds a sudo command. On that machine (--center <name> for several pairings):"),
+    el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
+      el("code", { class: "pair-value mono" }, line),
+      btn("Copy", "ghost", () => copy(line), "copy", `${key}:sudo-copy`))));
+}
+
+// The line that puts the sudo command `command` on the list exactly as it
+// is, the rule the audit buttons made: --exact keeps a trailing * the
+// command's own, where it would be a wildcard, every command that starts
+// so, as root. Null where a line to copy could not be trusted: inside
+// single quotes a word reads the same in POSIX shells and in fish unless it
+// holds a quote or a backslash (fish reads \' and \\ there), and a line
+// break would run what is before it when pasted.
+function sudoRuleLine(command) {
+  const s = String(command);
+  if (/['\\\u0000-\u001f\u007f]/.test(s)) return null;
+  return `nerve-node rule add allow --action exec.run --exact '${s}'`;
 }
 
 // A choice of the arguments of an audit entry's call that a rule may pin
@@ -1640,7 +1684,7 @@ function sudoSwitch(n) {
     const sealed = await sealSudo(offer, password);
     const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: true, sealed });
     show(r.sudo);
-    notify(`Sudo is on for ${n.name}: sudo commands on the sudo allow list run.`);
+    notify(`Sudo is on for ${n.name}: sudo commands on the sudo allow list run. Only the machine's owner adds to that list, on the machine.`);
   }));
   const off = btn("Turn sudo off", "", act(async () => {
     const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: false });

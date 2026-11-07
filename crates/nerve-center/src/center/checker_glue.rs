@@ -2,6 +2,8 @@
 //! docs/dev/action-checker.md): its settings, its rules against the catalog,
 //! the local model and its install, and the audit of what it decided.
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 /// Why a Save of the Action checker page was refused: the config changed
@@ -14,7 +16,7 @@ struct FilesHeld(Center);
 
 impl Drop for FilesHeld {
     fn drop(&mut self) {
-        *self.0.files_held.lock().unwrap() = false;
+        *lock(&self.0.files_held) = false;
     }
 }
 
@@ -23,7 +25,7 @@ impl Center {
 
     /// The checker as it is now.
     pub fn checker(&self) -> Arc<Checker> {
-        self.checker.lock().unwrap().clone()
+        lock(&self.checker).clone()
     }
 
     /// The file that holds the model endpoint's bearer token (a secret, so
@@ -74,7 +76,7 @@ impl Center {
                 &format!("the action checker left out a rule it could not parse: {why}"),
             );
         }
-        *self.checker.lock().unwrap() = Arc::new(checker);
+        *lock(&self.checker) = Arc::new(checker);
     }
 
     /// Starts, stops or keeps the local llama-server to match `cfg`. It runs
@@ -86,7 +88,7 @@ impl Center {
     fn manage_local_model(&self, cfg: &CheckerConfig) {
         // Held for the whole run, so an install cannot take the files between
         // the check below and the start.
-        let held = self.files_held.lock().unwrap();
+        let held = lock(&self.files_held);
         let installed = checker::install::installed(&self.dir, cfg.model.local_model);
         let want = cfg.model_wanted() && cfg.model.source == ModelSource::Local && installed;
         // An install is swapping the files (or Remove deleting them): start
@@ -103,7 +105,7 @@ impl Center {
         } else {
             String::new()
         };
-        if *self.local_sig.lock().unwrap() == sig {
+        if *lock(&self.local_sig) == sig {
             return;
         }
         // Starting a server needs a runtime; without one (an off-runtime
@@ -112,7 +114,7 @@ impl Center {
             return;
         }
         // Drop the old one (its Drop ends the process), then start the new.
-        *self.local_model.lock().unwrap() = None;
+        *lock(&self.local_model) = None;
         if want {
             let bin = checker::install::server_bin(&self.dir);
             let model = checker::install::model_path(&self.dir, cfg.model.local_model);
@@ -129,7 +131,7 @@ impl Center {
                     )
                 }) {
                 Ok(srv) => {
-                    *self.local_model.lock().unwrap() = Some(Arc::new(srv));
+                    *lock(&self.local_model) = Some(Arc::new(srv));
                     // A question stored before the cap (or with an
                     // endpoint) is kept; the client refuses a call it
                     // pushes over the context, so say why.
@@ -160,7 +162,7 @@ impl Center {
                 ),
             }
         }
-        *self.local_sig.lock().unwrap() = sig;
+        *lock(&self.local_sig) = sig;
     }
 
     /// The model endpoint to use now: the owner's endpoint, or the local
@@ -171,7 +173,7 @@ impl Center {
         match checker.model_source() {
             ModelSource::Endpoint => checker.endpoint().cloned(),
             ModelSource::Local => {
-                let srv = self.local_model.lock().unwrap().clone()?;
+                let srv = lock(&self.local_model).clone()?;
                 // A server that ended while it read a call keeps its
                 // endpoint while it starts again, so the client refuses the
                 // calls of that window as lost, and allow-and-log
@@ -185,11 +187,7 @@ impl Center {
     /// The local model's status for the UI, or `None` when there is no local
     /// server running.
     pub fn local_model_status(&self) -> Option<crate::checker::server::Status> {
-        self.local_model
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.status())
+        lock(&self.local_model).as_ref().map(|s| s.status())
     }
 
     /// Replaces the checker config (after the UI validated the change),
@@ -218,7 +216,7 @@ impl Center {
             Ok(())
         })?;
         if clear_taint {
-            for s in self.sessions.lock().unwrap().values() {
+            for s in lock(&self.sessions).values() {
                 s.tainted.store(false, Ordering::SeqCst);
             }
         }
@@ -243,7 +241,7 @@ impl Center {
             "models": checker::install::MODELS,
             "default_blocklist": checker::config::default_blocklist(),
             "local": self.local_model_status(),
-            "install": *self.install.lock().unwrap(),
+            "install": *lock(&self.install),
             "installed": checker::install::installed(&self.dir, cfg.model.local_model),
             "installed_models": checker::install::installed_models(&self.dir),
             "platform_supported": checker::install::platform_supported(),
@@ -257,7 +255,7 @@ impl Center {
 
     /// The one-click install's current state.
     pub fn checker_install_status(&self) -> checker::install::Status {
-        self.install.lock().unwrap().clone()
+        lock(&self.install).clone()
     }
 
     /// Starts the one-click install of llama.cpp and the chosen model on the
@@ -402,10 +400,10 @@ impl Center {
     /// stays down until the returned guard is dropped and the checker rebuilt.
     async fn hold_local_files(&self) -> FilesHeld {
         let server = {
-            let mut held = self.files_held.lock().unwrap();
+            let mut held = lock(&self.files_held);
             *held = true;
-            *self.local_sig.lock().unwrap() = String::new();
-            self.local_model.lock().unwrap().take()
+            *lock(&self.local_sig) = String::new();
+            lock(&self.local_model).take()
         };
         if let Some(srv) = server {
             srv.stop().await;
@@ -427,7 +425,7 @@ impl Center {
         }
         // Claim the install under the lock, so two requests cannot both start.
         {
-            let mut st = self.install.lock().unwrap();
+            let mut st = lock(&self.install);
             if matches!(
                 st.phase,
                 checker::install::Phase::Downloading
@@ -444,10 +442,10 @@ impl Center {
             };
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let from = self.install_from.lock().unwrap().clone();
+        let from = lock(&self.install_from).clone();
         // Keep the slot locked while spawning, so the task's own check of
         // whether it is still current waits until its handle is stored.
-        let mut slot = self.install_task.lock().unwrap();
+        let mut slot = lock(&self.install_task);
         let (me, flag) = (self.clone(), cancel.clone());
         let task = tokio::spawn(async move { me.run_install(gpu, model, flag, from).await });
         *slot = Some(InstallTask { cancel, task });
@@ -473,10 +471,7 @@ impl Center {
         }
         .await;
         // A Remove took over (it also ends this task): drop the result.
-        let current = self
-            .install_task
-            .lock()
-            .unwrap()
+        let current = lock(&self.install_task)
             .as_ref()
             .is_some_and(|t| Arc::ptr_eq(&t.cancel, &cancel));
         if !current {
@@ -501,7 +496,7 @@ impl Center {
                 });
                 checker::install::finish(&self.install, &r);
                 if gpu && !use_gpu {
-                    self.install.lock().unwrap().message =
+                    lock(&self.install).message =
                         "no GPU device was found; running on the CPU".into();
                 }
                 self.note(
@@ -535,7 +530,7 @@ impl Center {
     /// could not be deleted: it cannot run from a half-removed install, and
     /// left on it would refuse every call as unreachable.
     pub async fn remove_checker_model(&self) -> Result<(), String> {
-        let running = self.install_task.lock().unwrap().take();
+        let running = lock(&self.install_task).take();
         if let Some(t) = running {
             t.cancel.store(true, Ordering::Relaxed);
             // A download waiting on a silent connection only sees the flag at
@@ -543,7 +538,7 @@ impl Center {
             t.task.abort();
             let _ = t.task.await;
         }
-        *self.install.lock().unwrap() = checker::install::Status::default();
+        *lock(&self.install) = checker::install::Status::default();
         let held = self.hold_local_files().await;
         // The server has exited; retry a couple of times for a late handle on
         // Windows.
@@ -638,7 +633,7 @@ impl Center {
         if let Some(args) = nerve_policy::audit::pinnable_args(&route.cap, &route.action, &args) {
             e.insert("args".into(), Value::Object(args));
         }
-        self.audit.lock().unwrap().push(Value::Object(e));
+        lock(&self.audit).push(Value::Object(e));
         self.changed(Change::Audit);
         let (level, verb) = if decision == "forbidden" {
             (Level::Warn, "refused")
@@ -882,8 +877,12 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
     Value::Object(out)
 }
 
+/// Why no audit button puts a command on a machine's sudo list.
+pub const SUDO_LIST_OWNER_ONLY: &str =
+    "only the machine's owner puts a command on the sudo list, on the machine itself";
+
 /// The list and the rule an audit button means: the entry's `cap`, `action`
-/// and `target`, the list (`allow`, `deny`, or `sudo` for a sudo command),
+/// and `target`, the list (`allow` or `deny`; never `sudo`),
 /// whether it is the wildcard form, and the argument it pins with its value
 /// (one of the entry's `args`), if it pins one.
 pub fn audit_rule(
@@ -904,12 +903,10 @@ pub fn audit_rule(
     }
     match list {
         "allow" | "deny" => nerve_policy::rules::rule_for(cap, action, target, wildcard, pin),
-        "sudo" if pin.is_some() => Err("the sudo list holds commands, not arguments".into()),
-        "sudo" if (cap, action) == ("exec", "run") => {
-            nerve_policy::rules::sudo_rule_for(target, wildcard)
-        }
-        "sudo" => Err("the sudo list is for sudo commands".into()),
-        _ => Err("the list is allow, deny or sudo".into()),
+        // Its commands run as root, so the machine takes that list from its
+        // owner only (nerve-policy's client_only); the Audit page says where.
+        "sudo" => Err(SUDO_LIST_OWNER_ONLY.into()),
+        _ => Err("the list is allow or deny".into()),
     }
 }
 

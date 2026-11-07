@@ -262,7 +262,7 @@ fn same_place(a: &str, b: &str) -> bool {
 /// What a command that needs a pairing says when there is none: how to
 /// make one.
 pub const NO_CENTER_PAIRED: &str =
-    "no center is paired; pair one: `nerve-node center add '<link>'`";
+    "no center is paired; pair one: `nerve-node center add -`, then paste the link";
 
 /// The error for a center `name` this node has not paired: the names it
 /// has, or how to pair one.

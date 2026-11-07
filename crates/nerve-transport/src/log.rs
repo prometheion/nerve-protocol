@@ -191,8 +191,16 @@ impl Log {
         })
     }
 
+    #[track_caller]
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.inner)
+    }
+
+    /// Panics while it holds the log's lock, for a test of a poisoned one.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let _g = self.lock();
+        panic!("a panic under the log's lock, on purpose");
     }
 
     pub fn level(&self) -> Level {

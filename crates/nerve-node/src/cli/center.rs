@@ -110,7 +110,7 @@ pub(super) async fn rm(
     // follow: the pairing is gone then, so its key and profile go
     // now, or nothing names them later.
     let saved = edit_saved(&paths, |c| {
-        let mut g = gone.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = nerve_transport::sync::lock(&gone);
         g.clear();
         g.extend(
             c.centers
@@ -134,7 +134,7 @@ pub(super) async fn rm(
     // starts again, so there it stays.
     let mut p = saved.grants.profiles.clone();
     let mut ours = Vec::new();
-    for id in gone.into_inner().unwrap_or_else(|p| p.into_inner()) {
+    for id in nerve_transport::sync::into_inner(gone) {
         if cfg.centers.iter().any(|c| c.node_id == id) {
             continue;
         }
@@ -241,20 +241,48 @@ pub(super) async fn settings(
     })
     .await?;
     w(out, format!("{name}: settings {state}"));
+    if g == SettingsGrant::Off {
+        w(out, settings_off_text(&name));
+        return Ok(());
+    }
     let root = crate::owner::is_root(crate::service::owner_of(&paths).as_deref());
-    if let Some(warning) = settings_grant_warning(&name, g, root) {
+    let (cfg, _) = read_config(&paths).await?;
+    let admin = crate::owner::admin_owner(&cfg);
+    if let Some(warning) = settings_grant_warning(&name, g, root, admin.as_deref()) {
         w(out, warning);
     }
     Ok(())
 }
 
+/// What `center settings off` says: taking the grant back undoes nothing
+/// the center changed, so it names what stays and where each is shown.
+fn settings_off_text(name: &str) -> String {
+    format!(
+        "What {name} changed stays as it is until you change it: its mode (`nerve-node mode --center {name}`), its rules and sudo list (`nerve-node rule --center {name}`), the folders it added (`nerve-node folder --center {name}`) and its capability switches (`nerve-node cap --center {name}`)."
+    )
+}
+
 /// What `center settings on` warns of where root is the owner
-/// (`root`): the center may then set its own mode to user, whose commands
-/// run as root, with no password asked.
-fn settings_grant_warning(name: &str, g: SettingsGrant, root: bool) -> Option<String> {
-    (root && g == SettingsGrant::Write).then(|| {
-        format!(
+/// (`root`), or on Windows an administrator (`admin`, its name): the center
+/// may then set its own mode to user, whose commands run with every right
+/// here, with no password asked.
+fn settings_grant_warning(
+    name: &str,
+    g: SettingsGrant,
+    root: bool,
+    admin: Option<&str>,
+) -> Option<String> {
+    if g != SettingsGrant::Write {
+        return None;
+    }
+    if root {
+        return Some(format!(
             "Warning: root is the owner of this node, so {name} can now set its own mode to user, and its commands then run as root: anything on this machine, Nerve and its keys included"
+        ));
+    }
+    admin.map(|a| {
+        format!(
+            "Warning: {a}, the owner of this node, is an administrator, so {name} can now set its own mode to user, and its commands then run as {a} and can take its administrator rights (UAC is no security boundary): anything on this machine, Nerve and its keys included"
         )
     })
 }
@@ -478,7 +506,7 @@ mod tests {
     /// center can make itself root by setting its own mode to user.
     #[test]
     fn the_settings_grant_warns_where_root_is_the_owner() {
-        let w = settings_grant_warning("home", SettingsGrant::Write, true).unwrap();
+        let w = settings_grant_warning("home", SettingsGrant::Write, true, None).unwrap();
         assert!(
             w.starts_with("Warning: root is the owner of this node"),
             "{w}"
@@ -486,13 +514,58 @@ mod tests {
         assert!(w.contains("home can now set its own mode to user"), "{w}");
         assert!(w.contains("run as root"), "{w}");
         assert_eq!(
-            settings_grant_warning("home", SettingsGrant::Off, true),
+            settings_grant_warning("home", SettingsGrant::Off, true, None),
             None
         );
         assert_eq!(
-            settings_grant_warning("home", SettingsGrant::Write, false),
+            settings_grant_warning("home", SettingsGrant::Write, false, None),
             None
         );
+    }
+
+    /// Its Windows twin: an administrator as the owner (#197).
+    #[test]
+    fn the_settings_grant_warns_where_an_administrator_is_the_owner() {
+        let w = settings_grant_warning("home", SettingsGrant::Write, false, Some("alice")).unwrap();
+        assert!(
+            w.starts_with("Warning: alice, the owner of this node, is an administrator"),
+            "{w}"
+        );
+        assert!(w.contains("home can now set its own mode to user"), "{w}");
+        assert!(w.contains("UAC is no security boundary"), "{w}");
+        assert_eq!(
+            settings_grant_warning("home", SettingsGrant::Off, false, Some("alice")),
+            None
+        );
+    }
+
+    /// `center settings off` says what stays, and each command it names
+    /// is one the CLI takes and shows that center's part (#197).
+    #[test]
+    fn taking_the_grant_back_says_what_stays() {
+        let (_d, paths) = crate::cli::tests::setup(&["home", "lab"]);
+        crate::cli::tests::run(&paths, &["center", "settings", "on", "lab"]).unwrap();
+        let out = crate::cli::tests::run(&paths, &["center", "settings", "off", "lab"]).unwrap();
+        assert!(out.starts_with("lab: settings off\n"), "{out}");
+        for what in [
+            "its mode",
+            "its rules and sudo list",
+            "the folders it added",
+            "its capability switches",
+        ] {
+            assert!(out.contains(what), "{what}: {out}");
+        }
+        let commands: Vec<&str> = out.split('`').skip(1).step_by(2).collect();
+        assert_eq!(commands.len(), 4, "{out}");
+        for command in commands {
+            let words: Vec<&str> = command.split_whitespace().collect();
+            assert!(Cli::try_parse_from(&words).is_ok(), "{command}");
+            assert!(command.ends_with("--center lab"), "{command}");
+            crate::cli::tests::run(&paths, &words[1..])
+                .unwrap_or_else(|e| panic!("{command}: {e}"));
+        }
+        let on = crate::cli::tests::run(&paths, &["center", "settings", "on", "lab"]).unwrap();
+        assert!(!on.contains("stays"), "{on}");
     }
 
     /// The command `center rotate-key` names to end the grace is one the

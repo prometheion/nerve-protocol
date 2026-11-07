@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
+use nerve_transport::sync::lock;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
@@ -148,7 +149,7 @@ impl Admitted {
         let Some((_permit, places, who)) = self.held.take() else {
             return;
         };
-        let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = lock(&places);
         fn give<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
             if let Some(n) = map.get_mut(&key) {
                 *n -= 1;
@@ -199,7 +200,7 @@ fn admit(
     who: Peer,
 ) -> Option<Admitted> {
     let prefix = who.prefix();
-    let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
+    let mut p = lock(places);
     if p.peers.get(&who).copied().unwrap_or(0) >= PER_PEER
         || prefix.is_some_and(|x| p.prefixes.get(&x).copied().unwrap_or(0) >= PER_PREFIX)
     {

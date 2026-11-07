@@ -297,7 +297,7 @@ async fn an_earlier_signed_file_put_back_is_refused_at_start_up() {
     std::fs::write(&file, &earlier).unwrap();
     let e = node.reload().expect_err("the earlier file is refused");
     assert!(e.contains("older"), "{e}");
-    assert_eq!(node.config(), latest_cfg);
+    assert_eq!(*node.config(), latest_cfg);
     node.stop().await;
 
     // The owner looks at it and takes it. It is in force then, under a
@@ -337,7 +337,7 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
     // Written signed: the first line is the node's MAC, and the file loads.
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("# mac hmac-sha256 "), "{text}");
-    assert_eq!(NodeConfig::load(&file).unwrap(), cfg);
+    assert_eq!(NodeConfig::load(&file).unwrap(), *cfg);
     assert_eq!(node.reload(), Ok(false));
     // Audited with old and new value.
     let log = AuditLog::new(o.paths.audit_log()).read().unwrap();
@@ -532,9 +532,13 @@ async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_process_that_outlives_its_command_cannot_change_the_config() {
     let dir = tempfile::tempdir().unwrap();
-    let Some((mut center, o)) = folder_node(dir.path()).await else {
+    let Some((mut center, mut o)) = folder_node(dir.path()).await else {
         return;
     };
+    // A command with a /proc of its own takes what is left of it along when
+    // it ends (nerve_sandbox::own_proc): here a kernel without one, where
+    // nothing but the cgroup would.
+    o.own_proc = Some(false);
     let paths = o.paths.clone();
     let work = o.home.join("work");
     let extra = work.join("extra");
@@ -578,7 +582,7 @@ async fn a_process_that_outlives_its_command_cannot_change_the_config() {
         "the survivor changed the config: {text}"
     );
     assert_eq!(node.config(), before, "{text}");
-    assert_eq!(NodeConfig::load(&o.paths.config_file()).unwrap(), before);
+    assert_eq!(NodeConfig::load(&o.paths.config_file()).unwrap(), *before);
 
     // The owner's CLI still changes it.
     cli(&paths, &["folder", "add", extra.to_str().unwrap(), "rw"])

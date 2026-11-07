@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use nerve_transport::sync::lock;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -36,7 +37,7 @@ use nerve_transport::log::{Level, call_line, span};
 use nerve_transport::net::Proxy;
 use nerve_transport::ws::{self, ConnectError, WsMessage};
 
-use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared, lock};
+use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
 use crate::fs::{FsCall, WirePath, conflict};
@@ -1020,7 +1021,7 @@ impl Link {
     }
 
     /// The center's entry, or `None` when it was removed meanwhile.
-    fn entry(&self) -> Option<(NodeConfig, CenterEntry)> {
+    fn entry(&self) -> Option<(Arc<NodeConfig>, CenterEntry)> {
         let cfg = self.shared.config();
         let e = cfg.center(&self.name).cloned()?;
         Some((cfg, e))
@@ -1806,8 +1807,10 @@ impl Link {
             self.audit(inv, &target, "forbidden", Some("disabled"), Some(&why));
             return Err(RpcError::new(ErrorCode::Disabled, why));
         }
+        let protected = self.protected(entry);
         self.gate(
             entry,
+            &protected,
             inv,
             effect,
             &[],
@@ -2062,7 +2065,7 @@ impl Link {
         })?;
         let (program, serial) = self.program(&cap.provider)?;
         let args = o.params;
-        nerve_proto::schema::validate(&decl.params, &Value::Object(args.clone()))?;
+        nerve_proto::schema::validate_map(&decl.params, &args)?;
         let inv = unit_call(&o.cap, &o.stream, args.clone(), o.ctx.clone());
         let off = cap.exposure == Exposure::Off;
         self.decide_unit(&entry, &inv, decl.effect, off, program)
@@ -2309,7 +2312,7 @@ impl Link {
                 )
             })?;
             let entry = self.shared.around_pairings(&cfg, granted);
-            nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
+            nerve_proto::schema::validate_map(&action.params, &inv.args)?;
             let marked = nerve_proto::schema::path_args(&action.params);
             // The arguments its schema marks as paths are the call's rule
             // targets, resolved as the command account would see them, as an
@@ -2336,8 +2339,10 @@ impl Link {
             let unconfined = (effect == Effect::Execute)
                 .then(|| self.shared.unconfined_as(&cfg, || known.clone()))
                 .flatten();
+            let protected = self.protected(&entry);
             self.gate(
                 &entry,
+                &protected,
                 &inv,
                 effect,
                 &targets,
@@ -2381,7 +2386,7 @@ impl Link {
     /// `exec.signal`: a signal to a running command of this link.
     async fn exec_signal(
         self: &Arc<Self>,
-        cfg: NodeConfig,
+        cfg: Arc<NodeConfig>,
         entry: CenterEntry,
         effect: Effect,
         inv: Invoke,
@@ -2390,8 +2395,10 @@ impl Link {
         // is the action itself.
         let target = format!("{}.{}", inv.cap, inv.action);
         let unconfined = self.shared.unconfined(&cfg);
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             &inv,
             effect,
             &[],
@@ -2411,7 +2418,7 @@ impl Link {
     /// pairing's commands run as, within what its folders allow.
     async fn fs_call(
         self: &Arc<Self>,
-        cfg: NodeConfig,
+        cfg: Arc<NodeConfig>,
         entry: CenterEntry,
         effect: Effect,
         inv: &Invoke,
@@ -2464,8 +2471,10 @@ impl Link {
             Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
             _ => Vec::new(),
         };
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             inv,
             effect,
             &call.targets(),
@@ -2481,7 +2490,6 @@ impl Link {
         .map_err(|e| as_given(e, &named))?;
         account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-        let protected = self.protected(&entry);
         let deny = RuleSet::new(&entry.policy.deny, &self.home());
         let folders = entry.policy.folders.clone();
         let action = inv.action.clone();
@@ -2617,20 +2625,18 @@ impl Link {
                 args.insert(field.clone(), Value::String(real.clone()));
                 // Its schema holds the path as it is handed, too. Only the
                 // audit names where it leads ([`as_given`]).
-                nerve_proto::schema::validate(params, &Value::Object(args.clone())).map_err(
-                    |_| {
-                        let (cap, act) = (&inv.cap, &inv.action);
-                        (
-                            given,
-                            crate::fs::bad_path(format!(
-                                "{given} leads to a path {cap}.{act} does not take"
-                            )),
-                            Some(format!(
-                                "{given} leads to {real}, which {cap}.{act} does not take"
-                            )),
-                        )
-                    },
-                )?;
+                nerve_proto::schema::validate_map(params, &args).map_err(|_| {
+                    let (cap, act) = (&inv.cap, &inv.action);
+                    (
+                        given,
+                        crate::fs::bad_path(format!(
+                            "{given} leads to a path {cap}.{act} does not take"
+                        )),
+                        Some(format!(
+                            "{given} leads to {real}, which {cap}.{act} does not take"
+                        )),
+                    )
+                })?;
                 named.push((real, given.clone()));
                 targets.push(Target {
                     holds: crate::fs::holds(&path.real, write),
@@ -2725,6 +2731,7 @@ impl Link {
     async fn gate(
         &self,
         entry: &CenterEntry,
+        protected: &Protected,
         inv: &Invoke,
         effect: Effect,
         targets: &[Target],
@@ -2752,21 +2759,22 @@ impl Link {
         // The audit's arguments hold each marked path as resolved, as the
         // rules match it: a pin made from the entry names the place the
         // call reached, not the spelling it was given in (a link, a `..`).
-        let mut audited = inv.args.clone();
+        // Copied only when a path is replaced: the arguments may be large.
+        let mut audited = std::borrow::Cow::Borrowed(&inv.args);
         for t in targets {
             if let Some(field) = &t.arg
                 && audited.contains_key(field)
             {
-                audited.insert(
+                audited.to_mut().insert(
                     field.clone(),
                     Value::String(nerve_policy::paths::to_wire(&t.path)),
                 );
             }
         }
-        let audited = &audited;
+        let audited: &Map<String, Value> = &audited;
         let judged = Judged {
             home: self.home(),
-            protected: self.protected(entry),
+            protected: protected.clone(),
             unconfined: unconfined.map(Into::into),
             sudo: self.shared.sudo_on(),
             shell: self.shell_for(command),
@@ -3358,8 +3366,10 @@ impl Link {
             .map(|given| (nerve_policy::paths::to_wire(&rc.cwd), given.to_string()))
             .into_iter()
             .collect();
+        let protected = self.protected(entry);
         self.gate(
             entry,
+            &protected,
             inv,
             effect,
             &rc.targets(),
@@ -3429,10 +3439,16 @@ impl Link {
             let mut spec = match (separate.as_ref(), known.as_ref()) {
                 // Cut around every pairing's folders as the account sees the
                 // folders, which the gate's cut may not have resolved.
-                (Some(mine), Some(run)) => {
-                    exec::pairing_spec(&entry.policy, &home, &own, &writable, &run.home, mine)
-                }
-                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
+                (Some(mine), Some(run)) => exec::pairing_spec(
+                    &entry.policy,
+                    &home,
+                    &own,
+                    &writable,
+                    &run.home,
+                    mine,
+                    &protected,
+                ),
+                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable, &protected),
             };
             // The owner's switch, Landlock's layer of it: no TCP, where the
             // kernel has the rules.
@@ -3464,6 +3480,7 @@ impl Link {
             return Err(RpcError::forbidden(why));
         }
         self.shared.held_at(HoldAt::AfterLastLook).await;
+        let (landlock_held, separate_held) = (landlock.is_some(), separate.is_some());
         let opts = RunOptions {
             shell: cfg.machine.shell.clone(),
             landlock,
@@ -3485,6 +3502,12 @@ impl Link {
                 .map(|c| (c.clone(), granted)),
             tap,
             no_network,
+            // Held apart from the owner, it sees only its own processes.
+            own_proc: crate::daemon::exec_has_own_proc(
+                self.shared.own_proc,
+                landlock_held,
+                separate_held,
+            ),
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(open);
@@ -3552,7 +3575,7 @@ impl Link {
         decl: nerve_policy::config::ConfigCapability,
     ) -> Result<Value, RpcError> {
         let params = decl.params_schema();
-        nerve_proto::schema::validate(&params, &Value::Object(inv.args.clone()))?;
+        nerve_proto::schema::validate_map(&params, &inv.args)?;
         let marked = nerve_proto::schema::path_args(&params);
         let runs_as = self.shared.run_account(cfg);
         let entry = self.shared.with_built_in(cfg, granted);
@@ -3579,8 +3602,10 @@ impl Link {
         let unconfined = (effect == Effect::Execute)
             .then(|| self.shared.unconfined_as(cfg, || known.clone()))
             .flatten();
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             inv,
             effect,
             &targets,
@@ -3640,6 +3665,7 @@ impl Link {
                 &own,
                 &writable,
                 no_network,
+                &protected,
             )
         });
         let granted = cfg
@@ -3686,6 +3712,9 @@ impl Link {
                 .map(|c| (c.clone(), granted)),
             tap: guard.tap(true),
             no_network,
+            // It runs as nerve-run, apart from the owner (by hand: as a
+            // test's stand-in for it).
+            own_proc: self.shared.own_proc,
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(guard);

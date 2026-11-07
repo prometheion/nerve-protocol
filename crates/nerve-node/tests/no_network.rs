@@ -587,6 +587,19 @@ async fn a_command_that_starts_into_the_switch_is_ended_as_it_starts() {
     daemon.stop().await;
 }
 
+/// The process whose command line is `line`, its words split at blanks, as
+/// this machine's `/proc` shows it.
+fn process_of(line: &str) -> Option<u32> {
+    let want: Vec<u8> = line
+        .split(' ')
+        .flat_map(|w| [w.as_bytes(), b"\0"].concat())
+        .collect();
+    std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+        let pid = e.file_name().to_str()?.parse().ok()?;
+        (std::fs::read(e.path().join("cmdline")).ok()? == want).then_some(pid)
+    })
+}
+
 /// Whether process `pid` runs (a zombie does not).
 fn alive(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
@@ -660,7 +673,10 @@ async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
         let mut center = FakeCenter::start(false).await.unwrap();
         let daemon = node(&root, &work, &center, false, None, None).await;
         let mut conn = resumable(&mut center).await;
-        let args = json!({"command": "sleep 60 & echo $! > sleep.pid; wait",
+        // A number of its own on the command line, by which this test finds
+        // the process from outside its PID namespace, where `$!` is not it.
+        let line = format!("sleep 60.{}{}", std::process::id() % 1000, what.len());
+        let args = json!({"command": format!("{line} & wait"),
                           "cwd": work.display().to_string()});
         conn.request(
             "invoke",
@@ -670,10 +686,8 @@ async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
         .unwrap();
         let mut pid = None;
         for _ in 0..200 {
-            if let Ok(t) = std::fs::read_to_string(work.join("sleep.pid"))
-                && let Ok(n) = t.trim().parse::<u32>()
-            {
-                pid = Some(n);
+            pid = process_of(&line);
+            if pid.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

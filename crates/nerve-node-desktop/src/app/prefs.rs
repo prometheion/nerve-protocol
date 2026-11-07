@@ -565,8 +565,9 @@ impl Ctl {
         }) else {
             return;
         };
-        // The password and the header values go on stdin, never as
-        // arguments, which every process of the machine can read.
+        // The address (a relay link holds a token), the password and the
+        // header values go on stdin, never as arguments, which every
+        // process of the machine can read.
         let (url, password) = view::proxy_login(&url, &password);
         if password.is_some() && !nerve_node::cli::proxy_wants_password(&url) {
             self.with_prefs(|p| {
@@ -577,27 +578,8 @@ impl Ctl {
             });
             return;
         }
-        let mut args = vec!["proxy".into(), "set".into(), url];
-        if !pin.is_empty() {
-            args.push(format!("--pin={pin}"));
-        }
-        let headers: Vec<&str> = headers
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        // The CLI reads the password of a URL with a user name and no
-        // password, and the headers of `--header -` after it.
-        let mut input = Vec::new();
-        if let Some(pw) = password {
-            input.push(pw);
-        }
-        if !headers.is_empty() {
-            args.push("--header=-".into());
-            input.extend(headers.iter().map(|h| h.to_string()));
-        }
-        let input = (!input.is_empty()).then(|| input.join("\n"));
-        self.command(args, input, |c, answer| {
+        let (args, input) = view::proxy_set_command(&url, &pin, &headers, password);
+        self.command(args, Some(input), |c, answer| {
             match answer {
                 Ok(v) => {
                     c.with_prefs(|p| {

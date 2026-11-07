@@ -1,6 +1,8 @@
 //! The paired nodes: their names, removal and alerts, and their links
 //! coming, parking and going.
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 impl Center {
@@ -41,10 +43,9 @@ impl Center {
             Ok::<(), String>(())
         })?;
         if disabled {
-            let sessions: Vec<Arc<Session>> =
-                self.sessions.lock().unwrap().values().cloned().collect();
+            let sessions: Vec<Arc<Session>> = lock(&self.sessions).values().cloned().collect();
             for sess in sessions {
-                let stops = sess.jobs.lock().unwrap().stop_on(node_id);
+                let stops = lock(&sess.jobs).stop_on(node_id);
                 for stop in stops {
                     let _ = stop.send(Stop::Disabled);
                 }
@@ -52,7 +53,7 @@ impl Center {
                 // events are no jobs, but run there all the same: the node
                 // gets `stream.close` and `unsub`, and the agent reads none
                 // of what came meanwhile once the node is enabled again.
-                let units = sess.streams.lock().unwrap().units_on(node_id);
+                let units = lock(&sess.streams).units_on(node_id);
                 for c in units {
                     c.close("the node was disabled in the center");
                 }
@@ -76,7 +77,7 @@ impl Center {
         if !self.knows(node_id) {
             return Err("no such node".into());
         }
-        let link = self.links.lock().unwrap().remove(node_id);
+        let link = lock(&self.links).remove(node_id);
         if let Some(l) = link {
             l.bye(ByeReason::Revoked).await;
             // A parked link has no connection for the bye; its calls end.
@@ -100,7 +101,7 @@ impl Center {
             s.nodes.remove(node_id).is_some()
         });
         if had {
-            self.down.lock().unwrap().remove(node_id);
+            lock(&self.down).remove(node_id);
             self.log.record(
                 Level::Info,
                 Some((&name, node_id)),
@@ -113,7 +114,7 @@ impl Center {
 
     pub fn alert(&self, node_id: &str, text: &str) {
         self.note(Level::Warn, Some(node_id), text);
-        let mut a = self.alerts.lock().unwrap();
+        let mut a = lock(&self.alerts);
         a.push_back(json!({"ts": now_ms(), "node": node_id, "text": text}));
         while a.len() > ALERTS_KEEP {
             a.pop_front();
@@ -123,13 +124,13 @@ impl Center {
     }
 
     pub fn alerts(&self) -> Vec<Value> {
-        self.alerts.lock().unwrap().iter().cloned().collect()
+        lock(&self.alerts).iter().cloned().collect()
     }
 
     /// A link is up; `resumed` when it carries on a link that dropped.
     pub(crate) fn link_up(&self, link: Arc<Link>, hello: &Hello, resumed: bool) {
         let id = link.node_id.clone();
-        self.links.lock().unwrap().insert(id.clone(), link.clone());
+        lock(&self.links).insert(id.clone(), link.clone());
         let now = now_ms();
         self.update(|s| {
             if let Some(n) = s.nodes.get_mut(&id) {
@@ -140,10 +141,7 @@ impl Center {
                 s.day(&id, now).links += 1;
             }
         });
-        let gap = self
-            .down
-            .lock()
-            .unwrap()
+        let gap = lock(&self.down)
             .remove(&id)
             .map(|t| util::span(t.elapsed()));
         let line = match (resumed, gap) {
@@ -189,7 +187,7 @@ impl Center {
     /// told its drop already, and says nothing more.
     pub(crate) fn link_replaced(&self, old: &Arc<Link>) {
         {
-            let mut links = self.links.lock().unwrap();
+            let mut links = lock(&self.links);
             let current = links.get(&old.node_id).is_some_and(|l| Arc::ptr_eq(l, old));
             if !current {
                 return;
@@ -205,7 +203,7 @@ impl Center {
         let gone = Instant::now()
             .checked_sub(silent)
             .unwrap_or_else(Instant::now);
-        self.down.lock().unwrap().insert(old.node_id.clone(), gone);
+        lock(&self.down).insert(old.node_id.clone(), gone);
         self.note(
             Level::Warn,
             Some(&old.node_id),
@@ -234,7 +232,7 @@ impl Center {
         {
             // A link replaced by the connection that then failed to resume
             // it is the node's again, so that the next one finds it.
-            let mut links = self.links.lock().unwrap();
+            let mut links = lock(&self.links);
             let other = links
                 .get(&id)
                 .is_some_and(|l| !l.is_closed() && !Arc::ptr_eq(l, link));
@@ -259,7 +257,7 @@ impl Center {
         let gone = Instant::now()
             .checked_sub(silent)
             .unwrap_or_else(Instant::now);
-        self.down.lock().unwrap().entry(id.clone()).or_insert(gone);
+        lock(&self.down).entry(id.clone()).or_insert(gone);
         let grace = self.grace();
         self.note(
             Level::Warn,
@@ -280,7 +278,7 @@ impl Center {
                 return;
             }
             {
-                let mut links = c.links.lock().unwrap();
+                let mut links = lock(&c.links);
                 if links.get(&id).is_some_and(|l| Arc::ptr_eq(l, &link)) {
                     links.remove(&id);
                 }
@@ -334,7 +332,7 @@ impl Center {
         // A link the node's newer one replaced is no longer the node's: its end
         // says nothing about the node, which is up.
         let current = {
-            let mut links = self.links.lock().unwrap();
+            let mut links = lock(&self.links);
             let current = links.get(id).is_some_and(|l| Arc::ptr_eq(l, link));
             if current {
                 links.remove(id);
@@ -368,7 +366,7 @@ impl Center {
         let gone = Instant::now()
             .checked_sub(silent)
             .unwrap_or_else(Instant::now);
-        self.down.lock().unwrap().insert(id.clone(), gone);
+        lock(&self.down).insert(id.clone(), gone);
         let (level, verb) = if clean {
             (Level::Info, "closed")
         } else {
@@ -502,7 +500,7 @@ impl Center {
                     o.insert("node".into(), json!(name));
                     o.entry("ts").or_insert(json!(ev.ts));
                 }
-                self.audit.lock().unwrap().push(e);
+                lock(&self.audit).push(e);
                 self.changed(Change::Audit);
             }
             // A program's event, for the sessions subscribed to it.
@@ -522,19 +520,19 @@ impl Center {
     }
 
     pub fn audit(&self) -> Vec<Value> {
-        self.audit.lock().unwrap().list()
+        lock(&self.audit).list()
     }
 
     /// The nodes as the web UI shows them.
     pub fn nodes_json(&self) -> Value {
-        let links: BTreeMap<String, Arc<Link>> = self.links.lock().unwrap().clone();
+        let links: BTreeMap<String, Arc<Link>> = lock(&self.links).clone();
         // Which sessions use each node, read before the state is locked (see
         // `Inner::store`): `sessions_json` holds a session's node set while
         // it names the nodes.
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+        let sessions: Vec<Arc<Session>> = lock(&self.sessions).values().cloned().collect();
         let mut used: HashMap<String, Vec<String>> = HashMap::new();
         for x in &sessions {
-            for n in x.nodes.lock().unwrap().iter() {
+            for n in lock(&x.nodes).iter() {
                 used.entry(n.clone()).or_default().push(x.id.clone());
             }
         }
@@ -566,7 +564,7 @@ impl Center {
                         "platform": n.platform,
                         "arch": n.arch,
                         "online": link.is_some(),
-                        "status": link.map(|l| l.status.lock().unwrap().clone()),
+                        "status": link.map(|l| lock(&l.status).clone()),
                         "since_ms": link.map(|l| l.since_ms),
                         "last_seen_ms": n.last_seen_ms,
                         "paired_ms": n.paired_ms,

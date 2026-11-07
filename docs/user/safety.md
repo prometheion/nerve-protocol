@@ -18,14 +18,8 @@ leads to the detail.
 - Commands on the sudo list run as root, outside the folders. With the
   network off they do not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
-- A center with the settings grant can list commands for root itself. They
-  run whenever sudo is on, also after you take the grant back. Keep sudo
-  off while a center you would not give root has the grant. Before
-  `sudo on`, check each center's sudo list with `nerve-node rule` and
-  `rule rm` what you did not add
-  ([the grant](../dev/settings-and-config.md#the-settings-grant)).
-- Taking the grant back leaves what the center changed, still on: its mode,
-  folders, rules, sudo list, capability switches and capabilities
+- Taking the grant back leaves what the center changed, still on.
+  `center settings off` names it
   ([the grant](../dev/settings-and-config.md#without-the-grant)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust it, run `sudo nerve-node sudo on` on the
@@ -89,12 +83,15 @@ leads to the detail.
   name, not someone who hides the name. The mode, the rules and the account
   are the protection ([guard](../dev/policy-engine.md#the-guard)).
 - A mode change, `cap set ... off` or the end of a `--for` does not stop a
-  running command. A program handed to a service manager, or detached on a
-  node without a cgroup, outlives a stop
+  running command. A program handed to a service manager outlives a stop,
+  and a detached one where the command has neither a cgroup nor a `/proc`
+  of its own
   ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
 - While a command runs, its line, with the call's values, is readable by
-  every account, the other centers' commands too. Put no secret in a command
-  or a capability's line
+  every account, and by other pairings' commands unless they have a `/proc`
+  of their own: folder mode and `nerve-run`, where `status` warns when the
+  kernel gives none. A command that runs as you sees all. Put no secret in a
+  command or a capability's line
   ([secrets](../dev/capabilities.md#keep-secrets-out-of-the-command)).
 - The check of a program's provider tells programs apart, not users: allow
   only programs you trust
@@ -124,11 +121,10 @@ leads to the detail.
   ([backup](../dev/backup.md#what-is-not-in-a-backup)).
 - A restored backup brings its own pairings, modes and rules: restore only
   one you made yourself ([restore](../dev/backup.md#restore)).
-- While `center add` asks, the link is in the process list: use
-  `center add -` ([pair](pair.md)).
-- The relay link holds the relay token, and the `claude mcp add` line holds
-  the harness token. Delete them from your shell's history
-  ([pair](pair.md), [center](center.md)).
+- A pairing or relay link given as an argument is in the process list: give
+  `-` and paste it ([pair](pair.md)).
+- The `claude mcp add` line holds the harness token. Delete it from your
+  shell's history ([center](center.md)).
 - A relay token reaches the relay's centers' host and port, and the other
   sites a reverse proxy serves there
   ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).

@@ -50,21 +50,27 @@ fn main() {
     }
     // A nerve:// link alone, which the desktop hands to the app when one is
     // opened (no command of nerve-node): the app goes straight to pairing.
-    // The uninstall of Apps & features on Windows opens the app's.
-    let start = match words.as_slice() {
-        [Some(link)] if link.to_ascii_lowercase().starts_with("nerve://") => {
-            Some(Asked::link(link))
+    // The link is taken off this command line at once: a new start gets it
+    // on stdin, and this one ends (nerve_node_desktop::instance). The
+    // uninstall of Apps & features on Windows opens the app's.
+    use nerve_node_desktop::instance::{Start, hand_on, link_on_stdin};
+    let start = match Start::of(&words, nerve_node_desktop::parts::UNINSTALL_ARG) {
+        Start::Window(asked) => asked,
+        Start::HandOn(link) => {
+            let handed = std::env::current_exe().and_then(|me| hand_on(&me, &link, &[]));
+            std::process::exit(match handed {
+                Ok(_) => 0,
+                Err(e) => {
+                    eprintln!("nerve-node-desktop: cannot start the app for the link: {e}");
+                    1
+                }
+            });
         }
-        [Some(arg)] if *arg == nerve_node_desktop::parts::UNINSTALL_ARG => Some(Asked {
-            uninstall: true,
-            ..Asked::default()
-        }),
-        [] => Some(Asked::default()),
-        _ => None,
+        // A link that did not come is a start without one.
+        Start::LinkOnStdin => link_on_stdin().map(|l| Asked::link(&l)).unwrap_or_default(),
+        Start::Command => std::process::exit(nerve_node::entry::main()),
     };
-    let Some(start) = start else {
-        std::process::exit(nerve_node::entry::main());
-    };
+    let link = start.link.clone();
     use nerve_node_desktop::app::Failed;
     use nerve_node_desktop::deps;
     let fail = |e: &str| -> ! {
@@ -102,7 +108,7 @@ fn main() {
                     eprintln!(
                         "nerve-node-desktop: the window did not open ({e}); trying once more, drawing in software without OpenGL"
                     );
-                    std::process::exit(deps::rerun_in_software());
+                    std::process::exit(deps::rerun_in_software(link.as_deref()));
                 }
                 deps::Next::Fail(e) => fail(&e),
             }

@@ -543,11 +543,13 @@ fn relay_link(out: &mut dyn Write, name: &str, token: &str, at: &str, pin: &str,
     }
     .render();
     let _ = writeln!(out, "  {link}");
+    // `-` reads the link from stdin: as an argument the token would be in
+    // the process list while `proxy set` runs, and in the shell's history.
     let _ = writeln!(
         out,
-        "on {name}, paste it in the desktop app (Relay, Connect), or run:"
+        "on {name}, paste it in the desktop app (Relay, Connect), or run this and paste it on the next line:"
     );
-    let _ = writeln!(out, "  nerve-node proxy set '{link}'");
+    let _ = writeln!(out, "  nerve-node proxy set -");
     if guessed {
         let _ = writeln!(
             out,
@@ -659,7 +661,7 @@ mod tests {
         assert_eq!(parsed.address, format!("{host}:7491"));
         assert!(
             out.contains(&format!(
-                "on lab-pc, paste it in the desktop app (Relay, Connect), or run:\n  nerve-node proxy set '{link}'\nthe link reaches this machine as {host}:7491;"
+                "on lab-pc, paste it in the desktop app (Relay, Connect), or run this and paste it on the next line:\n  nerve-node proxy set -\nthe link reaches this machine as {host}:7491;"
             )),
             "{out}"
         );

@@ -219,6 +219,24 @@ pub struct SignalArgs {
     pub signal: String,
 }
 
+/// The limits for the command's cgroup: with a `/proc` of its own the shim
+/// and the namespace's init are two more tasks in it than the command
+/// (nerve_sandbox::own_proc), and a call that asks for one process or two
+/// would not start otherwise. The command still has the processes it was
+/// granted.
+#[cfg(target_os = "linux")]
+fn room_for_shim(
+    granted: &nerve_policy::config::Granted,
+    own_proc: bool,
+) -> nerve_policy::config::Granted {
+    nerve_policy::config::Granted {
+        processes: granted
+            .processes
+            .saturating_add(if own_proc { 2 } else { 0 }),
+        ..*granted
+    }
+}
+
 /// The shell program and its arguments for `command`.
 pub fn shell_command(shell: Option<&str>, command: &str) -> (String, Vec<String>) {
     let default = if cfg!(windows) {
@@ -418,14 +436,18 @@ pub fn other_text() -> Option<crate::tap::Decode> {
 /// command may be the one that wrote. A folder whose resolution crosses a
 /// link inside one is left out ([`led_away`]): a command may have put that
 /// link, and the rule would grant the folder's flags wherever it leads.
+///
+/// `protected` is the protected list the gate judged the call by, built
+/// once for the call (the Unix one: Landlock is Linux's), so the sandbox
+/// goes by the list the decision did.
 pub fn landlock_spec(
     policy: &CenterPolicy,
     home: &Path,
     own: &[PathBuf],
     writable: &[PathBuf],
+    protected: &Protected,
 ) -> LandlockSpec {
-    // Landlock is Linux's, so the list is the Unix one.
-    let f = folder_sets(policy, home, own, &Platform::Unix, writable);
+    let f = folder_sets(policy, home, protected, writable);
     // `/dev` is read whole except the terminals: a command of a node run by
     // hand runs as its owner and must not read the owner's terminals by name
     // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
@@ -462,8 +484,9 @@ pub fn pairing_spec(
     writable: &[PathBuf],
     run_home: &Path,
     mine: &crate::account::Own,
+    protected: &Protected,
 ) -> LandlockSpec {
-    let mut spec = landlock_spec(policy, home, own, writable);
+    let mut spec = landlock_spec(policy, home, own, writable, protected);
     let around = [run_home.to_path_buf()];
     let mine = [real(&mine.home), real(&mine.temp)];
     for set in [
@@ -558,13 +581,14 @@ pub fn config_spec(
     own: &[PathBuf],
     writable: &[PathBuf],
     no_network: bool,
+    protected: &Protected,
 ) -> LandlockSpec {
     let policy = crate::config_cap::confined(policy, separate, mine);
     let mut spec = match (mine, account_home) {
         (Some(mine), Some(run_home)) if separate => {
-            pairing_spec(&policy, home, own, writable, run_home, mine)
+            pairing_spec(&policy, home, own, writable, run_home, mine, protected)
         }
-        _ => landlock_spec(&policy, home, own, writable),
+        _ => landlock_spec(&policy, home, own, writable, protected),
     };
     // Landlock's layer of the network switch, as for the pairing's commands.
     spec.no_network = no_network;
@@ -629,11 +653,9 @@ pub struct FolderSets {
 pub fn folder_sets(
     policy: &CenterPolicy,
     home: &Path,
-    own: &[PathBuf],
-    platform: &Platform,
+    protected: &Protected,
     writable: &[PathBuf],
 ) -> FolderSets {
-    let protected = Protected::new(platform, home, own, &policy.protected);
     // The boundary is judged by resolved places, so a writable folder
     // reached by one spelling catches a folder configured by another.
     let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
@@ -690,7 +712,7 @@ pub fn folder_sets(
             .filter(|(a, _)| f(*a))
             .map(|(_, p)| p.clone())
             .collect();
-        leave_protected_out(&granted, &protected, write)
+        leave_protected_out(&granted, protected, write)
     };
     FolderSets {
         read: folders(&|a| a.read, false),
@@ -765,7 +787,8 @@ pub fn container_grants(
     platform: &Platform,
     writable: &[PathBuf],
 ) -> Vec<(PathBuf, Access)> {
-    let f = folder_sets(policy, home, own, platform, writable);
+    let protected = Protected::new(platform, home, own, &policy.protected);
+    let f = folder_sets(policy, home, &protected, writable);
     let mut out: Vec<(PathBuf, Access)> = Vec::new();
     for (set, flag) in [(f.read, 'r'), (f.write, 'w'), (f.exec, 'x')] {
         for p in leave_out(&set, own) {
@@ -1354,6 +1377,10 @@ pub struct RunOptions {
     /// starts (nerve_sandbox::net_filter). Linux only: elsewhere such a
     /// command does not run.
     pub no_network: bool,
+    /// Linux: the command runs through the shim in a PID namespace with a
+    /// `/proc` of its own, and sees only its own processes
+    /// (nerve_sandbox::own_proc, #199).
+    pub own_proc: bool,
 }
 
 /// The variables of the node's environment every command of `nerve-run`
@@ -1916,13 +1943,18 @@ pub async fn run(
     {
         line.insert_str(0, nerve_sandbox::POWERSHELL_START);
     }
-    let shim = (opts.landlock.is_some() || opts.container.is_some()).then(|| ShimSpec {
-        program: program.clone().into(),
-        args: args.clone(),
-        parent: std::process::id(),
-        landlock: opts.landlock.clone(),
-        container: opts.container.clone(),
-    });
+    // A sudo command and root's never: sudo would not rise in the user
+    // namespace the shim makes for it.
+    let own_proc = opts.own_proc && opts.sudo.is_none() && opts.root.is_none();
+    let shim =
+        (opts.landlock.is_some() || opts.container.is_some() || own_proc).then(|| ShimSpec {
+            program: program.clone().into(),
+            args: args.clone(),
+            parent: std::process::id(),
+            landlock: opts.landlock.clone(),
+            container: opts.container.clone(),
+            own_proc,
+        });
     // The shim makes the container's profile and window station for the
     // user it runs as, which is not wired for another account yet; such a
     // command would run without its container (crate::daemon, which gives
@@ -1972,12 +2004,16 @@ pub async fn run(
     // keeps the command from running: the owner set the limits.
     #[cfg(target_os = "linux")]
     let cgroup = match &opts.limits {
-        Some((cgroups, granted)) => Some(cgroups.command(granted).map_err(|e| {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the command was not run: {e}"),
-            )
-        })?),
+        Some((cgroups, granted)) => Some(
+            cgroups
+                .command(&room_for_shim(granted, own_proc))
+                .map_err(|e| {
+                    RpcError::new(
+                        ErrorCode::Unavailable,
+                        format!("the command was not run: {e}"),
+                    )
+                })?,
+        ),
         None => None,
     };
     // A confined command gets a session of its own, so it has no
@@ -2010,6 +2046,10 @@ pub async fn run(
         // Root as the account (the owner chose it, warned) gets root's
         // rights back at exec, which no_new_privs would keep from it.
         let nnp = opts.sudo.is_none() && opts.account.as_ref().is_none_or(|a| a.uid != 0);
+        // A command started without the shim leaves the node's AppArmor
+        // profile at its exec; the shim leaves it itself, after it made
+        // its namespace.
+        let leave_profile = shim.is_none();
         // The filter of the owner's network switch, made here: the child
         // only puts it on, last, once it is the account.
         let net = match opts.no_network {
@@ -2024,6 +2064,11 @@ pub async fn run(
             cmd.pre_exec(move || {
                 if own_session && libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                // First: once the process is another account, its
+                // /proc/self files are not its own to write.
+                if leave_profile {
+                    nerve_sandbox::own_proc::leave_profile()?;
                 }
                 if let Some(fd) = join {
                     crate::cgroup::join(fd)?;
@@ -2438,7 +2483,76 @@ mod command_line_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The specs with the protected list built for them, as a call builds
+    /// it once for its gate and its sandbox.
+    fn landlock_spec(
+        policy: &CenterPolicy,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::landlock_spec(policy, home, own, writable, &p)
+    }
+
+    fn pairing_spec(
+        policy: &CenterPolicy,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+        run_home: &Path,
+        mine: &crate::account::Own,
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::pairing_spec(policy, home, own, writable, run_home, mine, &p)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn config_spec(
+        policy: &CenterPolicy,
+        separate: bool,
+        mine: Option<&crate::account::Own>,
+        account_home: Option<&Path>,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+        no_network: bool,
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::config_spec(
+            policy,
+            separate,
+            mine,
+            account_home,
+            home,
+            own,
+            writable,
+            no_network,
+            &p,
+        )
+    }
     use nerve_policy::config::Access;
+
+    /// The shim and the namespace's init are two tasks of the command's
+    /// cgroup besides the command: a call that asks for two processes still
+    /// starts (round 1, correctness 2).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_with_its_own_proc_gets_room_for_the_shim_and_the_init() {
+        let g = nerve_policy::config::Granted {
+            memory_mb: 512,
+            cpu_percent: 100,
+            processes: 2,
+        };
+        assert_eq!(room_for_shim(&g, true).processes, 4);
+        assert_eq!(room_for_shim(&g, false), g);
+        let most = nerve_policy::config::Granted {
+            processes: u32::MAX,
+            ..g
+        };
+        assert_eq!(room_for_shim(&most, true).processes, u32::MAX);
+    }
 
     /// A command of nerve-run keeps of the node's environment only the few
     /// variables it always gets and the names the owner adds: not what the
@@ -2487,6 +2601,7 @@ mod tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 
@@ -4449,6 +4564,7 @@ mod windows_tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 

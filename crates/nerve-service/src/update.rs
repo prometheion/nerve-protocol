@@ -136,6 +136,10 @@ pub struct Program<'a> {
     pub files_args: Vec<String>,
     /// Where each file `service-files` names by its role goes, and its mode.
     pub places: Vec<Place>,
+    /// What the new files need before the service restarts (the node loads
+    /// its AppArmor profile). It says in `steps` what it did and does not
+    /// fail the update.
+    pub before_restart: &'a dyn Fn(&mut Steps<'_>),
 }
 
 /// Where the file of a role goes, and its mode.
@@ -311,7 +315,10 @@ pub async fn update(
     }
     let start = put
         .and_then(|()| reload(sys, &before))
-        .and_then(|()| sys.systemctl(&["restart", p.unit]))
+        .and_then(|()| {
+            (p.before_restart)(steps);
+            sys.systemctl(&["restart", p.unit])
+        })
         .and_then(|()| started());
     if let Err(e) = start {
         if !same {
@@ -526,6 +533,7 @@ mod tests {
                     mode: 0o644,
                 },
             ],
+            before_restart: &|_| {},
         }
     }
 

@@ -1013,7 +1013,8 @@ impl Ctl {
 
     fn center_grant(self: &Rc<Self>, name: &str, on: bool) {
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
-        let said = view::settings_grant_said(name, on, root);
+        let admin = self.with_perm(|p| p.get_owner_is_admin()).unwrap_or(false);
+        let said = view::settings_grant_said(name, on, root, admin);
         let value = if on { "on" } else { "off" };
         let args = vec![
             "center".into(),

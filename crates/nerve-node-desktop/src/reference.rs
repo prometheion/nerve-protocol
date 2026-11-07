@@ -71,7 +71,7 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "center add",
-        "nerve-node center add 'nerve://pair?center=…&code=…&pin=…'",
+        "nerve-node center add -   # then paste the link: nerve://pair?center=…&code=…&pin=…",
         (Some(Page::Centers), -1, "Centers › Pair a center"),
     ),
     (

@@ -474,11 +474,11 @@ pub(super) async fn rule_cmd(
                     }
                 };
                 list.of(&mut e.policy).retain(|r| *r != rule);
-                *removed.lock().unwrap() = (list, rule);
+                *nerve_transport::sync::lock(&removed) = (list, rule);
                 Ok(())
             })
             .await?;
-            let (list, removed) = removed.into_inner().unwrap();
+            let (list, removed) = nerve_transport::sync::into_inner(removed);
             let _ = writeln!(out, "{name}: removed {removed:?} from the {}", list.label());
         }
         RuleCmd::Edit {
@@ -521,11 +521,11 @@ pub(super) async fn rule_cmd(
                     i += 1;
                     i - 1 == at || *r != rule
                 });
-                *done.lock().unwrap() = (entry, rule);
+                *nerve_transport::sync::lock(&done) = (entry, rule);
                 Ok(())
             })
             .await?;
-            let (entry, rule) = done.into_inner().unwrap();
+            let (entry, rule) = nerve_transport::sync::into_inner(done);
             let _ = writeln!(
                 out,
                 "{name}: the {} {entry:?} is {rule:?} now",

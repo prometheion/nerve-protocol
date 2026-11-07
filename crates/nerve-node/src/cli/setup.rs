@@ -217,7 +217,7 @@ async fn setup_steps(
             [] => {
                 let _ = writeln!(
                     out,
-                    "No center is paired; `nerve-node center add '<link>'` pairs one."
+                    "No center is paired; `nerve-node center add -` pairs one (paste the link)."
                 );
                 return Ok(());
             }

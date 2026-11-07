@@ -356,7 +356,8 @@ fn stopped(cfg: &NodeConfig, owner: Option<String>, sudo: bool, centers: Vec<Val
         "version": cfg.version,
         "locked": cfg.locked,
         "owner_is_root": crate::owner::is_root(owner.as_deref()),
-        "owner": owner,
+        "owner_is_admin": crate::owner::admin_owner(cfg).is_some(),
+        "owner": owner.or_else(|| cfg.machine.user.clone().filter(|_| cfg!(windows))),
         "sudo": if sudo { "on" } else { "off" },
         "command_limits": crate::cgroup::status(
             &cfg.limits.command,

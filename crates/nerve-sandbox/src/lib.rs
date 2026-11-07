@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 pub mod inherit;
 #[cfg(target_os = "linux")]
 pub mod net_filter;
+#[cfg(target_os = "linux")]
+pub mod own_proc;
 
 /// The argument that selects the shim in the `nerve-node` binary. Hidden from
 /// `--help`.
@@ -72,6 +74,10 @@ pub struct ShimSpec {
     /// Windows: run the command in this AppContainer.
     #[serde(default)]
     pub container: Option<ContainerSpec>,
+    /// Linux: run the command in a PID namespace with a `/proc` of its own
+    /// ([`own_proc`]), so it sees only its own processes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_proc: bool,
 }
 
 /// What a PowerShell command in an AppContainer starts with. PowerShell
@@ -505,6 +511,27 @@ mod imp {
             eprintln!("nerve-node: AppContainers are Windows'");
             return SHIM_FAILED;
         }
+        // Before Landlock, which forbids the mount of the new /proc; the
+        // rules then name that /proc, opened in the namespace.
+        if spec.own_proc {
+            match super::own_proc::enter() {
+                Ok(super::own_proc::Entered::Inside) => {}
+                Ok(super::own_proc::Entered::Ended(code)) => return code,
+                Err(e) => {
+                    eprintln!("nerve-node: cannot give the command a /proc of its own: {e}");
+                    return SHIM_FAILED;
+                }
+            }
+        }
+        // The profile that let the shim make the namespace stays with the
+        // shim: whatever it starts leaves it (Landlock, below, forbids the
+        // write, and the shim is any account's to run).
+        if let Err(e) = super::own_proc::leave_profile() {
+            eprintln!(
+                "nerve-node: cannot take the command out of the node's AppArmor profile: {e}"
+            );
+            return SHIM_FAILED;
+        }
         if let Some(l) = &spec.landlock {
             let applied = super::landlock_rules::prepare(l)
                 .and_then(|r| super::landlock_rules::enforce(r).map_err(|e| e.to_string()));
@@ -529,7 +556,7 @@ mod imp {
     use std::process::{Command, Stdio};
 
     pub fn run(spec: ShimSpec) -> i32 {
-        if spec.landlock.is_some() || spec.container.is_some() {
+        if spec.landlock.is_some() || spec.container.is_some() || spec.own_proc {
             eprintln!("nerve-node: no Landlock on this system");
             return SHIM_FAILED;
         }
@@ -554,7 +581,7 @@ mod imp {
     }
 
     pub fn run(spec: ShimSpec) -> i32 {
-        if spec.landlock.is_some() {
+        if spec.landlock.is_some() || spec.own_proc {
             return SHIM_FAILED;
         }
         // A stop sends Ctrl+C to the command's console, which the shim shares
@@ -3019,6 +3046,7 @@ mod tests {
             container: Some(ContainerSpec {
                 name: "nerve.x".into(),
             }),
+            own_proc: true,
         };
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<ShimSpec>(&j).unwrap(), s);

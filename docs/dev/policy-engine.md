@@ -1259,6 +1259,10 @@ Names are matched without regard to case.
 ### What protection covers
 
 - The file actions (`fs`) and the working directory of a command.
+- Each call builds the list once, as the owner sees the files, when it
+  starts: its decision, the walk of an `fs` call and a command's Landlock
+  rules go by that one list. It is not kept from one call to the next, so a
+  link put in the home meanwhile counts at the next call.
 - It does not cover what a command reads or writes by itself. In `folder` mode
   (Landlock on Linux, the AppContainer on Windows), a command's sandbox leaves
   protected paths out. In `user`

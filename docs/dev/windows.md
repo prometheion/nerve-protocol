@@ -248,9 +248,19 @@ refuses it if it can. The install checks the same.
 started as another account ([modes](#what-a-command-can-reach-in-folder-mode-windows)).
 Use `allowlist` or `user` mode for its centers.
 
+The commands of every pairing run as that one account, and a process's
+command line is open to the account's other processes: a pairing's command
+can read the command lines of the others' running commands (call values
+included), and `status` does not warn of it. Linux gives each command a
+`/proc` of its own ([Linux](sandbox-linux.md#a-proc-of-its-own)); W2 adds the
+Windows test of a pairing's processes (#149) and the answer for it.
+
 UAC is no security boundary: a command of an administrator can get the
 group's rights back and read the keys. The install warns about an account in
-Administrators or Backup Operators. Choose an ordinary account as above.
+Administrators or Backup Operators, and so do the Overview (`status`'s
+`owner_is_admin`) and giving a center the settings grant, as a center with
+the grant can set its own mode to `user`: the twin of root as the owner on
+Linux. Choose an ordinary account as above.
 [Sudo on Windows](#sudo-on-windows) needs an administrator: its
 commands run with the account's administrator rights on purpose.
 

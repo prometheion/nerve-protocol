@@ -55,8 +55,10 @@ changes a node's descriptor while it runs.
 The closure returns a `Setup`. With `folder` (an empty folder on the node, in
 wire form) and the settings grant `write` for the fake center, the node part
 also checks the profiles: it writes its own policy with `settings.set` (that
-folder read-write and one exact command in `allow`, one in `sudo_allow`) and checks fs, exec, the audit
-event and the sudo switch. The sudo switch must be off when the part starts.
+folder read-write and one exact command in `allow`), checks that a document that adds to
+`sudo_allow` is forbidden, and checks fs, exec, the audit event and the sudo switch. The owner
+puts `SUDO_ALLOWED` (`sudo echo nerve-conformance-sudo`) on the center's sudo list before the
+part starts: a center may not. The sudo switch must be off when the part starts.
 It sends one wrong sudo password, so a node with a real `sudo` logs one failed
 attempt; with `sudo_password` it also turns sudo on and off once. The e2e test
 points the node at a fake `sudo` (`machine.sudo_path`) for this.
@@ -101,6 +103,7 @@ With a `Setup::folder`, before `bye revoked`:
 |---|---|
 | 7.4 | settings get returns document and version |
 | 7.4 | settings set with a stale `if_version` is `conflict` |
+| 7.4 | settings set that puts a command on the sudo allow list is `forbidden` |
 | 7.4 | settings set applies a document |
 | 7.4.2 | settings cap-add adds a capability offered to this center as `center-added` with effect `execute`, or is `unavailable` with its reason where the node takes none |
 | 7.4.2 | settings cap-rm of a capability this center did not add is refused, and of one it added removes it |

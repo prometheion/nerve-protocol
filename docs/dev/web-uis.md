@@ -89,8 +89,9 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
   `event <name>:`; a capability without actions is then listed by its own
   name. A reason is one line, cut after 300 characters. The agent never sees
   them; the rest of the machine's actions stay.
-- **Pair a machine.** Makes a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command and its bare link
-  (for the desktop app), each with Copy.
+- **Pair a machine.** Makes a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command,
+  `nerve-node center add -`, and the bare link it reads from stdin (also for the desktop
+  app), each with Copy; for a Windows machine it says to open the link there.
 - **Sessions.** The harnesses connected now, each marked `tainted` once the
   [action checker](action-checker.md#taint-1) marked it. **End** stops one
   session.

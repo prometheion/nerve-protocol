@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The center and the node end, and their service starts them again with clean state, when a part of them failed while it held a lock (a poisoned lock). Until now the center stopped answering without ending, and the node went on with state that may have been half changed. The log says which lock it was.
+
 ### Windows (with 0.1.0)
 
 Built and tested, not released: 0.0.7 publishes the Linux programs only.
@@ -13,6 +15,18 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - The user docs name no terminal command for the node on Windows: installing, the service, sudo, the relay, the proxy, backups, logs and troubleshooting say where in the app each is done.
 - The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
 - On Windows the guard also refuses the node's service by its display name (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`), `reg add`, `delete`, `copy` and `restore` on the service's key and the keys below it (`Parameters` holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and kin on them; only keys of the registry count, a folder `C:\Services\nerve-node` is a folder. `pkill` and `killall` see an alternative in their pattern (`pkill -f 'nerve-node|nerve-center'`), and cmd's `/c` text is read from the line, also with the doubled quotes a program path with a blank needs (`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`).
+
+### The settings grant, secrets and other pairings' commands
+
+- Only the owner puts a command on the sudo list: the node refuses a center's addition, also with the settings grant, and the center's Audit page shows the `nerve-node rule add allow --action exec.run --exact '<command>'` to run on the machine (on Windows: the app's Permissions › Sudo) in place of its sudo Allow buttons, and it cannot take off a deny rule of `exec` that can match a sudo command, which narrows an entry. Entries a center put on its list before stay: check each center with `nerve-node rule --center <name>` and `rule rm` what you did not add ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `as_owner` goes with `allowlist` mode alone: a timed `folder` or `user` mode a center saves no longer ends in `allowlist` as you, and `mode` and `status` say ", as you" for the mode a timer ends in ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `center settings off` says what the center changed stays (mode, rules, sudo list, folders, capability switches) and names the command that shows each; the app says it too ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- On Windows an administrator as the owner is warned of where Linux warns of root: `center settings on`, `status` and the app ([#197](https://github.com/prometheion/nerve-protocol/issues/197)).
+- `proxy set -` reads the proxy URL or relay link from the first line of stdin, as `center add -` does, and `relay add` shows that form: the relay token is no longer in the process list or the shell's history ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- The center's **Pair a machine** card shows `nerve-node center add -` with the link to paste under it, each with Copy, and says to open the link on a Windows machine ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- The hints of `install`, `status`, `folder`, `setup`, the help and the app say `center add -` (then paste the link), and the app's Proxy dialog hands the address to `proxy set -` on stdin: a pairing code or relay token is no longer in the process list while they wait ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- The desktop app no longer keeps a `nerve://` link on its own command line while its window is open: the start the link opens hands it to a new start on stdin and ends ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- On Linux each folder-mode command, and each command of `nerve-run`, runs in a PID namespace with a `/proc` of its own: `ps` there shows its own processes, never another pairing's running commands. `install` on Ubuntu 24.04 adds an AppArmor profile that allows it for the service only (the unit puts it in the profile; a program anyone runs by hand, and a command, is not in it), and `status` warns where the kernel cannot, also on a node run by hand. `update` puts the profile from this release on; updating from 0.0.7 on Ubuntu 24.04, run `sudo nerve-node install` once after it (`status` says so) ([#199](https://github.com/prometheion/nerve-protocol/issues/199)).
 
 ### Fixed
 

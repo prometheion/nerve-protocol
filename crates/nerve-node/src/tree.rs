@@ -130,7 +130,7 @@ mod watch {
     impl Watch {
         fn poll(&self) -> bool {
             let procs = win::processes();
-            self.tree.lock().unwrap().grow(&procs, win::start_of)
+            nerve_transport::sync::lock(&self.tree).grow(&procs, win::start_of)
         }
 
         /// Stops recording.
@@ -144,7 +144,7 @@ mod watch {
         pub fn kill(&self) {
             self.poll();
             for _ in 0..5 {
-                let members = self.tree.lock().unwrap().members();
+                let members = nerve_transport::sync::lock(&self.tree).members();
                 for (p, start) in members {
                     win::terminate(p, start);
                 }

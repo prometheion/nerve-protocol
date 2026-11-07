@@ -65,6 +65,11 @@ A call may ask for less, or more up to the most (`exec.run` takes
 killed, with all it started; past its CPU it is slowed; past its processes
 it cannot start more. A center cannot change the limits.
 
+`processes` counts the command and what it starts. A command with a
+[`/proc` of its own](../dev/sandbox-linux.md#a-proc-of-its-own) has two
+helpers of the node beside it, which the node allows on top: its cgroup's
+`pids.max` then reads two more.
+
 `nerve-node status` says whether this machine holds them. A node run by
 hand without systemd runs its commands without limits
 ([where the limits hold](../dev/sandbox-linux.md#where-the-limits-hold)).

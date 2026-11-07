@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -21,6 +21,7 @@ use nerve_proto::resume::{self, Replay};
 use nerve_proto::{Effect, Message};
 use nerve_sandbox::Confinement;
 use nerve_transport::log::{Level, Log};
+use nerve_transport::sync::lock;
 use nerve_transport::ws::WsMessage;
 
 use crate::descriptor::IMPLICIT;
@@ -53,6 +54,14 @@ pub struct NodeOptions {
     /// (nerve_sandbox::net_filter), instead of asking the kernel. A test
     /// sets it, to stand for a kernel without seccomp filters.
     pub net_filter: Option<bool>,
+    /// Whether the shim can give a command a `/proc` of its own
+    /// (nerve_sandbox::own_proc), instead of trying it once at start. A test
+    /// sets it, to stand for a kernel that cannot.
+    pub own_proc: Option<bool>,
+    /// Whether the installed node runs outside the AppArmor profile that
+    /// the system needs for the namespace, instead of asking the system. A
+    /// test sets it.
+    pub apparmor_missing: Option<bool>,
     /// Whether this is the installed service, instead of asking where its
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
@@ -143,6 +152,8 @@ impl NodeOptions {
             full_rights: None,
             confinement: None,
             net_filter: None,
+            own_proc: None,
+            apparmor_missing: None,
             service: None,
             config_caps_by_hand: false,
             cgroups: None,
@@ -153,12 +164,6 @@ impl NodeOptions {
             notify: None,
         }
     }
-}
-
-/// Locks a std mutex, shrugging off poisoning: every holder keeps its state
-/// consistent before anything can panic.
-pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where the params of an awaited notification go.
@@ -562,14 +567,46 @@ impl CenterState {
     }
 }
 
-/// How this node confines the commands of folder mode. The installed
-/// Windows service runs every command as another account (crate::win_user),
-/// and the AppContainer is not wired for that account yet (its profile and
-/// window station are made for the user the shim runs as), so there folder
-/// mode has no confinement and runs no command. A node run by hand takes a
-/// Landlock below the floor as none and so refuses folder mode's commands
-/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
-/// commands would run as `nerve-run` without it, held by nothing else.
+/// What `status` says where the pairings' commands see each other's
+/// processes ([`Shared::processes_warning`]).
+pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (the node runs as root, or the kernel does not let it make user namespaces): each pairing's commands see the running commands of the others, with their command lines";
+
+/// [`PROCESSES_SHARED`] where the cause is that the node runs outside its
+/// AppArmor profile: an `update` does not put it from a node of before the
+/// profile, `install` does.
+pub const PROCESSES_NO_PROFILE: &str = "the system holds user namespaces back and the node is not in its AppArmor profile, so no command gets a /proc of its own: each pairing's commands see the running commands of the others, with their command lines; `sudo nerve-node install` puts the profile";
+
+/// Whether an `exec.run` command gets a `/proc` of its own: on a node where
+/// the shim can make one (`available`, [`Shared::own_proc`]), the commands
+/// held apart from the owner, by Landlock (folder mode) or as `nerve-run`
+/// (also where Landlock is missing). A command of the owner's own rights
+/// sees the owner's processes anyway.
+pub(crate) fn exec_has_own_proc(available: bool, landlock_held: bool, separate_held: bool) -> bool {
+    available && (landlock_held || separate_held)
+}
+
+/// Whether the system holds user namespaces back from an account and this
+/// node is not in its AppArmor profile ([`Shared::apparmor_missing`]).
+fn apparmor_missing_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::own_proc::userns_restricted()
+        && !nerve_sandbox::own_proc::in_own_profile();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+/// Whether the shim at `exe` can give a command a PID namespace with a
+/// `/proc` of its own here ([`Shared::own_proc`]): tried once.
+fn own_proc_here(exe: Option<&std::path::Path>) -> bool {
+    #[cfg(target_os = "linux")]
+    return exe.is_some_and(nerve_sandbox::own_proc::works);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = exe;
+        false
+    }
+}
+
 /// Whether the node can put its network filter on a command here
 /// ([`Shared::net_filter`]).
 fn net_filter_here() -> bool {
@@ -579,6 +616,14 @@ fn net_filter_here() -> bool {
     false
 }
 
+/// How this node confines the commands of folder mode. The installed
+/// Windows service runs every command as another account (crate::win_user),
+/// and the AppContainer is not wired for that account yet (its profile and
+/// window station are made for the user the shim runs as), so there folder
+/// mode has no confinement and runs no command. A node run by hand takes a
+/// Landlock below the floor as none and so refuses folder mode's commands
+/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
+/// commands would run as `nerve-run` without it, held by nothing else.
 pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     if !service {
         return detected.by_hand();
@@ -659,6 +704,16 @@ pub(crate) struct Shared {
     /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
     /// aarch64.
     pub net_filter: bool,
+    /// Whether a command held apart from the owner (folder mode, or as
+    /// `nerve-run`) gets a PID namespace with a `/proc` of its own, where it
+    /// sees only its own processes (nerve_sandbox::own_proc, #199): Linux,
+    /// where the kernel lets the shim make one.
+    pub own_proc: bool,
+    /// Whether the system holds user namespaces back from an account and the
+    /// installed node is not in the profile that lifts it (an `update` from
+    /// before the profile left it out): `install` puts it
+    /// ([`PROCESSES_NO_PROFILE`]).
+    pub apparmor_missing: bool,
     /// Where a test holds a command's call ([`NodeOptions::hold`]).
     pub hold: Option<Hold>,
     /// Whether the node runs with full rights (root, an elevated token): its
@@ -669,6 +724,9 @@ pub(crate) struct Shared {
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
     pub store: Mutex<SettingsStore>,
+    /// The store's audit log, written without the store's lock: an entry
+    /// waits only for the log's own.
+    pub audit: AuditLog,
     /// Ticks whenever the config may have changed; links re-check their
     /// center, the supervisor its link tasks.
     pub changed: watch::Sender<u64>,
@@ -739,8 +797,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub fn config(&self) -> NodeConfig {
-        lock(&self.store).config().clone()
+    /// The config in force, shared with the store: a reader takes no copy,
+    /// and a change puts a new one in the store's place.
+    pub fn config(&self) -> Arc<NodeConfig> {
+        lock(&self.store).shared()
     }
 
     /// Waits for the test's hold at `at`, if it set one.
@@ -1095,14 +1155,13 @@ impl Shared {
         if walk == AclWalk::IfBehind && !behind(want, true) {
             return;
         }
-        let _walking = match self.acl_walk.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
+        let _walking = match nerve_transport::sync::try_turn(&self.acl_walk) {
+            Some(g) => g,
+            None => {
                 if walk == AclWalk::IfBehind && !behind(want, false) {
                     return;
                 }
-                lock(&self.acl_walk)
+                nerve_transport::sync::turn(&self.acl_walk)
             }
         };
         let Some(want) = fresh() else {
@@ -1433,6 +1492,21 @@ impl Shared {
         None
     }
 
+    /// That the commands of a Linux node's pairings, all of one account
+    /// (`nerve-run` on the installed node, the owner by hand), see each
+    /// other's running commands here, with their command lines: the kernel
+    /// gives the shim no PID namespace with a `/proc` of its own
+    /// (nerve_sandbox::own_proc). Without Landlock
+    /// [`Shared::pairings_warning`] says more.
+    fn processes_warning(&self) -> Option<&'static str> {
+        (cfg!(target_os = "linux") && self.confinement.landlock_abi.is_some() && !self.own_proc)
+            .then_some(if self.apparmor_missing {
+                PROCESSES_NO_PROFILE
+            } else {
+                PROCESSES_SHARED
+            })
+    }
+
     /// That the commands of two or more pairings run as `nerve-run` here
     /// with no Landlock to keep them apart (crate::account::pairings_warning).
     fn pairings_warning(&self, cfg: &NodeConfig) -> Option<String> {
@@ -1596,7 +1670,7 @@ impl Shared {
 
     /// Records a rotation of a key in the audit log (crate::rotate).
     pub fn audit_key(&self, center: &str, event: &str, detail: &str) {
-        if let Err(err) = lock(&self.store).audit().key(center, event, detail) {
+        if let Err(err) = self.audit.key(center, event, detail) {
             tracing::error!("the audit log cannot be written: {err}");
         }
     }
@@ -1615,7 +1689,7 @@ impl Shared {
             }
         }
         let e = &e;
-        if let Err(err) = lock(&self.store).audit().decision(e) {
+        if let Err(err) = self.audit.decision(e) {
             tracing::error!("the audit log cannot be written: {err}");
         }
         self.emit(&e.center, "audit", "decision", e.event_data());
@@ -1741,6 +1815,8 @@ impl Shared {
             // root, as whom what runs as the owner then runs.
             "owner": self.owner_name(&cfg),
             "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
+            // Its Windows twin: the owner is an administrator.
+            "owner_is_admin": crate::owner::admin_owner(&cfg).is_some(),
             // Whether this is the installed node, which an owner may not
             // have been found for (the web UI words its advice by it).
             "installed": self.service,
@@ -1767,6 +1843,8 @@ impl Shared {
             // That nothing keeps two pairings of nerve-run apart without
             // Landlock.
             "pairings_warning": self.pairings_warning(&cfg),
+            // That the pairings' commands see each other's processes.
+            "processes_warning": self.processes_warning(),
             "centers": centers,
             "relay": self.relay.status(&cfg),
             "ui": self.ui_status(&cfg),
@@ -2082,6 +2160,12 @@ impl Daemon {
             .cgroups
             .unwrap_or_else(|| crate::cgroup::Cgroups::find().map(Arc::new));
         let endpoint = opts.owners.filter(|_| opts.ctl);
+        let own_proc = opts
+            .own_proc
+            .unwrap_or_else(|| own_proc_here(opts.exe.as_deref()));
+        let apparmor_missing = opts
+            .apparmor_missing
+            .unwrap_or_else(|| service && !own_proc && apparmor_missing_here());
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
@@ -2094,9 +2178,12 @@ impl Daemon {
                 service,
             ),
             net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
+            own_proc,
+            apparmor_missing,
             hold: opts.hold,
             full_rights,
             cgroups,
+            audit: store.audit().clone(),
             store: Mutex::new(store),
             changed,
             centers: Mutex::default(),
@@ -2223,7 +2310,7 @@ impl Daemon {
     }
 
     /// The config as the daemon holds it now.
-    pub fn config(&self) -> NodeConfig {
+    pub fn config(&self) -> Arc<NodeConfig> {
         self.shared.config()
     }
 
@@ -3194,7 +3281,7 @@ mod every_platform {
         o.owner = Some("alice".into());
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
-        let mut cfg = s.config();
+        let mut cfg = NodeConfig::clone(&s.config());
         cfg.machine.user = Some("alice".into());
         let named = |mode: Mode, as_owner: bool| {
             s.account_name(
@@ -3424,7 +3511,7 @@ mod tests {
     #[tokio::test]
     async fn the_keyring_folder_is_the_nodes_own_with_the_keyring() {
         let (d, daemon) = daemon().await;
-        let mut cfg = daemon.config();
+        let mut cfg = NodeConfig::clone(&daemon.config());
         let keyrings = d.path().join(".local/share/keyrings");
         assert_eq!(daemon.shared.own(&cfg), daemon.paths().own());
         cfg.machine.secret_storage = SecretStorage::Keyring;
@@ -3455,7 +3542,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[]);
+        let p = nerve_policy::protected::Protected::new(
+            &nerve_policy::protected::Platform::Unix,
+            &home,
+            &own,
+            &policy.protected,
+        );
+        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[], &p);
         let keyrings = std::fs::canonicalize(&keyrings).unwrap();
         for set in [&spec.read, &spec.write, &spec.exec] {
             assert!(!set.iter().any(|r| keyrings.starts_with(r)), "{set:?}");
@@ -3515,6 +3608,54 @@ mod tests {
         opts.ctl = false;
         opts.log = Some(log.clone());
         opts
+    }
+
+    /// A decision goes to the audit log while the settings store is held:
+    /// an entry waits only for the log's own lock.
+    #[tokio::test]
+    async fn an_audit_entry_does_not_wait_for_the_store() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let held = lock(&s.store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = s.clone();
+        std::thread::spawn(move || {
+            writer.audit(&Entry {
+                ts: 1,
+                center: "lab".into(),
+                cap: "fs".into(),
+                action: "read".into(),
+                target: "/w/a".into(),
+                decision: "allowed".into(),
+                code: None,
+                session: None,
+                reason: None,
+                command: None,
+                args: None,
+            });
+            let _ = tx.send(());
+        });
+        let written = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        drop(held);
+        assert!(written, "the entry waited for the store");
+        let read = s.audit.read().unwrap();
+        assert!(read.iter().any(|e| e["target"] == "/w/a"), "{read:?}");
+        daemon.stop().await;
+    }
+
+    /// A call reads the config the store holds, not a copy of it: every
+    /// read until the next change is the same one.
+    #[tokio::test]
+    async fn the_config_is_read_without_a_copy() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let (a, b) = (daemon.config(), daemon.shared.config());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(std::ptr::eq(&*a, lock(&daemon.shared.store).config()));
+        daemon.stop().await;
     }
 
     /// A stop sent before the daemon's tasks first ran is not lost: a stop
@@ -3967,7 +4108,7 @@ mod tests {
         let folders = || s.config().centers[0].policy.folders.len();
         let before = s.webui.lock_count();
         // The panic.
-        let mut locked = s.config();
+        let mut locked = NodeConfig::clone(&s.config());
         locked.locked = true;
         let Reply::Ok(_) = control(
             &s,
@@ -4532,6 +4673,62 @@ mod tests {
         }
     }
 
+    /// Which commands get a /proc of their own: the ones held apart from
+    /// the owner, by Landlock or as nerve-run (also without Landlock, the
+    /// half the tests of a node by hand cannot start), and only where the
+    /// shim can make one (round 1, spec/security 4).
+    #[test]
+    fn a_command_held_apart_gets_a_proc_of_its_own() {
+        use super::exec_has_own_proc as has;
+        assert!(has(true, true, false), "folder mode, Landlock");
+        assert!(has(true, false, true), "nerve-run without Landlock");
+        assert!(has(true, true, true));
+        assert!(!has(true, false, false), "the owner's own rights");
+        assert!(!has(false, true, true), "no namespace here");
+    }
+
+    /// The status says where the pairings' commands see each other's
+    /// processes, on the installed node and on one run by hand: no /proc of
+    /// their own here (#199). A node where the shim makes one says nothing
+    /// of it. Where the system holds user namespaces back and the installed
+    /// node is not in its profile (an `update` from before the profile), it
+    /// names `install`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_says_where_the_pairings_see_each_others_processes() {
+        for (service, own_proc, missing, told) in [
+            (true, false, false, Some(PROCESSES_SHARED)),
+            (true, true, false, None),
+            (false, false, false, Some(PROCESSES_SHARED)),
+            (false, true, false, None),
+            (true, false, true, Some(PROCESSES_NO_PROFILE)),
+            (true, true, true, None),
+        ] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            o.own_proc = Some(own_proc);
+            o.apparmor_missing = Some(missing);
+            o.confinement = Some(Confinement {
+                landlock_abi: Some(6),
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let st = daemon.status();
+            assert_eq!(
+                st["processes_warning"].as_str(),
+                told,
+                "service {service}, own /proc {own_proc}, profile missing {missing}: {st}"
+            );
+            daemon.stop().await;
+        }
+        assert!(PROCESSES_NO_PROFILE.contains("sudo nerve-node install"));
+    }
+
     /// The installed node's status says that nothing keeps its pairings of
     /// nerve-run apart without Landlock once there are two; with Landlock,
     /// with one, and on a node run by hand it says nothing of it.
@@ -4680,7 +4877,7 @@ mod tests {
             );
             // The folders of the folder pairing, then of the user pairing.
             let pairings_each = |f: Vec<Folder>, u: Vec<Folder>| {
-                let mut cfg = s.config();
+                let mut cfg = NodeConfig::clone(&s.config());
                 cfg.centers = [("f", Mode::Folder, f), ("u", Mode::User, u)]
                     .into_iter()
                     .map(|(name, mode, folders)| nerve_policy::CenterEntry {

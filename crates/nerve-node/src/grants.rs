@@ -680,7 +680,7 @@ impl RecordLock {
 /// record that cannot be read stops the sync, since the grants in it could
 /// not be found again.
 pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
-    let _one = SYNC.lock().unwrap_or_else(|p| p.into_inner());
+    let _one = nerve_transport::sync::turn(&SYNC);
     let out = Synced::default();
     // Without a state folder nothing is recorded, and with nothing wanted
     // there is nothing to do: no folder and no lock file are made for it

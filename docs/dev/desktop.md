@@ -390,6 +390,16 @@ that is not your Nerve holds the name the window listens by; on Linux,
 when `$XDG_RUNTIME_DIR` is not a folder only you may open), each start
 opens a window of its own and says so.
 
+The desktop starts the app with the link on its command line, which every
+account on the machine can read while the process lives (`/proc/<pid>/cmdline`
+on Linux, the process list on Windows), and another pairing's command could
+pair a machine of its own with the code. So the app takes it off at once
+(#198): that start hands the link on stdin to a new start of the program
+(`instance::hand_on`, the argument `--link-on-stdin`) and ends; the new
+start goes on as a start with the link would, to the open window or to a
+window of its own, and holds no link on its command line. A software rerun
+after a failed window hands the link on the same way.
+
 ## Update
 
 **Settings**, **App**, **Update…**: from the latest release
