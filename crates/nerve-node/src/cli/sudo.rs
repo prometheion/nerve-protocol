@@ -5,8 +5,8 @@ use super::*;
 
 /// `nerve-node sudo`, `sudo on|off`. The password lives in the running
 /// daemon only, so `on` needs one; `off` without a daemon edits the file.
-/// Windows has no control socket: there the password is kept with DPAPI
-/// for the service (crate::winsudo).
+/// On Windows the service also keeps it with DPAPI, and the CLI talks to it
+/// over its control pipe (crate::winsudo).
 pub(super) async fn sudo_cmd(
     paths: &NodePaths,
     c: Option<SudoCmd>,
@@ -64,18 +64,20 @@ pub(super) async fn sudo_cmd(
     #[cfg(windows)]
     {
         use crate::win_host::WinHost;
+        let call = async |m: &str, p: Value| node_call(paths, m, p).await;
         match c {
             SudoCmd::On => {
                 let installed = crate::service::is_service_node(paths);
-                crate::winsudo::on(paths, &WinHost, installed, out).await
+                crate::winsudo::on(paths, &WinHost, installed, call, out).await
             }
-            SudoCmd::Off => crate::winsudo::off(paths, &WinHost, out).await,
+            SudoCmd::Off => crate::winsudo::off(paths, &WinHost, call, out).await,
         }
     }
 }
 
-/// Whether sudo is on: the running node holds the password (on Windows the
-/// signed config says so and the password is kept, crate::winsudo).
+/// Whether sudo is on: the running node holds the password (on Windows,
+/// with no node running, the signed config says so and the password is
+/// kept, crate::winsudo).
 pub(super) async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
     #[cfg(unix)]
     {
@@ -88,7 +90,10 @@ pub(super) async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
     }
     #[cfg(windows)]
     {
-        crate::winsudo::status(paths)
+        crate::winsudo::status(paths, async |m: &str, p: Value| {
+            node_call(paths, m, p).await
+        })
+        .await
     }
 }
 

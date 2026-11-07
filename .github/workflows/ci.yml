@@ -360,9 +360,6 @@ jobs:
       # as such in the output. The tests below fail on Windows today and are
       # skipped by name, so that this job is green and a new failure shows;
       # remove each skip when its test is fixed:
-      # - the_daemon_logs_its_links_changes_and_failed_calls never sees the
-      #   settings change logged on Windows, a run on a Windows test machine
-      #   fails the same way (issue #99);
       # - folder_mode_confines_commands_to_their_folders,
       #   windows_folder_grants_follow_the_folders and
       #   an_appcontainer_moves_only_what_it_reads_and_writes fail on the
@@ -385,7 +382,6 @@ jobs:
           TEMP: ${{ runner.temp }}
         run: >-
           cargo test --locked --workspace --no-fail-fast --
-          --skip the_daemon_logs_its_links_changes_and_failed_calls
           --skip folder_mode_confines_commands_to_their_folders
           --skip windows_folder_grants_follow_the_folders
           --skip powershell_runs_in_an_appcontainer

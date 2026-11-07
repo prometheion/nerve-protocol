@@ -10,17 +10,9 @@ use crate::broker;
 use crate::{Store, Tone};
 
 impl Ctl {
-    /// The app ends: so does what follows the audit or the log. A restart
-    /// the app said would come runs now, while the app still has the rights
-    /// for it, or the service would go on without the change; its answer,
-    /// `None` when none waited.
-    pub fn end(&self) -> Option<Result<(), String>> {
+    /// The app ends: so does what follows the audit or the log.
+    pub fn end(&self) {
         self.stop_follow();
-        if !self.restart_waits.replace(false) {
-            return None;
-        }
-        self.restart_timer.stop();
-        Some(self.runner().run(&["service", "restart"]).map(|_| ()))
     }
 
     /// The installed service's state, from `status`, which needs no rights;
@@ -41,34 +33,6 @@ impl Ctl {
         });
     }
 
-    /// Restarts the installed service for the changes that wait for it
-    /// ([`Ctl::restart_for`]).
-    pub(super) fn restart_service(self: &Rc<Self>) {
-        self.restart_waits.set(false);
-        self.restart_timer.stop();
-        self.with_store(|s| s.set_busy("service-restart".into()));
-        self.command(
-            vec!["service".into(), "restart".into()],
-            None,
-            |c, answer| {
-                c.with_store(|s| s.set_busy(SharedString::new()));
-                match answer {
-                    Ok(_) => {
-                        c.with_store(|s| s.set_restart_due(false));
-                        c.toast("The node restarted and took the change.", Tone::Ok);
-                    }
-                    // The Overview still offers the restart.
-                    Err(e) => c.toast(
-                        format!("The node did not restart: {e}. Restart it on the Overview."),
-                        Tone::Danger,
-                    ),
-                }
-                c.refresh_service();
-                c.refresh_status();
-            },
-        );
-    }
-
     /// Starts, stops or restarts the installed service.
     fn service_action(self: &Rc<Self>, what: &str) {
         let key = format!("service-{what}");
@@ -77,10 +41,6 @@ impl Ctl {
             "stop" => "The service stopped: the node ended its links.",
             _ => "The service restarted, and the node answers.",
         };
-        // The owner's own start, stop or restart replaces one the app
-        // planned: a stopped service stays stopped.
-        self.restart_waits.set(false);
-        self.restart_timer.stop();
         self.with_store(|s| s.set_busy(key.as_str().into()));
         self.command(
             vec!["service".into(), what.to_string()],
@@ -88,11 +48,7 @@ impl Ctl {
             move |c, answer| {
                 c.with_store(|s| s.set_busy(SharedString::new()));
                 match answer {
-                    Ok(_) => {
-                        // A start takes every change the node waited with.
-                        c.with_store(|s| s.set_restart_due(false));
-                        c.toast(said, Tone::Ok);
-                    }
+                    Ok(_) => c.toast(said, Tone::Ok),
                     Err(e) => c.toast(e, Tone::Danger),
                 }
                 c.refresh_service();
@@ -174,10 +130,7 @@ impl Ctl {
     fn setup_run(self: &Rc<Self>, args: Vec<String>, next: i32) {
         self.with_store(|s| s.set_setup_busy(true));
         self.command(args, None, move |c, answer| match answer {
-            Ok(v) => {
-                c.restart_for(&v);
-                c.setup_go(next)
-            }
+            Ok(_) => c.setup_go(next),
             Err(e) => {
                 c.with_store(|s| {
                     s.set_setup_busy(false);
@@ -209,16 +162,13 @@ impl Ctl {
                 self.setup_run(args, 2);
             }
             _ => {
-                let (state, due) = self
-                    .with_store(|s| (s.get_service_state().to_string(), s.get_restart_due()))
+                let state = self
+                    .with_store(|s| s.get_service_state().to_string())
                     .unwrap_or_default();
                 self.with_store(|s| s.set_setup_open(false));
-                // The service takes the steps' changes when it starts: it
-                // starts, or starts again.
-                match state.as_str() {
-                    "stopped" => self.service_action("start"),
-                    "running" if due => self.service_action("restart"),
-                    _ => {}
+                // A stopped service takes the steps' changes when it starts.
+                if state == "stopped" {
+                    self.service_action("start");
                 }
             }
         }
@@ -230,18 +180,10 @@ impl Ctl {
         self.setup_go(1);
     }
 
-    /// The steps closed before their end, with × or Escape: the restart
-    /// their changes wait for runs now, as at their end.
+    /// The steps closed before their end, with × or Escape. A running node
+    /// took their changes already.
     fn setup_close(self: &Rc<Self>) {
-        let (running, due) = self
-            .with_store(|s| {
-                s.set_setup_open(false);
-                (s.get_service_state() == "running", s.get_restart_due())
-            })
-            .unwrap_or_default();
-        if running && due {
-            self.restart_service();
-        }
+        self.with_store(|s| s.set_setup_open(false));
     }
 
     /// One step back. The pairing's confirmation goes back to its link; the

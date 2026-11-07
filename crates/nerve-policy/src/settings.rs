@@ -548,13 +548,23 @@ impl SettingsStore {
     /// have written the file meanwhile ([`Secrets::begin`]), a file that is
     /// no longer that version is a conflict and nothing is written: a
     /// change made on the old file would undo the other one, and with it a
-    /// move of the keys that one made.
+    /// move of the keys that one made. The node's own store, which no other
+    /// process writes while it runs, refuses a file ahead of it the same
+    /// way: that file holds a change the owner made behind the running node
+    /// (a CLI that found no node), and a write of a center or a timed mode
+    /// would undo it, a panic included.
     fn write(&mut self, c: &NodeConfig, opened: Option<u64>) -> Result<(), SetError> {
         let shared = self.secrets.begin().map_err(SetError::Io)?;
         let r = (|| {
-            if let Some(opened) = opened.filter(|_| shared) {
-                let now = self.version_on_disk().map_err(SetError::Io)?;
-                if now != opened {
+            if let Some(opened) = opened {
+                // A file the node cannot read is no change ahead of it; the
+                // write then says what is wrong with it.
+                let now = match self.version_on_disk() {
+                    Ok(v) => v,
+                    Err(e) if shared => return Err(SetError::Io(e)),
+                    Err(_) => 0,
+                };
+                if (shared && now != opened) || now > opened {
                     return Err(SetError::Conflict { current: now });
                 }
             }
@@ -2697,10 +2707,11 @@ mod tests {
     }
 
     /// Another writer saved the file while a node holds its config in memory
-    /// (the CLI on Windows, which has no socket to ask the node), and raised
-    /// the record by more than one. The node's own next save must go above
-    /// the record, or its next start refuses the node's own file as an
-    /// earlier one put back, whatever kind of write it was.
+    /// (a CLI that found no node), and raised the record by more than one.
+    /// The node saves nothing over that file; once it took it, its own next
+    /// save goes above the record, or its next start would refuse the
+    /// node's own file as an earlier one put back, whatever kind of write it
+    /// was.
     #[test]
     fn a_running_nodes_save_goes_above_the_record_another_writer_raised() {
         type Save = fn(&mut SettingsStore) -> Result<(), String>;
@@ -2735,6 +2746,8 @@ mod tests {
             bump(&mut cli);
             let newest = bump(&mut cli);
             assert!(newest > running.version() + 1, "{what}");
+            assert!(save(&mut running).is_err(), "{what}");
+            running.reload().unwrap();
             save(&mut running).unwrap_or_else(|e| panic!("{what}: {e}"));
             assert!(running.version() > newest, "{what}");
             assert_eq!(recorded(d.path()), Some(running.version()), "{what}");
@@ -2943,5 +2956,58 @@ mod tests {
         // An unchanged config is no new version.
         let same = s.config().clone();
         assert_eq!(s.set_local(same, None).unwrap(), v + 1);
+    }
+
+    /// A store that no other process writes (the running node's) refuses
+    /// every write while the file holds a newer version, a change made
+    /// behind it: a center's write, a mark, the sudo switch or a local
+    /// change would undo it. Once the file is taken, writes go on.
+    #[test]
+    fn a_write_never_undoes_a_newer_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        let ahead = other
+            .update(|c| {
+                c.locked = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(ahead > node.version());
+        let conflict = Err(SetError::Conflict { current: ahead });
+        assert_eq!(
+            node.update(|c| {
+                c.limits.max_running = 7;
+                Ok(())
+            }),
+            conflict
+        );
+        assert_eq!(node.set_sudo(Writer::Center("home"), Sudo::On), conflict);
+        assert!(node.mark(|c| c.centers[0].unknown = true).is_err());
+        let (mut doc, v) = (doc(&node), node.version());
+        doc["policy"]["caps"] = json!({"exec": "off"});
+        assert_eq!(
+            node.set_center_document("home", doc, v, |_| false, host, &|_, _| None),
+            conflict
+        );
+        // The file still holds the owner's change.
+        assert!(
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key"))
+                .unwrap()
+                .locked
+        );
+        // Taken, it is the store's, and the next write goes on from it.
+        assert!(node.reload().unwrap());
+        node.update(|c| {
+            c.limits.max_running = 7;
+            Ok(())
+        })
+        .unwrap();
+        assert!(node.config().locked);
     }
 }

@@ -334,17 +334,9 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
     };
     let (cfg, _) = read_config(paths).await?;
     let r = &cfg.relay;
-    #[cfg(unix)]
-    let live = match nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await {
-        Ok(v) => Some(v["relay"].clone()),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
-        Err(e) => return Err(e),
-    };
-    // Windows: the control pipe answers `status` too. Only a pipe
-    // that is not there means no node runs; any other error is
-    // said, not taken for "no tunnel".
-    #[cfg(windows)]
-    let live = match crate::pipe::call(paths, "status", json!({})).await {
+    // Only a node that is not there means no node runs; any other error
+    // is said, not taken for "no tunnel".
+    let live = match node_call(paths, "status", json!({})).await {
         Ok(v) => Some(v["relay"].clone()),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
         Err(e) => return Err(format!("cannot ask the running node: {e}")),
@@ -411,25 +403,15 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
 
 /// Says when a relay change is in force. A running node that took it
 /// applies it at once: `now` says what that does ("its tunnels end"), for
-/// the changes that take something away. On Windows the CLI writes the file
-/// and the running node reads it at its next start, so until then that node
-/// goes on by its old relay settings, for new tunnels as well as open ones:
-/// a removed or replaced token still opens tunnels, and a new one is
-/// refused. With no node running there is nothing to say.
+/// the changes that take something away. With no node running there is
+/// nothing to say.
 async fn relay_in_force(paths: &NodePaths, out: &mut dyn Write, now: Option<&str>) {
-    if daemon_answers(paths, false).await {
-        if let Some(what) = now {
-            let _ = writeln!(out, "{what} now");
-        }
-    } else if cfg!(windows) {
-        let _ = writeln!(out, "{RELAY_AT_NEXT_START}");
-        waits_for_next_start();
+    if daemon_answers(paths).await
+        && let Some(what) = now
+    {
+        let _ = writeln!(out, "{what} now");
     }
 }
-
-/// [`relay_in_force`] on Windows, where a running node has not taken the
-/// change.
-pub(super) const RELAY_AT_NEXT_START: &str = "a running node takes this change only at its next start, and until then works by its old relay settings: a removed or replaced token still opens new tunnels, the tunnels it carries stay, and a new token or node is refused. Restart it (Restart on the app's Overview) to apply the change now";
 
 /// Refuses a `--center` list that names a center this node is not paired
 /// with, or one twice.

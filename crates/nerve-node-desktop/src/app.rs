@@ -162,11 +162,6 @@ pub struct Ctl {
     /// `cap` as the Permissions page last read it for its center: the
     /// arguments its rule fields offer (view::rule_hint).
     rule_listing: RefCell<Value>,
-    /// Restarts the service a moment after a change it takes only then.
-    restart_timer: slint::Timer,
-    /// A restart the app said would come and that has not run yet; the
-    /// app's end runs it ([`Ctl::end`]).
-    restart_waits: Cell<bool>,
     /// Asks the desktop now and then whether it is dark, while the app
     /// follows it (crate::scheme).
     scheme_timer: slint::Timer,
@@ -240,13 +235,16 @@ fn lines(v: &Value) -> impl Iterator<Item = &str> {
         .filter_map(Value::as_str)
 }
 
-/// Whether the node takes what a change made only at its next start: the
-/// installed node on Windows takes nothing but folder changes while it
-/// runs, and a node that does not run takes everything when it starts
-/// (`"next_start"` of nerve-node's `--json`).
+/// Whether the node takes what a change made only at its next start: a
+/// node that does not run takes it when it starts (`"next_start"` of
+/// nerve-node's `--json`). A running node takes every change at once, on
+/// Windows over its control pipe as elsewhere over its socket.
 fn waits_for_start(v: &Value) -> bool {
     v["next_start"] == true
 }
+
+/// What the app says when the running node took the lock.
+const LOCKED: &str = "Locked: every link ended, and nothing runs until you unlock.";
 
 /// What a change said, without the line about the next start, which
 /// [`Ctl::done`] says in words of its own.
@@ -264,19 +262,6 @@ fn and_then(said: String, then: &str) -> String {
     } else {
         format!("{said}\n{then}")
     }
-}
-
-/// What the app does about a change the node takes only at its next start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Restart {
-    /// The node took it, or it changed nothing.
-    No,
-    /// The service runs: the app restarts it in a moment.
-    Soon,
-    /// The service runs, and the first-run steps restart it at their end.
-    AtEnd,
-    /// The node does not run, and takes it when it starts.
-    AtStart,
 }
 
 impl Ctl {
@@ -318,8 +303,6 @@ impl Ctl {
             cap_tried: Cell::new(false),
             caps_listing: RefCell::new(Value::Null),
             rule_listing: RefCell::new(Value::Null),
-            restart_timer: slint::Timer::default(),
-            restart_waits: Cell::new(false),
             scheme_timer: slint::Timer::default(),
             desktop_dark: Cell::new(None),
             scheme_source: Cell::new(
@@ -627,10 +610,8 @@ impl Ctl {
     }
 
     /// Says that a change is made: `said`, or what the command said when
-    /// `said` is empty. When the node takes the change only at its next
-    /// start, the app restarts the running service for it (a person who
-    /// changed a setting expects it to count), and says so; a node that
-    /// does not run takes it when it starts.
+    /// `said` is empty, and when no node runs, that it takes the change when
+    /// it starts.
     fn done(self: &Rc<Self>, v: &Value, said: impl Into<String>) {
         let mut said = said.into();
         if said.is_empty() {
@@ -641,71 +622,13 @@ impl Ctl {
         let warned = lines(v)
             .any(|l| l.starts_with("Warning") || l.starts_with("folder mode runs no command"));
         let tone = if warned { Tone::Warn } else { Tone::Ok };
-        match self.restart_for(v) {
-            Restart::No | Restart::AtEnd => self.toast(said, tone),
-            Restart::Soon => {
-                self.toast(
-                    and_then(said, "The node restarts in a moment to take it."),
-                    tone,
-                );
-                self.restart_soon();
-            }
-            Restart::AtStart => self.toast(
+        if waits_for_start(v) {
+            self.toast(
                 and_then(said, "The node takes it when it starts."),
                 Tone::Warn,
-            ),
-        }
-    }
-
-    /// What a change's answer `v` asks of the running service: when the
-    /// node takes it only at its next start, a restart, [`Ctl::restart_soon`]
-    /// after the change is said, or at the end of the first-run steps while
-    /// they are open. Until it restarts, the Overview says that changes wait
-    /// for it.
-    fn restart_for(&self, v: &Value) -> Restart {
-        if !waits_for_start(v) {
-            return Restart::No;
-        }
-        let Some((running, steps)) =
-            self.with_store(|s| (s.get_service_state() == "running", s.get_setup_open()))
-        else {
-            return Restart::No;
-        };
-        if !running {
-            return Restart::AtStart;
-        }
-        self.with_store(|s| s.set_restart_due(true));
-        if steps {
-            return Restart::AtEnd;
-        }
-        Restart::Soon
-    }
-
-    /// Restarts the service a moment after the last change that needs it,
-    /// so that a few changes in a row restart it once. Should the app end
-    /// before, its end runs it ([`Ctl::end`]).
-    fn restart_soon(self: &Rc<Self>) {
-        self.restart_waits.set(true);
-        // No timers without the event loop: tests call [`Ctl::tick`].
-        if self.exec == Exec::Threads {
-            let c = Rc::downgrade(self);
-            self.restart_timer.start(
-                slint::TimerMode::SingleShot,
-                Duration::from_secs(2),
-                move || {
-                    if let Some(c) = c.upgrade() {
-                        c.restart_service();
-                    }
-                },
             );
-        }
-    }
-
-    /// What the timers do when their moment comes, for tests, which have no
-    /// event loop: the restart that waits.
-    pub fn tick(self: &Rc<Self>) {
-        if self.restart_waits.get() {
-            self.restart_service();
+        } else {
+            self.toast(said, tone);
         }
     }
 
@@ -968,8 +891,6 @@ impl Ctl {
                     let steps = c.with_store(|s| s.get_setup_open()).unwrap_or(false);
                     c.with_store(|s| s.set_pair_open(false));
                     if steps {
-                        // The service links to it when the steps end.
-                        c.restart_for(&v);
                         c.setup_paired(&name);
                     } else {
                         c.done(
@@ -1189,16 +1110,47 @@ impl Ctl {
         });
     }
 
+    /// Panic, or unlock. A running node takes the lock at once and ends
+    /// every link and command. When it does not take it (its pipe or socket
+    /// fails), the app stops the installed service, which ends them as
+    /// well, then saves the lock for its next start; "ended" is said only
+    /// once the node took the lock or stopped.
     fn lock(self: &Rc<Self>, lock: bool) {
-        let (args, said) = if lock {
-            (
-                "panic",
-                "Locked: every link ended, and nothing runs until you unlock.",
-            )
-        } else {
-            ("unlock", "Unlocked: the node links and works again.")
-        };
-        self.change("node", vec![args.into()], said.into());
+        if !lock {
+            let said = "Unlocked: the node links and works again.";
+            self.change("node", vec!["unlock".into()], said.into());
+            return;
+        }
+        self.with_store(|s| s.set_busy("node".into()));
+        self.command(vec!["panic".into()], None, |c, answer| {
+            c.with_store(|s| s.set_busy(SharedString::new()));
+            match answer {
+                Ok(v) => c.done(&v, LOCKED),
+                Err(e) if c.service.get() => c.stop_for_panic(e),
+                Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
+            }
+            c.refresh_status();
+        });
+    }
+
+    /// The running service did not take the lock (`why`): it stops, and the
+    /// lock is then saved for its next start, where no node takes it.
+    fn stop_for_panic(self: &Rc<Self>, why: String) {
+        self.with_store(|s| s.set_busy("service-stop".into()));
+        let stop = vec!["service".into(), "stop".into()];
+        self.command(stop, None, move |c, stopped| {
+            c.with_store(|s| s.set_busy(SharedString::new()));
+            if let Err(e) = stopped {
+                c.toast(view::panic_not_stopped(&why, &e), Tone::Danger);
+                c.refresh_service();
+                return;
+            }
+            c.command(vec!["panic".into()], None, |c, saved| {
+                c.toast(view::panic_stopped(saved.err().as_deref()), Tone::Warn);
+                c.refresh_service();
+                c.refresh_status();
+            });
+        });
     }
 
     /// Makes this window the user's one window: what a later start asks
@@ -1442,9 +1394,7 @@ pub fn run(start: crate::instance::Asked) -> Result<(), Failed> {
         })
         .and_then(|()| window.hide())
         .map_err(|e| Failed::Window(e.to_string()));
-    if let Some(Err(e)) = ctl.end() {
-        eprintln!("The node did not restart for the last change: {e}");
-    }
+    ctl.end();
     // A start in software (crate::deps) is the user's one window then.
     ctl.instance.borrow_mut().take();
     r

@@ -209,10 +209,8 @@ impl Shared {
         // A logon takes a moment; it does not hold up the other links.
         tokio::task::spawn_blocking(move || {
             let host = crate::win_host::WinHost;
-            crate::winsudo::check(&host, account.as_ref(), pw.expose())?;
-            let name = &account.as_ref().expect("checked").name;
-            crate::winsudo::keep(&paths, &host, name, pw.expose())?;
-            tracing::warn!("{}", crate::winsudo::warning(name));
+            let name = crate::winsudo::take(&paths, &host, account.as_ref(), pw.expose())?;
+            tracing::warn!("{}", crate::winsudo::warning(&name));
             Ok::<(), String>(())
         })
         .await
