@@ -357,20 +357,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The tests marked `#[ignore = "<reason>"]` stay ignored and are listed
-      # as such in the output. The tests below fail on Windows today and are
-      # skipped by name, so that this job is green and a new failure shows;
-      # remove each skip when its test is fixed:
-      # - folder_mode_confines_commands_to_their_folders,
-      #   windows_folder_grants_follow_the_folders and
-      #   an_appcontainer_moves_only_what_it_reads_and_writes fail on the
-      #   hosted runner (the first two with "no answer within 15s"). The cause
-      #   is not known yet. They pass on the Windows test VM (issue #106);
-      # - powershell_runs_in_an_appcontainer,
-      #   powershell_changes_to_whole_paths_in_an_appcontainer and
-      #   an_appcontainer_keeps_write_and_execute_apart_from_read fail on the
-      #   hosted runner (the log shows PowerShell cmdlets "not recognized" in
-      #   the container). The cause is not known yet. They pass on the Windows
-      #   test VM (issue #105).
+      # as such in the output. No test is skipped by name.
       # TMP and TEMP point at the runner's temp folder, a long-name path
       # (D:\a\_temp). The default is C:\Users\RUNNER~1\AppData\Local\Temp, and
       # tempfile hands out that 8.3 short form: a test that compares it with the
@@ -382,12 +369,6 @@ jobs:
           TEMP: ${{ runner.temp }}
         run: >-
           cargo test --locked --workspace --no-fail-fast --
-          --skip folder_mode_confines_commands_to_their_folders
-          --skip windows_folder_grants_follow_the_folders
-          --skip powershell_runs_in_an_appcontainer
-          --skip powershell_changes_to_whole_paths_in_an_appcontainer
-          --skip an_appcontainer_keeps_write_and_execute_apart_from_read
-          --skip an_appcontainer_moves_only_what_it_reads_and_writes
           --show-output 2>&1 | tee "$RUNNER_TEMP/tests.log"
       - name: Skipped tests
         if: success() || failure()

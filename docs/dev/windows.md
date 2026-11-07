@@ -336,6 +336,16 @@ folders.
 | Read and run programs | the Windows folder and Program Files |
 | Read, write, run programs | each folder by its rights |
 
+- Windows PowerShell in the container loads modules from its own folders
+  only, `%ProgramFiles%\WindowsPowerShell\Modules` and
+  `%SystemRoot%\system32\WindowsPowerShell\v1.0\Modules`, whatever the
+  machine's `PSModulePath` holds, and uses no module analysis cache of the
+  machine's (`PSModuleAnalysisCachePath`). Other entries there, PowerShell
+  7's folders, those of SQL Server or Azure tools and of other accounts,
+  kept it from finding its own cmdlets and made it take half a minute to
+  start. A module installed for all users (`Install-Module -Scope
+  AllUsers`) is in the first folder.
+
 - The node gives each folder a permission entry for the pairing's container,
   with the folder's rights. Everything below the folder inherits it. Windows
   keeps the permissions of each file and folder, so the node writes the

@@ -17,6 +17,7 @@ Built and tested, not released: the releases before 0.1.0 publish the Linux prog
 - Panic on Windows locks the running node at once. When the node does not take it, the app stops the service, says that every link ended only once it has stopped, and saves the lock for its next start.
 - The running node saves nothing over a `node.toml` newer than the config it runs (a change made while it was thought stopped), on Linux too: a center's write, a timed mode or a key rotation can no longer undo such a change, a panic included.
 - On Windows each command is held to its limits (Settings › Limits › Each command) by its job object, as by its cgroup on Linux: past its memory the node ends it and the result says `killed: "memory"`, its CPU is capped (the limit stays in percent of one CPU), and it starts no more processes past its limit, which on Windows counts processes, not threads. `status` and the app say the limits hold.
+- In folder mode on Windows, PowerShell loads modules only from its own folders (Program Files' and Windows'), so it finds its cmdlets and starts at once on a machine whose module path holds PowerShell 7's, SQL Server's or Azure's folders.
 
 ## 0.0.8
 

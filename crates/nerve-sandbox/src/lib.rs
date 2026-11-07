@@ -1041,6 +1041,44 @@ pub mod acl {
         }
         out
     }
+
+    /// The environment a command starts with in the container, from this
+    /// process's `vars`: Windows PowerShell gets a module path of its own
+    /// folders only, `%ProgramFiles%\WindowsPowerShell\Modules` and
+    /// `%SystemRoot%\system32\WindowsPowerShell\v1.0\Modules`, which every
+    /// AppContainer reads, and no module analysis cache of the machine's
+    /// (`PSModuleAnalysisCachePath`). A machine's module path often holds
+    /// more: PowerShell 7's folders, which break Windows PowerShell's own
+    /// cmdlets, folders of tools (SQL Server, Azure) and of other accounts.
+    /// A container reads few of them, and its PowerShell then took half a
+    /// minute to start and found none of its own cmdlets (#105, #106). The
+    /// rest of the environment stays as it is.
+    pub fn container_env(
+        vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let vars: Vec<_> = vars.into_iter().collect();
+        let named = |name: &str| {
+            vars.iter()
+                .find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_string_lossy().trim_end_matches('\\').to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let programs = named("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
+        let windows = named("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let modules = format!(
+            r"{programs}\WindowsPowerShell\Modules;{windows}\system32\WindowsPowerShell\v1.0\Modules"
+        );
+        let mut out: Vec<_> = vars
+            .into_iter()
+            .filter(|(k, _)| {
+                let k = k.to_string_lossy();
+                !k.eq_ignore_ascii_case("PSModulePath")
+                    && !k.eq_ignore_ascii_case("PSModuleAnalysisCachePath")
+            })
+            .collect();
+        out.push(("PSModulePath".into(), modules.into()));
+        out
+    }
 }
 
 #[cfg(windows)]
@@ -1121,11 +1159,12 @@ pub mod appcontainer {
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-        GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-        LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+        PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+        WaitForSingleObject,
     };
 
     use super::acl::{self, FileId, Found, Masks, command_line, entries};
@@ -2841,6 +2880,21 @@ pub mod appcontainer {
     /// process's environment, working folder, stdout and stderr, and the
     /// null device as its stdin; no other handle goes to it. Waits for it
     /// and returns its exit code.
+    /// `vars` as an environment block: each `name=value` ended by a NUL,
+    /// sorted by name as Windows keeps them, and a NUL at the end.
+    fn env_block(mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Vec<u16> {
+        vars.sort_by_key(|(k, _)| k.to_string_lossy().to_uppercase());
+        let mut block = Vec::new();
+        for (k, v) in vars {
+            block.extend(k.encode_wide());
+            block.push(u16::from(b'='));
+            block.extend(v.encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
     pub fn run(program: &Path, args: &[String], name: &str) -> io::Result<u32> {
         ensure_profile(name)?;
         let sid = Sid::derive(name)?;
@@ -2931,6 +2985,7 @@ pub mod appcontainer {
         let exe = find(program)?;
         let app = wide(exe.as_os_str());
         let mut line = wide(OsStr::new(&command_line(&exe.to_string_lossy(), args)));
+        let env = env_block(acl::container_env(std::env::vars_os()));
         let mut pi = PROCESS_INFORMATION::default();
         let started = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", exe.display()));
         // SAFETY: NUL-terminated strings, a writable command line, and the
@@ -2942,8 +2997,8 @@ pub mod appcontainer {
                 null(),
                 null(),
                 1,
-                EXTENDED_STARTUPINFO_PRESENT,
-                null(),
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                env.as_ptr().cast(),
                 null(),
                 &si.StartupInfo,
                 &mut pi,
@@ -3186,6 +3241,61 @@ mod tests {
 
     /// The command line reads back as the arguments given, by the rules of
     /// `CommandLineToArgvW`.
+    /// A container's command gets Windows PowerShell's own module folders
+    /// as its module path, whatever the machine's says, and no module
+    /// analysis cache; every other variable stays.
+    #[test]
+    fn the_container_gets_windows_powershells_own_module_path() {
+        let vars = |pairs: &[(&str, &str)]| -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect()
+        };
+        let got = acl::container_env(vars(&[
+            ("Path", r"C:\Windows\system32"),
+            (
+                "PSMODULEPATH",
+                r"C:\Program Files\PowerShell\7\Modules;C:\\Modules\az_15.6.1;C:\Users\packer\Documents\WindowsPowerShell\Modules",
+            ),
+            (
+                "PSModuleAnalysisCachePath",
+                r"C:\PSModuleAnalysisCachePath\ModuleAnalysisCache",
+            ),
+            ("ProgramFiles", r"D:\Programs\"),
+            ("SystemRoot", r"D:\WIN"),
+        ]));
+        let as_text: Vec<(String, String)> = got
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into()))
+            .collect();
+        let get = |name: &str| {
+            as_text
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            get("PSModulePath"),
+            [
+                r"D:\Programs\WindowsPowerShell\Modules;D:\WIN\system32\WindowsPowerShell\v1.0\Modules"
+            ]
+        );
+        assert!(get("PSModuleAnalysisCachePath").is_empty());
+        assert_eq!(get("Path"), [r"C:\Windows\system32"]);
+        assert_eq!(get("SystemRoot"), [r"D:\WIN"]);
+        // Without the two folders' variables, Windows' own places.
+        let bare = acl::container_env(Vec::new());
+        assert_eq!(
+            bare,
+            vars(&[(
+                "PSModulePath",
+                r"C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
+            )])
+        );
+    }
+
     #[test]
     fn windows_command_lines_quote_as_rust_does() {
         let line = |args: &[&str]| {
