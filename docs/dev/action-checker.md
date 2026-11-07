@@ -31,7 +31,7 @@ center where the owner watches the audit feed.
    and allows, by the setting.
 4. Otherwise `Pass`.
 
-The center (`center.rs`, `call_inner`) turns a `Refuse` into a `forbidden`
+The center (`center/calls.rs`, `call_inner`) turns a `Refuse` into a `forbidden`
 error for the harness and an audit entry, an `Allowed` into an audit entry, and
 a `Pass` into the call going on to the node. It checks first that the node is
 neither disabled nor offline: such a call is `unavailable` before the checker
@@ -64,7 +64,7 @@ until it is removed.
 
 A call of any capability, `fs` included, meets the `fs` entries with its path
 arguments: `CallInfo.paths` holds the values of the arguments the unit's
-schema marks `x-nerve-path` (`center.rs` `CheckerUnit`, from the catalog), and
+schema marks `x-nerve-path` (`center/calls.rs` `CheckerUnit`, from the catalog), and
 `Rule::matches_path` matches each against the `fs` entries for every action
 and for `fs.read` or `fs.write` by its mark, with the same `path_glob` and
 `normalize_path` as an `fs` call's path (so an `fs.read` entry holds `fs.grep`,
@@ -378,7 +378,7 @@ rule and a stalled connection are unit-tested against loopback fakes
 ready and stop (bounded below its own cap, and the port closed afterwards)
 against a fake `llama-server` script (`server::tests`, Unix). The center's
 side runs against the same fake and a release server that stalls on demand
-(`center::tests`, Unix): the model keeps running during an install's download
+(`center::checker_glue::tests`, Unix): the model keeps running during an install's download
 and after a failed one, a config save while the files are held starts
 nothing, and a Remove during a stalled download ends it for good.
 `tests/local_install.rs` has two `#[ignore]` end-to-end tests. The first
