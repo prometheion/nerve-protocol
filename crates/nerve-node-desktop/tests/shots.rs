@@ -1049,7 +1049,7 @@ fn every_page_light_and_dark() {
     // the same version.
     let install = window.global::<Install>();
     install.set_other_file("/home/alex/Downloads/nerve-node-desktop-x86_64-linux".into());
-    install.set_other_version("0.0.7".into());
+    install.set_other_version("0.0.9".into());
     install.set_other_newer(true);
     install.set_other_open(true);
     shots.take("other-copy-newer");

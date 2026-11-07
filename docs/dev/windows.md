@@ -1,6 +1,6 @@
 # Windows (until 0.1.0)
 
-Release 0.0.7 publishes the Linux programs only; Windows comes with 0.1.0.
+The releases before 0.1.0 publish the Linux programs only; Windows comes with 0.1.0.
 The user guide is Linux only until then. This page keeps everything it said
 about Windows, for the work toward 0.1.0. It comes back to the user guide,
 short, with that release.
