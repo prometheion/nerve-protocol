@@ -17,8 +17,23 @@ ring.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The passphrase prompt reads a line without echo from the console.
-windows-sys = { workspace = true, features = ["Win32_System_Console"] }
+# The passphrase prompt reads a line without echo from the console. The
+# services share the service control manager (Services), the folders' and
+# the pipe's DACL (Security, Authorization), the Event Log and its source
+# (EventLog, Registry), the pipe (Pipes, tokio's named pipes) and the job
+# object (JobObjects).
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Console",
+    "Win32_System_EventLog",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+] }
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

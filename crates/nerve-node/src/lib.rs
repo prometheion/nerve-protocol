@@ -19,10 +19,7 @@ pub mod daemon;
 pub mod descriptor;
 pub mod edition;
 pub mod entry;
-// The Event Log is Windows-only in use, and its message table is build.rs's;
-// both are tested everywhere.
-#[cfg_attr(not(test), allow(dead_code))]
-mod eventlog;
+use nerve_service::eventlog;
 pub mod exec;
 mod folder_change;
 pub mod fs;

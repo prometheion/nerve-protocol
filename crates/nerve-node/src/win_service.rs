@@ -17,10 +17,6 @@ use windows_sys::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT,
     ERROR_SERVICE_SPECIFIC_ERROR, NO_ERROR,
 };
-use windows_sys::Win32::System::EventLog::{
-    DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE, RegisterEventSourceW,
-    ReportEventW,
-};
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
     SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING,
@@ -116,45 +112,9 @@ fn log_path() -> String {
 }
 
 /// Writes an entry to the Windows Event Log (Application) as the source
-/// [`SOURCE`]. Every user of the machine may read that log, so the text is
-/// made one line, redacted and cut as a line of the node's log is.
+/// [`SOURCE`] (nerve_service::win::event::report).
 pub fn event(e: Event, text: &str) -> Result<(), String> {
-    let text = nerve_transport::log::scrub(text);
-    let source = wide(SOURCE);
-    // SAFETY: this machine and a NUL-terminated name; a source that is not
-    // registered still writes, to the Application log.
-    let h = unsafe { RegisterEventSourceW(std::ptr::null(), source.as_ptr()) };
-    if h.is_null() {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    let line = wide(&text);
-    let strings = [line.as_ptr()];
-    let kind = if e.is_error() {
-        EVENTLOG_ERROR_TYPE
-    } else {
-        EVENTLOG_INFORMATION_TYPE
-    };
-    // SAFETY: an open source, one NUL-terminated string and no data.
-    let ok = unsafe {
-        ReportEventW(
-            h,
-            kind,
-            0,
-            e.id(),
-            std::ptr::null_mut(),
-            1,
-            0,
-            strings.as_ptr(),
-            std::ptr::null(),
-        )
-    };
-    let err = std::io::Error::last_os_error();
-    // SAFETY: the handle from above, closed once.
-    unsafe { DeregisterEventSource(h) };
-    if ok == 0 {
-        return Err(err.to_string());
-    }
-    Ok(())
+    nerve_service::win::event::report(SOURCE, e.id(), e.is_error(), text)
 }
 
 /// Writes each panic to the Event Log, then does what the hook before did. A

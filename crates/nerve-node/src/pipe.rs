@@ -13,7 +13,7 @@
 //!   in effect, and gets none either.
 //! - It refuses remote clients (PIPE_REJECT_REMOTE_CLIENTS).
 //! - A caller in the job of a command the node runs is refused whatever it
-//!   asks ([`crate::job::from_a_command`]). That is for those the DACL lets
+//!   asks ([`nerve_service::win::job::from_a_command`]). That is for those the DACL lets
 //!   in: a sudo command (the account's elevated token), and every command
 //!   of a node run by hand, which runs as the node's own account.
 //!
@@ -33,7 +33,8 @@
 //! instance with FILE_FLAG_FIRST_PIPE_INSTANCE and keeps one open while it
 //! runs, so it never serves on a pipe someone else made; the CLI opens it
 //! for identification only and talks to it only when its owner is SYSTEM,
-//! the administrators or the node's account ([`trusted_owner`]).
+//! the administrators or the node's account
+//! ([`nerve_service::win::pipe::trusted_owner`]).
 
 /// How the CLI's error starts when the pipe of the node's name is another
 /// account's.
@@ -50,127 +51,35 @@ pub fn file_instead(e: &str, node_runs: impl FnOnce() -> bool) -> bool {
     e == nerve_transport::ctl::NOT_RUNNING || (e.starts_with(NOT_THE_NODES) && !node_runs())
 }
 
-/// The pipe's DACL in SDDL: full access for SYSTEM, the administrators and
-/// `own` (the SID of the node's account, `S-1-5-…`), nothing for anyone
-/// else. `P` keeps out anything inherited.
-pub fn dacl_text(own: &str) -> String {
-    let mut s = String::from("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-    if !matches!(own, "S-1-5-18" | "S-1-5-32-544") {
-        s.push_str(&format!("(A;;GA;;;{own})"));
-    }
-    s
-}
-
-/// Whether a pipe whose owner is `owner` may be the node's: SYSTEM, the
-/// administrators, or `node` (the account the node runs as). Another
-/// account cannot make an object one of them owns.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn trusted_owner<S: PartialEq>(owner: &S, system: &S, admins: &S, node: Option<&S>) -> bool {
-    owner == system || owner == admins || node.is_some_and(|n| owner == n)
-}
-
+pub use nerve_service::win::pipe::dacl_text;
 #[cfg(windows)]
-pub(crate) use sys::{Descriptor, check_owner, client_pid, instance};
+pub(crate) use nerve_service::win::pipe::{Descriptor, client_pid, instance};
+#[cfg(windows)]
+pub(crate) use sys::check_owner;
 #[cfg(windows)]
 pub use sys::{call, serve};
 
 #[cfg(windows)]
 mod sys {
-    use std::ffi::c_void;
     use std::io;
     use std::os::windows::io::AsRawHandle;
     use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::Value;
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer};
     use tokio::task::JoinHandle;
     use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, LocalFree,
-    };
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-        SE_KERNEL_OBJECT,
-    };
-    use windows_sys::Win32::Security::{
-        GetLengthSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE,
     };
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
-    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 
+    use nerve_service::win::pipe::{Descriptor, client_pid, foreign_owner, instance};
     use nerve_transport::ctl::NOT_RUNNING;
 
-    use super::{NOT_THE_NODES, dacl_text, trusted_owner};
+    use super::{NOT_THE_NODES, dacl_text};
     use crate::daemon::Shared;
     use crate::paths::NodePaths;
-    use crate::win_user::{well_known_sid, wide};
-
-    /// A security descriptor made from SDDL, freed when dropped.
-    pub(crate) struct Descriptor(PSECURITY_DESCRIPTOR);
-
-    // SAFETY: the descriptor is plain memory that is only read once made.
-    unsafe impl Send for Descriptor {}
-    // SAFETY: as above.
-    unsafe impl Sync for Descriptor {}
-
-    impl Descriptor {
-        pub(crate) fn from_sddl(sddl: &str) -> io::Result<Descriptor> {
-            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-            // SAFETY: a NUL-terminated SDDL string; the descriptor is freed
-            // on drop.
-            if unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    wide(sddl).as_ptr(),
-                    SDDL_REVISION_1,
-                    &mut sd,
-                    std::ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Descriptor(sd))
-        }
-    }
-
-    impl Drop for Descriptor {
-        fn drop(&mut self) {
-            // SAFETY: the descriptor from the conversion, freed once.
-            unsafe { LocalFree(self.0) };
-        }
-    }
-
-    /// One instance of the pipe `name` with the node's DACL; the first one
-    /// only where no pipe of that name is.
-    pub(crate) fn instance(
-        name: &str,
-        sd: &Descriptor,
-        first: bool,
-    ) -> io::Result<NamedPipeServer> {
-        let mut sa = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: sd.0,
-            bInheritHandle: 0,
-        };
-        // SAFETY: the attributes are valid and their descriptor lives
-        // through the call.
-        unsafe {
-            ServerOptions::new()
-                .first_pipe_instance(first)
-                .reject_remote_clients(true)
-                .create_with_security_attributes_raw(name, (&raw mut sa).cast::<c_void>())
-        }
-    }
-
-    /// The id of the process at the other end of a connected instance.
-    pub(crate) fn client_pid(pipe: &NamedPipeServer) -> Option<u32> {
-        let mut pid = 0u32;
-        // SAFETY: a connected pipe instance and a place for the id.
-        let ok =
-            unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } != 0;
-        (ok && pid != 0).then_some(pid)
-    }
 
     /// Serves the control pipe of `shared`'s node until the task is
     /// aborted. The first instance is made before this returns, so a CLI
@@ -260,37 +169,6 @@ mod sys {
         }
     }
 
-    /// The SID that owns the pipe `pipe` is open on.
-    fn owner_of(pipe: HANDLE) -> io::Result<Vec<u8>> {
-        let mut owner: PSID = std::ptr::null_mut();
-        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: an open handle; the owner points into the descriptor,
-        // which is freed below.
-        let r = unsafe {
-            GetSecurityInfo(
-                pipe,
-                SE_KERNEL_OBJECT,
-                OWNER_SECURITY_INFORMATION,
-                &mut owner,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut sd,
-            )
-        };
-        if r != 0 {
-            return Err(io::Error::from_raw_os_error(r as i32));
-        }
-        // SAFETY: a valid SID in the descriptor, copied before it is freed.
-        let sid = unsafe {
-            let len = GetLengthSid(owner) as usize;
-            let v = std::slice::from_raw_parts(owner.cast::<u8>(), len).to_vec();
-            LocalFree(sd);
-            v
-        };
-        Ok(sid)
-    }
-
     /// The account the node at `paths` runs as: `nerve` for the installed
     /// node, else this one (a node run by hand is its owner's).
     fn node_account(paths: &NodePaths) -> Option<Vec<u8>> {
@@ -340,12 +218,10 @@ mod sys {
         client: &tokio::net::windows::named_pipe::NamedPipeClient,
         name: &str,
     ) -> Result<(), String> {
-        let owner = owner_of(client.as_raw_handle() as HANDLE)
-            .map_err(|e| format!("cannot check the control pipe {name}: {e}"))?;
-        let system = well_known_sid(WinLocalSystemSid).map_err(|e| e.to_string())?;
-        let admins = well_known_sid(WinBuiltinAdministratorsSid).map_err(|e| e.to_string())?;
         let node = node_account(paths);
-        if !trusted_owner(&owner, &system, &admins, node.as_ref()) {
+        let foreign = foreign_owner(client.as_raw_handle() as HANDLE, node.as_deref())
+            .map_err(|e| format!("cannot check the control pipe {name}: {e}"))?;
+        if let Some(owner) = foreign {
             let who = crate::win_host::sid_text(&owner).unwrap_or_else(|e| e);
             return Err(format!(
                 "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/dev/windows.md, \"The control pipe is not the node's\"). With the node stopped, folder changes go to node.toml"
@@ -358,23 +234,6 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// SYSTEM, the administrators and the node's account, nobody else; no
-    /// entry twice where the node runs as one of the first two.
-    #[test]
-    fn the_dacl_names_the_owners_accounts_only() {
-        let nerve = "S-1-5-21-1-2-3-1001";
-        assert_eq!(
-            dacl_text(nerve),
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1001)"
-        );
-        assert_eq!(dacl_text("S-1-5-18"), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-        assert_eq!(dacl_text("S-1-5-32-544"), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-        // No entry for everyone, the users, the network or an AppContainer.
-        for other in ["WD", "BU", "AU", "NU", "AC", "S-1-15-"] {
-            assert!(!dacl_text(nerve).contains(other), "{other}");
-        }
-    }
 
     /// The CLI writes the file itself when no node made the pipe, and when
     /// another account's pipe holds the name but no node runs; with a node
@@ -403,19 +262,5 @@ mod tests {
         ] {
             assert!(!file_instead(other, runs(false)), "{other}");
         }
-    }
-
-    /// The CLI talks to a pipe only when SYSTEM, the administrators or the
-    /// node's account own it.
-    #[test]
-    fn a_pipe_another_account_made_is_not_the_nodes() {
-        let (system, admins, nerve, other) = ("SY", "BA", "nerve", "mallory");
-        assert!(trusted_owner(&system, &system, &admins, Some(&nerve)));
-        assert!(trusted_owner(&admins, &system, &admins, Some(&nerve)));
-        assert!(trusted_owner(&nerve, &system, &admins, Some(&nerve)));
-        assert!(!trusted_owner(&other, &system, &admins, Some(&nerve)));
-        // Without the node's account, only the first two.
-        assert!(!trusted_owner(&nerve, &system, &admins, None));
-        assert!(trusted_owner(&system, &system, &admins, None));
     }
 }

@@ -3,7 +3,7 @@
 //! where in the app to do it instead.
 
 /// The Windows parts: the service, its installer, sudo, the accounts, the
-/// control pipe.
+/// control pipe, and what the node shares with the center's service.
 const SOURCES: &[(&str, &str)] = &[
     ("winsvc.rs", include_str!("../src/winsvc.rs")),
     ("winsudo.rs", include_str!("../src/winsudo.rs")),
@@ -13,7 +13,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("win.rs", include_str!("../src/win.rs")),
     ("win_stop.rs", include_str!("../src/win_stop.rs")),
     ("pipe.rs", include_str!("../src/pipe.rs")),
-    ("eventlog.rs", include_str!("../src/eventlog.rs")),
+    (
+        "eventlog.rs",
+        include_str!("../../nerve-service/src/eventlog.rs"),
+    ),
 ];
 
 /// What sends a person to a terminal.

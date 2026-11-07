@@ -5032,7 +5032,7 @@ mod tests {
     /// A job of a command, as the pipe asks it: the processes it holds.
     struct FakeJob(Vec<u32>);
 
-    impl crate::job::Members for FakeJob {
+    impl nerve_service::win::job::Members for FakeJob {
         fn pids(&self) -> std::io::Result<Vec<u32>> {
             Ok(self.0.clone())
         }
@@ -5083,7 +5083,8 @@ mod tests {
                 Arc::new(move |req: CtlRequest, pid: Option<u32>| {
                     let (s, job) = (s.clone(), job.clone());
                     async move {
-                        let from_command = crate::job::from_a_command(pid, [Some(&*job)]);
+                        let from_command =
+                            nerve_service::win::job::from_a_command(pid, [Some(&*job)]);
                         pipe_control(&s, &req.method, req.params, from_command).await
                     }
                 }),

@@ -10,7 +10,7 @@
 //! an object; the GNU linker does not, so a windows-gnu build goes without.
 
 #[allow(dead_code)]
-#[path = "../nerve-node/src/eventlog.rs"]
+#[path = "../nerve-service/src/eventlog.rs"]
 mod eventlog;
 
 /// The DLLs the Windows program imports that are not among Windows'
@@ -35,7 +35,7 @@ fn main() {
     slint_build::compile_with_config("ui/app.slint", config).expect("the Slint files compile");
 
     println!("cargo:rerun-if-changed=ui/icons/app.ico");
-    println!("cargo:rerun-if-changed=../nerve-node/src/eventlog.rs");
+    println!("cargo:rerun-if-changed=../nerve-service/src/eventlog.rs");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if os != "windows" || env != "msvc" {

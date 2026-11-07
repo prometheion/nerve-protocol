@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_SERVICE_ALREADY_RUNNING,
-    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR,
-    ERROR_SHARING_VIOLATION, GetLastError, LocalFree, STATUS_SUCCESS,
+    ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR, ERROR_SHARING_VIOLATION, GetLastError,
+    STATUS_SUCCESS,
 };
 use windows_sys::Win32::NetworkManagement::NetManagement::{
     NetUserAdd, NetUserDel, NetUserSetInfo, UF_DONT_EXPIRE_PASSWD, UF_PASSWD_CANT_CHANGE,
@@ -21,36 +21,29 @@ use windows_sys::Win32::Security::Authentication::Identity::{
     LsaNtStatusToWinError, LsaOpenPolicy, LsaRemoveAccountRights, POLICY_CREATE_ACCOUNT,
     POLICY_LOOKUP_NAMES,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetNamedSecurityInfoW,
-};
-use windows_sys::Win32::Security::{
-    CheckTokenMembership, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, LookupAccountNameW,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE,
-    WinBuiltinAdministratorsSid,
-};
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID};
 use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows_sys::Win32::System::Console::{
     ENABLE_ECHO_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
 };
-use windows_sys::Win32::System::EventLog::{EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE};
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, REG_DWORD, REG_SZ, RegDeleteKeyValueW, RegDeleteKeyW, RegSetKeyValueW,
+    HKEY_LOCAL_MACHINE, REG_DWORD, RegDeleteKeyValueW, RegSetKeyValueW,
 };
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
-    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW,
-    QueryServiceConfigW, QueryServiceStatusEx, SC_ACTION, SC_ACTION_NONE, SC_ACTION_RESTART,
-    SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SC_STATUS_PROCESS_INFO,
-    SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_CONTROL_STOP,
-    SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_CONFIG,
-    SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_START,
-    SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_PROCESS, SERVICE_STOP,
-    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, SetServiceObjectSecurity,
-    StartServiceW,
+    ChangeServiceConfig2W, ChangeServiceConfigW, ControlService, CreateServiceW, DeleteService,
+    QUERY_SERVICE_CONFIGW, QueryServiceConfigW, SC_ACTION, SC_ACTION_NONE, SC_ACTION_RESTART,
+    SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS,
+    SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
+    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+    SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_START, SERVICE_START_PENDING,
+    SERVICE_STATUS, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS,
+    SetServiceObjectSecurity, StartServiceW,
 };
+
+use nerve_service::win::scm::Scm;
+pub use nerve_service::win::sid::is_admin;
+pub(crate) use nerve_service::win::sid::{sid_of, sid_text};
 
 use crate::eventlog::{SOURCE, SOURCE_KEY};
 use crate::service::{Account, Layout, ServiceState, USER, USER_MARK};
@@ -93,86 +86,11 @@ fn os(code: u32) -> String {
     std::io::Error::from_raw_os_error(code as i32).to_string()
 }
 
-/// Whether this process runs as an administrator, elevated: the
-/// Administrators group is in effect in its token.
-pub fn is_admin() -> bool {
-    let Ok(sid) = win_user::well_known_sid(WinBuiltinAdministratorsSid) else {
-        return false;
-    };
-    let mut member = 0;
-    // SAFETY: a null token is this thread's or process's own; a valid SID.
-    let ok =
-        unsafe { CheckTokenMembership(std::ptr::null_mut(), sid.as_ptr() as PSID, &mut member) };
-    ok != 0 && member != 0
-}
-
 /// Whether the service is registered, as anyone may ask.
 pub fn service_registered() -> bool {
     Scm::open(SC_MANAGER_CONNECT)
-        .and_then(|m| m.service(SERVICE_QUERY_STATUS))
+        .and_then(|m| m.service(SERVICE_NAME, SERVICE_QUERY_STATUS))
         .is_ok_and(|s| s.is_some())
-}
-
-/// A handle of the service control manager, or of a service, closed when
-/// dropped.
-struct Scm(SC_HANDLE);
-
-impl Drop for Scm {
-    fn drop(&mut self) {
-        // SAFETY: a handle from OpenSCManagerW or OpenServiceW, closed once.
-        unsafe { CloseServiceHandle(self.0) };
-    }
-}
-
-impl Scm {
-    fn open(access: u32) -> Result<Scm, String> {
-        // SAFETY: this machine's active database.
-        let h = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), access) };
-        if h.is_null() {
-            return Err(format!(
-                "cannot open the service control manager: {}",
-                last()
-            ));
-        }
-        Ok(Scm(h))
-    }
-
-    /// The node's service; `None` when it is not registered.
-    fn service(&self, access: u32) -> Result<Option<Scm>, String> {
-        // SAFETY: an open manager and a NUL-terminated name.
-        let h = unsafe { OpenServiceW(self.0, wide(SERVICE_NAME).as_ptr(), access) };
-        if h.is_null() {
-            // SAFETY: plain getter, right after the call.
-            if unsafe { GetLastError() } == ERROR_SERVICE_DOES_NOT_EXIST {
-                return Ok(None);
-            }
-            return Err(format!(
-                "cannot open the service {SERVICE_NAME}: {}",
-                last()
-            ));
-        }
-        Ok(Some(Scm(h)))
-    }
-
-    fn status(&self) -> Result<SERVICE_STATUS_PROCESS, String> {
-        // SAFETY: plain data that the call fills.
-        let mut st: SERVICE_STATUS_PROCESS = unsafe { std::mem::zeroed() };
-        let mut need = 0;
-        // SAFETY: a buffer of the size given.
-        let ok = unsafe {
-            QueryServiceStatusEx(
-                self.0,
-                SC_STATUS_PROCESS_INFO,
-                (&raw mut st).cast(),
-                std::mem::size_of::<SERVICE_STATUS_PROCESS>() as u32,
-                &mut need,
-            )
-        };
-        if ok == 0 {
-            return Err(format!("cannot ask the service {SERVICE_NAME}: {}", last()));
-        }
-        Ok(st)
-    }
 }
 
 /// The node's service with every right; an error when it is not there.
@@ -184,7 +102,7 @@ fn the_service() -> Result<Scm, String> {
 /// for starting and stopping it (crate::owner).
 fn the_service_for(access: u32) -> Result<Scm, String> {
     Scm::open(SC_MANAGER_CONNECT)?
-        .service(access)?
+        .service(SERVICE_NAME, access)?
         .ok_or_else(|| format!("the service {SERVICE_NAME} is not registered"))
 }
 
@@ -228,56 +146,6 @@ pub fn owners() -> Result<Vec<String>, String> {
             ERROR_MORE_DATA => buf.resize(len as usize / 2 + 1, 0),
             e => return Err(format!("cannot read the owners of the service: {}", os(e))),
         }
-    }
-}
-
-/// The SID of the local account `name`.
-pub(crate) fn sid_of(name: &str) -> Result<Vec<u8>, String> {
-    let mut sid = vec![0u8; 68];
-    let mut len = sid.len() as u32;
-    let mut domain = vec![0u16; 256];
-    let mut dlen = domain.len() as u32;
-    let mut kind: SID_NAME_USE = 0;
-    // The machine's name first, so a domain account of that name is not it.
-    let full = wide(format!(
-        "{}\\{name}",
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| ".".into())
-    ));
-    // SAFETY: buffers of the sizes given.
-    let ok = unsafe {
-        LookupAccountNameW(
-            std::ptr::null(),
-            full.as_ptr(),
-            sid.as_mut_ptr().cast(),
-            &mut len,
-            domain.as_mut_ptr(),
-            &mut dlen,
-            &mut kind,
-        )
-    };
-    if ok == 0 {
-        return Err(format!("cannot find the SID of {name}: {}", last()));
-    }
-    // The call leaves `len` at the buffer's size when the SID fits, so the
-    // SID's own length cuts it: a SID compared as bytes must have no tail.
-    // SAFETY: a valid SID the call wrote.
-    let real = unsafe { windows_sys::Win32::Security::GetLengthSid(sid.as_ptr() as PSID) };
-    sid.truncate((real as usize).min(len as usize));
-    Ok(sid)
-}
-
-/// A SID as text, `S-1-5-…`.
-pub(crate) fn sid_text(sid: &[u8]) -> Result<String, String> {
-    let mut text: *mut u16 = std::ptr::null_mut();
-    // SAFETY: a valid SID; the string is freed with LocalFree.
-    if unsafe { ConvertSidToStringSidW(sid.as_ptr() as PSID, &mut text) } == 0 {
-        return Err(last());
-    }
-    // SAFETY: a NUL-terminated string, freed once.
-    unsafe {
-        let s = win_user::from_wide(text);
-        LocalFree(text.cast());
-        Ok(s)
     }
 }
 
@@ -362,18 +230,6 @@ fn settle(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// The DACL in SDDL: full control for `owner` (a SID), SYSTEM and the
-/// administrators, inherited by every file and folder below; `P` keeps out
-/// what the folders above would hand down.
-pub fn dacl_text(owner: Option<&str>) -> String {
-    let mut s = String::from("D:P");
-    if let Some(o) = owner {
-        s.push_str(&format!("(A;OICI;FA;;;{o})"));
-    }
-    s.push_str("(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
-    s
 }
 
 /// This machine.
@@ -486,64 +342,12 @@ impl WinSystem for WinHost {
     }
 
     fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String> {
-        let at = |e: String| format!("{}: {e}", dir.display());
-        match std::fs::symlink_metadata(dir) {
-            Ok(m) if m.file_type().is_symlink() => {
-                return Err(at(
-                    "it is a link; the node's folders are folders, and install does not follow it"
-                        .into(),
-                ));
-            }
-            Ok(m) if !m.is_dir() => return Err(at("it is not a folder".into())),
-            Ok(_) => {}
-            Err(_) => std::fs::create_dir_all(dir).map_err(|e| at(e.to_string()))?,
-        }
-        let owner = owner
-            .map(sid_of)
-            .transpose()?
-            .map(|s| sid_text(&s))
-            .transpose()?;
-        let text = wide(dacl_text(owner.as_deref()));
-        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: a NUL-terminated SDDL string; the descriptor is freed below.
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                text.as_ptr(),
-                SDDL_REVISION_1,
-                &mut sd,
-                std::ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(at(last()));
-        }
-        let (mut present, mut defaulted) = (0, 0);
-        let mut dacl = std::ptr::null_mut();
-        // SAFETY: the descriptor just made; the DACL points into it.
-        let r = unsafe {
-            if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 {
-                Err(last())
-            } else {
-                // Inheritable entries go down to what is below.
-                let r = SetNamedSecurityInfoW(
-                    wide(dir).as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    dacl,
-                    std::ptr::null(),
-                );
-                if r == 0 { Ok(()) } else { Err(os(r)) }
-            }
-        };
-        // SAFETY: the descriptor from the conversion, freed once.
-        unsafe { LocalFree(sd) };
-        r.map_err(at)
+        nerve_service::win::dacl::secure(dir, owner)
     }
 
     fn service(&self) -> Result<Option<bool>, String> {
-        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(SERVICE_QUERY_STATUS)? else {
+        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(SERVICE_NAME, SERVICE_QUERY_STATUS)?
+        else {
             return Ok(None);
         };
         Ok(Some(s.status()?.dwCurrentState != SERVICE_STOPPED))
@@ -551,7 +355,7 @@ impl WinSystem for WinHost {
 
     fn service_state(&self) -> Result<Option<ServiceState>, String> {
         let access = SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG;
-        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(access)? else {
+        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(SERVICE_NAME, access)? else {
             return Ok(None);
         };
         let st = s.status()?;
@@ -602,7 +406,7 @@ impl WinSystem for WinHost {
         let name = wide(SERVICE_NAME);
         let shown = wide("Nerve node");
         let m = Scm::open(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
-        let s = match m.service(SERVICE_ALL_ACCESS)? {
+        let s = match m.service(SERVICE_NAME, SERVICE_ALL_ACCESS)? {
             Some(s) => {
                 // SAFETY: an open service and NUL-terminated strings; null
                 // leaves the rest as it is.
@@ -654,7 +458,7 @@ impl WinSystem for WinHost {
                         last()
                     ));
                 }
-                Scm(h)
+                Scm(h, SERVICE_NAME.into())
             }
         };
         let mut about = wide(concat!(
@@ -849,51 +653,11 @@ impl WinSystem for WinHost {
     }
 
     fn put_event_source(&self, layout: &Layout) -> Result<(), String> {
-        let file = wide(&layout.bin);
-        // The node writes errors and information, nothing else.
-        let types = u32::from(EVENTLOG_ERROR_TYPE | EVENTLOG_INFORMATION_TYPE);
-        for (name, kind, data, len) in [
-            (
-                "EventMessageFile",
-                REG_SZ,
-                file.as_ptr().cast(),
-                (file.len() * 2) as u32,
-            ),
-            ("TypesSupported", REG_DWORD, (&raw const types).cast(), 4),
-        ] {
-            // SAFETY: NUL-terminated key and value names; data of the length
-            // given (the path with its NUL, or a DWORD). The key is made when
-            // it is missing.
-            let r = unsafe {
-                RegSetKeyValueW(
-                    HKEY_LOCAL_MACHINE,
-                    wide(SOURCE_KEY).as_ptr(),
-                    wide(name).as_ptr(),
-                    kind,
-                    data,
-                    len,
-                )
-            };
-            if r != 0 {
-                return Err(format!(
-                    "cannot register the source {SOURCE} in the Windows Event Log: {}",
-                    os(r)
-                ));
-            }
-        }
-        Ok(())
+        nerve_service::win::event::put_source(SOURCE_KEY, SOURCE, &layout.bin)
     }
 
     fn delete_event_source(&self) -> Result<bool, String> {
-        // SAFETY: a NUL-terminated key name; the key has values only.
-        match unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE, wide(SOURCE_KEY).as_ptr()) } {
-            0 => Ok(true),
-            ERROR_FILE_NOT_FOUND => Ok(false),
-            r => Err(format!(
-                "cannot remove the source {SOURCE} from the Windows Event Log: {}",
-                os(r)
-            )),
-        }
+        nerve_service::win::event::delete_source(SOURCE_KEY, SOURCE)
     }
 
     fn wait_running(&self, layout: &Layout) -> Result<(), String> {
@@ -1056,17 +820,6 @@ fn later(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The DACL of the node's folders names nerve, SYSTEM and the
-    /// administrators, and nothing from the folders above.
-    #[test]
-    fn the_folders_get_a_dacl_of_their_own() {
-        assert_eq!(
-            dacl_text(Some("S-1-5-21-1-2-3-1010")),
-            "D:P(A;OICI;FA;;;S-1-5-21-1-2-3-1010)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-        );
-        assert_eq!(dacl_text(None), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
-    }
 
     fn icacls(p: &Path) -> String {
         let o = std::process::Command::new("icacls")
