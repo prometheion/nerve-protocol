@@ -15,9 +15,10 @@
 //! no confinement. Folder mode adds that with an AppContainer, which the
 //! shim starts in the command's job (nerve_sandbox::appcontainer).
 //!
-//! When Windows makes no job, the command runs anyway and its processes are
-//! ended by the walk of crate::tree, best effort. When it makes one but
-//! cannot put the shell in it, the command does not run.
+//! When Windows makes no job, a command that has limits does not run: nothing
+//! could hold it to them. One without limits runs anyway and its processes
+//! are ended by the walk of crate::tree, best effort. When Windows makes a
+//! job but the shell cannot be put in it, the command does not run.
 //!
 //! The choices and their texts are plain logic, tested on every platform;
 //! the job itself is crate::win::Job.
@@ -227,8 +228,9 @@ mod sys {
         }
     }
 
-    /// A job for the next command; `None`, logged, when Windows makes none
-    /// (the command then starts as it is and the walk ends its processes).
+    /// A job for the next command; `None`, logged, when Windows makes none (a
+    /// command with limits then does not run; one without starts as it is and
+    /// the walk ends its processes).
     pub fn make() -> Option<Job> {
         match Job::new() {
             Ok(j) => Some(j),

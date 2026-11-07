@@ -840,16 +840,16 @@ pub(crate) async fn node_call(
 /// then writes node.toml itself: no node runs. On Windows also a pipe of the
 /// node's name that another account made while no node runs
 /// (crate::pipe::file_instead); a node that runs holds the keys' lock.
-fn no_node(paths: &NodePaths, e: &str) -> bool {
+pub(crate) fn no_node(paths: &NodePaths, e: &str) -> bool {
     #[cfg(windows)]
-    return crate::pipe::file_instead(e, || {
-        !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)))
-    });
+    let runs = || !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)));
+    // Only Windows' pipe can be another account's.
     #[cfg(not(windows))]
-    {
+    let runs = || {
         let _ = paths;
-        e == nerve_transport::ctl::NOT_RUNNING
-    }
+        false
+    };
+    crate::pipe::file_instead(e, runs)
 }
 
 /// Reads the config: from the daemon when it runs, else from the file.
@@ -1278,22 +1278,33 @@ fn invoker_of(
 /// nothing a command of a center starts may install, set up, update or
 /// remove the node, nor back it up or restore it. The node that runs knows
 /// its commands, so it is asked over its control socket, and refuses a
-/// caller below one of them.
+/// caller below one of them. On Windows the node is asked over its control
+/// pipe, which refuses a caller in the job of one of its commands.
 pub async fn owner_check(paths: &[&NodePaths]) -> Result<(), String> {
-    let sockets: Vec<PathBuf> = paths.iter().map(|p| p.ctl_socket()).collect();
-    nerve_service::owner_check(&sockets).await
+    for p in paths {
+        match node_call(p, "owner.check", json!({})).await {
+            Ok(_) => {}
+            // No node runs, so no command of one does.
+            Err(e) if no_node(p, &e) => {}
+            // A node that does not know the method cannot answer it. It is let
+            // through.
+            Err(e) if e.starts_with("unknown method") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Whether a daemon runs on the control socket (on Windows its pipe); it
 /// then took every change at once. One that takes no connection now runs all
 /// the same; a socket that cannot be reached at all is none. On Windows only
-/// a node that answers counts: a pipe another account made is none.
+/// a node that answers, or is busy, counts: a pipe another account made is none.
 async fn daemon_answers(paths: &NodePaths) -> bool {
     let outcome = node_call(paths, "status", json!({})).await;
     #[cfg(unix)]
     return nerve_transport::ctl::node_is_there(&outcome).unwrap_or(false);
     #[cfg(windows)]
-    return outcome.is_ok();
+    return crate::pipe::node_answered(&outcome);
 }
 
 /// Writes `s` as one line of what a command shows.

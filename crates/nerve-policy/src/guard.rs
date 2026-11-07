@@ -25,8 +25,9 @@ pub enum Guard {
     Paths,
     /// A command that stops, restarts, disables or kills the node's service
     /// or process, or that changes what Windows starts at sign-in or boot
-    /// (the registry's Run keys, Winlogon, Image File Execution Options),
-    /// where a command would start again outside the node's hold.
+    /// (the registry's Run keys, Winlogon, Image File Execution Options), or
+    /// makes a new service or scheduled task, where a command would start
+    /// again outside the node's hold.
     Service,
 }
 
@@ -428,6 +429,12 @@ fn is_guarded_key(key: &str) -> bool {
 fn registry_key(key: &str) -> Option<String> {
     let k = key.replace('/', "\\").to_lowercase();
     let k = k.trim_end_matches('\\');
+    // `-Path:HKCU:\…` holds the key in the one word, as `-Path HKCU:\…` does
+    // in two.
+    let k = match k.strip_prefix('-') {
+        Some(rest) => rest.split_once(':').map_or(k, |(_, value)| value),
+        None => k,
+    };
     let k = k
         .strip_prefix(r"microsoft.powershell.core\registry::")
         .or_else(|| k.strip_prefix("registry::"))
@@ -464,9 +471,10 @@ fn under(key: &str, place: &str) -> bool {
 /// The keys that start a program at sign-in or boot, of the machine
 /// (`HKLM`) or of a user (`HKCU`), also the 32-bit view (`Wow6432Node`):
 /// the Run keys, Winlogon (`Shell`, `Userinit`) and Image File Execution
-/// Options (a `Debugger` starts in place of any program).
+/// Options (a `Debugger` starts in place of any program), and the task
+/// scheduler's cache of its tasks.
 fn is_autostart_key(key: &str) -> bool {
-    const PLACES: [&str; 8] = [
+    const PLACES: [&str; 9] = [
         r"microsoft\windows\currentversion\run",
         r"microsoft\windows\currentversion\runonce",
         r"microsoft\windows\currentversion\runonceex",
@@ -475,6 +483,8 @@ fn is_autostart_key(key: &str) -> bool {
         r"microsoft\windows\currentversion\policies\explorer\run",
         r"microsoft\windows nt\currentversion\winlogon",
         r"microsoft\windows nt\currentversion\image file execution options",
+        // The scheduler's own record of its tasks.
+        r"microsoft\windows nt\currentversion\schedule\taskcache",
     ];
     ["software", r"software\wow6432node"]
         .iter()
@@ -648,9 +658,32 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 .map(|w| w.text.as_str())
                 .skip_while(|a| a.starts_with("\\\\"))
                 .collect();
-            ops.len() >= 2
-                && matches!(ops[0].to_lowercase().as_str(), "stop" | "config" | "delete")
-                && is_service(ops[1], true)
+            let verb = ops.first().map(|v| v.to_lowercase()).unwrap_or_default();
+            (ops.len() >= 2
+                && matches!(verb.as_str(), "stop" | "config" | "delete")
+                && is_service(ops[1], true))
+                // A new service, or another's program changed, starts a
+                // program outside the node's hold.
+                || verb == "create"
+                || (verb == "config"
+                    && args
+                        .iter()
+                        .any(|w| w.text.to_lowercase().starts_with("binpath")))
+        }
+        // A scheduled task starts a program outside the node's hold as well.
+        "schtasks" if win => args.iter().any(|w| {
+            matches!(
+                w.text.to_lowercase().as_str(),
+                "/create" | "-create" | "/change" | "-change"
+            )
+        }),
+        "new-service"
+        | "register-scheduledtask"
+        | "set-scheduledtask"
+        | "register-scheduledjob"
+            if win =>
+        {
+            true
         }
         "net" => {
             // net takes its switches (`/y`) before the service as well.
@@ -1009,6 +1042,9 @@ mod tests {
             r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node",
             r"HKLM\SYSTEM\ControlSet001\Services\EventLog\Application\Nerve-Node",
             r"HKLM\SYSTEM\CurrentControlSet\Services\nerve-node",
+            r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks\{1}",
+            r"-Path:HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+            r"-LiteralPath:Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         ] {
             assert!(is_guarded_key(key), "{key:?}");
         }

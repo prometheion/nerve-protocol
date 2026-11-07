@@ -218,7 +218,7 @@ pub(super) async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<V
     let r = crate::pipe::call(paths, "caps.list", json!({})).await;
     match r {
         Ok(v) => Ok(v),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(
+        Err(e) if crate::cli::no_node(paths, &e) => Ok(crate::provider::listing(
             cfg,
             None,
             crate::service::is_service_node(paths),

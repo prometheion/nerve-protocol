@@ -96,9 +96,12 @@ jobs:
       - name: The app installs, controls, updates and uninstalls Nerve
         run: |
           $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path
-          & dist/tests/real.exe --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 |
-            Tee-Object "$env:RUNNER_TEMP/real.log"
+          $said = & dist/tests/real.exe --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/real.log" | Out-String
+          Write-Host $said
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # A renamed test matches nothing, and the run then ends well.
+          if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the install test did not run' }
       # As the app's install runs for that account's owner: the broker names
       # the owner by SID, and the password goes on stdin.
       - name: The node installed, its commands as the account
@@ -120,9 +123,16 @@ jobs:
           )
           $failed = 0
           foreach ($r in $runs) {
-            & "dist/tests/$($r[0])" --ignored --exact --nocapture --test-threads=1 $r[1] 2>&1 |
-              Tee-Object -Append "$env:RUNNER_TEMP/installed.log"
+            $said = & "dist/tests/$($r[0])" --ignored --exact --nocapture --test-threads=1 $r[1] 2>&1 |
+              Tee-Object -Append "$env:RUNNER_TEMP/installed.log" | Out-String
+            Write-Host $said
             if ($LASTEXITCODE -ne 0) { $failed++ }
+            # A renamed or moved test matches nothing, and `cargo test` then
+            # ends well with "0 passed".
+            elseif ($said -notmatch 'test result: ok\. 1 passed') {
+              "no test ran for $($r[1])"
+              $failed++
+            }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
       - name: Uninstall

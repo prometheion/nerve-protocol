@@ -338,7 +338,7 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
     // is said, not taken for "no tunnel".
     let live = match node_call(paths, "status", json!({})).await {
         Ok(v) => Some(v["relay"].clone()),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => None,
+        Err(e) if crate::cli::no_node(paths, &e) => None,
         Err(e) => return Err(format!("cannot ask the running node: {e}")),
     };
     match (&r.listen, &live) {

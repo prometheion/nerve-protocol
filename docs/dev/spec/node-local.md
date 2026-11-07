@@ -196,9 +196,13 @@ file it replaces, so the record never goes down.
   the version in force. Another writer may have saved the file meanwhile and
   raised the record (the CLI on Windows, where a running node takes the file
   only at its next start; on Linux the CLI before the node's socket is up).
-  The node's save replaces that file, as it always did, but it never lands
-  below the record, so the node does not refuse its own file as an earlier
-  one put back at its next start.
+  The running node does not save over a file it signed that is ahead of
+  it (a change the CLI made when it found no node): a write is refused,
+  naming the file, until the node took it (a reload or a restart); only a
+  panic saves over it, since a lock never waits. A file nobody signed names
+  no change of the owner's and blocks nothing. Whatever it saves lands above
+  the record, so the node does not refuse its own file as an earlier one
+  put back at its next start.
 - A record that cannot be written after the file was saved changes nothing: it
   only lags, the audit log says `not_recorded`, and the next start records
   the version.
@@ -1800,7 +1804,7 @@ answered, which takes long on a large folder. Methods:
 | `caps.list` | | as on the socket |
 | `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
 | `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
-| `owner.check` | | as on the socket |
+| `owner.check` | | as on the socket; the CLI asks it over the pipe as it asks the socket on Linux |
 | `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, walked}` |
 
 `path` is the folder as the CLI judged it: for `add` the real place it

@@ -1,9 +1,11 @@
 //! The control pipe of a node on Windows, where Unix has its control socket
 //! (nerve_transport::ctl): the same lines, on a named pipe of the node's
-//! state folder ([`crate::paths::NodePaths::ctl_pipe`]). For now it serves
-//! the status and the changes to a center's folders
-//! ([`crate::daemon::pipe_control`]); every other change the CLI still
-//! writes to `node.toml`, which the node takes at its next start.
+//! state folder ([`crate::paths::NodePaths::ctl_pipe`]). It serves what the
+//! socket serves ([`crate::daemon::control`]: the status, the whole config
+//! read and written, the sudo switch, `owner.check`, a reload, `config
+//! accept`) and the key rotation and the changes to a center's folders
+//! ([`crate::daemon::pipe_control`]). Only while no node runs does the CLI
+//! write `node.toml` itself, which the node takes when it starts.
 //!
 //! Who may write to it:
 //! - Its DACL lets SYSTEM, the administrators (elevated) and the node's own
@@ -51,6 +53,18 @@ pub fn file_instead(e: &str, node_runs: impl FnOnce() -> bool) -> bool {
     e == nerve_transport::ctl::NOT_RUNNING || (e.starts_with(NOT_THE_NODES) && !node_runs())
 }
 
+/// Whether the outcome of a call over the pipe says that a node answered: an
+/// answer or a refusal of its own, or [`nerve_transport::ctl::BUSY`] (a node
+/// that takes no connection now runs all the same). No node made the pipe,
+/// the pipe is another account's, or this one may not open it: none.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn node_answered(outcome: &Result<serde_json::Value, String>) -> bool {
+    match outcome {
+        Ok(_) => true,
+        Err(e) => e == nerve_transport::ctl::BUSY || e.starts_with("refused"),
+    }
+}
+
 pub use nerve_service::win::pipe::dacl_text;
 #[cfg(windows)]
 pub(crate) use nerve_service::win::pipe::{Descriptor, client_pid, instance};
@@ -75,7 +89,7 @@ mod sys {
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
 
     use nerve_service::win::pipe::{Descriptor, client_pid, foreign_owner, instance};
-    use nerve_transport::ctl::NOT_RUNNING;
+    use nerve_transport::ctl::{BUSY, NOT_RUNNING};
 
     use super::{NOT_THE_NODES, dacl_text};
     use crate::daemon::Shared;
@@ -195,7 +209,11 @@ mod sys {
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     return Err(NOT_RUNNING.into());
                 }
-                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && busy < 50 => {
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                    // Every instance in use: a node is there, and busy.
+                    if busy == 50 {
+                        return Err(BUSY.into());
+                    }
                     busy += 1;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -234,6 +252,27 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node that is busy, or that refuses the caller, is a node that runs;
+    /// no pipe, another account's pipe and a pipe this account may not open
+    /// are not one.
+    #[test]
+    fn a_busy_or_refusing_node_counts_as_running() {
+        use nerve_transport::ctl::{BUSY, NOT_RUNNING};
+        assert!(node_answered(&Ok(serde_json::json!({}))));
+        assert!(node_answered(&Err(BUSY.into())));
+        assert!(node_answered(&Err(
+            "refused: this request comes from a command the node runs for a center".into()
+        )));
+        for none in [
+            NOT_RUNNING,
+            "the control pipe is not the node's: \\\\.\\pipe\\nerve-node-1 belongs to S-1-5-21-9",
+            "the running node lets only the administrators, SYSTEM and its own account change it",
+            "cannot reach the running node: the pipe is gone (os error 109)",
+        ] {
+            assert!(!node_answered(&Err(none.into())), "{none}");
+        }
+    }
 
     /// The CLI writes the file itself when no node made the pipe, and when
     /// another account's pipe holds the name but no node runs; with a node

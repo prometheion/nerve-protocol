@@ -293,7 +293,7 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
         let v = match crate::cli::node_call(paths, "folder.grants", json!({ "every": true })).await
         {
             Ok(v) => v,
-            Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
+            Err(e) if crate::cli::no_node(paths, &e) => {
                 let walked = crate::grants::walk_every(&crate::grants::record_file(paths))?;
                 let (cfg, _) = read_config(paths).await?;
                 crate::grants::apply_outside(paths, &cfg, &crate::paths::home_dir(), &mut |m| {

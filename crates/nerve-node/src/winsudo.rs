@@ -220,7 +220,7 @@ pub async fn off(
     }
     match call("sudo.off", json!({})).await {
         Ok(_) => {}
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
+        Err(e) if crate::cli::no_node(paths, &e) => {
             forget(paths)?;
             crate::cli::edit(paths, |c| {
                 c.machine.sudo = Sudo::Off;
@@ -253,7 +253,7 @@ pub async fn status(
 ) -> Result<bool, String> {
     match call("sudo.status", json!({})).await {
         Ok(v) => Ok(v["sudo"] == "on"),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => kept_on(paths),
+        Err(e) if crate::cli::no_node(paths, &e) => kept_on(paths),
         Err(e) => Err(e),
     }
 }
@@ -345,6 +345,34 @@ mod tests {
                 m => Err(format!("unknown method {m}")),
             }
         }
+    }
+
+    /// A pipe of the node's name that another account made, while no node
+    /// runs, is no node: `sudo off` and the status work on the files, as the
+    /// other commands do (cli::no_node).
+    #[tokio::test]
+    async fn another_accounts_pipe_is_no_node_for_the_switch() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let p = &l.paths;
+        let call = async |_: &str, _: Value| -> Result<Value, String> {
+            Err(format!(
+                "{}: \\\\.\\pipe\\nerve-node-1 belongs to S-1-5-21-9",
+                crate::pipe::NOT_THE_NODES
+            ))
+        };
+        keep(p, &sys, "alice", "alice's").unwrap();
+        crate::cli::edit(p, |c| {
+            c.machine.sudo = Sudo::On;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(status(p, call).await.unwrap());
+        off(p, &sys, call, &mut Vec::new()).await.unwrap();
+        assert_eq!(sudo_of(p), Sudo::Off);
+        assert!(!status(p, call).await.unwrap());
     }
 
     #[tokio::test]

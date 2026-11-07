@@ -929,6 +929,44 @@ const SERVICE_FORMS: &[Case] = &[
         WIN,
         SERVICE,
     ),
+    // The key in the one word of `-Path:`, in each parameter that takes it.
+    (
+        r"Set-ItemProperty -Path:HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"New-ItemProperty -LiteralPath:HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+        PS,
+        SERVICE,
+    ),
+    // A new service or a scheduled task starts a program outside the node's
+    // hold, as the Run keys do.
+    (r"sc create svc binPath= C:\x\x.exe", WIN, SERVICE),
+    (r"sc.exe \\pc1 create svc binPath= C:\x\x.exe", CMD, SERVICE),
+    (r"sc config spooler binPath= C:\x\x.exe", CMD, SERVICE),
+    (
+        r"New-Service -Name svc -BinaryPathName C:\x\x.exe",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"schtasks /create /tn x /tr C:\x\x.exe /sc onlogon",
+        WIN,
+        SERVICE,
+    ),
+    (r"schtasks.exe /Change /tn x /tr C:\x\y.exe", WIN, SERVICE),
+    (
+        r"Register-ScheduledTask -TaskName x -Action $a -Trigger $t",
+        PS,
+        SERVICE,
+    ),
+    (r"Set-ScheduledTask -TaskName x -Action $a", PS, SERVICE),
+    (
+        r#"reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\x" /v Id /d y /f"#,
+        WIN,
+        SERVICE,
+    ),
     // The registry cmdlets on the service's key itself.
     (
         r"New-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node -Name Start -Value 4",
@@ -1984,6 +2022,19 @@ const DATA: &[Case] = &[
     (
         "reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler /v Start /d 4 /f",
         WIN,
+        None,
+    ),
+    // Reading the services and the tasks, starting one that exists, and
+    // another service's other settings.
+    (r"sc query spooler", CMD, None),
+    (r"sc config spooler start= demand", CMD, None),
+    (r"schtasks /query /fo list", WIN, None),
+    (r"schtasks /run /tn x", WIN, None),
+    (r"Get-ScheduledTask -TaskName x", PS, None),
+    (r"Get-Service spooler", PS, None),
+    (
+        r"Set-ItemProperty -Path:HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer -Name x -Value y",
+        PS,
         None,
     ),
     // Reading what starts at sign-in is not changing it.

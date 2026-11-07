@@ -2876,10 +2876,6 @@ pub mod appcontainer {
         check(unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) })
     }
 
-    /// Runs `program` with `args` in the container `name`, with this
-    /// process's environment, working folder, stdout and stderr, and the
-    /// null device as its stdin; no other handle goes to it. Waits for it
-    /// and returns its exit code.
     /// `vars` as an environment block: each `name=value` ended by a NUL,
     /// sorted by name as Windows keeps them, and a NUL at the end.
     fn env_block(mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Vec<u16> {
@@ -2895,6 +2891,11 @@ pub mod appcontainer {
         block
     }
 
+    /// Runs `program` with `args` in the container `name`, with this
+    /// process's environment as [`acl::container_env`] makes it (Windows
+    /// PowerShell's own module path), working folder, stdout and stderr, and
+    /// the null device as its stdin; no other handle goes to it. Waits for it
+    /// and returns its exit code.
     pub fn run(program: &Path, args: &[String], name: &str) -> io::Result<u32> {
         ensure_profile(name)?;
         let sid = Sid::derive(name)?;
@@ -3239,8 +3240,6 @@ mod tests {
         }
     }
 
-    /// The command line reads back as the arguments given, by the rules of
-    /// `CommandLineToArgvW`.
     /// A container's command gets Windows PowerShell's own module folders
     /// as its module path, whatever the machine's says, and no module
     /// analysis cache; every other variable stays.
@@ -3296,6 +3295,8 @@ mod tests {
         );
     }
 
+    /// The command line reads back as the arguments given, by the rules of
+    /// `CommandLineToArgvW`.
     #[test]
     fn windows_command_lines_quote_as_rust_does() {
         let line = |args: &[&str]| {

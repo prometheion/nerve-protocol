@@ -128,9 +128,9 @@ does not take over the pipe makes the app stop the service, which ends
 every link and command, and then save the lock for its next start; the app
 says that the links ended only once the service has stopped. With the node
 stopped, a change goes to the signed `node.toml`, which the node takes when
-it starts. A running node never saves over a `node.toml` newer than what it
-runs: it refuses the change instead
-([troubleshooting](#restart-the-node-then-change-the-folder-again-windows)).
+it starts. A running node never saves over a `node.toml` it signed that is
+newer than what it runs: it refuses the change instead, a panic excepted
+([troubleshooting](#restart-the-node-then-make-the-change-again-windows)).
 The commands the node runs for a center run as another account than the
 node's, which cannot open the node's folders unless it is an administrator:
 UAC is no security boundary ([Windows](#the-node-as-a-service-on-windows)).
@@ -782,14 +782,15 @@ A test that skips fails the job. The `windows` job also keeps the debug
 `windows-programs` for three days, to try a change on a Windows test
 machine as a person would.
 
-## Restart the node, then change the folder again (Windows)
+## Restart the node, then make the change again (Windows)
 
-A folder change on **Permissions** says `node.toml holds changes the running
-node takes at its next start`, or another change says `conflict`: a change
-went into the file while the app found no node running, and waits there for
-its next start. The node saves its whole config with a change and would undo
-that one, so it refuses. Restart the node (**Restart** on the app's
-**Overview**) and make the change again.
+A change on **Permissions** or another page says `node.toml holds changes
+the running node takes at its next start`: a change went into the file while
+the app found no node running (in the moment the node started, say), and
+waits there for its next start. The node saves its whole config with a change
+and would undo that one, so it refuses. Restart the node (**Restart** on the
+app's **Overview**) and make the change again. A panic is never refused: it
+locks the node over such a file.
 
 ## The control pipe is not the node's (Windows)
 

@@ -2658,11 +2658,12 @@ fn look_at_link(windows: bool) -> &'static str {
     }
 }
 
-/// Why the pipe refuses a folder change while `node.toml` (version
-/// `on_disk`) holds changes the node (version `in_force`) has not taken.
+/// Why a change is refused while `node.toml` (version `on_disk`) holds
+/// changes the node (version `in_force`) has not taken: a CLI that found no
+/// node wrote them, and the node saves its whole config.
 fn file_ahead(on_disk: u64, in_force: u64) -> String {
     format!(
-        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (Restart on the app's Overview), then change the folder again"
+        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (Restart on the app's Overview), then make the change again"
     )
 }
 
@@ -3055,7 +3056,18 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     // Who made it, as the CLI names its user (crate::cli::invoker):
     // only the owner's programs hold the token.
     store.set_user(str_of("user"));
-    let r = store.set_local(new, if_version);
+    let panic = params.get("panic").and_then(Value::as_bool) == Some(true);
+    // A panic saves over a file the node has not taken yet: the lock never
+    // waits for the owner to look at a change that is waiting.
+    let r = if panic {
+        store.set_local_panic(new, if_version)
+    } else {
+        store.set_local(new, if_version)
+    };
+    // The file's version, for a conflict that is the file ahead and no
+    // change in between: the CLI's retry cannot fix that one.
+    let on_disk = store.version_on_disk().unwrap_or(0);
+    let in_force = store.version();
     store.set_user(None);
     // A lock ends the web UI's sessions and counts, before another
     // write can be checked against the count.
@@ -3063,7 +3075,7 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     if r.is_ok() {
         // A panic counts also when the node is locked already: the
         // owner's way to end a session that started in the lock.
-        if params.get("panic").and_then(Value::as_bool) == Some(true) {
+        if panic {
             shared.webui.settle_panic(store.config());
         } else {
             shared.webui.settle(store.config());
@@ -3074,6 +3086,9 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
         Ok(v) => {
             shared.bump();
             Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
+        }
+        Err(SetError::Conflict { current }) if current > in_force && on_disk == current => {
+            Reply::Err(file_ahead(current, in_force))
         }
         Err(SetError::Conflict { current }) => {
             Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -5370,6 +5385,69 @@ mod tests {
         assert!(matches!(r, Reply::Ok(_)), "refused");
         assert_eq!(saved().mode, nerve_policy::Mode::Folder);
         assert_eq!(saved().folders.len(), 1);
+        daemon.stop().await;
+    }
+
+    /// A signed file ahead of the node (a CLI's change that waits) refuses a
+    /// change, with a text that says so and no retry can fix; a panic locks
+    /// over it. A file nobody signed, whatever version it names, blocks
+    /// nothing: it holds no change of the owner's.
+    #[tokio::test]
+    async fn a_panic_locks_over_a_file_ahead_and_an_unsigned_one_blocks_nothing() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let paths = daemon.paths().clone();
+        let write = |cfg: &NodeConfig, at: u64, panic: bool| json!({"config": cfg.to_toml(), "if_version": at, "user": "alice", "panic": panic});
+        lock(&s.store)
+            .update(|c| {
+                c.limits.max_running = 6;
+                Ok(())
+            })
+            .unwrap();
+        let mut cfg = s.config().as_ref().clone();
+        let version = cfg.version;
+        // A file nobody signed, with a version far ahead.
+        let file = paths.config_file();
+        let signed = std::fs::read_to_string(&file).unwrap();
+        let body = signed.split_once('\n').unwrap().1;
+        std::fs::write(
+            &file,
+            body.replace(&format!("version = {version}"), "version = 900"),
+        )
+        .unwrap();
+        cfg.limits.max_running = 7;
+        let r = control(&s, "config.write", write(&cfg, version, false), false);
+        assert!(
+            matches!(r, Reply::Ok(_)),
+            "an unsigned file blocked a write"
+        );
+        let version = s.config().version;
+        // A CLI's signed change that waits.
+        let mut cli = SettingsStore::open_with(
+            paths.config_file(),
+            Box::new(crate::secrets::NodeSecrets::for_cli(&paths)),
+            AuditLog::new(paths.audit_log()),
+        )
+        .unwrap();
+        cli.update(|c| {
+            c.limits.max_running = 9;
+            Ok(())
+        })
+        .unwrap();
+        cfg.limits.max_running = 5;
+        let Reply::Err(e) = control(&s, "config.write", write(&cfg, version, false), false) else {
+            panic!("a write went over the file ahead")
+        };
+        assert_eq!(e, file_ahead(version + 1, version));
+        assert!(!s.config().locked);
+        cfg.locked = true;
+        let r = control(&s, "config.write", write(&cfg, version, true), false);
+        assert!(matches!(r, Reply::Ok(_)), "the panic was refused");
+        assert!(s.config().locked);
+        let saved = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
+        assert!(saved.locked);
+        assert!(saved.version > version + 1);
         daemon.stop().await;
     }
 

@@ -1145,7 +1145,10 @@ impl Ctl {
                 c.refresh_service();
                 return;
             }
-            c.command(vec!["panic".into()], None, |c, saved| {
+            // With the administrator's rights: an owner's own `panic` goes to
+            // the node's pipe or socket, which the stopped service no longer
+            // has, and would save nothing.
+            c.command_with_rights(vec!["panic".into()], None, |c, saved| {
                 c.toast(view::panic_stopped(saved.err().as_deref()), Tone::Warn);
                 c.refresh_service();
                 c.refresh_status();

@@ -334,7 +334,7 @@ impl SettingsStore {
             let mut c =
                 NodeConfig::parse(&text).map_err(|e| format!("{}: {e}", s.path.display()))?;
             c.version = c.version.max(last);
-            s.write(&c, None).map_err(|e| e.to_string())?;
+            s.write(&c, None, false).map_err(|e| e.to_string())?;
             s.config = Arc::new(c);
             let _ = s
                 .audit
@@ -519,7 +519,7 @@ impl SettingsStore {
         new.version = self.config.version.max(new.version).max(last) + 1;
         let made = change(&self.config, &mut new);
         // Taken as it is: whoever wrote it last.
-        self.write(&new, None)?;
+        self.write(&new, None, false)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
         self.config = Arc::new(new);
@@ -553,18 +553,29 @@ impl SettingsStore {
     /// way: that file holds a change the owner made behind the running node
     /// (a CLI that found no node), and a write of a center or a timed mode
     /// would undo it, a panic included.
-    fn write(&mut self, c: &NodeConfig, opened: Option<u64>) -> Result<(), SetError> {
+    ///
+    /// `over_newer` lets the node's own store save over a file ahead of it:
+    /// only a panic does, which never waits for the owner to look at a change
+    /// that is waiting (docs/dev/spec/node-local.md §1).
+    fn write(
+        &mut self,
+        c: &NodeConfig,
+        opened: Option<u64>,
+        over_newer: bool,
+    ) -> Result<(), SetError> {
         let shared = self.secrets.begin().map_err(SetError::Io)?;
         let r = (|| {
             if let Some(opened) = opened {
-                // A file the node cannot read is no change ahead of it; the
-                // write then says what is wrong with it.
-                let now = match self.version_on_disk() {
+                // Another writer's file counts whoever signed it; the
+                // node's own store goes by the files the node signed. A file
+                // it cannot read is no change ahead of it; the write then
+                // says what is wrong with it.
+                let now = match self.disk_version(!shared) {
                     Ok(v) => v,
                     Err(e) if shared => return Err(SetError::Io(e)),
                     Err(_) => 0,
                 };
-                if (shared && now != opened) || now > opened {
+                if (shared && now != opened) || (!over_newer && now > opened) {
                     return Err(SetError::Conflict { current: now });
                 }
             }
@@ -583,14 +594,27 @@ impl SettingsStore {
         r
     }
 
-    /// The version of the file as it is now, read without checking its MAC
-    /// (the version a write must not go behind): 0 for no file, and for one
-    /// that names none.
+    /// The version of the file as it is now, when the node signed it (the
+    /// version a running node's write must not go behind): 0 for no file, for
+    /// one that names none and for one whose MAC does not verify. A file
+    /// nobody signed holds no change the owner made, so it is no reason to
+    /// refuse a write; `reload` refuses it in its own way.
     pub fn version_on_disk(&self) -> Result<u64, String> {
+        self.disk_version(true)
+    }
+
+    /// [`SettingsStore::version_on_disk`], with the MAC left unchecked when
+    /// `signed_only` is not set: the version another writer's save is told
+    /// from, whoever signed it.
+    fn disk_version(&self, signed_only: bool) -> Result<u64, String> {
         let Some(text) = read_file(&self.path)? else {
             return Ok(0);
         };
-        let table: Option<toml::Table> = toml::from_str(unseal(&text).1).ok();
+        let (mac, body) = unseal(&text);
+        if signed_only && !mac.is_some_and(|m| self.key.verify(&mac_input(body), m)) {
+            return Ok(0);
+        }
+        let table: Option<toml::Table> = toml::from_str(body).ok();
         Ok(table
             .as_ref()
             .and_then(|t| t.get("version"))
@@ -629,6 +653,27 @@ impl SettingsStore {
     /// Replaces the whole config as the owner; `if_version` guards against a
     /// concurrent writer.
     pub fn set_local(&mut self, new: NodeConfig, if_version: Option<u64>) -> Result<u64, SetError> {
+        self.set_local_as(new, if_version, false)
+    }
+
+    /// [`SettingsStore::set_local`] for a panic: the save goes over a file
+    /// ahead of the node (a change that waits for the node to take it), as a
+    /// lock never waits for that. The owner's change in that file is undone;
+    /// the file's version stays below the one saved.
+    pub fn set_local_panic(
+        &mut self,
+        new: NodeConfig,
+        if_version: Option<u64>,
+    ) -> Result<u64, SetError> {
+        self.set_local_as(new, if_version, true)
+    }
+
+    fn set_local_as(
+        &mut self,
+        new: NodeConfig,
+        if_version: Option<u64>,
+        over_newer: bool,
+    ) -> Result<u64, SetError> {
         if let Some(v) = if_version
             && v != self.config.version
         {
@@ -636,7 +681,7 @@ impl SettingsStore {
                 current: self.config.version,
             });
         }
-        self.commit(Writer::Local, new)
+        self.commit(Writer::Local, new, over_newer)
     }
 
     /// Changes the config as the owner through a closure (CLI commands).
@@ -646,7 +691,7 @@ impl SettingsStore {
     ) -> Result<u64, SetError> {
         let mut new = NodeConfig::clone(&self.config);
         f(&mut new).map_err(SetError::Invalid)?;
-        self.commit(Writer::Local, new)
+        self.commit(Writer::Local, new, false)
     }
 
     /// Updates bookkeeping the node itself sets (revoked, unknown) without
@@ -658,7 +703,7 @@ impl SettingsStore {
             return Ok(());
         }
         new.version = self.next_version();
-        self.write(&new, Some(self.config.version))
+        self.write(&new, Some(self.config.version), false)
             .map_err(|e| e.to_string())?;
         self.config = Arc::new(new);
         Ok(())
@@ -726,7 +771,7 @@ impl SettingsStore {
         let e = cfg.center_mut(center).expect("checked above");
         e.paused = new.paused;
         e.policy = new.policy;
-        self.commit(Writer::Center(center), cfg)
+        self.commit(Writer::Center(center), cfg, false)
     }
 
     /// Sets the node's sudo switch: the one machine setting a center with the
@@ -738,7 +783,7 @@ impl SettingsStore {
         }
         let mut cfg = NodeConfig::clone(&self.config);
         cfg.machine.sudo = sudo;
-        self.commit(by, cfg)
+        self.commit(by, cfg, false)
     }
 
     /// A change of `center` to the capabilities it added itself
@@ -754,7 +799,7 @@ impl SettingsStore {
         self.granted(center)?;
         let mut cfg = NodeConfig::clone(&self.config);
         f(&mut cfg)?;
-        self.commit(Writer::Center(center), cfg)
+        self.commit(Writer::Center(center), cfg, false)
     }
 
     /// `center`'s entry, when it has the settings grant `write`.
@@ -771,7 +816,12 @@ impl SettingsStore {
         Ok(entry)
     }
 
-    fn commit(&mut self, by: Writer, mut new: NodeConfig) -> Result<u64, SetError> {
+    fn commit(
+        &mut self,
+        by: Writer,
+        mut new: NodeConfig,
+        over_newer: bool,
+    ) -> Result<u64, SetError> {
         // A center's pin changed by hand to another one (after a rotation
         // of the center's key the node missed) counts as a rotation the node
         // took: a restore then keeps it over a backup's older pin.
@@ -800,7 +850,7 @@ impl SettingsStore {
             return Ok(self.config.version);
         }
         new.version = self.next_version();
-        self.write(&new, Some(self.config.version))?;
+        self.write(&new, Some(self.config.version), over_newer)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
         self.config = Arc::new(new);
@@ -3005,6 +3055,79 @@ mod tests {
         assert!(node.reload().unwrap());
         node.update(|c| {
             c.limits.max_running = 7;
+            Ok(())
+        })
+        .unwrap();
+        assert!(node.config().locked);
+    }
+
+    /// A panic saves over a file ahead of the node: the lock never waits for
+    /// the owner to look at a change that waits. The save goes above the
+    /// file's version, so the node does not refuse its own file at its next
+    /// start.
+    #[test]
+    fn a_panic_saves_over_a_newer_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        let bump = |s: &mut SettingsStore| {
+            s.update(|c| {
+                c.limits.max_running += 1;
+                Ok(())
+            })
+            .unwrap()
+        };
+        bump(&mut other);
+        let ahead = bump(&mut other);
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        assert_eq!(
+            node.set_local(locked.clone(), Some(node.version())),
+            Err(SetError::Conflict { current: ahead })
+        );
+        let v = node.set_local_panic(locked, Some(node.version())).unwrap();
+        assert!(v > ahead);
+        let saved =
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key")).unwrap();
+        assert!(saved.locked);
+        assert_eq!(saved.version, v);
+    }
+
+    /// A file the node did not sign names a version, and it holds no change of
+    /// the owner's: it blocks no write of the running node, a lock least of
+    /// all (a sync tool or another account can put such a file there).
+    #[test]
+    fn an_unsigned_file_ahead_blocks_no_write() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let file = d.path().join("node.toml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let body = text.split_once('\n').unwrap().1;
+        let forged = body.replace(
+            &format!("version = {}", node.version()),
+            &format!("version = {}", node.version() + 50),
+        );
+        assert_ne!(forged, body);
+        std::fs::write(&file, &forged).unwrap();
+        assert_eq!(node.version_on_disk(), Ok(0));
+        // Signed by another key, the version is as unproven.
+        let other_key = d.path().join("other.key");
+        let other = SettingsStore::open(
+            d.path().join("other.toml"),
+            other_key,
+            AuditLog::new(d.path().join("other-audit.jsonl")),
+        )
+        .unwrap();
+        let theirs = sealed(&other.key, &NodeConfig::parse(&forged).unwrap());
+        std::fs::write(&file, theirs).unwrap();
+        assert_eq!(node.version_on_disk(), Ok(0));
+        node.update(|c| {
+            c.locked = true;
             Ok(())
         })
         .unwrap();

@@ -21,7 +21,7 @@ pub(super) async fn rotate_key(
     let r = crate::pipe::call(paths, "center.rotate-key", params).await;
     let v = match r {
         Ok(v) => v,
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {
+        Err(e) if crate::cli::no_node(paths, &e) => {
             return Err(format!(
                 "the node does not run: a key rotation goes to center {name} over the node's link. Start it (`nerve-node run`, or the service), then try again"
             ));

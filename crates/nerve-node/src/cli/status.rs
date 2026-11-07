@@ -5,6 +5,12 @@ use super::*;
 /// What `status` says of the limits per command (crate::cgroup::status):
 /// what a command gets and may ask for, then where they hold or why not.
 fn limits_lines(v: &Value) -> Vec<String> {
+    limits_lines_on(v, cfg!(windows))
+}
+
+/// [`limits_lines`] in the words of Linux's cgroup, or of Windows' job object
+/// (`windows`), which the node names itself in `cgroup`.
+fn limits_lines_on(v: &Value, windows: bool) -> Vec<String> {
     let n = |k: &str| v[k].as_u64().unwrap_or_default();
     let mut lines = vec![format!(
         "limits per command: memory {} MiB, CPU {} %, {} processes; a call may ask for up to {} MiB, {} %, {} processes",
@@ -24,28 +30,35 @@ fn limits_lines(v: &Value) -> Vec<String> {
     };
     let (enforced, lost) = (list("enforced"), list("lost"));
     if let Some(cgroup) = v["cgroup"].as_str() {
+        let (holder, lacks, gone) = if windows {
+            (
+                cgroup.to_string(),
+                "it holds no limit for it",
+                "its job object",
+            )
+        } else {
+            (
+                format!("the cgroup {cgroup}"),
+                "the cgroup has no controller for it",
+                "the cgroup",
+            )
+        };
         let not: Vec<&str> = ["memory", "cpu", "processes"]
             .into_iter()
             .filter(|l| !enforced.contains(l) && !lost.contains(l))
             .collect();
         let mut line = match enforced.is_empty() {
-            true => format!("limits held by the cgroup {cgroup}: none"),
-            false => format!(
-                "limits held by the cgroup {cgroup}: {}",
-                enforced.join(", ")
-            ),
+            true => format!("limits held by {holder}: none"),
+            false => format!("limits held by {holder}: {}", enforced.join(", ")),
         };
         if !not.is_empty() {
-            line.push_str(&format!(
-                "; not {} (the cgroup has no controller for it)",
-                not.join(", ")
-            ));
+            line.push_str(&format!("; not {} ({lacks})", not.join(", ")));
         }
         lines.push(line);
         // Turned off while the node ran: no command runs (crate::cgroup).
         if !lost.is_empty() {
             lines.push(format!(
-                "NO COMMAND RUNS: {} turned off in the cgroup since the node started; start the node again",
+                "NO COMMAND RUNS: {} turned off in {gone} since the node started; start the node again",
                 lost.join(", ")
             ));
         }
@@ -64,7 +77,7 @@ pub(super) async fn live_status(paths: &NodePaths) -> Result<Option<Value>, Stri
     let r = crate::pipe::call(paths, "status", json!({})).await;
     match r {
         Ok(v) => Ok(Some(v)),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(None),
+        Err(e) if crate::cli::no_node(paths, &e) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -606,6 +619,31 @@ mod tests {
             [
                 "limits held by the cgroup /: none; not cpu (the cgroup has no controller for it)",
                 "NO COMMAND RUNS: memory, processes turned off in the cgroup since the node started; start the node again",
+            ]
+        );
+    }
+
+    /// On Windows the job object holds the limits, and the status says so
+    /// instead of naming a cgroup.
+    #[test]
+    fn the_status_names_the_job_object_on_windows() {
+        let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
+                       "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
+                       "cgroup": "the command's job object",
+                       "enforced": ["memory", "cpu", "processes"], "off": null});
+        assert_eq!(
+            limits_lines_on(&v, true)[1],
+            "limits held by the command's job object: memory, cpu, processes"
+        );
+        let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
+                       "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
+                       "cgroup": "the command's job object",
+                       "enforced": ["memory"], "lost": ["processes"], "off": null});
+        assert_eq!(
+            limits_lines_on(&v, true)[1..],
+            [
+                "limits held by the command's job object: memory; not cpu (it holds no limit for it)",
+                "NO COMMAND RUNS: processes turned off in its job object since the node started; start the node again",
             ]
         );
     }
