@@ -341,6 +341,43 @@ async fn the_node_says_it_is_ready_once_its_sockets_answer() {
     node.await.unwrap().unwrap();
 }
 
+/// A node whose owner endpoint cannot be made runs on without it (see
+/// `Daemon::start_with`), and still says it is ready: the unit is
+/// `Type=notify`, so a node that never said so would make `install` wait
+/// out systemd's start timeout for a node that runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_without_its_owner_endpoint_still_says_it_is_ready() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut o, _) = options(d.path(), vec![uid()]);
+    // A socket below a file cannot be bound.
+    let file = d.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    o.owners.as_mut().unwrap().at = file.join("owner.sock");
+    let ctl = o.paths.ctl_socket();
+    let notify = d.path().join("notify");
+    let socket = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    o.notify = Some(notify.into_os_string());
+    let (stop, events) = tokio::sync::mpsc::unbounded_channel();
+    let node = tokio::spawn(Daemon::run_until(o, events));
+    let said = tokio::task::spawn_blocking(move || {
+        let mut b = [0u8; 64];
+        let n = socket.recv(&mut b).expect("the node says it is ready");
+        String::from_utf8_lossy(&b[..n]).into_owned()
+    })
+    .await
+    .unwrap();
+    assert_eq!(said, "READY=1");
+    let status = nerve_transport::ctl::call(&ctl, "status", json!({}))
+        .await
+        .unwrap();
+    assert!(status.is_object(), "{status}");
+    stop.send(nerve_node::Event::Stop).unwrap();
+    node.await.unwrap().unwrap();
+}
+
 /// An owner backs up and restores without root: the file is opened by the
 /// owner's own program and handed to the node, which writes and reads only
 /// that (the path it is told leads nowhere). A restore stops the node,

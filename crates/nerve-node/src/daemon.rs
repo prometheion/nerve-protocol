@@ -2320,7 +2320,6 @@ impl Daemon {
         // Under the service control manager, its stop request ends the node.
         #[cfg(windows)]
         {
-            crate::win_service::running();
             tokio::spawn(async move {
                 if crate::win_service::is_service() {
                     crate::win_service::stop_requested().await;
@@ -2345,6 +2344,11 @@ impl Daemon {
         let (tx, mut asides) = tokio::sync::mpsc::unbounded_channel();
         opts.aside = Some(tx);
         let mut d = Daemon::start(opts.clone()).await?;
+        // The service control manager hears that the node runs only now,
+        // with its control and owner pipes made: `install`, `update` and
+        // `service start` wait for that state, and answer after it.
+        #[cfg(windows)]
+        crate::win_service::running();
         // The unit is `Type=notify` (crate::service): systemd counts the node
         // as started from here, where its control and owner sockets answer,
         // so `systemctl start`, and `install` with it, return only then and
@@ -2375,6 +2379,12 @@ impl Daemon {
         Ok(())
     }
 }
+
+/// The variable that names the service manager's socket for the node's
+/// readiness. The node reads it and takes it away from every program it
+/// starts: such a program would send to PID 1, which drops it (the unit's
+/// `NotifyAccess=main`) and logs a complaint.
+pub const NOTIFY_ENV: &str = "NOTIFY_SOCKET";
 
 /// Sends `state` to the service manager's socket `at` (`NOTIFY_SOCKET`), as
 /// `sd_notify` does: one datagram, to a path or, for an `at` that starts

@@ -16,7 +16,7 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 
 ### Fixed
 
-- `install`, `update` and `nerve-node service start` or `restart` return only once the node answers its owner: a command typed right after them no longer hears that the node does not run. The node's unit is `Type=notify` and the node says when it is ready ([#180](https://github.com/prometheion/nerve-protocol/issues/180)).
+- `install`, `update` and `nerve-node service start` or `restart` return only once the node answers its owner: a command typed right after them no longer hears that the node does not run. On Linux the node's unit is `Type=notify` and the node says when it is ready, and the programs it starts no longer get its `NOTIFY_SOCKET`; on Windows the service reports that it runs only once the node's pipes are made ([#180](https://github.com/prometheion/nerve-protocol/issues/180)).
 
 ## 0.0.7
 

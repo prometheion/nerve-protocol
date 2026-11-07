@@ -218,7 +218,12 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
    ([below](#start-and-stop)).
 7. Writes the unit `/etc/systemd/system/nerve-node.service`, which names the
    owner (`NERVE_NODE_OWNER`), enables it and starts it. It waits until the
-   node answers. The unit hands the node its cgroup (`Delegate=cpu memory
+   node answers. The unit is `Type=notify` (`NotifyAccess=main`): the node
+   sends `READY=1` once its control, provider and owner sockets are bound,
+   so `systemctl start` returns only then, and fails at once for a node
+   that cannot start. A unit written by hand for the installed layout needs
+   `Type=notify` too. The node takes `NOTIFY_SOCKET` out of the environment
+   of every program it starts. The unit hands the node its cgroup (`Delegate=cpu memory
    pids`), so each command runs held to its [limits](sandbox-linux.md#limits-per-command), and keeps
    the node running when one of them is killed for its memory
    (`OOMPolicy=continue`).

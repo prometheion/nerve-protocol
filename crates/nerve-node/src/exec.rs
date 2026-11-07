@@ -2079,6 +2079,9 @@ pub async fn run(
             cmd.current_dir(&call.cwd);
         }
     }
+    // The node's readiness socket is the node's: a command that speaks
+    // sd_notify would send to PID 1 (crate::daemon::NOTIFY_ENV).
+    cmd.env_remove(crate::daemon::NOTIFY_ENV);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -2584,6 +2587,30 @@ mod tests {
         let r = run(&call(&line), &o, |_| {}).await.unwrap();
         assert_eq!(r["exit_code"], 0, "{r}");
         assert!(ran.exists());
+    }
+
+    /// The node's readiness socket (`NOTIFY_SOCKET`) does not reach a
+    /// command: run again in a process of its own with it set, as the
+    /// installed node has it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_does_not_get_the_nodes_readiness_socket() {
+        const NAME: &str = "exec::tests::a_command_does_not_get_the_nodes_readiness_socket";
+        if std::env::var_os("NERVE_TEST_NOTIFY_CHILD").is_some() {
+            let r = run(&call("echo \"[$NOTIFY_SOCKET]\""), &opts(1 << 16), |_| {})
+                .await
+                .unwrap();
+            println!("said={}", r["stdout"].as_str().unwrap_or_default().trim());
+            return;
+        }
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env("NERVE_TEST_NOTIFY_CHILD", "1")
+            .env(crate::daemon::NOTIFY_ENV, "/run/systemd/notify")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&o.stdout);
+        assert!(text.contains("said=[]"), "{text}");
     }
 
     /// A child that cannot join its cgroup is not started.

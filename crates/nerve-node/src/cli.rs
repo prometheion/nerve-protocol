@@ -1486,7 +1486,7 @@ async fn run(paths: NodePaths) -> Result<(), String> {
     let mut opts = NodeOptions::new(paths);
     opts.exe = std::env::current_exe().ok();
     // Under the installed unit: systemd's socket for the node's readiness.
-    opts.notify = std::env::var_os("NOTIFY_SOCKET");
+    opts.notify = std::env::var_os(crate::daemon::NOTIFY_ENV);
     Daemon::run(opts).await
 }
 
