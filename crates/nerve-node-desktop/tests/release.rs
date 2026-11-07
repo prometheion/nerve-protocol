@@ -1,4 +1,4 @@
-//! That 0.0.7 publishes the Linux programs only, and what the release gives
+//! That the releases before 0.1.0 publish the Linux programs only, and what the release gives
 //! Windows once its switch is on: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
 //! (docs/dev/windows.md); what the released app keeps for the licence it
@@ -22,7 +22,7 @@ fn job(name: &str) -> String {
         .join("\n")
 }
 
-/// Release 0.0.7 publishes the Linux programs only: the input `windows`,
+/// The releases before 0.1.0 publish the Linux programs only: the input `windows`,
 /// off by default, gates the Windows job, and the publish job then counts
 /// five programs and names no Windows program in its footer. 0.1.0 turns it
 /// on, and the Windows job builds the app and the center, no `nerve-node`.
@@ -115,10 +115,12 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
 
 /// The user guide is Linux only until 0.1.0 (Q9 of the PR 6 plan): it names
 /// Windows once, in "Windows comes with 0.1.0", and every Windows text is in
-/// docs/dev/windows.md until then. The release notes of 0.0.7 hold no
-/// Windows item either: they wait under `## Unreleased`.
+/// docs/dev/windows.md until then. The notes of a release name everything it
+/// changed, Windows too (owner, 2026-11-07), and begin with the update order;
+/// the Windows items of 0.0.7 and before wait under `## Unreleased` for the
+/// release log of 0.1.0.
 #[test]
-fn the_user_guide_and_the_notes_are_linux_only() {
+fn the_user_guide_is_linux_only_and_the_notes_say_the_update_order() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut found = Vec::new();
     let mut pages = vec![root.join("README.md")];
@@ -136,21 +138,14 @@ fn the_user_guide_and_the_notes_are_linux_only() {
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
     let changelog = include_str!("../../../CHANGELOG.md");
+    // The newest release's notes: the first `## x.y.z` below `## Unreleased`.
     let notes = changelog
-        .split("\n## 0.0.7\n")
-        .nth(1)
-        .expect("a section ## 0.0.7")
         .split("\n## ")
-        .next()
-        .unwrap();
-    let windows: Vec<&str> = notes
-        .lines()
-        .filter(|l| {
-            l.replace("Windows comes with 0.1.0", "")
-                .contains("Windows")
-        })
-        .collect();
-    assert!(windows.is_empty(), "{windows:?}");
+        .find(|s| s.starts_with(|c: char| c.is_ascii_digit()))
+        .expect("a release section")
+        .split_once('\n')
+        .unwrap()
+        .1;
     assert!(notes.contains("Update the center first, then the nodes."));
     let unreleased = changelog
         .split("\n## Unreleased\n")

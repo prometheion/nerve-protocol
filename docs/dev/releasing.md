@@ -106,7 +106,7 @@ run again.
 2. Merge that to `main`.
 3. Run the workflow with kind `release` and that version.
 
-After a release, raise the version in `Cargo.toml` and `Cargo.lock` with the
-first change toward the next one. Until then the workflow refuses a pre-release
-of the released version. That change also starts a new `## Unreleased` section
-at the top of `CHANGELOG.md`.
+The version is raised only by the release chore of step 1, right before the
+release: never with the first change toward it. A pre-release of a version
+that is not released yet needs that version on its branch, in a commit of its
+own. Every change between releases collects under `## Unreleased`.
