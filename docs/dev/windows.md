@@ -22,7 +22,8 @@ Debian 12, Fedora 36 and later) and fontconfig.
 | `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, confined by an AppContainer; not yet on the [installed service](#the-node-as-a-service-on-windows) |
 | `allowlist` and `user` mode run commands | Yes | Yes, in a Job Object, not confined to folders |
 | Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with the administrator token of the account commands run as ([sudo on Windows](#sudo-on-windows)) |
-| Control socket | Yes | A control pipe: `status`, `center rotate-key` and folder changes, no other change |
+| Control socket | Yes | A [control pipe](#the-control-pipe): every change at once, no providers |
+| [Limits per command](#limits-per-command) | A cgroup | The command's job object |
 | [Providers](capabilities.md#capability-providers-in-use) | Yes | Not yet |
 | [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Kept in `node.toml`, offered not yet |
 | Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node |
@@ -66,6 +67,18 @@ Debian 12, Fedora 36 and later) and fontconfig.
 - `cap add` keeps a [capability of your own](capabilities.md#capabilities-of-your-own-in-nodetoml) in
   `node.toml`, also one for `windows`, but the node offers none yet.
 
+### Limits per command
+
+Each command's job holds it to the limits under **Settings › Limits ›
+Each command**, as a cgroup does on Linux
+([node-local spec](spec/node-local.md)): its memory, its CPU and its
+processes at once. Past its memory the node ends the job, and the result
+says `killed: "memory"`. The CPU limit is in percent of one CPU, as on
+Linux; Windows holds it as a share of every CPU of the machine. Windows
+counts processes, not their threads, and the console host and the helper
+that asks a command to end run in the job beside the command, so the job
+allows two more than the limit (three in `folder` mode, with its shim).
+
 ### Root and administrator
 
 A node with full rights hands those rights to every command a center runs:
@@ -100,17 +113,22 @@ there is none: the desktop app is the node's UI there.
 
 ### The control pipe
 
-A running node on Windows answers the app's status and relay pages (with the
-relay's live tunnels) over a named pipe, and takes a new key for a center
-and the folder changes of **Permissions › Folders** at once. For a folder
-change it brings the folders' permission entries in line before it answers.
-Only the administrators, SYSTEM and the node's own account can open the
-pipe; the owner's changes in the app reach it through the service, which
-runs them as its own account. The node refuses every request from a process
-of a command it runs. The pipe takes no other change yet: for those the
-signed `node.toml` is written, and the node takes them at its next start,
-for which the app restarts it. Until then the node refuses folder changes,
-which would undo them: restart it first
+A running node on Windows takes every change at once over a named pipe, as
+the Linux node does over its control socket: the app's status and relay
+pages, a pairing, a pause, rules, modes, the proxy, the relay, a new key for
+a center, the sudo switch, panic and unlock, and the folder changes of
+**Permissions › Folders**, for which it brings the folders' permission
+entries in line before it answers. The app restarts no service for a
+change, so running commands go on. Only the administrators, SYSTEM and the
+node's own account can open the pipe; the owner's changes in the app reach
+it through the service, which runs them as its own account. The node
+refuses every request from a process of a command it runs. A panic the node
+does not take over the pipe makes the app stop the service, which ends
+every link and command, and then save the lock for its next start; the app
+says that the links ended only once the service has stopped. With the node
+stopped, a change goes to the signed `node.toml`, which the node takes when
+it starts. A running node never saves over a `node.toml` newer than what it
+runs: it refuses the change instead
 ([troubleshooting](#restart-the-node-then-change-the-folder-again-windows)).
 The commands the node runs for a center run as another account than the
 node's, which cannot open the node's folders unless it is an administrator:
@@ -624,8 +642,9 @@ planned.
   `Start-Process -Verb RunAs` was refused. That held in a session with the
   administrator's elevated token, so a node you allowed to run elevated
   ([root and administrator](#root-and-administrator)) does not
-  hand that token to the command. The container does not limit memory, CPU,
-  disk or the number of processes; the job only ends them (code).
+  hand that token to the command. The container limits nothing; the
+  command's job holds it to its limits, as for every command ([Limits per
+  command](#limits-per-command)).
 - **What a granted folder allows.** The flags are the rights, and a command
   in the folder is in the container too. A command with `w` can leave files
   there that you, a build or an editor run later, outside the container: a
@@ -759,10 +778,11 @@ service's output (`journalctl -u nerve-node`, `journalctl -u nerve-center`).
 ## Restart the node, then change the folder again (Windows)
 
 A folder change on **Permissions** says `node.toml holds changes the running
-node takes at its next start`: an earlier change was of something else, which
-waits in the file for the next start. The node saves its whole config with a
-folder change and would undo that change, so it refuses. Restart the node
-(**Restart** on the app's **Overview**) and change the folder again.
+node takes at its next start`, or another change says `conflict`: a change
+went into the file while the app found no node running, and waits there for
+its next start. The node saves its whole config with a change and would undo
+that one, so it refuses. Restart the node (**Restart** on the app's
+**Overview**) and make the change again.
 
 ## The control pipe is not the node's (Windows)
 

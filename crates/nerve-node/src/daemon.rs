@@ -2275,6 +2275,11 @@ impl Daemon {
         );
         // After the start line, which opens the node's part of the log.
         match &shared.cgroups {
+            Ok(c) if cfg!(windows) => tracing::info!(
+                "commands are held to their limits ({}) by {}",
+                c.enforced().join(", "),
+                c.name()
+            ),
             Ok(c) => tracing::info!(
                 "commands are held to their limits ({}) in the cgroup {}",
                 c.enforced().join(", "),

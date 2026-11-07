@@ -23,7 +23,14 @@
 //!
 //! Without such a cgroup (no systemd, a cgroup v1 machine, a node started
 //! in a terminal) commands run without these limits; `status` and the log
-//! say why. Windows does not hold commands to them yet.
+//! say why.
+//!
+//! On Windows every command's job object holds it to them (crate::job,
+//! [`job_limits`]): its memory, its CPU rate, which Windows counts as a
+//! share of every CPU of the machine, and its processes, which Windows
+//! counts without their threads. A command past its memory is ended, as
+//! on Linux. What a command has started outside its job (the task
+//! scheduler, WMI, a service) is not held to them.
 
 use std::sync::Arc;
 
@@ -48,6 +55,31 @@ pub fn status(limits: &CommandLimits, found: &Found) -> Value {
         "lost": found.as_ref().map_or_else(|_| Vec::new(), |c| c.lost()),
         "off": found.as_ref().err(),
     })
+}
+
+/// What a command's job object holds it to on Windows: the limits it was
+/// granted, the CPU's as Windows counts it on a machine of `cpus`
+/// (nerve_service::win::job::cpu_rate). The processes have room for what
+/// runs in the job besides the command's own: the console host of its
+/// console, the helper that asks the command to end (crate::win_stop) and
+/// the shim of folder mode (`shim`, which starts the command in its
+/// container).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn job_limits(
+    granted: &nerve_policy::config::Granted,
+    cpus: u32,
+    shim: bool,
+) -> nerve_service::win::job::JobLimits {
+    nerve_service::win::job::JobLimits {
+        memory_bytes: Some(granted.memory_mb.saturating_mul(1024 * 1024)),
+        cpu_rate: nerve_service::win::job::cpu_rate(granted.cpu_percent, cpus),
+        processes: Some(
+            granted
+                .processes
+                .saturating_add(2)
+                .saturating_add(u32::from(shim)),
+        ),
+    }
 }
 
 /// The text of a command killed for its memory limit of `mb` MiB, in its
@@ -844,12 +876,39 @@ mod linux {
     }
 }
 
-/// Linux only for now: elsewhere no node finds a cgroup, so there is none.
-#[cfg(not(target_os = "linux"))]
+/// On Windows no cgroup is needed: each command's job object holds it to
+/// its limits ([`job_limits`]), wherever the node runs.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct Cgroups(());
+
+#[cfg(windows)]
+impl Cgroups {
+    pub fn find() -> Result<Cgroups, String> {
+        Ok(Cgroups(()))
+    }
+
+    /// What holds the limits, for `status` and the log.
+    pub fn name(&self) -> &str {
+        "the command's job object"
+    }
+
+    pub fn enforced(&self) -> Vec<&'static str> {
+        vec!["memory", "cpu", "processes"]
+    }
+
+    pub fn lost(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
+/// Linux and Windows only: elsewhere no node holds commands to their
+/// limits.
+#[cfg(not(any(target_os = "linux", windows)))]
 #[derive(Debug)]
 pub enum Cgroups {}
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 impl Cgroups {
     pub fn find() -> Result<Cgroups, String> {
         Err("this node does not hold commands to their limits on this platform yet".into())
@@ -865,5 +924,40 @@ impl Cgroups {
 
     pub fn lost(&self) -> Vec<&'static str> {
         match *self {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nerve_policy::config::Granted;
+
+    /// A command's job gets its memory in bytes, its CPU as Windows' share
+    /// of every CPU, and room for the console host, the stop helper and the
+    /// shim beside its processes; a CPU limit of the whole machine holds
+    /// nothing.
+    #[test]
+    fn a_commands_job_gets_its_granted_limits() {
+        let g = Granted {
+            memory_mb: 512,
+            cpu_percent: 200,
+            processes: 3,
+        };
+        let l = job_limits(&g, 8, false);
+        assert_eq!(l.memory_bytes, Some(512 << 20));
+        assert_eq!(l.cpu_rate, Some(2_500));
+        assert_eq!(l.processes, Some(5));
+        assert_eq!(job_limits(&g, 8, true).processes, Some(6));
+        assert_eq!(job_limits(&g, 2, false).cpu_rate, None);
+        let most = Granted {
+            memory_mb: u64::MAX,
+            cpu_percent: u32::MAX,
+            processes: u32::MAX,
+        };
+        let l = job_limits(&most, 8, true);
+        assert_eq!(
+            (l.memory_bytes, l.processes),
+            (Some(u64::MAX), Some(u32::MAX))
+        );
     }
 }

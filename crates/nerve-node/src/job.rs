@@ -202,6 +202,11 @@ mod sys {
                 stopping: AtomicBool::new(false),
             }
         }
+
+        /// Whether the job ended the command at its memory limit.
+        pub fn out_of_memory(&self) -> bool {
+            self.job.out_of_memory()
+        }
     }
 
     impl End for Held {

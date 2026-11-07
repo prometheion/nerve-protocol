@@ -839,7 +839,21 @@ files, outside folder mode's Landlock, and so can a root one (root as the
 account, a sudo command); one of another account cannot. Any command can
 have work started outside its cgroup by its account's service manager
 (`systemd-run --user`, `at`, cron), which the limits do not hold.
-Windows does not hold commands to these limits yet.
+
+On Windows the command's job object holds it to them, wherever the node
+runs: `JobMemoryLimit` for the memory of the whole job, a hard cap on the
+CPU rate, which Windows counts in hundredths of a percent of every CPU of the
+machine (the node turns `cpu_percent` of one CPU into that share, and sets
+none where it is the whole machine), and `ActiveProcessLimit`, which counts
+processes, not threads, with room for the console host, the stop helper and
+folder mode's shim, which run in the job too. Past its memory Windows only
+refuses it; the node hears `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT` on the job's
+completion port, ends the job and says `killed: "memory"` with the reason,
+as on Linux. A job that cannot be made, or does not take the limits, keeps
+the command from running (`unavailable`). `status` says `cgroup: "the
+command's job object"` and `enforced: ["memory", "cpu", "processes"]`.
+Work a command has started outside its job (the task scheduler, WMI, a
+service) is not held to them.
 
 Windows has no signals either. Each command gets a console of its own,
 without a window (`CREATE_NO_WINDOW`), never the node's. On `timeout_ms`

@@ -6,6 +6,32 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// What a job object holds its processes to
+/// ([`crate::win::job_object::Job::limit`]); each `None` is no limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobLimits {
+    /// The memory all of them may commit, in bytes.
+    pub memory_bytes: Option<u64>,
+    /// Their CPU rate, in Windows' unit: hundredths of a percent of every
+    /// CPU of the machine ([`cpu_rate`]).
+    pub cpu_rate: Option<u32>,
+    /// Processes at once; Windows counts processes, not threads.
+    pub processes: Option<u32>,
+}
+
+/// Windows' CPU rate for `percent` of one CPU, the unit the node's limits
+/// use on every platform (200 is two CPUs), on a machine of `cpus`:
+/// hundredths of a percent of all of them, at least 1. `None` where it
+/// would be all of them or more, which holds nothing.
+pub fn cpu_rate(percent: u32, cpus: u32) -> Option<u32> {
+    let all = u64::from(cpus.max(1)) * 100;
+    let percent = u64::from(percent);
+    if percent >= all {
+        return None;
+    }
+    Some((percent * 10_000).div_ceil(all).max(1) as u32)
+}
+
 /// Something that lists the processes it holds: a job object, a fake in the
 /// tests.
 pub trait Members {
@@ -101,6 +127,22 @@ pub fn jobless() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Percent of one CPU becomes a share of every CPU: two CPUs of eight
+    /// are a quarter; at least the smallest share; none where the limit is
+    /// the whole machine or more.
+    #[test]
+    fn the_cpu_limit_is_a_share_of_every_cpu() {
+        assert_eq!(cpu_rate(200, 8), Some(2_500));
+        assert_eq!(cpu_rate(100, 1), None);
+        assert_eq!(cpu_rate(50, 1), Some(5_000));
+        assert_eq!(cpu_rate(1, 4096), Some(1));
+        assert_eq!(cpu_rate(800, 8), None);
+        assert_eq!(cpu_rate(900, 8), None);
+        assert_eq!(cpu_rate(799, 8), Some(9_988));
+        // A machine that says it has none counts as one.
+        assert_eq!(cpu_rate(50, 0), Some(5_000));
+    }
 
     /// A job that holds the processes it is told, or cannot list them.
     struct Holds(Option<Vec<u32>>);

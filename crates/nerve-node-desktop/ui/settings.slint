@@ -433,7 +433,7 @@ export component SettingsPage inherits PageFrame {
             Group {
                 icon: @image-url("icons/cpu.svg");
                 title: "Each command";
-                text: Install.windows ? "What one command gets, and the most a call may ask for. Windows does not hold commands to them yet." : "What one command gets, and the most a call may ask for.";
+                text: Install.windows ? "What one command gets, and the most a call may ask for. Windows counts processes, not their threads." : "What one command gets, and the most a call may ask for.";
                 LimitRows {
                     group: "command";
                     rows: Prefs.limits-command;

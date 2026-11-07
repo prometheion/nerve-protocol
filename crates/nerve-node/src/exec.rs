@@ -1363,8 +1363,9 @@ pub struct RunOptions {
     /// Set only for an allowed sudo command of `nerve-run`, which runs as
     /// `account`, root: where it starts, and how ([`AsRoot`]).
     pub root: Option<AsRoot>,
-    /// Linux: the command runs in a cgroup of its own below these, held to
-    /// these limits (crate::cgroup); `None` runs it without.
+    /// The command is held to these limits (crate::cgroup): on Linux in a
+    /// cgroup of its own below these, on Windows by its job object; `None`
+    /// runs it without.
     pub limits: Option<(
         std::sync::Arc<crate::cgroup::Cgroups>,
         nerve_policy::config::Granted,
@@ -2142,6 +2143,10 @@ pub async fn run(
     #[cfg(windows)]
     let job = crate::job::make();
     #[cfg(windows)]
+    if let Some((_, granted)) = &opts.limits {
+        hold_to_limits(job.as_ref(), granted, shim.is_some())?;
+    }
+    #[cfg(windows)]
     cmd.creation_flags(match job {
         Some(_) => crate::job::CONSOLE | crate::job::SUSPENDED,
         None => crate::job::CONSOLE,
@@ -2182,6 +2187,10 @@ pub async fn run(
         ),
         None => None,
     };
+    // Asked once the command has ended: whether its job ended it at its
+    // memory limit.
+    #[cfg(windows)]
+    let held = job.clone();
     #[cfg(windows)]
     let group = Group::start(child.id(), job);
     #[cfg(unix)]
@@ -2231,6 +2240,8 @@ pub async fn run(
             ((Vec::new(), false), (Vec::new(), false), None, true)
         }
     };
+    #[cfg(windows)]
+    let out_of_memory = memory_hit(held.as_deref(), opts);
     drop(group);
     // Read before the cgroup goes with what is left in it.
     #[cfg(target_os = "linux")]
@@ -2246,7 +2257,6 @@ pub async fn run(
     let status = status
         .expect("set unless timed out")
         .map_err(|e| RpcError::internal(format!("waiting for the command: {e}")))?;
-    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut result = json!({
         "exit_code": status.code(),
         "stdout": decode(&out.0, out.1),
@@ -2271,12 +2281,44 @@ pub async fn run(
             result["signal"] = name.into();
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(mb) = out_of_memory {
         result["killed"] = "memory".into();
         result["reason"] = crate::cgroup::memory_reason(mb).into();
     }
     Ok(result)
+}
+
+/// Holds a command's job to the limits it was `granted` (crate::cgroup::
+/// job_limits), before anything runs in it; `shim` says folder mode's shim
+/// runs in it too. Without a job, or with one that does not take them, the
+/// command does not run: the owner set the limits, as a command without its
+/// cgroup does not run on Linux.
+#[cfg(windows)]
+fn hold_to_limits(
+    job: Option<&crate::win::Job>,
+    granted: &nerve_policy::config::Granted,
+    shim: bool,
+) -> Result<(), RpcError> {
+    let unavailable = |m: String| RpcError::new(ErrorCode::Unavailable, m);
+    let job = job.ok_or_else(|| {
+        unavailable(
+            "the command was not run: Windows made no job object for it, which would hold it to its limits".into(),
+        )
+    })?;
+    let limits = crate::cgroup::job_limits(granted, nerve_service::win::job_object::cpus(), shim);
+    job.limit(&limits).map_err(|e| {
+        unavailable(format!(
+            "the command was not run: its job object does not take its limits ({e})"
+        ))
+    })
+}
+
+/// The memory limit in MiB that a command's job ended it at, if it did.
+#[cfg(windows)]
+fn memory_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u64> {
+    let (_, granted) = opts.limits.as_ref()?;
+    job.filter(|j| j.out_of_memory()).map(|_| granted.memory_mb)
 }
 
 /// [`run`] as another account on Windows (crate::win_user): the shell
@@ -2333,6 +2375,9 @@ async fn run_as(
             "the command was not run: Windows made no job object for it ({e})"
         ))
     })?;
+    if let Some((_, granted)) = &opts.limits {
+        hold_to_limits(Some(&job), granted, false)?;
+    }
     let line = windows_command_line(program, args);
     // The command's own token also starts the helper that asks it to end
     // (crate::win_stop).
@@ -2360,8 +2405,9 @@ async fn run_as(
         )));
     }
     let asker = crate::win_stop::Asker::As(opts.exe.clone(), token);
-    let job = crate::job::Held::new(job, child.handle().ok(), asker);
-    let group = Group::start(Some(child.pid), Some(std::sync::Arc::new(job)));
+    let job = std::sync::Arc::new(crate::job::Held::new(job, child.handle().ok(), asker));
+    let held = job.clone();
+    let group = Group::start(Some(child.pid), Some(job));
     if let Some(e) = &group.0 {
         started(e);
     }
@@ -2403,6 +2449,7 @@ async fn run_as(
             return Err(limit.timed_out());
         }
     };
+    let out_of_memory = memory_hit(Some(&held), opts);
     drop(group);
     let code = code.map_err(|e| RpcError::internal(format!("waiting for the command: {e}")))?;
     let mut result = json!({
@@ -2413,6 +2460,10 @@ async fn run_as(
     });
     if call.argv.is_some() {
         result["stdout_truncated"] = out.1.into();
+    }
+    if let Some(mb) = out_of_memory {
+        result["killed"] = "memory".into();
+        result["reason"] = crate::cgroup::memory_reason(mb).into();
     }
     Ok(result)
 }
@@ -2652,6 +2703,52 @@ mod tests {
             return;
         }
         assert!(text.contains("limits helper passed"), "{text}");
+    }
+
+    /// On Windows a command's job holds it to its limits: past its memory
+    /// the job ends it and its result says so, and past its processes it
+    /// starts no more. PowerShell, the shell here, asks for 1 GiB at once,
+    /// and starts cmd within cmd ten deep.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_is_held_to_its_limits_by_its_job() {
+        use nerve_policy::config::Granted;
+        let cgroups = std::sync::Arc::new(crate::cgroup::Cgroups::find().unwrap());
+        assert_eq!(cgroups.enforced(), ["memory", "cpu", "processes"]);
+        let held = |memory_mb, processes| {
+            let mut o = opts(1 << 16);
+            o.limits = Some((
+                cgroups.clone(),
+                Granted {
+                    memory_mb,
+                    cpu_percent: 100,
+                    processes,
+                },
+            ));
+            o
+        };
+        let mut long = call("$a = [byte[]]::new(1GB); 'took ' + $a.Length");
+        long.timeout = Some(Duration::from_secs(120));
+        let r = run(&long, &held(400, 64), |_| {}).await.unwrap();
+        assert_eq!(r["killed"], "memory", "{r}");
+        assert_eq!(
+            r["reason"],
+            "the command went past its memory limit of 400 MiB and was killed"
+        );
+        let r = run(&long, &held(4096, 64), |_| {}).await.unwrap();
+        assert!(
+            r["stdout"].as_str().unwrap().contains("took 1073741824"),
+            "{r}"
+        );
+        assert!(r.get("killed").is_none(), "{r}");
+        let deep = format!("{}echo deep", "cmd /c ".repeat(10));
+        let mut deep = call(&deep);
+        deep.timeout = Some(Duration::from_secs(120));
+        let r = run(&deep, &held(4096, 2), |_| {}).await.unwrap();
+        assert!(!r["stdout"].as_str().unwrap().contains("deep"), "{r}");
+        assert!(r.get("killed").is_none(), "{r}");
+        let r = run(&deep, &held(4096, 64), |_| {}).await.unwrap();
+        assert!(r["stdout"].as_str().unwrap().contains("deep"), "{r}");
     }
 
     /// A command whose cgroup cannot be made does not run: the owner set
