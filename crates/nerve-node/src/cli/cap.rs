@@ -415,7 +415,6 @@ pub(super) fn held_note(center: &str, name: &str) -> String {
 /// What the owner is told of `name`, an action `center` added that senses
 /// or actuates, switched off as `config accept` took a file that turns it
 /// on while a program keeps it out (crate::config_cap::hold_shadowed).
-#[cfg(unix)]
 pub(super) fn shadowed_note(center: &str, name: &str) -> String {
     let cap = name.split_once('.').map_or(name, |(c, _)| c);
     format!(
@@ -427,7 +426,6 @@ pub(super) fn shadowed_note(center: &str, name: &str) -> String {
 /// for `center`, which keeps one of its own under a program's capability:
 /// the file's `on` or allow rule for it would go with the center's own
 /// (crate::config_cap::hold_with_own).
-#[cfg(unix)]
 pub(super) fn with_own_note(center: &str, name: &str) -> String {
     let cap = name.split_once('.').map_or(name, |(c, _)| c);
     format!(
@@ -438,7 +436,6 @@ pub(super) fn with_own_note(center: &str, name: &str) -> String {
 /// What the owner is told of `scope`, an `on` or allow rule of `center`
 /// that `config accept` took away with that center's own capability, which
 /// the file no longer holds (crate::config_cap::drop_removed).
-#[cfg(unix)]
 pub(super) fn dropped_note(center: &str, scope: &str) -> String {
     format!(
         "{center}: its own capability is gone from the file, so its on and allow rules for {scope} went with it"

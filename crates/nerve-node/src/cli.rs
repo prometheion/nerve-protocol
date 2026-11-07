@@ -42,7 +42,6 @@ mod sudo;
 pub mod ui;
 
 use cap::{added_by_other, cap_listing};
-#[cfg(unix)]
 use cap::{dropped_note, held_note, shadowed_note, with_own_note};
 use center::tell_pairings_apart;
 pub(crate) use center::{given_link, pairings_warning_here};
@@ -891,7 +890,13 @@ pub async fn edit(
 pub struct Saved {
     pub cfg: NodeConfig,
     pub grants: crate::grants::Synced,
+    /// A panic that the node saved over a change waiting in node.toml.
+    pub replaced: bool,
 }
+
+/// What `panic` says when the node's lock replaced a change that waited in
+/// node.toml for the node's next start: the owner was told it would count.
+pub const PANIC_REPLACED: &str = "node.toml held a change the node had not taken yet, and the lock replaced it: make that change again if you still want it";
 
 /// Why the folder grants do not follow a saved config, if they do not.
 fn grants_failed(s: &crate::grants::Synced) -> Option<String> {
@@ -946,10 +951,11 @@ async fn edit_saved_as(
                 params["panic"] = json!(true);
             }
             match node_call(paths, "config.write", params).await {
-                Ok(_) => {
+                Ok(v) => {
                     return Ok(Saved {
                         cfg,
                         grants: Default::default(),
+                        replaced: v["replaced"] == true,
                     });
                 }
                 Err(e) if e.starts_with("conflict") => {
@@ -997,7 +1003,11 @@ async fn edit_saved_as(
                 crate::grants::apply_outside(paths, &cfg, &crate::paths::home_dir(), &mut |m| {
                     eprintln!("{m}")
                 });
-            Ok(Saved { cfg, grants })
+            Ok(Saved {
+                cfg,
+                grants,
+                replaced: false,
+            })
         }
         Err(SetError::Conflict { .. }) => Err("the config changed meanwhile; try again".into()),
         Err(e) => Err(e.to_string()),
@@ -1518,6 +1528,9 @@ async fn lock(paths: NodePaths, out: &mut dyn Write) -> Result<(), String> {
         out,
         "locked: every link ends and nothing runs until `nerve-node unlock`".into(),
     );
+    if saved.replaced {
+        w(out, format!("warning: {PANIC_REPLACED}"));
+    }
     Ok(())
 }
 
@@ -1924,6 +1937,47 @@ mod tests {
         assert_eq!(writes.load(Ordering::SeqCst), 5);
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert!(!load(&paths).locked);
+    }
+
+    /// A panic the node saved over a change that waited in node.toml says so:
+    /// the owner was told that change counts at the next start.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_over_a_waiting_change_says_it_replaced_it() {
+        use nerve_transport::ctl::{Reply, serve};
+        let (_d, paths) = setup(&["home"]);
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let replaced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (sock, says) = (paths.ctl_socket(), replaced.clone());
+        rt.spawn(async move {
+            let _ = serve(&sock, move |req, _| {
+                let (text, says) = (text.clone(), says.clone());
+                async move {
+                    match req.method.as_str() {
+                        "config.read" => Reply::Ok(json!({"config": text, "version": 7})),
+                        "config.write" => Reply::Ok(json!({
+                            "version": 8,
+                            "replaced": says.load(std::sync::atomic::Ordering::SeqCst),
+                        })),
+                        _ => Reply::Ok(json!({})),
+                    }
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let said = run(&paths, &["panic"]).unwrap();
+        assert!(said.contains(PANIC_REPLACED), "{said}");
+        replaced.store(false, std::sync::atomic::Ordering::SeqCst);
+        let said = run(&paths, &["panic"]).unwrap();
+        assert!(!said.contains(PANIC_REPLACED), "{said}");
     }
 
     /// The callers that only ask whether a node runs take a busy one for a

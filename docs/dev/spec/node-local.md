@@ -194,12 +194,14 @@ file it replaces, so the record never goes down.
   writes it again, or the owner deletes it.
 - A save by the running node is numbered above the record as well as above
   the version in force. Another writer may have saved the file meanwhile and
-  raised the record (the CLI on Windows, where a running node takes the file
-  only at its next start; on Linux the CLI before the node's socket is up).
+  raised the record (the CLI before the node's socket or pipe is up).
   The running node does not save over a file it signed that is ahead of
   it (a change the CLI made when it found no node): a write is refused,
   naming the file, until the node took it (a reload or a restart); only a
-  panic saves over it, since a lock never waits. A file nobody signed names
+  panic saves over it, since a lock never waits; the owner's change in that
+  file is then gone, which the audit log says (`config`, `replaced`) and the
+  answer to `config.write` (`"replaced": true`), `panic` and the app say too.
+  A file nobody signed names
   no change of the owner's and blocks nothing. Whatever it saves lands above
   the record, so the node does not refuse its own file as an earlier one
   put back at its next start.
@@ -1847,7 +1849,13 @@ Who may write:
   the installed node, else the CLI's own). When the pipe is another's and no
   node holds `keys.lock` (none runs), the CLI writes the change to
   `node.toml` itself, as with no pipe at all; with a node running it stops
-  with an error that says how to free the name.
+  with an error that says how to free the name. The same holds for a pipe
+  that is missing while `keys.lock` is held (a node that runs without its
+  pipe, or is starting): the CLI never writes behind a running node, and the
+  app's panic, which gets that error, stops the service.
+- A call waits at most 90 s for the answer, as on the socket, and then
+  says `the node did not answer in time`: a node that is stuck must not
+  hold the CLI, nor the app's panic, for ever.
 
 Not covered: a process another program starts for a command (the task
 scheduler, WMI) is in no job of the node's; it opens the pipe only if its
@@ -1974,8 +1982,8 @@ reason) and commands ended because the owner's network switch went on
 (`decision` `killed`, `code` `no_network`, `target` `(running commands)` or
 `(a command being started)`), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config
-file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored` or
-`not_recorded`, with the file and the reason), and what the owner did to the node
+file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored`,
+`replaced` or `not_recorded`, with the file and the reason), and what the owner did to the node
 (`"kind": "node"`, `event` `install`, `setup`, `update` or `uninstall`, with
 its `steps` and the `error` that stopped it), and each key rotation
 (`"kind": "key"`, `center`, `event` `node-key`, `node-key-refused`,

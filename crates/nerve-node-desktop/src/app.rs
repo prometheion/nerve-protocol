@@ -246,6 +246,15 @@ fn waits_for_start(v: &Value) -> bool {
 /// What the app says when the running node took the lock.
 const LOCKED: &str = "Locked: every link ended, and nothing runs until you unlock.";
 
+/// What the app says of a lock the node took: that, and when the lock
+/// replaced a change that waited in node.toml, that too.
+fn locked_said(v: &Value) -> String {
+    match lines(v).any(|l| l.contains(nerve_node::cli::PANIC_REPLACED)) {
+        true => and_then(LOCKED.into(), view::panic_replaced()),
+        false => LOCKED.into(),
+    }
+}
+
 /// What a change said, without the line about the next start, which
 /// [`Ctl::done`] says in words of its own.
 fn said_of(v: &Value) -> String {
@@ -619,8 +628,11 @@ impl Ctl {
         }
         // A warning that came with it, such as folder mode running no
         // command once the keys are in the keyring, is no plain "done".
-        let warned = lines(v)
-            .any(|l| l.starts_with("Warning") || l.starts_with("folder mode runs no command"));
+        let warned = lines(v).any(|l| {
+            l.starts_with("Warning")
+                || l.starts_with("folder mode runs no command")
+                || l.contains(nerve_node::cli::PANIC_REPLACED)
+        });
         let tone = if warned { Tone::Warn } else { Tone::Ok };
         if waits_for_start(v) {
             self.toast(
@@ -1125,7 +1137,7 @@ impl Ctl {
         self.command(vec!["panic".into()], None, |c, answer| {
             c.with_store(|s| s.set_busy(SharedString::new()));
             match answer {
-                Ok(v) => c.done(&v, LOCKED),
+                Ok(v) => c.done(&v, locked_said(&v)),
                 Err(e) if c.service.get() => c.stop_for_panic(e),
                 Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
             }
@@ -1463,4 +1475,22 @@ pub enum Failed {
     /// The window did not open, or ended with an error.
     Window(String),
     Other(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock that replaced a change waiting in node.toml says so in the
+    /// toast; any other lock does not.
+    #[test]
+    fn a_lock_over_a_waiting_change_says_it_replaced_it() {
+        let plain = serde_json::json!({"messages": ["locked: every link ends"]});
+        assert_eq!(locked_said(&plain), LOCKED);
+        let line = format!("warning: {}", nerve_node::cli::PANIC_REPLACED);
+        let replaced = serde_json::json!({"messages": ["locked: every link ends", line]});
+        let said = locked_said(&replaced);
+        assert!(said.starts_with(LOCKED), "{said}");
+        assert!(said.contains("replaced by the lock"), "{said}");
+    }
 }

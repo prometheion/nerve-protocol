@@ -387,8 +387,9 @@ impl AuditLog {
     /// Something that happened to the config file itself: `refused` (it was
     /// changed outside the owner's path and is not applied), `signed` (the
     /// node signed a file without a MAC line), `accepted` (the owner
-    /// took a refused file as it is) or `restored` (the owner put the config
-    /// of a backup in place).
+    /// took a refused file as it is), `replaced` (a panic saved over a change
+    /// that waited in the file for the node) or `restored` (the owner put
+    /// the config of a backup in place).
     pub fn config(&self, event: &str, file: &Path, reason: &str) -> std::io::Result<()> {
         self.append(&json!({
             "ts": nerve_proto::msg::now_ms(),

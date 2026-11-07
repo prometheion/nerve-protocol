@@ -129,6 +129,16 @@ pub const NOT_RUNNING: &str = "not running";
 /// taken, or its queue is full (EAGAIN).
 pub const BUSY: &str = "the node does not take connections now; try again";
 
+/// How long a call waits for an answer, on the socket and on Windows' pipe.
+/// The slowest handler, the check of a sudo password, ends after 30 s itself.
+/// A node that does not accept (it is out of descriptors) never answers a
+/// call that sits in its queue, and a node that is stuck never answers one
+/// it took.
+pub const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Error when a call got no answer in time.
+pub const NO_ANSWER: &str = "the node did not answer in time; try again";
+
 /// Why a provider socket ([`serve_providers`]), or its handler, refuses a
 /// caller whose process ended before the node could hold on to it: its pid
 /// may be another process's by then.
@@ -370,8 +380,9 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{
-        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, OTHER_ACCOUNTS, PEER_ENDED,
-        PER_ACCOUNT, Peer, Reply, answer, call_stream, serve_stream_within, token_file, write_line,
+        ANSWER_WAIT, BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NO_ANSWER, NOT_RUNNING,
+        OTHER_ACCOUNTS, PEER_ENDED, PER_ACCOUNT, Peer, Reply, answer, call_stream,
+        serve_stream_within, token_file, write_line,
     };
 
     /// Who a socket serves, and what it takes from the caller beside the
@@ -396,15 +407,6 @@ mod unix {
 
     /// Whether the account of a uid gets the places of the owner.
     type Kept = dyn Fn(u32) -> bool + Send + Sync;
-
-    /// How long [`call`] waits for an answer. The slowest handler, the check
-    /// of a sudo password, ends after 30 s itself. A node that does not
-    /// accept (it is out of descriptors) never answers a call that sits in
-    /// its queue.
-    const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
-
-    /// Error when [`call`] got no answer in time.
-    pub const NO_ANSWER: &str = "the node did not answer in time; try again";
 
     /// Binds `path` and serves every connection with `handler`. A stale socket
     /// file is replaced; a live one (another node running) is an error.
@@ -1810,8 +1812,8 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{
-    CANNOT_CONNECT, NO_ANSWER, bind, bind_open, call, follow, node_is_there, request_line,
-    send_files, serve, serve_anyone, serve_on, serve_providers, token_ok, write_token,
+    CANNOT_CONNECT, bind, bind_open, call, follow, node_is_there, request_line, send_files, serve,
+    serve_anyone, serve_on, serve_providers, token_ok, write_token,
 };
 
 #[cfg(test)]

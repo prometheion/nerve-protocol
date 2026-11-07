@@ -128,8 +128,11 @@ does not take over the pipe makes the app stop the service, which ends
 every link and command, and then save the lock for its next start; the app
 says that the links ended only once the service has stopped. With the node
 stopped, a change goes to the signed `node.toml`, which the node takes when
-it starts. A running node never saves over a `node.toml` it signed that is
-newer than what it runs: it refuses the change instead, a panic excepted
+it starts; a node that runs without its pipe, or does not answer within 90
+seconds, is an error, so nothing is written behind it. A node that does not
+answer is also a panic the node did not take. A running node never saves
+over a `node.toml` it signed that is newer than what it runs: it refuses the
+change instead, a panic excepted
 ([troubleshooting](#restart-the-node-then-make-the-change-again-windows)).
 The commands the node runs for a center run as another account than the
 node's, which cannot open the node's folders unless it is an administrator:
@@ -796,8 +799,12 @@ locks the node over such a file.
 
 A folder change says `the control pipe is not the node's`: another process
 made a pipe of the node's name before the node started, and the node runs
-without its pipe (its log says `the control pipe … is taken`). The node's
-commands send that pipe nothing. Find the process with Sysinternals Process
-Explorer (**Find**, **Find Handle or DLL**, `nerve-node-`), end it, and
+without its pipe (its log says `the control pipe … is taken`); once that
+process has let the name go, a change says `the node runs without its
+control pipe`. The node's commands send that pipe nothing. Find the
+process with Sysinternals Process Explorer (**Find**, **Find Handle or
+DLL**, `nerve-node-`), end it, and
 restart the node (**Restart** on the app's **Overview**). With the node
-stopped, folder changes go to `node.toml` as every other change does.
+stopped, folder changes go to `node.toml` as every other change does. A
+panic in that state makes the app stop the service, as for any node that does
+not take it.

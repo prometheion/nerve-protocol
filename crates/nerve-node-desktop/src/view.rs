@@ -739,6 +739,12 @@ pub fn panic_stopped(not_saved: Option<&str>) -> String {
     }
 }
 
+/// What the app adds to "Locked" when the lock replaced a change that waited
+/// in node.toml for the node's next start.
+pub fn panic_replaced() -> &'static str {
+    "A change waiting in node.toml was replaced by the lock: make it again if you still want it."
+}
+
 /// What the app says when the running node took no lock (`why`) and its
 /// service did not stop either (`e`): nothing ended.
 pub fn panic_not_stopped(why: &str, e: &str) -> String {

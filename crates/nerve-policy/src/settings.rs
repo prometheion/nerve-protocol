@@ -658,8 +658,9 @@ impl SettingsStore {
 
     /// [`SettingsStore::set_local`] for a panic: the save goes over a file
     /// ahead of the node (a change that waits for the node to take it), as a
-    /// lock never waits for that. The owner's change in that file is undone;
-    /// the file's version stays below the one saved.
+    /// lock never waits for that. The owner's change in that file is undone,
+    /// which the audit log says (`replaced`) and [`SettingsStore::file_ahead`]
+    /// lets the caller say; the file's version stays below the one saved.
     pub fn set_local_panic(
         &mut self,
         new: NodeConfig,
@@ -681,7 +682,34 @@ impl SettingsStore {
                 current: self.config.version,
             });
         }
-        self.commit(Writer::Local, new, over_newer)
+        let in_force = self.config.version;
+        let ahead = if over_newer {
+            self.version_on_disk().unwrap_or(0)
+        } else {
+            0
+        };
+        let saved = self.commit(Writer::Local, new, over_newer)?;
+        // The owner was told that the change in that file takes effect at the
+        // next start: a save that wrote the file replaced it, and the audit
+        // log says so. A lock that changed nothing leaves the file alone.
+        if ahead > in_force && saved > in_force {
+            let _ = self.audit.config(
+                "replaced",
+                &self.path,
+                &format!(
+                    "a panic saved over node.toml, which held a change the node had not taken yet (version {ahead}, the node runs version {in_force})"
+                ),
+            );
+        }
+        Ok(saved)
+    }
+
+    /// Whether node.toml is a file the node signed that is ahead of the
+    /// config in force: a change the owner made while no node answered, which
+    /// the node takes when it starts. A panic saves over it.
+    pub fn file_ahead(&self) -> bool {
+        self.version_on_disk()
+            .is_ok_and(|v| v > self.config.version)
     }
 
     /// Changes the config as the owner through a closure (CLI commands).
@@ -3090,12 +3118,72 @@ mod tests {
             node.set_local(locked.clone(), Some(node.version())),
             Err(SetError::Conflict { current: ahead })
         );
+        assert!(node.file_ahead());
+        let replaced = |s: &SettingsStore| {
+            s.audit()
+                .read()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e["kind"] == "config" && e["event"] == "replaced")
+                .collect::<Vec<_>>()
+        };
+        assert!(replaced(&node).is_empty());
         let v = node.set_local_panic(locked, Some(node.version())).unwrap();
         assert!(v > ahead);
         let saved =
             SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key")).unwrap();
         assert!(saved.locked);
         assert_eq!(saved.version, v);
+        // The change that waited in the file is gone, and the audit log says so.
+        let said = replaced(&node);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let reason = said[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("had not taken yet") && reason.contains(&format!("version {ahead}")),
+            "{reason}"
+        );
+        assert!(!node.file_ahead());
+    }
+
+    /// A panic that finds no change waiting says nothing of one: neither
+    /// does a lock that changes nothing over a file ahead.
+    #[test]
+    fn a_panic_with_nothing_waiting_replaces_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        assert!(!node.file_ahead());
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        node.set_local_panic(locked, Some(node.version())).unwrap();
+        // Locked already: the same lock again saves nothing, and leaves a
+        // change waiting in the file where it is.
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        other
+            .update(|c| {
+                c.limits.max_running += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(node.file_ahead());
+        let again = node.config().clone();
+        node.set_local_panic(again, Some(node.version())).unwrap();
+        assert!(
+            node.file_ahead(),
+            "a lock that changed nothing wrote the file"
+        );
+        let said: Vec<_> = node
+            .audit()
+            .read()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["event"] == "replaced")
+            .collect();
+        assert!(said.is_empty(), "{said:?}");
     }
 
     /// A file the node did not sign names a version, and it holds no change of

@@ -266,11 +266,16 @@ async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
 /// What to tell when the node did not answer a walk of the folders in time:
 /// on a large tree the walk takes longer than the wait, and it goes on. A
 /// second call would only queue another walk.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn walk_goes_on(error: &str) -> Option<String> {
+    // Windows has no `status` at the CLI: the app shows what the walk left.
+    let left = if cfg!(windows) {
+        ""
+    } else {
+        ", `nerve-node status` shows what it left"
+    };
     (error == nerve_transport::ctl::NO_ANSWER).then(|| {
-        "the node is still walking the folders and goes on; do not run this again, `nerve-node status` shows what it left"
-            .to_string()
+        format!("the node is still walking the folders and goes on; do not run this again{left}")
     })
 }
 
@@ -301,7 +306,7 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
                 })
                 .json(walked)
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(walk_goes_on(&e).unwrap_or(e)),
         };
         for line in windows_sync_lines(&v) {
             let _ = writeln!(out, "{line}");
@@ -433,7 +438,8 @@ async fn change_folder(
             if crate::pipe::file_instead(&e, || {
                 !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)))
             }) => {}
-        Err(e) => return Err(e),
+        // The change is not undone by a late answer: the node goes on.
+        Err(e) => return Err(walk_goes_on(&e).unwrap_or(e)),
     }
     let (cfg, _) = read_config(paths).await?;
     let name = pick_center(&cfg, center)?;

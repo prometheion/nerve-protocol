@@ -5,7 +5,11 @@
 //! read and written, the sudo switch, `owner.check`, a reload, `config
 //! accept`) and the key rotation and the changes to a center's folders
 //! ([`crate::daemon::pipe_control`]). Only while no node runs does the CLI
-//! write `node.toml` itself, which the node takes when it starts.
+//! write `node.toml` itself, which the node takes when it starts. A node
+//! counts as running by the keys' lock it holds, so one that runs without
+//! its pipe is an error to the CLI ([`NO_PIPE`]), not a node to write
+//! behind. A call waits for the answer as long as one on the socket does
+//! ([`nerve_transport::ctl::ANSWER_WAIT`]).
 //!
 //! Who may write to it:
 //! - Its DACL lets SYSTEM, the administrators (elevated) and the node's own
@@ -42,26 +46,60 @@
 /// account's.
 pub const NOT_THE_NODES: &str = "the control pipe is not the node's";
 
+/// How the CLI's error reads when a node runs (it holds the keys' lock) and
+/// there is no pipe of its name: it could not make one at its start because
+/// another account held the name, or it is starting. Not
+/// [`nerve_transport::ctl::NOT_RUNNING`]: nothing may be written behind a
+/// node that runs, and the app, which stops the service for a panic the node
+/// did not take, sees an error.
+pub const NO_PIPE: &str = "the node runs without its control pipe: it is still starting, or another process held the pipe's name when it started (docs/dev/windows.md, \"The control pipe is not the node's\"); try again in a moment, or restart the node";
+
+/// The error of a call that found no pipe of the node's name:
+/// [`nerve_transport::ctl::NOT_RUNNING`], unless the node runs all the same
+/// (`node_runs`, the keys' lock held).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn missing_pipe(node_runs: impl FnOnce() -> bool) -> String {
+    if node_runs() {
+        NO_PIPE.into()
+    } else {
+        nerve_transport::ctl::NOT_RUNNING.into()
+    }
+}
+
+/// `call` ended with an error after `limit` when no answer came: the same
+/// error and limit as the socket's.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub async fn within<T>(
+    limit: std::time::Duration,
+    call: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(limit, call)
+        .await
+        .unwrap_or_else(|_| Err(nerve_transport::ctl::NO_ANSWER.to_string()))
+}
+
 /// Whether the CLI makes a folder change in node.toml itself after the pipe
-/// call failed with `e`: when no node made a pipe, and when the pipe is
-/// another account's but no node runs (`node_runs`, asked only then), so a
-/// pipe someone made of the node's name does not keep the owner from
-/// changing folders with the node stopped. Any other failure is the
-/// answer.
+/// call failed with `e`: when no node made a pipe and none runs
+/// ([`missing_pipe`]), and when the pipe is another account's but no node
+/// runs (`node_runs`, asked only then), so a pipe someone made of the node's
+/// name does not keep the owner from changing folders with the node stopped.
+/// Any other failure is the answer.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn file_instead(e: &str, node_runs: impl FnOnce() -> bool) -> bool {
     e == nerve_transport::ctl::NOT_RUNNING || (e.starts_with(NOT_THE_NODES) && !node_runs())
 }
 
 /// Whether the outcome of a call over the pipe says that a node answered: an
-/// answer or a refusal of its own, or [`nerve_transport::ctl::BUSY`] (a node
-/// that takes no connection now runs all the same). No node made the pipe,
-/// the pipe is another account's, or this one may not open it: none.
+/// answer or a refusal of its own, [`nerve_transport::ctl::BUSY`] (a node
+/// that takes no connection now runs all the same), no answer in time (a
+/// node that is stuck runs too), or [`NO_PIPE`]. No node made the pipe, the
+/// pipe is another account's, or this one may not open it: none.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn node_answered(outcome: &Result<serde_json::Value, String>) -> bool {
+    use nerve_transport::ctl::{BUSY, NO_ANSWER};
     match outcome {
         Ok(_) => true,
-        Err(e) => e == nerve_transport::ctl::BUSY || e.starts_with("refused"),
+        Err(e) => e == BUSY || e == NO_ANSWER || e == NO_PIPE || e.starts_with("refused"),
     }
 }
 
@@ -89,7 +127,7 @@ mod sys {
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
 
     use nerve_service::win::pipe::{Descriptor, client_pid, foreign_owner, instance};
-    use nerve_transport::ctl::{BUSY, NOT_RUNNING};
+    use nerve_transport::ctl::{ANSWER_WAIT, BUSY};
 
     use super::{NOT_THE_NODES, dacl_text};
     use crate::daemon::Shared;
@@ -193,9 +231,21 @@ mod sys {
         }
     }
 
-    /// One call to the node at `paths` over its pipe: [`NOT_RUNNING`] when
-    /// no node made one.
+    /// One call to the node at `paths` over its pipe:
+    /// [`nerve_transport::ctl::NOT_RUNNING`] when no node made one and none
+    /// runs, [`super::NO_PIPE`] when one runs without,
+    /// and [`nerve_transport::ctl::NO_ANSWER`] when it does not answer in
+    /// time, as on the socket: a node that is stuck must not hold the
+    /// caller, the app's panic least of all, for ever.
     pub async fn call(paths: &NodePaths, method: &str, params: Value) -> Result<Value, String> {
+        super::within(ANSWER_WAIT, call_unlimited(paths, method, params)).await
+    }
+
+    async fn call_unlimited(
+        paths: &NodePaths,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
         let name = paths.ctl_pipe();
         let mut busy = 0;
         let client = loop {
@@ -207,7 +257,10 @@ mod sys {
             {
                 Ok(c) => break c,
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
-                    return Err(NOT_RUNNING.into());
+                    // A node that runs holds the keys' lock.
+                    return Err(super::missing_pipe(|| {
+                        !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)))
+                    }));
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                     // Every instance in use: a node is there, and busy.
@@ -258,9 +311,11 @@ mod tests {
     /// are not one.
     #[test]
     fn a_busy_or_refusing_node_counts_as_running() {
-        use nerve_transport::ctl::{BUSY, NOT_RUNNING};
+        use nerve_transport::ctl::{BUSY, NO_ANSWER, NOT_RUNNING};
         assert!(node_answered(&Ok(serde_json::json!({}))));
         assert!(node_answered(&Err(BUSY.into())));
+        assert!(node_answered(&Err(NO_ANSWER.into())));
+        assert!(node_answered(&Err(NO_PIPE.into())));
         assert!(node_answered(&Err(
             "refused: this request comes from a command the node runs for a center".into()
         )));
@@ -301,5 +356,59 @@ mod tests {
         ] {
             assert!(!file_instead(other, runs(false)), "{other}");
         }
+    }
+
+    /// No pipe of the node's name is no node only when none runs: a node
+    /// that runs without its pipe (another account held the name when it
+    /// started) is an error, so a change is not written behind it and the
+    /// app's panic sees a lock that was not taken.
+    #[test]
+    fn a_node_that_runs_without_its_pipe_is_no_node_to_write_behind() {
+        use nerve_transport::ctl::NOT_RUNNING;
+        assert_eq!(missing_pipe(|| false), NOT_RUNNING);
+        let e = missing_pipe(|| true);
+        assert_eq!(e, NO_PIPE);
+        assert!(!file_instead(&e, || true));
+        assert!(!file_instead(&e, || false));
+    }
+
+    /// A call that is not answered ends with the socket's error and does not
+    /// wait for ever: the node may be stuck with its pipe still listening.
+    #[tokio::test]
+    async fn a_call_that_is_not_answered_ends() {
+        use nerve_transport::ctl::NO_ANSWER;
+        let silent = std::future::pending::<Result<(), String>>();
+        // Bounded here, so that a call without its limit fails this test
+        // and does not hang it.
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            within(std::time::Duration::from_millis(100), silent),
+        )
+        .await
+        .expect("within ends by itself");
+        assert_eq!(r, Err(NO_ANSWER.to_string()));
+        let r = within(std::time::Duration::from_secs(5), async { Ok(1) }).await;
+        assert_eq!(r, Ok(1));
+        let r = within(std::time::Duration::from_secs(5), async {
+            Err::<u8, _>("x".to_string())
+        })
+        .await;
+        assert_eq!(r, Err("x".to_string()));
+    }
+
+    /// The call itself, on a state folder with no pipe: no node, until the
+    /// keys' lock is held as a running node holds it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_call_finds_no_pipe_while_a_node_holds_its_lock() {
+        use nerve_transport::ctl::NOT_RUNNING;
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let e = call(&paths, "status", serde_json::json!({})).await;
+        assert_eq!(e, Err(NOT_RUNNING.to_string()));
+        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let e = call(&paths, "status", serde_json::json!({})).await;
+        assert_eq!(e, Err(NO_PIPE.to_string()));
+        drop(held);
     }
 }

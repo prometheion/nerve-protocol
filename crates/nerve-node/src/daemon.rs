@@ -2608,18 +2608,17 @@ async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
 }
 
 /// Windows: the control pipe (crate::pipe). A node whose pipe cannot be
-/// made runs on without it, as a node without a channel did before: the CLI
-/// then writes the signed file, which the node takes at its next start.
-/// Failing the start instead would let any account that takes the pipe's
-/// name first keep the node from running.
+/// made runs on without it. The CLI finds the node by the keys' lock it
+/// holds and answers [`crate::pipe::NO_PIPE`] to every change, so nothing
+/// is written behind it and the app, whose panic the node cannot take,
+/// stops the service. Failing the start instead would let any account that
+/// takes the pipe's name first keep the node from running.
 #[cfg(windows)]
 async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
     match crate::pipe::serve(shared) {
         Ok(task) => Ok(task),
         Err(e) => {
-            tracing::error!(
-                "{e}; a change from the CLI takes effect at the next start of the node"
-            );
+            tracing::error!("{e}; the CLI cannot change a running node until it is restarted");
             Ok(tokio::spawn(async {}))
         }
     }
@@ -3059,6 +3058,7 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     let panic = params.get("panic").and_then(Value::as_bool) == Some(true);
     // A panic saves over a file the node has not taken yet: the lock never
     // waits for the owner to look at a change that is waiting.
+    let (before, waiting) = (store.version(), panic && store.file_ahead());
     let r = if panic {
         store.set_local_panic(new, if_version)
     } else {
@@ -3085,7 +3085,10 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     match r {
         Ok(v) => {
             shared.bump();
-            Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
+            // The change that waited in the file went with it: the CLI and
+            // the app say so (the audit log has `replaced`).
+            let replaced = waiting && v > before;
+            Reply::Ok(json!({"version": v, "held": held, "dropped": dropped, "replaced": replaced}))
         }
         Err(SetError::Conflict { current }) if current > in_force && on_disk == current => {
             Reply::Err(file_ahead(current, in_force))
@@ -5443,11 +5446,23 @@ mod tests {
         assert!(!s.config().locked);
         cfg.locked = true;
         let r = control(&s, "config.write", write(&cfg, version, true), false);
-        assert!(matches!(r, Reply::Ok(_)), "the panic was refused");
+        // The answer says that the change waiting in the file went with it.
+        let Reply::Ok(answer) = r else {
+            panic!("the panic was refused")
+        };
+        assert_eq!(answer["replaced"], true, "{answer}");
         assert!(s.config().locked);
         let saved = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
         assert!(saved.locked);
         assert!(saved.version > version + 1);
+        // A write that waits for nothing says nothing was replaced.
+        let version = s.config().version;
+        cfg.locked = false;
+        let Reply::Ok(answer) = control(&s, "config.write", write(&cfg, version, false), false)
+        else {
+            panic!("an owner's write was refused")
+        };
+        assert_eq!(answer["replaced"], false, "{answer}");
         daemon.stop().await;
     }
 
