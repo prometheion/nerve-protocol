@@ -24,7 +24,8 @@ use nerve_node::exec::{RunCall, RunOptions, Sig, run};
 use nerve_proto::ErrorCode;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows_sys::Win32::System::Console::{
-    AllocConsole, CTRL_C_EVENT, GetConsoleProcessList, SetConsoleCtrlHandler,
+    AllocConsole, AttachConsole, CTRL_C_EVENT, FreeConsole, GetConsoleProcessList,
+    SetConsoleCtrlHandler,
 };
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -267,7 +268,10 @@ async fn term_lets_a_command_that_heeds_ctrl_c_clean_up() {
 /// A command whose process has joined the node's own console is not sent
 /// Ctrl+C there, which would reach the node (and stop it, as it hears
 /// Ctrl+C): with nothing else to ask, `term` ends the job at once. The
-/// shell leaves its own console for this test process's one.
+/// command, a stand-in ([`stand_in_joins_the_nodes_console`]), leaves its
+/// own console for this test process's one. It was a PowerShell that
+/// compiled the two calls with `Add-Type` first, which on a busy runner
+/// took longer than the wait for it (#180).
 #[tokio::test]
 async fn a_command_on_the_nodes_console_is_not_sent_ctrl_c() {
     setup();
@@ -279,18 +283,20 @@ async fn a_command_on_the_nodes_console_is_not_sent_ctrl_c() {
         }
     }
     let d = tempfile::tempdir().unwrap();
-    let command = format!(
-        "Add-Type -Namespace N -Name K -MemberDefinition \
-         '[DllImport(\"kernel32.dll\")] public static extern bool FreeConsole(); \
-         [DllImport(\"kernel32.dll\")] public static extern bool AttachConsole(uint p);'; \
-         [void][N.K]::FreeConsole(); \
-         if ([N.K]::AttachConsole({})) {{ Set-Content -Path attached -Value 1 }} \
-         else {{ Set-Content -Path refused -Value 1 }}; \
-         try {{ Start-Sleep 120 }} finally {{ Set-Content -Path cleaned -Value 1 }}",
-        std::process::id()
-    );
+    // The console to join: this process's.
+    std::fs::write(d.path().join("joins"), std::process::id().to_string()).unwrap();
+    let argv = vec![
+        std::env::current_exe().unwrap().display().to_string(),
+        "--ignored".into(),
+        "--exact".into(),
+        "stand_in_joins_the_nodes_console".into(),
+    ];
+    let c = RunCall {
+        command: argv.join(" "),
+        argv: Some(argv),
+        ..call("", d.path(), Duration::from_secs(120))
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let c = call(&command, d.path(), Duration::from_secs(120));
     let task = tokio::spawn(async move {
         run(&c, &opts(), |e| {
             let _ = tx.send(e.clone());
@@ -298,6 +304,7 @@ async fn a_command_on_the_nodes_console_is_not_sent_ctrl_c() {
         .await
     });
     let ender = rx.await.unwrap();
+    // The stand-in says which, by a file that appears whole.
     let (attached, refused) = (d.path().join("attached"), d.path().join("refused"));
     for _ in 0..600 {
         if attached.exists() || refused.exists() {
@@ -307,7 +314,7 @@ async fn a_command_on_the_nodes_console_is_not_sent_ctrl_c() {
     }
     assert!(
         attached.exists(),
-        "the shell did not join the test's console"
+        "the command did not join the test's console"
     );
     let t = Instant::now();
     ender.signal(Sig::Term);
@@ -421,6 +428,41 @@ fn stand_in_heeds_ctrl_c() {
     // process.
     unsafe { SetConsoleCtrlHandler(Some(heard), 1) };
     std::fs::write("started", "1").unwrap();
+    std::thread::sleep(Duration::from_secs(120));
+}
+
+/// The command of [`a_command_on_the_nodes_console_is_not_sent_ctrl_c`]:
+/// this program again. It leaves its own console and joins the one of the
+/// process whose pid is in `joins` (the test's, standing for the node's),
+/// puts its Ctrl+C handler in place, and then says whether it joined
+/// (`attached` or `refused`, renamed into place). A Ctrl+C it hears there
+/// leaves `cleaned` and ends it with [`HEARD`]. Outside a folder marked
+/// `joins` it does nothing.
+#[test]
+#[ignore = "a command the other tests run"]
+fn stand_in_joins_the_nodes_console() {
+    let Ok(pid) = std::fs::read_to_string("joins") else {
+        return;
+    };
+    let pid: u32 = pid.trim().parse().unwrap();
+    unsafe extern "system" fn heard(event: u32) -> BOOL {
+        if event != CTRL_C_EVENT {
+            return 0;
+        }
+        let _ = std::fs::write("cleaned", "1");
+        std::process::exit(HEARD as i32)
+    }
+    // SAFETY: plain calls on this process's console; the handler is a plain
+    // function that lives as long as the process.
+    let joined = unsafe {
+        FreeConsole();
+        let joined = AttachConsole(pid) != 0;
+        SetConsoleCtrlHandler(Some(heard), 1);
+        joined
+    };
+    let said = if joined { "attached" } else { "refused" };
+    std::fs::write("said.tmp", "1").unwrap();
+    std::fs::rename("said.tmp", said).unwrap();
     std::thread::sleep(Duration::from_secs(120));
 }
 
