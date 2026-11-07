@@ -540,7 +540,8 @@ protected = { extra = [], allow = [] }  # a center may add to extra; only the ow
                                         # also by a folder at or inside an entry
 allow = ["exec.run:git status", "fs.read:~/notes/*"]   # allowlist mode only
 deny = ["fs:~/private/*", "exec.run:rm *"]             # every mode
-sudo_allow = ["sudo apt update"]                       # sudo commands, every mode
+sudo_allow = ["sudo apt update"]                       # sudo commands, every mode; only the owner adds
+                                                       # (a center may remove: `policy.sudo_allow ...: only the owner ...`)
 ```
 
 Unknown keys are refused, and so is a rule that does not parse. Two centers
@@ -783,9 +784,11 @@ On Linux each command runs in a cgroup v2 of its own, held to the limits
 its call was granted from `limits.command`: `memory.max` (with
 `memory.swap.max` 0 and `memory.oom.group` 1, so a command past its memory
 is killed whole), `cpu.max` (`cpu_percent` × 1000 µs per 100 ms) and
-`pids.max`. Each default and most is from 1 up to 1 PiB, 4096 CPUs and
-4194304 processes, and no default is above its most; a call names a value
-of its own up to the most. The node takes its own cgroup as the root
+`pids.max` (`processes`, plus 2 for a command with a `/proc` of its own,
+whose shim and namespace init are in its cgroup too). Each default and
+most is from 1 up to 1 PiB, 4096 CPUs and 4194304 processes, and no
+default is above its most; a call names a value of its own up to the
+most. The node takes its own cgroup as the root
 (`/proc/self/cgroup`) when systemd delegated it (`user.delegate` or
 `trusted.delegate` set to `1`), or when it belongs to the node's user, who
 is not root, and holds no other process: outside `user@<uid>.service` the
@@ -949,7 +952,8 @@ turns it on, and a center reads and changes nothing of it, grant or not.
 - `nerve-node relay add <name> [--center <center>]...` makes a token for a
   relayed node: 43 characters of `a-z0-9`, shown once, with the line the
   relayed node runs,
-  `nerve-node proxy set 'https://<name>:<token>@<relay>:<port>' --pin=<pin>`.
+  `nerve-node proxy set -`, with the link on the next line (the token stays
+  out of the process list).
   `node.toml` keeps the token's SHA-256 only, and the log tells a change of
   `relay.node` without its values. `relay token <name>` gives a known node
   a new token, shown once with the same line, and keeps its centers and

@@ -36,8 +36,9 @@ pub struct Setup {
     /// itself to read and write in. Without it the profile checks do not run.
     pub folder: Option<String>,
     /// The node's sudo password. With it the part also turns sudo on, runs
-    /// a sudo command on the sudo allow list, turns sudo off and replays the
-    /// password.
+    /// a sudo command on the sudo allow list ([`SUDO_ALLOWED`], which the
+    /// owner puts there before the part starts: a center may not), turns
+    /// sudo off and replays the password.
     pub sudo_password: Option<String>,
 }
 
@@ -219,6 +220,10 @@ where
 const PROFILE_CHECKS: &[(&str, &str)] = &[
     ("7.4", "settings get returns document and version"),
     ("7.4", "settings set with a stale if_version is conflict"),
+    (
+        "7.4",
+        "settings set that puts a command on the sudo allow list is forbidden",
+    ),
     ("7.4", "settings set applies a document"),
     (
         "7.4.2",
@@ -286,7 +291,9 @@ const START_WAIT: Duration = Duration::from_secs(5);
 /// PowerShell.
 const STREAMED_SH: &str = "for i in 1 2 3; do echo line $i; sleep 0.3; done";
 const STREAMED_PS: &str = "foreach ($i in 1..3) { \"line $i\"; Start-Sleep -Milliseconds 300 }";
-const SUDO_ALLOWED: &str = "sudo echo nerve-conformance-sudo";
+/// The sudo command the owner puts on the fake center's sudo list before
+/// the part starts ([`Setup::sudo_password`]).
+pub const SUDO_ALLOWED: &str = "sudo echo nerve-conformance-sudo";
 
 type Conn = crate::wire::Conn<tokio::net::TcpStream>;
 
@@ -555,8 +562,28 @@ async fn profile_steps(
     };
     step(Ok(()))?;
 
+    // Only the owner lists commands for sudo: a center that adds one is
+    // refused, whatever else its document says.
+    let mut more = doc.clone();
+    if let Some(p) = more["policy"].as_object_mut() {
+        let list = p.entry("sudo_allow").or_insert_with(|| json!([]));
+        if let Some(l) = list.as_array_mut() {
+            l.push(json!("sudo echo nerve-conformance-other"));
+        }
+    }
+    step(expect_code(
+        invoke(
+            conn,
+            "settings",
+            "set",
+            json!({"document": more, "if_version": version}),
+        )
+        .await,
+        ErrorCode::Forbidden,
+    ))?;
+
     // A policy of its own, in default deny: allow rules for the folder and
-    // one exact command, and the sudo allow list for another.
+    // one exact command; the sudo allow list stays the owner's.
     let policy = &mut doc["policy"];
     policy["mode"] = json!("allowlist");
     if let Some(p) = policy.as_object_mut() {
@@ -570,7 +597,6 @@ async fn profile_steps(
         format!("exec.run:{}", literal(streamed)),
     ]);
     policy["deny"] = json!([]);
-    policy["sudo_allow"] = json!([SUDO_ALLOWED]);
     let set = |if_version: u64| json!({"document": doc.clone(), "if_version": if_version});
 
     step(expect_code(

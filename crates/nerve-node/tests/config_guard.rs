@@ -532,9 +532,13 @@ async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_process_that_outlives_its_command_cannot_change_the_config() {
     let dir = tempfile::tempdir().unwrap();
-    let Some((mut center, o)) = folder_node(dir.path()).await else {
+    let Some((mut center, mut o)) = folder_node(dir.path()).await else {
         return;
     };
+    // A command with a /proc of its own takes what is left of it along when
+    // it ends (nerve_sandbox::own_proc): here a kernel without one, where
+    // nothing but the cgroup would.
+    o.own_proc = Some(false);
     let paths = o.paths.clone();
     let work = o.home.join("work");
     let extra = work.join("extra");

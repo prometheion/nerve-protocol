@@ -878,10 +878,25 @@ mod tests {
         let js = String::from_utf8(js.body).unwrap();
         let card = &js[js.find("function pairingCard").unwrap()..];
         let card = &card[..card.find("\n}\n").unwrap()];
-        // Two rows with a Copy each: the command, and the link alone for the
-        // desktop app. The link's parts are not shown apart.
-        assert!(card.contains("row(\"Command\", command)"), "{card}");
+        // Two rows with a Copy each: the command, which reads the link from
+        // stdin so that it is never in the process list (#198), and the link
+        // alone for the desktop app, which a Windows machine opens. The
+        // link's parts are not shown apart.
+        assert!(card.contains("row(\"Command\", PAIR_COMMAND)"), "{card}");
+        assert!(
+            js.contains("const PAIR_COMMAND = \"nerve-node center add -\";"),
+            "{js}"
+        );
         assert!(card.contains("row(\"Link\", p.link)"), "{card}");
+        assert!(!card.contains("center add '"), "{card}");
+        assert!(
+            card.contains("then paste the link on the next line"),
+            "{card}"
+        );
+        assert!(
+            card.contains("On a Windows machine, open this link on the machine"),
+            "{card}"
+        );
         for gone in ["\"Center\"", "\"Code\"", "\"Certificate pin\""] {
             assert!(!card.contains(gone), "{gone} is still a row: {card}");
         }
@@ -1594,6 +1609,94 @@ mod tests {
         );
         assert!(APP_JS.contains("    staleBanner(c.meta.stale),\n"));
         assert!(APP_JS.contains("((state.checker && state.checker.meta.fields) || {})[scope]"));
+    }
+
+    /// A sudo command's audit row has no Allow buttons, as only the
+    /// machine's owner puts a command on the sudo list: it says where,
+    /// the nerve-node command with a Copy button, or the app's place on a
+    /// Windows machine (#197). The API refuses the list as well.
+    #[tokio::test]
+    async fn a_sudo_commands_audit_row_says_where_the_owner_adds_it() {
+        let row = &APP_JS[APP_JS.find("function auditRow(").unwrap()..];
+        let row = &row[..row.find("\n}\n").unwrap()];
+        for part in [
+            r#"sudo ? null : ruleBtn("Allow", "", "allow", false, "check")"#,
+            r#"sudo ? null : ruleBtn("Allow as wildcard", "", "allow", true)"#,
+            "known && sudo ? sudoListHint(n, d.target, auditKey) : null",
+        ] {
+            assert!(row.contains(part), "{part}");
+        }
+        assert!(!row.contains(r#""sudo""#), "no button writes the sudo list");
+        let hint = &APP_JS[APP_JS.find("function sudoListHint(").unwrap()..];
+        let hint = &hint[..hint.find("\n}\n").unwrap()];
+        for part in [
+            r#"if (n && n.platform === "windows") {"#,
+            "const line = sudoRuleLine(command);",
+            "in the Nerve app on that machine, Permissions, Sudo",
+            // A Linux command with no line to copy still names the CLI: a
+            // headless server has no app (round 2, correctness 2).
+            "nerve-node rule add allow --action exec.run --exact 'COMMAND'",
+            r#"btn("Copy", "ghost", () => copy(line)"#,
+        ] {
+            assert!(hint.contains(part), "{part}");
+        }
+        assert!(
+            !APP_JS.contains("shellWord"),
+            "no word is quoted for one shell"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(dir.path()), None, true);
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/audit/rule", &[], ""),
+                &json!({"list": "sudo", "cap": "exec", "action": "run",
+                        "target": "sudo apt update", "node_id": "n1"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status, 400);
+        assert!(
+            e["error"]
+                .as_str()
+                .unwrap()
+                .contains("only the machine's owner"),
+            "{e}"
+        );
+    }
+
+    /// The line the Audit page offers for a sudo command is the exact rule
+    /// (a trailing ` *` stays the command's own, not a wildcard for root),
+    /// and only for a word that reads the same in POSIX shells and in fish:
+    /// none with a quote, a backslash or a line break (round 1, security 2
+    /// and 3). Runs the page's function with `node` where it is there.
+    #[test]
+    fn the_sudo_line_is_the_exact_rule_and_is_safe_to_paste() {
+        let from = APP_JS.find("function sudoRuleLine(").unwrap();
+        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
+        let script = format!(
+            "{func}\nconst cases = [\"sudo apt update\", \"sudo chown -R me *\", \"it's\", \"a\\\\'b\", \"a\\nb\", \"a\\u0000b\", \"x\\\\\"];\nconsole.log(JSON.stringify(cases.map(sudoRuleLine)));"
+        );
+        let out = match std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => {
+                eprintln!("skipped: no node here");
+                return;
+            }
+        };
+        let lines: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(
+            lines[0].as_deref(),
+            Some("nerve-node rule add allow --action exec.run --exact 'sudo apt update'")
+        );
+        assert_eq!(
+            lines[1].as_deref(),
+            Some("nerve-node rule add allow --action exec.run --exact 'sudo chown -R me *'")
+        );
+        assert_eq!(&lines[2..], [None, None, None, None, None], "{lines:?}");
     }
 
     #[test]

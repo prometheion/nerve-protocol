@@ -185,6 +185,8 @@ export global Perm {
     in-out property <bool> runs-as-owner;
     // Root is the owner (#151): what runs as the owner runs as root.
     in-out property <bool> owner-is-root;
+    // Its Windows twin: the owner is an administrator (#197).
+    in-out property <bool> owner-is-admin;
     in-out property <string> built-in;
     in-out property <string> grant-errors;
     in-out property <string> stale;

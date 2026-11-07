@@ -25,6 +25,11 @@ pub(super) async fn proxy_cmd(
             pin,
             mut headers,
         } => {
+            // `-` takes the URL or relay link from the first line of stdin,
+            // as `center add -` takes its link: a relay link holds the
+            // relay token, which in an argument every account could read in
+            // the process list. What else comes on stdin follows that line.
+            let url = given_url(&url)?;
             // A URL with a user name and no password takes the password from
             // stdin (asked without echo at a terminal), and `--header -`
             // the headers, one a line after it: neither shows in the
@@ -285,6 +290,26 @@ fn stdin_secrets(text: &str, password: bool, headers: bool) -> (Option<String>, 
         Vec::new()
     };
     (pw, hs)
+}
+
+/// The URL of `proxy set`: the one given, or for `-` the first line of
+/// stdin.
+fn given_url(url: &str) -> Result<String, String> {
+    if url != "-" {
+        return Ok(url.to_string());
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the proxy URL: {e}"))?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err(
+            "proxy set -: the first line of stdin is empty, not a proxy URL or relay link".into(),
+        );
+    }
+    Ok(line.to_string())
 }
 
 /// Whether `proxy set` reads the password of `url`: a URL with a user name

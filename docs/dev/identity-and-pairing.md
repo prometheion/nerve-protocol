@@ -26,7 +26,7 @@ node.
    the link. The code lasts 10 minutes by default (up to 24 hours), allows 10
    tries and works once.
    `nerve://pair?center=<percent-encoded URL>&code=<code>&pin=<pin>`
-2. On the node: `nerve-node center add '<link>'`. The node parses the link
+2. On the node: `nerve-node center add -` and paste the link (a link given as an argument is in the process list while the node waits for the yes). The node parses the link
    strictly and shows the center's address, plus the policy the new pairing
    starts with (mode `folder`, no folder, the guard's deny rules
    `nerve_policy::rules::GUARD`, settings grant `off`). Before it asks, it
@@ -113,13 +113,20 @@ Pairing links a machine to a center. Do it once per machine and center.
    **Pair a machine**. It shows a command and the pairing link, each with a
    Copy button. With the [desktop app](desktop.md), paste the link there
    (Centers, **Pair a center**) and skip the command.
-2. On the machine, as a normal user, run the command it shows:
+2. On the machine, as a normal user, run the command it shows, then paste
+   the link on the next line:
 
    ```sh
-   nerve-node center add 'nerve://pair?center=https%3A%2F%2Flab.example%3A7443&code=k3v7x9q2m1ab&pin=...'
+   nerve-node center add -
+   nerve://pair?center=https%3A%2F%2Flab.example%3A7443&code=k3v7x9q2m1ab&pin=...
    ```
 
-   Keep the quotes. The link has `&` in it.
+   `-` reads the link from stdin (#198): `center add` waits for your yes
+   with the unused code, and as an argument it would sit in the process
+   list meanwhile, where another pairing's command could read it and pair
+   a machine of its own. On a Windows machine the card says to open the
+   link there instead: the desktop app takes it from the link handler and
+   hands it on at once ([desktop](desktop.md)).
 
    The node shows the center's address and what the center may do at first,
    then asks you to confirm. Nothing is stored before you say yes.

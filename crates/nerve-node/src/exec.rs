@@ -219,6 +219,24 @@ pub struct SignalArgs {
     pub signal: String,
 }
 
+/// The limits for the command's cgroup: with a `/proc` of its own the shim
+/// and the namespace's init are two more tasks in it than the command
+/// (nerve_sandbox::own_proc), and a call that asks for one process or two
+/// would not start otherwise. The command still has the processes it was
+/// granted.
+#[cfg(target_os = "linux")]
+fn room_for_shim(
+    granted: &nerve_policy::config::Granted,
+    own_proc: bool,
+) -> nerve_policy::config::Granted {
+    nerve_policy::config::Granted {
+        processes: granted
+            .processes
+            .saturating_add(if own_proc { 2 } else { 0 }),
+        ..*granted
+    }
+}
+
 /// The shell program and its arguments for `command`.
 pub fn shell_command(shell: Option<&str>, command: &str) -> (String, Vec<String>) {
     let default = if cfg!(windows) {
@@ -1359,6 +1377,10 @@ pub struct RunOptions {
     /// starts (nerve_sandbox::net_filter). Linux only: elsewhere such a
     /// command does not run.
     pub no_network: bool,
+    /// Linux: the command runs through the shim in a PID namespace with a
+    /// `/proc` of its own, and sees only its own processes
+    /// (nerve_sandbox::own_proc, #199).
+    pub own_proc: bool,
 }
 
 /// The variables of the node's environment every command of `nerve-run`
@@ -1921,13 +1943,18 @@ pub async fn run(
     {
         line.insert_str(0, nerve_sandbox::POWERSHELL_START);
     }
-    let shim = (opts.landlock.is_some() || opts.container.is_some()).then(|| ShimSpec {
-        program: program.clone().into(),
-        args: args.clone(),
-        parent: std::process::id(),
-        landlock: opts.landlock.clone(),
-        container: opts.container.clone(),
-    });
+    // A sudo command and root's never: sudo would not rise in the user
+    // namespace the shim makes for it.
+    let own_proc = opts.own_proc && opts.sudo.is_none() && opts.root.is_none();
+    let shim =
+        (opts.landlock.is_some() || opts.container.is_some() || own_proc).then(|| ShimSpec {
+            program: program.clone().into(),
+            args: args.clone(),
+            parent: std::process::id(),
+            landlock: opts.landlock.clone(),
+            container: opts.container.clone(),
+            own_proc,
+        });
     // The shim makes the container's profile and window station for the
     // user it runs as, which is not wired for another account yet; such a
     // command would run without its container (crate::daemon, which gives
@@ -1977,12 +2004,16 @@ pub async fn run(
     // keeps the command from running: the owner set the limits.
     #[cfg(target_os = "linux")]
     let cgroup = match &opts.limits {
-        Some((cgroups, granted)) => Some(cgroups.command(granted).map_err(|e| {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the command was not run: {e}"),
-            )
-        })?),
+        Some((cgroups, granted)) => Some(
+            cgroups
+                .command(&room_for_shim(granted, own_proc))
+                .map_err(|e| {
+                    RpcError::new(
+                        ErrorCode::Unavailable,
+                        format!("the command was not run: {e}"),
+                    )
+                })?,
+        ),
         None => None,
     };
     // A confined command gets a session of its own, so it has no
@@ -2015,6 +2046,10 @@ pub async fn run(
         // Root as the account (the owner chose it, warned) gets root's
         // rights back at exec, which no_new_privs would keep from it.
         let nnp = opts.sudo.is_none() && opts.account.as_ref().is_none_or(|a| a.uid != 0);
+        // A command started without the shim leaves the node's AppArmor
+        // profile at its exec; the shim leaves it itself, after it made
+        // its namespace.
+        let leave_profile = shim.is_none();
         // The filter of the owner's network switch, made here: the child
         // only puts it on, last, once it is the account.
         let net = match opts.no_network {
@@ -2029,6 +2064,11 @@ pub async fn run(
             cmd.pre_exec(move || {
                 if own_session && libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                // First: once the process is another account, its
+                // /proc/self files are not its own to write.
+                if leave_profile {
+                    nerve_sandbox::own_proc::leave_profile()?;
                 }
                 if let Some(fd) = join {
                     crate::cgroup::join(fd)?;
@@ -2491,6 +2531,26 @@ mod tests {
     }
     use nerve_policy::config::Access;
 
+    /// The shim and the namespace's init are two tasks of the command's
+    /// cgroup besides the command: a call that asks for two processes still
+    /// starts (round 1, correctness 2).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_with_its_own_proc_gets_room_for_the_shim_and_the_init() {
+        let g = nerve_policy::config::Granted {
+            memory_mb: 512,
+            cpu_percent: 100,
+            processes: 2,
+        };
+        assert_eq!(room_for_shim(&g, true).processes, 4);
+        assert_eq!(room_for_shim(&g, false), g);
+        let most = nerve_policy::config::Granted {
+            processes: u32::MAX,
+            ..g
+        };
+        assert_eq!(room_for_shim(&most, true).processes, u32::MAX);
+    }
+
     /// A command of nerve-run keeps of the node's environment only the few
     /// variables it always gets and the names the owner adds: not what the
     /// unit and systemd put there.
@@ -2538,6 +2598,7 @@ mod tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 
@@ -4476,6 +4537,7 @@ mod windows_tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 

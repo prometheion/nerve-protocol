@@ -29,17 +29,28 @@ fn text_model(items: Vec<String>) -> ModelRc<SharedString> {
 /// What the Overview says while root is the node's owner (#151).
 pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user mode, and of allowlist mode as the owner, run as root. They can do everything on this machine, Nerve and its keys included, and nothing in Nerve holds them back.";
 
+/// What the Overview says while an administrator is the node's owner on
+/// Windows, the twin of [`ROOT_OWNER`] (#197).
+pub const ADMIN_OWNER: &str = "The owner of this node is an administrator: commands of user mode, and of allowlist mode as the owner, run as that account and can take its administrator rights (UAC is no security boundary). They can do everything on this machine, Nerve and its keys included.";
+
 /// What the app says once the settings grant of the center `name` is given
-/// (`on`) or taken. Where root is the node's owner (`root`), the center may
-/// set its own mode to user, whose commands run as root, and the app says
-/// so, as `center settings on` does.
-pub fn settings_grant_said(name: &str, on: bool, root: bool) -> String {
-    match (on, root) {
-        (true, true) => format!(
+/// (`on`) or taken. Where root is the node's owner (`root`), or on Windows an
+/// administrator (`admin`), the center may set its own mode to user, whose
+/// commands then have every right here, and the app says so, as `center
+/// settings on` does. Taken back, what the center changed stays, which the
+/// app says as `center settings off` does.
+pub fn settings_grant_said(name: &str, on: bool, root: bool, admin: bool) -> String {
+    match (on, root, admin) {
+        (true, true, _) => format!(
             "{name} may change this machine's settings now. Root is the owner of this node, so {name} can set its own mode to user, and its commands then run as root."
         ),
-        (true, false) => format!("{name} may change this machine's settings now."),
-        (false, _) => format!("{name} can no longer change this machine's settings."),
+        (true, false, true) => format!(
+            "{name} may change this machine's settings now. The owner of this node is an administrator, so {name} can set its own mode to user, and its commands can then take every right on this machine (UAC is no security boundary)."
+        ),
+        (true, false, false) => format!("{name} may change this machine's settings now."),
+        (false, ..) => format!(
+            "{name} can no longer change this machine's settings. What it changed stays until you change it: its mode, rules, sudo list and folders on Permissions, its capability switches on Capabilities."
+        ),
     }
 }
 
@@ -102,6 +113,9 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
             held = false;
             (limits_off, limits_restart) = limits_line(why);
         }
+        if let Some(why) = v["processes_warning"].as_str() {
+            warnings.push(why.into());
+        }
         if v["keyring_failed"] == true {
             warnings.push(
                 "The node found no keyring at its start. Restart it once the keyring runs.".into(),
@@ -112,6 +126,8 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
     // the owner runs as root.
     if v["owner_is_root"] == true {
         warnings.push(ROOT_OWNER.into());
+    } else if v["owner_is_admin"] == true {
+        warnings.push(ADMIN_OWNER.into());
     }
     let n = |k: &str| limits[k].as_u64().unwrap_or_default();
     let limits_text = if held || limits_restart || !limits_off.is_empty() {
@@ -1131,6 +1147,36 @@ pub fn proxy_login(url: &str, typed: &str) -> (String, Option<String>) {
     (url, password)
 }
 
+/// The arguments of `proxy set` for the dialog's values, and what goes to
+/// it on stdin. The address (a relay link holds a token) goes on stdin like
+/// the password and the header values: an argument shows in the process
+/// list of the machine. The CLI reads the address from the first line, then
+/// the password of a URL with a user name and no password, and the headers
+/// of `--header -` after it. `url` and `password` are [`proxy_login`]'s.
+pub fn proxy_set_command(
+    url: &str,
+    pin: &str,
+    headers: &str,
+    password: Option<String>,
+) -> (Vec<String>, String) {
+    let mut args: Vec<String> = vec!["proxy".into(), "set".into(), "-".into()];
+    if !pin.is_empty() {
+        args.push(format!("--pin={pin}"));
+    }
+    let mut input = vec![url.to_string()];
+    input.extend(password);
+    let headers: Vec<&str> = headers
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !headers.is_empty() {
+        args.push("--header=-".into());
+        input.extend(headers.iter().map(|h| h.to_string()));
+    }
+    (args, input.join("\n"))
+}
+
 /// `%XX` escapes undone; a broken one stays as it is.
 fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -1968,17 +2014,43 @@ mod tests {
         let (st, _) = status(&v, NOW);
         assert_eq!(st.state, "locked");
         assert_eq!(st.warnings.row_count(), 1);
+        // The Linux node's note that pairings see each other's commands.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "processes_warning": "commands of different pairings can read each other"});
+        let (st, _) = status(&v, NOW);
+        assert_eq!(st.warnings.row_count(), 1);
     }
 
     /// Giving the settings grant where root is the owner says that the
     /// center can make itself root.
     #[test]
     fn the_settings_grant_says_root_where_root_is_the_owner() {
-        let said = settings_grant_said("home", true, true);
+        let said = settings_grant_said("home", true, true, false);
         assert!(said.contains("home can set its own mode to user"), "{said}");
         assert!(said.contains("run as root"), "{said}");
-        assert!(!settings_grant_said("home", true, false).contains("root"));
-        assert!(!settings_grant_said("home", false, true).contains("root"));
+        assert!(!settings_grant_said("home", true, false, false).contains("root"));
+        assert!(!settings_grant_said("home", false, true, false).contains("root"));
+    }
+
+    /// Its Windows twin: an administrator as the owner, on the grant and on
+    /// the Overview; and taking the grant back says what stays (#197).
+    #[test]
+    fn the_settings_grant_says_an_administrator_owner_and_what_stays() {
+        let said = settings_grant_said("home", true, false, true);
+        assert!(
+            said.contains("is an administrator, so home can set its own mode to user"),
+            "{said}"
+        );
+        assert!(!settings_grant_said("home", true, false, false).contains("administrator"));
+        let off = settings_grant_said("home", false, false, true);
+        assert!(!off.contains("administrator"), "{off}");
+        assert!(off.contains("What it changed stays"), "{off}");
+        for daemon in ["running", "not running"] {
+            let v =
+                json!({"daemon": daemon, "owner": "alice", "owner_is_admin": true, "centers": []});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(ADMIN_OWNER)], "{daemon}");
+        }
     }
 
     /// That nothing keeps the pairings of nerve-run apart without Landlock
@@ -2695,6 +2767,25 @@ mod tests {
             login("http://alice:old@p.example:3128", "typed"),
             ("http://alice@p.example:3128".into(), Some("typed".into()))
         );
+    }
+
+    /// Nothing the owner typed into the proxy dialog is an argument of
+    /// `proxy set`, which every process of the machine can read: not a relay
+    /// link with its token either (round 1, correctness 6).
+    #[test]
+    fn the_proxy_dialog_hands_the_cli_its_address_on_stdin() {
+        let link = "nerve://relay?host=relay.example&port=7490&node=lab&token=t0ken&pin=abc";
+        let (args, input) = proxy_set_command(link, "", "", None);
+        assert_eq!(args, ["proxy", "set", "-"]);
+        assert_eq!(input, link);
+        let (args, input) = proxy_set_command(
+            "http://alice@p.example:3128",
+            "abc",
+            "X-A: 1\n\n X-B: 2 \n",
+            Some("pw".into()),
+        );
+        assert_eq!(args, ["proxy", "set", "-", "--pin=abc", "--header=-"]);
+        assert_eq!(input, "http://alice@p.example:3128\npw\nX-A: 1\nX-B: 2");
     }
 
     #[test]

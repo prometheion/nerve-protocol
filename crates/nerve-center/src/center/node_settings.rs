@@ -137,8 +137,8 @@ impl Center {
     }
 
     /// Adds `rule` to one list of this center's policy on the node, from the
-    /// audit tab (design §11 9a): `allow`, `deny`, or `sudo` for the sudo
-    /// allow list. A button only adds; it never takes a rule off the other
+    /// audit tab (design §11 9a): `allow` or `deny`; the sudo list is the
+    /// owner's alone. A button only adds; it never takes a rule off the other
     /// list. The node checks and may refuse the document.
     pub async fn add_rule(&self, node_id: &str, list: &str, rule: &str) -> Result<Value, RpcError> {
         let key = policy_list(list)?;
@@ -319,15 +319,18 @@ pub fn settings_write(d: &Descriptor) -> bool {
 }
 
 /// The key of the policy list a button writes to. The settings document is
-/// the node's center entry (nerve-policy): `policy.allow`, `policy.deny` and
-/// `policy.sudo_allow`. A node with another layout refuses the document and
-/// the web UI shows why.
+/// the node's center entry (nerve-policy): `policy.allow` and `policy.deny`.
+/// A node with another layout refuses the document and the web UI shows why.
+/// `policy.sudo_allow` is the owner's alone: the node refuses a center's
+/// addition there.
 fn policy_list(list: &str) -> Result<&'static str, RpcError> {
     match list {
         "allow" => Ok("allow"),
         "deny" => Ok("deny"),
-        "sudo" => Ok("sudo_allow"),
-        _ => Err(RpcError::invalid_args("the list is allow, deny or sudo")),
+        "sudo" => Err(RpcError::invalid_args(
+            super::checker_glue::SUDO_LIST_OWNER_ONLY,
+        )),
+        _ => Err(RpcError::invalid_args("the list is allow or deny")),
     }
 }
 
@@ -428,14 +431,12 @@ mod tests {
         put_rule(&mut d, "allow", "exec.run:git *").unwrap();
         put_rule(&mut d, "allow", "exec.run:git *").unwrap();
         put_rule(&mut d, "deny", "exec.run:git *").unwrap();
-        put_rule(&mut d, "sudo_allow", "sudo apt update").unwrap();
         // Nothing leaves the other list; a repeat adds nothing.
         assert_eq!(
             d["policy"],
             json!({
                 "allow": ["exec.run:ls", "exec.run:git *"],
                 "deny": ["exec.run:git push*", "exec.run:git *"],
-                "sudo_allow": ["sudo apt update"],
             })
         );
         // A document without a policy gets one.
@@ -444,7 +445,13 @@ mod tests {
         assert_eq!(d["policy"]["deny"], json!(["camera"]));
         assert!(put_rule(&mut json!([]), "deny", "x").is_err());
         assert!(put_rule(&mut json!({"policy": {"deny": 1}}), "deny", "x").is_err());
-        assert_eq!(policy_list("sudo").unwrap(), "sudo_allow");
+        // The sudo list is the owner's (#197).
+        let e = policy_list("sudo").unwrap_err();
+        assert!(
+            e.message.contains("only the machine's owner"),
+            "{}",
+            e.message
+        );
         assert!(policy_list("permit").is_err());
     }
 
@@ -480,14 +487,11 @@ mod tests {
             rule("deny", "camera", "snap", "camera.snap", true).unwrap(),
             "camera"
         );
-        assert_eq!(
-            rule("sudo", "exec", "run", "sudo apt update", false).unwrap(),
-            "sudo apt update"
-        );
-        assert_eq!(
-            rule("sudo", "exec", "run", "sudo apt update", true).unwrap(),
-            "sudo apt *"
-        );
+        // No button puts a command on the sudo list (#197).
+        for wild in [false, true] {
+            let e = rule("sudo", "exec", "run", "sudo apt update", wild).unwrap_err();
+            assert!(e.contains("only the machine's owner"), "{e}");
+        }
         for (list, cap, action, target) in [
             ("permit", "exec", "run", "ls"),
             ("allow", "exec", "run", "  "),

@@ -254,14 +254,17 @@ fn nerve_center_and_nerve_node_work_together() {
         click(&mcp, "deny", "camera", "snap", "camera.snap", true),
         "camera"
     );
-    assert_eq!(
-        click(&mcp, "sudo", "exec", "run", "sudo apt update", false),
-        "sudo apt update"
-    );
-    assert_eq!(
-        click(&mcp, "sudo", "exec", "run", "sudo apt update", true),
-        "sudo apt *"
-    );
+    // Only the owner puts a command on the sudo list: the center makes no
+    // such rule, and the node would refuse it.
+    for wildcard in [false, true] {
+        let (status, v) = button(
+            &mcp,
+            json!({"node_id": node_id, "list": "sudo", "cap": "exec", "action": "run",
+                   "target": "sudo apt update", "wildcard": wildcard}),
+        );
+        assert_eq!(status, 400, "{v}");
+        assert!(v.to_string().contains("only the machine's owner"), "{v}");
+    }
     // A repeat adds nothing.
     click(&mcp, "allow", "exec", "run", "echo hi", false);
     let allow = list("allow");
@@ -285,11 +288,8 @@ fn nerve_center_and_nerve_node_work_together() {
         assert!(deny.contains(want), "{deny}");
     }
     assert!(!deny.contains("echo"), "{deny}");
-    let sudo = list("sudo_allow");
-    assert!(
-        sudo.contains("sudo apt update") && sudo.contains("sudo apt *"),
-        "{sudo}"
-    );
+    let (_, sudo, _) = node.cli(&["config", "get", &format!("{center_policy}.sudo_allow")]);
+    assert!(!sudo.contains("apt"), "{sudo}");
     // A bad list, a missing target and a sudo list for a plain command are
     // refused before the node sees them.
     for body in [
@@ -824,6 +824,12 @@ fn node_part_passes_against_nerve_node() {
             if !ok {
                 return Err(format!("grant failed: {out}{err}"));
             }
+            // A center may not put a command on the sudo list; the owner does.
+            let sudo = ["rule", "add", "allow", node_part::SUDO_ALLOWED];
+            let (ok, out, err) = node.cli(&sudo);
+            if !ok {
+                return Err(format!("sudo rule failed: {out}{err}"));
+            }
             let password = "conformance-right-password";
             node.use_fake_sudo(password);
             let folder = node.home.join("work");
@@ -842,7 +848,7 @@ fn node_part_passes_against_nerve_node() {
         .outcomes
         .iter()
         .filter(|o| o.section.starts_with('7'));
-    assert_eq!(profiles.count(), 22, "{report}");
+    assert_eq!(profiles.count(), 23, "{report}");
     drop(node);
 }
 

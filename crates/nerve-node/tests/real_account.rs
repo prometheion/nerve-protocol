@@ -2087,7 +2087,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
 
     // Its own cgroup, with what the call asked for. The cgroup's files are
     // the node's, so the test reads them while the command waits.
-    let wait = "cut -d: -f3 /proc/self/cgroup > cgroup.txt; i=0; \
+    let wait = "echo $$ > pid.txt; cut -d: -f3 /proc/self/cgroup > cgroup.txt; i=0; \
                 while [ ! -e release ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done";
     let call = conn
         .request(
@@ -2118,7 +2118,21 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     };
     assert_eq!(file("memory.max"), (64u64 << 20).to_string());
     assert_eq!(file("cpu.max"), "50000 100000");
-    assert_eq!(file("pids.max"), "32");
+    // With a /proc of its own (nerve_sandbox::own_proc) the shell is the
+    // namespace's second process, after its init, and the cgroup holds the
+    // shim and the init besides the 32 processes the call asked for
+    // (exec::room_for_shim). Where the shim gets no namespace (user
+    // namespaces held back and no AppArmor profile, as in CI's Debian 12
+    // container) the command has the 32 alone, and with Landlock `status`
+    // warns of that.
+    let own_proc = std::fs::read_to_string(work.join("pid.txt"))
+        .unwrap()
+        .trim()
+        == "2";
+    if nerve_sandbox::Confinement::detect().landlock_abi.is_some() {
+        assert_eq!(st["processes_warning"].is_null(), own_proc, "{st}");
+    }
+    assert_eq!(file("pids.max"), if own_proc { "34" } else { "32" });
     std::fs::write(work.join("release"), b"").unwrap();
     let r = conn
         .answer(call, WAIT, &mut Vec::new())
@@ -2588,4 +2602,290 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     for name in ["lab", "home"] {
         let _ = std::fs::remove_dir_all(format!("/srv/nrv167-{name}"));
     }
+}
+
+/// Whether a process of this machine has `text` in its command line.
+fn running_with(text: &str) -> bool {
+    std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+        std::fs::read(e.path().join("cmdline"))
+            .is_ok_and(|c| String::from_utf8_lossy(&c).contains(text))
+    })
+}
+
+/// The installed node gives each folder-mode command of `nerve-run` a
+/// `/proc` of its own (#199): `ps -eo args` in one pairing's command does
+/// not show the running command of another, which `nerve-run` runs too;
+/// `ps`, `top` and `make` work there; `status` warns of nothing. With the
+/// settings grant a center may not put a command on the sudo list, and
+/// `center settings off` says what stays (#197); `proxy set -` takes the
+/// proxy from a pipe (#198).
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
+/// account with a home> cargo test -p nerve-node --test real_account --
+/// --ignored --exact the_installed_nodes_pairings_see_only_their_own_processes`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn the_installed_nodes_pairings_see_only_their_own_processes() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
+    assert!(ok, "{said}");
+    let mut links = Vec::new();
+    for name in ["lab", "home"] {
+        let work = PathBuf::from(format!("/srv/nrv199-{name}"));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(
+            sh(Command::new("chown")
+                .arg(format!("{owner}:{owner}"))
+                .arg(&work))
+            .0
+        );
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let link = center.link().render();
+        let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", name]);
+        assert!(ok, "{said}");
+        let p = work.to_str().unwrap();
+        let (ok, said) = as_owner(&owner, &["folder", "add", p, "rwx", "--center", name]);
+        assert!(ok, "{said}");
+        let paired = center.paired().expect("paired");
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .expect("handshake");
+        links.push((work, inc.conn, center));
+    }
+    let (_, st) = as_owner(&owner, &["status"]);
+    assert!(!st.contains("no /proc of its own"), "{st}");
+    let (home, mut home_conn, _home_center) = links.pop().unwrap();
+    let (lab, lab_conn, _lab_center) = links.pop().unwrap();
+    // The lab pairing's command runs while the home pairing's looks.
+    let marker = format!("nrv199-marker-{}", std::process::id());
+    let line = format!("sleep 4; : {marker}");
+    let first = {
+        let (lab, mut conn) = (lab.clone(), lab_conn);
+        tokio::spawn(async move { (run(&mut conn, &lab, &line).await, conn) })
+    };
+    until("the lab command runs", || running_with(&marker));
+    let r = run(&mut home_conn, &home, "ps -eo user,pid,args")
+        .await
+        .unwrap();
+    assert!(!out(&r).contains(&marker), "{r}");
+    assert!(out(&r).contains("ps -eo user,pid,args"), "{r}");
+    let (r, mut lab_conn) = first.await.unwrap();
+    assert_eq!(r.unwrap()["exit_code"], 0);
+    // Its own processes it sees, and the tools that read /proc work.
+    let r = run(&mut lab_conn, &lab, &format!("ps -eo args; : {marker}"))
+        .await
+        .unwrap();
+    assert!(out(&r).contains(&marker), "{r}");
+    let r = run(&mut lab_conn, &lab, "top -bn1 | head -12")
+        .await
+        .unwrap();
+    assert_eq!(r["exit_code"], 0, "{r}");
+    std::fs::write(lab.join("Makefile"), "all:\n\t@echo built\n").unwrap();
+    let r = run(&mut lab_conn, &lab, "make -j2").await.unwrap();
+    assert_eq!(out(&r), "built\n", "{r}");
+    eprintln!(
+        "lab's ps -eo args, while it runs itself:\n{}",
+        out(&run(&mut lab_conn, &lab, "ps -eo user,pid,args")
+            .await
+            .unwrap())
+    );
+
+    // #197: with the grant the center may not put a command on the sudo
+    // list; taking the grant back says what stays.
+    let (ok, said) = as_owner(&owner, &["center", "settings", "on", "lab"]);
+    assert!(ok, "{said}");
+    eprintln!("$ nerve-node center settings on lab\n{said}");
+    let mut got = None;
+    for _ in 0..100 {
+        let r = lab_conn
+            .call(
+                "get",
+                json!({"cap": "settings", "keys": ["document", "version"]}),
+                WAIT,
+            )
+            .await
+            .expect("an answer");
+        if let Ok(v) = r {
+            got = Some(v);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = got.expect("the grant reaches the center");
+    let mut doc = got["document"].clone();
+    doc["policy"]["sudo_allow"] = json!(["sudo id"]);
+    let e = lab_conn
+        .call(
+            "invoke",
+            json!({"cap": "settings", "action": "set", "ctx": {},
+                   "args": {"document": doc, "if_version": got["version"]}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect_err("only the owner");
+    assert!(
+        e.message
+            .contains("only the owner puts a command on the sudo list"),
+        "{}",
+        e.message
+    );
+    eprintln!(
+        "lab's settings.set with sudo_allow [\"sudo id\"]: {}",
+        e.message
+    );
+    let (_, rules) = as_owner(&owner, &["rule", "sudo", "--center", "lab"]);
+    assert!(!rules.contains("sudo id"), "{rules}");
+    let (ok, said) = as_owner(&owner, &["center", "settings", "off", "lab"]);
+    assert!(
+        ok && said.contains("What lab changed stays as it is"),
+        "{said}"
+    );
+    eprintln!("$ nerve-node center settings off lab\n{said}");
+
+    // #198: the proxy from a pipe, never in the process list.
+    let (ok, said) = as_owner_typing(&owner, &["proxy", "set", "-"], "http://127.0.0.1:3128\n");
+    assert!(ok && said.contains("proxy http://127.0.0.1:3128"), "{said}");
+    eprintln!("$ echo http://127.0.0.1:3128 | nerve-node proxy set -\n{said}");
+    let (_, shown) = as_owner(&owner, &["proxy"]);
+    assert!(shown.contains("http://127.0.0.1:3128"), "{shown}");
+    assert!(as_owner(&owner, &["proxy", "off"]).0);
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    for work in [&lab, &home] {
+        let _ = std::fs::remove_dir_all(work);
+    }
+}
+
+/// With the node's AppArmor profile loaded and the service running in it
+/// (what `install` does on Ubuntu 24.04), a command leaves the profile at
+/// its start: in folder mode through the shim, in `user` mode without it
+/// (round 1, security 1). Without that the label of the command stays
+/// `nerve-node (unconfined)`, and its user namespaces keep all their
+/// capabilities. A program that runs the node's file by hand is not in the
+/// profile at all, so its shim's user namespace is the system's to refuse
+/// (round 2, correctness 1 and security 1). This machine need not hold user
+/// namespaces back: the label is what is read.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
+/// account with a home> cargo test -p nerve-node --test real_account --
+/// --ignored --exact the_nodes_commands_leave_its_apparmor_profile`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine and loads an AppArmor profile; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn the_nodes_commands_leave_its_apparmor_profile() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
+    assert!(ok, "{said}");
+    let work = PathBuf::from("/srv/nrv-aa-work");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(
+        sh(Command::new("chown")
+            .arg(format!("{owner}:{owner}"))
+            .arg(&work))
+        .0
+    );
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", "lab"]);
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "folder",
+            "add",
+            work.to_str().unwrap(),
+            "rwx",
+            "--center",
+            "lab",
+        ],
+    );
+    assert!(ok, "{said}");
+    // The profile `install` writes where AppArmor holds user namespaces
+    // back, loaded by hand here, and the service started again in it.
+    let profile = Path::new("/etc/apparmor.d/nerve-node");
+    std::fs::write(profile, nerve_node::service::apparmor_profile_text()).unwrap();
+    let (ok, said) = sh(Command::new("apparmor_parser").arg("-r").arg(profile));
+    assert!(ok, "{said}");
+    let (ok, said) = sh(Command::new("systemctl").args(["restart", "nerve-node"]));
+    assert!(ok, "{said}");
+    let (_, pid) =
+        sh(Command::new("systemctl").args(["show", "-p", "MainPID", "--value", "nerve-node"]));
+    let label = std::fs::read_to_string(format!("/proc/{}/attr/current", pid.trim())).unwrap();
+    eprintln!("the node's label: {}", label.trim());
+    assert!(
+        label.starts_with("nerve-node"),
+        "the node is in its profile: {label}"
+    );
+    // The link the node dialled before the restart is closed: the one that
+    // answers is the new one.
+    let paired = center.paired().expect("paired");
+    let mut conn = None;
+    for _ in 0..5 {
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        if fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .is_ok()
+        {
+            conn = Some(inc.conn);
+            break;
+        }
+    }
+    let mut conn = conn.expect("a link that answers");
+    let r = run(&mut conn, &work, "cat /proc/self/attr/current")
+        .await
+        .unwrap();
+    eprintln!("folder mode, through the shim: {}", out(&r).trim());
+    assert_eq!(out(&r), "unconfined\n", "{r}");
+    // `user` mode: no shim, the owner's own account.
+    assert!(as_owner(&owner, &["mode", "user", "--center", "lab"]).0);
+    let r = run(&mut conn, &work, "cat /proc/self/attr/current")
+        .await
+        .unwrap();
+    eprintln!("user mode, without the shim: {}", out(&r).trim());
+    assert_eq!(out(&r), "unconfined\n", "{r}");
+    // The owner's own run of the shim: its init is the first process of the
+    // namespace, and its label is the shim's. The profile attaches to no
+    // file, so a program of an account, not started by the service, is not
+    // in it.
+    let (ok, said) = sh(Command::new("runuser").args([
+        "-u",
+        &owner,
+        "--",
+        "sh",
+        "-c",
+        &format!(
+            r#"printf '{{"program":"/bin/cat","args":["/proc/1/attr/current"],"parent":%s,"own_proc":true}}' $$ | {BIN} __exec-shim"#
+        ),
+    ]));
+    eprintln!("an account's own shim, its init: {}", said.trim());
+    assert!(ok, "{said}");
+    assert_eq!(said, "unconfined\n", "outside the profile");
+
+    let _ = sh(Command::new("apparmor_parser").arg("-R").arg(profile));
+    let _ = std::fs::remove_file(profile);
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    let _ = std::fs::remove_dir_all(&work);
 }

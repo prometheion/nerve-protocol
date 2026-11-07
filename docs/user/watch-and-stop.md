@@ -89,7 +89,8 @@ settings grant can pause its own link; only you resume it.
 A command stops when its call ends: on its timeout, when it is cancelled,
 or when its session or link ends. The node kills its process group, and
 where it has a cgroup (`status` says so) all it started. A program handed to
-a service manager, or detached on a node without a cgroup, keeps running: end
+a service manager, or detached where the command has neither a cgroup nor a
+`/proc` of its own, keeps running: end
 what it left yourself, `nerve-run`'s processes, or your own for a command that
 ran as you or on a node run by hand
 ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).

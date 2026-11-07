@@ -889,6 +889,43 @@ fn client_only(
             ));
         }
     }
+    // A command on the sudo list runs as root in every mode while the
+    // machine's sudo switch is on, so a center that could add to it would
+    // have root, and with it the node's keys: only the owner lists commands
+    // for root. Taking one off narrows, and stays the center's.
+    if let Some(glob) = n.sudo_allow.iter().find(|g| !o.sudo_allow.contains(g)) {
+        return Err(format!(
+            "policy.sudo_allow {glob}: only the owner puts a command on the sudo list, on the machine itself"
+        ));
+    }
+    // A deny rule of exec narrows a sudo entry (`sudo apt *` with a deny rule
+    // for `sudo apt remove*`), so taking one off widens what runs as root once
+    // the owner has such an entry. A center could empty the list first and
+    // take the rule off in a second request, so this holds whatever the list
+    // holds now, for every rule that can match a sudo command: one with no
+    // pattern, a first word of `sudo` or a path to it, or a wildcard in it.
+    // (The owner's `off` of exec is not held: a center cannot tell it from
+    // its own, docs/dev/settings-and-config.md.)
+    if let Some(rule) = o.deny.iter().find(|r| {
+        let scope = crate::rules::scope_of(r);
+        !n.deny.contains(r)
+            && (scope == "exec" || scope.starts_with("exec."))
+            && crate::guard::Guard::of_rule(r).is_none()
+            && match r.split_once(':') {
+                None => true,
+                Some((_, pattern)) => {
+                    let first = pattern.split_whitespace().next().unwrap_or("");
+                    first.is_empty()
+                        || first == "sudo"
+                        || first.ends_with("/sudo")
+                        || first.contains(['*', '?', '['])
+                }
+            }
+    }) {
+        return Err(format!(
+            "policy.deny {rule}: only the owner takes off a deny rule of exec that can match a sudo command, since it narrows an entry of the sudo list"
+        ));
+    }
     // The network switch holds the commands back; taking it away lets them
     // reach the network again.
     if o.no_network && !n.no_network {
@@ -1522,6 +1559,150 @@ mod tests {
             s.config().center("home").unwrap().policy.deny,
             ["lamp.set:room=office", "exec.run:rm *"]
         );
+    }
+
+    /// A center that sets a timed mode with `as_owner` does not get the
+    /// owner's account when the timer ends in allowlist: `as_owner` goes
+    /// with any mode but allowlist (#197).
+    #[test]
+    fn a_timed_mode_does_not_end_as_the_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let until = 4_000_000_000_000u64;
+        for mode in ["folder", "user"] {
+            let v = s.version();
+            let mut new = doc(&s);
+            new["policy"]["mode"] = json!(mode);
+            new["policy"]["until"] = json!(until);
+            new["policy"]["as_owner"] = json!(true);
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+                .unwrap();
+            let p = &s.config().center("home").unwrap().policy;
+            assert_eq!(p.mode_at(until), Mode::Allowlist, "{mode}");
+            assert!(!p.as_owner && !p.runs_as_owner(until), "{mode}");
+        }
+        // In allowlist mode it is the center's choice, as user mode is.
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["mode"] = json!("allowlist");
+        new["policy"]["until"] = json!(null);
+        new["policy"]["as_owner"] = json!(true);
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        assert!(s.config().center("home").unwrap().policy.as_owner);
+    }
+
+    /// The sudo list runs its commands as root: a center with the grant may
+    /// take a command off it, never put one on it (#197).
+    #[test]
+    fn only_the_owner_puts_a_command_on_the_sudo_list() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        s.update(|c| {
+            c.center_mut("home").unwrap().policy.sudo_allow = vec!["sudo apt update".into()];
+            Ok(())
+        })
+        .unwrap();
+        for list in [
+            json!(["sudo apt update", "sudo id"]),
+            json!(["sudo id"]),
+            json!(["sudo *"]),
+        ] {
+            let v = s.version();
+            let mut new = doc(&s);
+            new["policy"]["sudo_allow"] = list.clone();
+            let e = s
+                .set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+                .unwrap_err();
+            assert!(
+                matches!(&e, SetError::Forbidden(m) if m.contains("policy.sudo_allow sudo")
+                    && m.contains("only the owner")),
+                "{list}: {e:?}"
+            );
+        }
+        assert_eq!(
+            s.config().center("home").unwrap().policy.sudo_allow,
+            ["sudo apt update"]
+        );
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["sudo_allow"] = json!([]);
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        assert!(
+            s.config()
+                .center("home")
+                .unwrap()
+                .policy
+                .sudo_allow
+                .is_empty()
+        );
+    }
+
+    /// A deny rule of exec narrows a sudo entry, so a center with the grant
+    /// leaves it on while the list has an entry; it may add more and take
+    /// off rules of other scopes, and with no entry left all are its own.
+    #[test]
+    fn a_deny_rule_that_narrows_a_sudo_entry_stays() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        s.update(|c| {
+            let p = &mut c.center_mut("home").unwrap().policy;
+            p.sudo_allow = vec!["sudo apt *".into()];
+            p.deny = vec!["exec.run:sudo apt remove*".into(), "fs.read:/x".into()];
+            Ok(())
+        })
+        .unwrap();
+        let set = |s: &mut SettingsStore, deny: serde_json::Value| {
+            let v = s.version();
+            let mut new = doc(s);
+            new["policy"]["deny"] = deny;
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+        };
+        for deny in [
+            json!(["fs.read:/x"]),
+            json!([]),
+            json!(["exec.run:sudo apt remove*x", "fs.read:/x"]),
+        ] {
+            let e = set(&mut s, deny.clone()).unwrap_err();
+            assert!(
+                matches!(&e, SetError::Forbidden(m) if m.contains("policy.deny exec.run:sudo apt remove*")
+                    && m.contains("only the owner")),
+                "{deny}: {e:?}"
+            );
+        }
+        // More rules, and the other kinds of rule off, are the center's.
+        set(
+            &mut s,
+            json!(["exec.run:sudo apt remove*", "exec.run:sudo rm*"]),
+        )
+        .unwrap();
+        let e = set(&mut s, json!(["exec.run:sudo apt remove*"])).unwrap_err();
+        assert!(matches!(e, SetError::Forbidden(_)), "{e:?}");
+        // Emptying the list first does not free the rule: the owner may put
+        // the entry back later.
+        let mut emptied = doc(&s);
+        emptied["policy"]["sudo_allow"] = json!([]);
+        let v = s.version();
+        s.set_center_document("home", emptied, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        let e = set(&mut s, json!([])).unwrap_err();
+        assert!(matches!(e, SetError::Forbidden(_)), "{e:?}");
+        // A rule that cannot match a sudo command narrows no entry.
+        set(
+            &mut s,
+            json!([
+                "exec.run:sudo apt remove*",
+                "exec.run:sudo rm*",
+                "exec.run:rm *"
+            ]),
+        )
+        .unwrap();
+        set(
+            &mut s,
+            json!(["exec.run:sudo apt remove*", "exec.run:sudo rm*"]),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -139,6 +139,45 @@ fn a_proxy_password_comes_on_stdin() {
     assert!(!config.contains("s3cret"), "{config}");
 }
 
+/// `proxy set -` takes the URL or the relay link from the first line of
+/// stdin, so the relay token is never an argument every account could read
+/// in the process list (#198); a password the URL asks for comes on the
+/// next line.
+#[test]
+fn a_proxy_url_or_relay_link_comes_on_stdin() {
+    let d = tempfile::tempdir().unwrap();
+    let (ok, v) = with_stdin(d.path(), &["proxy", "set", "-"], "\n");
+    assert!(!ok, "{v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("first line of stdin is empty"), "{e}");
+    let token = "0123456789abcdefghijklmnopqrstuvwxyz0123456";
+    let pin = "q1Q3tvgEmVkvsjsZTEOBtG9Rb12pM9iyCOVCTVwjz4A";
+    let link =
+        format!("nerve://relay?address=relay.example%3A7490&node=laptop&token={token}&pin={pin}");
+    let (ok, v) = with_stdin(d.path(), &["proxy", "set", "-"], &format!("{link}\n"));
+    assert!(ok, "{v}");
+    let (_, ls) = node(d.path(), &["proxy"]);
+    let ls = ls.to_string();
+    assert!(
+        ls.contains("relay.example:7490") && ls.contains("laptop"),
+        "{ls}"
+    );
+    assert!(ls.contains(pin) && !ls.contains(token), "{ls}");
+    let config = std::fs::read_to_string(d.path().join("config/node.toml")).unwrap();
+    assert!(!config.contains(token), "{config}");
+    // A URL that wants a password: it is the next line.
+    let (ok, v) = with_stdin(
+        d.path(),
+        &["proxy", "set", "-"],
+        "https://desk@relay.example:7491\ns3cret\n",
+    );
+    assert!(ok, "{v}");
+    let (_, ls) = node(d.path(), &["proxy"]);
+    assert!(ls.to_string().contains("desk"), "{ls}");
+    let config = std::fs::read_to_string(d.path().join("config/node.toml")).unwrap();
+    assert!(!config.contains("s3cret"), "{config}");
+}
+
 /// Without a session bus nothing answers for the keyring, and `config get`
 /// of where the keys go says so, for a program that offers the choice.
 #[cfg(target_os = "linux")]

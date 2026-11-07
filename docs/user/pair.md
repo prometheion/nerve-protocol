@@ -4,16 +4,15 @@ Pairing links a machine to a center. Do it once per machine and center.
 
 1. In the center's web UI, on the Overview, press **Pair a machine**. It
    shows a command and the pairing link, each with a Copy button.
-2. On the machine, run the command. Keep the quotes: the link has `&` in it.
+2. On the machine, run the command, then paste the link on the next line:
 
    ```sh
-   nerve-node center add 'nerve://pair?center=...&code=...&pin=...'
+   nerve-node center add -
+   nerve://pair?center=...&code=...&pin=...
    ```
 
-   While `center add` asks, the link is in the process list, which any
-   account can read. On a machine where that matters, run
-   `nerve-node center add -` and paste the link on the next line: `-` reads
-   it from stdin instead.
+   `-` reads the link from stdin. Given as an argument instead, the link is
+   in the process list, which any account can read.
 
 3. The node shows the center's address and what it may do at first, and asks
    before it stores anything. Then check the link:
@@ -117,13 +116,13 @@ nerve-node relay on 0.0.0.0:7490
 nerve-node relay add lab-pc --address relay.example
 ```
 
-`relay add` shows a link once. The link holds the relay token: delete the
-`proxy set` line from your shell's history, and `relay rm` the node if it
-leaked. On the relayed node, paste it as its proxy, then pair as usual:
+`relay add` shows a link once. The link holds the relay token: `relay rm`
+the node if it leaked. On the relayed node, give it as its proxy, then pair
+as usual. Each `-` reads its link from the next line:
 
 ```sh
-nerve-node proxy set 'nerve://relay?address=...&node=lab-pc&token=...&pin=...'
-nerve-node center add 'nerve://pair?...'
+nerve-node proxy set -        # paste the relay link
+nerve-node center add -       # paste the pairing link
 ```
 
 `relay add lab-pc --to home` lets it reach only that center. `relay` shows
