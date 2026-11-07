@@ -14,6 +14,10 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
 - On Windows the guard also refuses the node's service by its display name (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`), `reg add`, `delete`, `copy` and `restore` on the service's key and the keys below it (`Parameters` holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and kin on them; only keys of the registry count, a folder `C:\Services\nerve-node` is a folder. `pkill` and `killall` see an alternative in their pattern (`pkill -f 'nerve-node|nerve-center'`), and cmd's `/c` text is read from the line, also with the doubled quotes a program path with a blank needs (`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`).
 
+### Fixed
+
+- `install`, `update` and `nerve-node service start` or `restart` return only once the node answers its owner: a command typed right after them no longer hears that the node does not run. The node's unit is `Type=notify` and the node says when it is ready ([#180](https://github.com/prometheion/nerve-protocol/issues/180)).
+
 ## 0.0.7
 
 The finished Linux version: `nerve-center` and `nerve-node` for Linux x86_64

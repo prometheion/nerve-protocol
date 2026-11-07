@@ -185,7 +185,10 @@ impl Layout {
     /// already). systemd makes the node's runtime folder, where its owner
     /// reaches it (crate::owner); every account may enter it. The owner is
     /// named here, where only root writes and everyone reads
-    /// ([`owner_in_unit`]).
+    /// ([`owner_in_unit`]). The node tells systemd when it answers
+    /// (`Type=notify`, crate::daemon::notify): `systemctl start` returns only
+    /// then, so a command typed right after `install` or `service start`
+    /// finds it.
     pub fn unit_text(&self, owner: Option<&str>) -> String {
         let owner = owner.map_or_else(String::new, |o| {
             format!("Environment={}={o}\n", crate::owner::OWNER_VAR)
@@ -199,7 +202,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User={USER}
 Group={USER}
 Environment=HOME={home}
@@ -2577,6 +2580,9 @@ pub(crate) mod tests {
         let unit = std::fs::read_to_string(&l.unit).unwrap();
         assert_eq!(unit, l.unit_text(Some("alice")));
         assert!(unit.contains("\nUser=nerve\nGroup=nerve\n"), "{unit}");
+        // systemd waits for the node to say it answers (crate::daemon::notify),
+        // so install returns only then.
+        assert!(unit.contains("\nType=notify\n"), "{unit}");
         assert!(!unit.contains("SupplementaryGroups"), "{unit}");
         // The owner is named where everyone reads and only root writes.
         assert!(
