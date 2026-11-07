@@ -1,0 +1,140 @@
+# The Windows programs installed and driven on a real machine: GitHub's
+# windows-2025 runner, an elevated administrator on a disposable virtual
+# machine. CI calls it with the debug programs and test programs its `windows`
+# job built (first version, docs/dev/windows.md "Tests on an installed
+# node"); it grows with each part of the Windows node that needs a machine of
+# its own.
+#
+# The job makes an administrator account of its own, with a random password
+# and its profile loaded (nobody signs in on a runner), then runs:
+# - the desktop app's own install, control, update and uninstall
+#   (crates/nerve-node-desktop/tests/real.rs);
+# - with the node installed again, its commands run as that account: the
+#   sudo switch end to end (crates/nerve-node/tests/win_sudo.rs) and the
+#   limits per command on the service (crates/nerve-node/tests/win_limits.rs);
+# - the administrator's batch logon (nerve-node's
+#   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
+#   folder on a virtual disk mounted in a folder (nerve-sandbox's
+#   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again).
+# A test that skips fails the job. The account's password is masked in the
+# log and goes nowhere but the tests of this job.
+name: Installed on Windows
+
+on:
+  workflow_call:
+    inputs:
+      programs:
+        description: "The artifact with nerve-node-desktop.exe and nerve-center.exe"
+        type: string
+        required: true
+      tests:
+        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, nerve_node_lib.exe and nerve_sandbox_lib.exe"
+        type: string
+        required: true
+      ref:
+        description: "The commit whose scripts run (the default: the commit of the run)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  installed:
+    name: Windows Server 2025 x86_64
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUST_BACKTRACE: "1"
+      # As in the `windows` job: a long-name temp folder.
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: The machine
+        run: ./.github/scripts/windows-runner.ps1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.programs }}
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.tests }}
+          path: dist/tests
+      - name: The programs
+        run: Get-ChildItem dist, dist/tests | Format-Table Name, Length
+      # An administrator of its own: the runner's account has a password
+      # nobody knows, and the node's commands run as an account whose password
+      # the install stores.
+      - name: An administrator account with its profile
+        run: |
+          $name = 'nervetest'
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $pw = [Convert]::ToBase64String($bytes) + 'a1!'
+          "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Administrators -Member $name
+          # A logon that loads the profile makes it, as a first sign-in would.
+          $cred = New-Object System.Management.Automation.PSCredential(".\$name", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
+            -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
+          $sid = (Get-LocalUser $name).SID.Value
+          $profile = Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid
+          if (-not $profile) { throw "$name has no profile" }
+          "the account $name ($sid), its profile $($profile.LocalPath)" >> $env:GITHUB_STEP_SUMMARY
+          "NERVE_WIN_SUDO_ACCOUNT=$name" >> $env:GITHUB_ENV
+          "NERVE_WIN_SUDO_PASSWORD=$pw" >> $env:GITHUB_ENV
+          "NERVE_TEST_SID=$sid" >> $env:GITHUB_ENV
+      - name: The app installs, controls, updates and uninstalls Nerve
+        run: |
+          $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path
+          & dist/tests/real.exe --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/real.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      # As the app's install runs for that account's owner: the broker names
+      # the owner by SID, and the password goes on stdin.
+      - name: The node installed, its commands as the account
+        run: |
+          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
+          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/install.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Select-String -Quiet -Path "$env:RUNNER_TEMP/install.log" -Pattern "commands run as $env:NERVE_WIN_SUDO_ACCOUNT")) {
+            throw "the install did not take $env:NERVE_WIN_SUDO_ACCOUNT for commands"
+          }
+      - name: Sudo, limits, the batch logon, a virtual disk
+        run: |
+          $runs = @(
+            @('win_sudo.exe', 'sudo_runs_a_listed_command_elevated_on_the_installed_service'),
+            @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
+            @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
+            @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again')
+          )
+          $failed = 0
+          foreach ($r in $runs) {
+            & "dist/tests/$($r[0])" --ignored --exact --nocapture --test-threads=1 $r[1] 2>&1 |
+              Tee-Object -Append "$env:RUNNER_TEMP/installed.log"
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+          }
+          if ($failed) { throw "$failed of the installed tests failed" }
+      - name: Uninstall
+        if: success() || failure()
+        run: |
+          $bin = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          if (Test-Path $bin) { & $bin uninstall --purge }
+      # A test that returns early says so with `skipped` at the start of a
+      # line, or behind `test <name> ... ` with one test thread.
+      - name: No test skipped
+        if: success() || failure()
+        run: |
+          $logs = Get-ChildItem "$env:RUNNER_TEMP" -Filter *.log | Where-Object Name -in 'real.log', 'installed.log'
+          $skipped = $logs | Select-String -Pattern '(^|\.\.\. )skipped'
+          if ($skipped) { $skipped; throw 'a test skipped' }

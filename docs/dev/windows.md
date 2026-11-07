@@ -64,8 +64,9 @@ Debian 12, Fedora 36 and later) and fontconfig.
 - The node runs only as the installed service, which the
   [desktop app](desktop.md) installs and starts, as its own account `nerve`:
   never elevated, and never by hand ([root and administrator](#root-and-administrator)).
-- `cap add` keeps a [capability of your own](capabilities.md#capabilities-of-your-own-in-nodetoml) in
-  `node.toml`, also one for `windows`, but the node offers none yet.
+- A [capability of your own](capabilities.md#capabilities-of-your-own-in-nodetoml)
+  is kept in `node.toml`, also one for `windows`, but the node offers none
+  yet.
 
 ### Limits per command
 
@@ -83,8 +84,8 @@ allows two more than the limit (three in `folder` mode, with its shim).
 
 A node with full rights hands those rights to every command a center runs:
 root on Linux. The installed node runs the commands as `nerve-run` or its
-owner instead. A node you run by hand as root is refused at start unless you
-allow it:
+owner instead. On Linux, a node you run by hand as root is refused at start
+unless you allow it:
 
 ```
 nerve-node config set machine.allow_root true
@@ -216,16 +217,13 @@ account (also a restore that would change them), the app asks Windows for an
 administrator's rights, with the UAC prompt. Uninstalling removes the
 service, and the owners and their rights with it.
 
-The service takes folder changes at once over its
-[control pipe](#the-control-pipe), and every other change at its
-next start, for which the app restarts it
-([start and stop](desktop.md#start-and-stop)).
+The service takes every change at once over its
+[control pipe](#the-control-pipe).
 
 The installed node on Windows keeps its keys in files. The service runs as
 `nerve`, and the Credential Manager is one per account: keys put in the
 keyring would be in the Credential Manager of the account that put them
-there, where the service does not find them. So the CLI's `setup`
-takes keys it finds in the keyring into files. The app's first-run steps
+there, where the service does not find them. The app's first-run steps
 leave the keys alone, and the keyring under **Settings**, **Keys** is
 refused and changes nothing. A `node.toml` that keeps the keys in the keyring is refused by the
 install, before it changes anything, and the service does not start with
@@ -354,13 +352,13 @@ folders.
   far as it changes something: putting the same entry on again changes
   nothing, a later change skips the parts of the folder it leaves as they
   are, and a folder whose permissions do not inherit keeps the change out
-  of itself and of what is below it. A change that stopped part way (you
-  stopped the CLI or the node, or it failed) goes through the whole folder
+  of itself and of what is below it. A change that stopped part way (the
+  node stopped, or it failed) goes through the whole folder
   again at the next sync; until it is done, the node treats the folder as
   having the flags it was heading for as well, and where the change is
   refused, the pairing's commands do not run. A change that takes more than a few seconds says
-  how far it is: the CLI prints it, a running node writes it to its log,
-  and a command waits for it.
+  how far it is: the node writes it to its log, and a command waits for
+  it.
 - A file or folder moved into a granted folder keeps the access list it
   had, without the entry. **Sync folders** under **Permissions ›
   Folders** walks every grant again into every folder below it, which gives
@@ -370,53 +368,28 @@ folders.
   refused when it is added, in the app's folder picker too: the service
   runs in a session of its own, where a drive mapped at your sign-in does
   not exist, and the container reaches no network folder by its grants.
-- `folder rm` and `folder add` change the entry, and removing the pairing
-  takes it off. That is the node's entry on the folder: permissions a
-  command gave what it made there stay (see "What the AppContainer does not
-  stop" below). A running node takes these changes from the CLI at once,
-  over its [control pipe](#the-control-pipe), and has changed
-  the entries when the CLI answers.
-- `uninstall` takes off the entries of the node in your own folders (not
-  those of a folder that holds hard links the check refuses, see below)
-  (`%USERPROFILE%\.config\nerve` and `.local\state\nerve`, or those you name
-  with `--config-dir` and `--state-dir`). Once a service is installed, the CLI
-  reaches the service, so name the folders to change the node you run
-  yourself. Before you delete its folders, remove its pairings: the record of
-  the entries is in its state folder.
-- Each pairing's container has a profile in the account that ran the node:
-  a folder `%LOCALAPPDATA%\Packages\nerve.…` and a registry key.
-  `center` names each pairing's container (`AppContainer nerve.…`). The
-  profile goes with the container's last folder entry, with `center rm`,
-  and at `uninstall`, which say which profiles they removed. While the node
-  runs they keep its profiles and say so, as it still serves the pairing
-  until it starts again, and the other changes the CLI writes to the file
-  itself keep them too; stop the node first. The running node itself removes
-  a profile when the pairing's last granted folder is deleted or moved away.
-  So does a `folder rm` or `folder add ... none` that leaves a pairing with no
-  granted folder: the CLI hands it to the node over the
-  [control pipe](#the-control-pipe), and the node syncs the
-  grants and removes the profile, without the CLI saying so. The name comes from the
-  path of the state folder and the pairing in `node.toml`, so the node
-  finds the profile as long as the config folder is there, also after the
-  state folder was deleted, and whether you type the folder with `\` or
-  `/`. If you deleted the state folder before you removed the pairings,
-  name both folders as they were and remove the pairings:
-  `nerve-node --config-dir <config> --state-dir <state> config accept`,
-  then `center rm` with the same folders for each pairing. Spell the state
-  folder exactly as the node had it: the same upper and lower case, no
-  `\` at the end, and absolute or relative as it was given (only `\` and
-  `/` may differ). Each `center rm` says
-  `removed the AppContainer profile nerve.…`, also when the grants of the
-  other pairings do not follow. To check first, run `center` with the
-  same folders: when the `AppContainer nerve.…` name it shows for a
-  pairing is not in the `Get-ChildItem` list below, that pairing never ran
-  a command in its container, or the state folder is spelled otherwise
-  than the node had it.
-- If the config folder is gone too, the node cannot tell which profiles
+- Removing a folder or changing its rights under **Permissions ›
+  Folders** changes the entry, and removing the pairing takes it off. That
+  is the node's entry on the folder: permissions a command gave what it made
+  there stay (see "What the AppContainer does not stop" below). The running
+  node makes these changes itself, over its
+  [control pipe](#the-control-pipe), and has changed the entries when the
+  app says so.
+- Uninstalling takes off the node's entries (not those of a folder that
+  holds hard links the check refuses, see below). The record of the entries
+  is in the node's state folder: uninstall with the app, never by deleting
+  the folders.
+- Each pairing's container has a profile in the account that runs the
+  node: a folder `%LOCALAPPDATA%\Packages\nerve.…` and a registry key. The
+  profile goes with the container's last folder entry: the running node
+  removes it when the pairing's last granted folder is removed, deleted or
+  moved away, when the pairing is removed, and at uninstall. The name comes
+  from the path of the state folder and the pairing in `node.toml`, so the
+  node finds the profile as long as the config folder is there.
+- If the config folder is gone, the node cannot tell which profiles
   were its own. `Get-ChildItem $env:LOCALAPPDATA\Packages -Filter nerve.*`
-  lists the profiles of all nodes this account ran; those that `center`
-  of the nodes you still run (with their folders) does not name are left
-  over. Remove each, as that account, with
+  lists the profiles of all nodes this account ran; while no node runs
+  there, each of them is left over. Remove each, as that account, with
   `[Nerve.Profile]::DeleteAppContainerProfile('nerve.…')` after
   `Add-Type -Namespace Nerve -Name Profile -MemberDefinition '[DllImport("userenv.dll", CharSet = CharSet.Unicode)] public static extern int DeleteAppContainerProfile(string name);'`.
   It returns 0 also for a name that has no profile, so check that the
@@ -427,11 +400,11 @@ folders.
   there.
 - A granted folder you move or rename on the same drive takes its entry
   along, as Windows keeps its permissions. At its next sync (at start, on a
-  change, before a command, and when the CLI changes the config) the node
+  change, before a command, and on **Sync folders**) the node
   finds it by its file ID and takes the entry off where it is now, also on a
   drive mounted in a folder. A granted folder you delete and make again gets
   its entry back at the next sync. One on a drive that is not connected keeps
-  its entry until the drive is back; `uninstall` names those it leaves on.
+  its entry until the drive is back; uninstalling names those it leaves on.
 - A file or folder you move out of a granted folder on the same drive keeps
   the entry it inherited. `icacls <path> /reset` gives it the permissions of
   its new place.
@@ -455,7 +428,8 @@ folders.
   names such a folder in its log (`left out of the command's sandbox: it
   passes through the link …`) and grants it once it is a plain folder again.
   A junction of yours that leads into the `w` folder is followed to its end
-  and judged on the way. A folder you added with `folder add` stays out when
+  and judged on the way. A folder you added under **Permissions › Folders**
+  stays out when
   a junction has replaced it since, also after you took the `w` off the
   folder above or removed the pairing that had it
   ([above](sandbox-linux.md#a-folder-keeps-the-place-you-added)). A folder without that
@@ -492,7 +466,7 @@ folders.
   every pairing's container has (`S-1-15-3-1`, `-2` and `-3`, which
   `icacls` shows as `APPLICATION PACKAGE AUTHORITY\Your …`). The node
   neither sees nor removes these. They stay when you remove the folder,
-  change its flags, remove the pairing or run `uninstall`. An entry for the
+  change its flags, remove the pairing or uninstall Nerve. An entry for the
   container belongs to that pairing: no later pairing runs in that
   container, also not one of the same center or under the same name. The
   other two kinds count at once, for every pairing of the
@@ -543,15 +517,14 @@ folders.
   `node_modules` to its store, uv links a `.venv` to its cache, and a local
   `git clone` links its objects. A folder that holds such links does not get
   its entry, and its entry is not changed or taken off. A refused removal
-  stops that pairing's commands, and `uninstall` leaves the entry on, until
+  stops that pairing's commands, and uninstalling leaves the entry on, until
   the links are gone. Keep them out of granted folders: pnpm's
   `package-import-method=copy`, `UV_LINK_MODE=copy`, `git clone
   --no-hardlinks`. Or remove them (delete `node_modules` or `.venv`) before
   you add, change or remove the folder.
 
-`nerve-node status` shows a running node's confinement (`node: running
-(confinement appcontainer)`): on Windows it asks the node over its
-[control pipe](#the-control-pipe). The node also names it when it
+The app's **Overview** shows a running node's confinement, which it asks the
+node over its [control pipe](#the-control-pipe). The node also names it when it
 starts, in its output and its [log](logging.md#the-log-as-the-owner-reads-it):
 `node daemon running (…, confinement appcontainer, …)`. The center sees it in
 the node's `exec` state, `confinement appcontainer`, or `none` on the
@@ -610,10 +583,9 @@ planned.
   holds `Temp`), without any grant. It stays between the commands of the
   pairing, and Windows deletes it with the container's profile. The node
   removes that profile with the container's last grant, a running node
-  too when the pairing's folders are gone at its sync, also after a
-  `folder rm` or `folder add ... none` of the last one; `center rm`, `uninstall` and
-  the other changes the CLI writes to the file itself remove it only while
-  the node does not run (see above) (checked, code).
+  too when the pairing's folders are gone at its sync, also after the last
+  one is removed or closed; removing the pairing and uninstalling remove it
+  too (see above) (checked, code).
 - **The registry.** Checked: a command reads the machine part (`HKLM`, for
   example the Windows version), lists the keys of your `HKCU` and reads
   `HKCU\Environment`, which holds the environment variables you set for
@@ -704,8 +676,8 @@ administrator" gives, not the token UAC gives its other commands. So:
   centers you trust with the whole machine.
 - Turning it on asks for that account's password, the one the install
   stored. A wrong password is refused and the switch stays as it was.
-- The node keeps the password with DPAPI in the config folder, as `install`
-  keeps it (`sudo.dpapi`). Unlike on Linux, sudo stays on when the service
+- The node keeps the password with DPAPI in the config folder, as the
+  install keeps it (`sudo.dpapi`). Unlike on Linux, sudo stays on when the service
   restarts. Turning it off removes the file, and uninstalling removes it
   too. Neither takes the account out of Administrators: do that yourself to
   close the other way to the administrator rights again. Turning it off
@@ -714,11 +686,9 @@ administrator" gives, not the token UAC gives its other commands. So:
 In the [desktop app](desktop.md), the **Sudo** section of **Permissions**
 turns it on and off, and the center's sudo list there takes the commands
 (`net session`). Turning it on needs an administrator: the app asks Windows
-for the rights, with the UAC prompt. The
-[control pipe](#the-control-pipe) on Windows takes folder changes
-only, so turning it on takes effect when the service starts again, for which
-the app restarts it. Turning it off takes effect at once: the running service
-drops the password within a second.
+for the rights, with the UAC prompt. Both take effect at once, over the
+[control pipe](#the-control-pipe): the running service checks the password
+and keeps it, or drops it. Turning it on needs the node running.
 
 A center with the settings grant switches the running service at once, as on
 Linux.
@@ -759,14 +729,9 @@ account that does it.
 ## A relay on Windows
 
 On Windows the [desktop app](desktop.md)'s **Relay** page does the relay's
-commands. Windows has no control socket, so a relay change is in `node.toml`
-and takes effect at the next start of the node, for which the app restarts
-the service. Until then the running node works by its old relay settings,
-for new tunnels as well as the ones it carries: a token taken away or
-replaced still opens tunnels, a node off its center list still reaches the
-center, a relay turned off still listens, and a new token or node gets
-`407`. Should the restart fail, **Restart** on the app's **Overview** applies
-the change, above all when a token may have leaked. The **Relay** page asks
+commands. The running node takes a relay change at once over its
+[control pipe](#the-control-pipe), as on Linux: a token taken away or
+replaced stops working now, and its tunnels end. The **Relay** page asks
 the running node who is connected. Windows Firewall must let other machines
 reach the relay's port.
 
@@ -793,6 +758,29 @@ in the description. Their text is still in them, under **Details**.
 Every user of the machine can read the Application log, so these entries are
 redacted like the log ([below](logging.md#what-is-never-in-it)). On Linux the journal has the
 service's output (`journalctl -u nerve-node`, `journalctl -u nerve-center`).
+
+## Tests on an installed node
+
+The tests that need a Windows machine of their own carry
+`#[ignore = "<reason>"]`. CI's `windows-installed` job
+(`.github/workflows/installed-windows.yml`) runs them on a fresh
+`windows-2025` runner, with the programs and test programs the `windows`
+job built:
+
+- it checks the runner is Windows Server 2025 (`.github/scripts/windows-runner.ps1`);
+- it makes an administrator account with a random password, and its
+  profile by a logon that loads it, as nobody signs in on a runner;
+- the app installs, starts, stops, restarts, updates and uninstalls Nerve
+  (`nerve-node-desktop/tests/real.rs`);
+- the node is installed again with that account for commands, then the
+  sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
+  (`nerve-node/tests/win_limits.rs`), the account's batch logon and a folder
+  on a virtual disk mounted in a folder run on it.
+
+A test that skips fails the job. The `windows` job also keeps the debug
+`nerve-node-desktop.exe` and `nerve-center.exe` as the artifact
+`windows-programs` for three days, to try a change on a Windows test
+machine as a person would.
 
 ## Restart the node, then change the folder again (Windows)
 

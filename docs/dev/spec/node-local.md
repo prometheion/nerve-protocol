@@ -213,11 +213,12 @@ can write the state folder can delete or lower the record as well. In
 adds is a defence against whoever can write the config folder alone: a
 backup, a sync tool, a process of another account.
 
-On Windows there is no control socket. A running node takes the folder
-changes over its control pipe (§5); for every other change the CLI writes
-the signed file itself, and a running node takes it at its next start. After
-a change no daemon answered for, the CLI says so in one line ("takes effect
-at the next start of the node").
+On Windows there is no control socket: a running node takes every change
+over its control pipe (§5), as over the socket. Only while no node runs does
+the CLI write the signed file itself, which the node takes when it starts;
+the CLI then says so in one line ("takes effect at the next start of the
+node"). A running node saves no change over a file newer than the config in
+force: the write is refused as a conflict.
 
 ### Where the keys are
 
@@ -987,9 +988,7 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   `status` carries the same under `relay` (§5); on Windows `relay` asks
   the control pipe's `status` for them. `relay rm`, `relay off` and `relay
   set --to` say whether their cut is in force: "now" when a running node
-  took the change; on Windows, where the CLI writes the file for the next
-  start, that a running node keeps its tunnels until then and must be
-  restarted to cut them now.
+  took the change, on Windows over its control pipe as elsewhere.
 - A tunnel goes to one of this node's centers whose URL is `https` and
   that has not revoked it or answered 401, and is on the node's list when
   it has one, matched by host (without case)
@@ -1675,12 +1674,13 @@ holds the kept password again when `machine.sudo` says on and the file is
 the current account's. A sudo command runs what followed `sudo` in the
 shell, started with a fresh batch logon's full token (`CreateProcessAsUserW`)
 with the account's own environment, in a job like every command; the check
-that the account cannot open the node's folders does not apply to it. The
-control pipe takes folder changes only, so `nerve-node sudo on` (elevated) checks the password,
-writes the file and sets `machine.sudo` in the signed file, which the service
-takes at its next start; `nerve-node sudo off` removes the file, and the
-running node drops a held password whose file is gone within a second and
-switches off. `uninstall` removes the file.
+that the account cannot open the node's folders does not apply to it.
+`sudo.on` and `sudo.off` reach the running service over the control pipe,
+as over the socket on Linux: the service checks the password, keeps it in
+the file and sets `machine.sudo` at once, or removes the file and drops the
+password. `sudo on` needs the running node; `sudo off` without one removes
+the file and sets the switch off in the signed file. `uninstall` removes the
+file.
 
 ## 5. Control socket
 
@@ -1798,6 +1798,10 @@ answered, which takes long on a large folder. Methods:
 | `folder.rm` | `center`?, `path`, `given` | takes a folder away |
 | `center.rotate-key` | `center`, `end_grace` | as on the socket |
 | `caps.list` | | as on the socket |
+| `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
+| `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
+| `owner.check` | | as on the socket |
+| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, walked}` |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
 settled the path at (`exec::settle`, as this process sees it: the pipe takes
@@ -1807,9 +1811,11 @@ as typed or, after that lookup, the stored path again; `set` and `rm` find the
 folder by either. A `rm` takes the folder's `places` entry with it (the
 config's validation drops an entry that names no folder). Without `center`
 the only paired center is meant.
-While `node.toml` is newer than the config in force (the CLI wrote another
-change there for the next start), a folder change is refused: the node saves
-its whole config and would undo that change.
+While `node.toml` is newer than the config in force (a CLI wrote a change
+there while it found no node), a folder change is refused, as every write of
+the node is: the node saves its whole config and would undo that change.
+`folder.add` refuses a network folder (`\\server\share`) and a folder on a
+network drive, or on a drive the node's account does not see.
 A field the method does not take refuses the request. The node checks a
 change as the CLI does when it writes the file, saves it, brings the folder
 grants in line, and answers `{center, path, access, mode, version}`

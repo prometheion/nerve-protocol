@@ -183,13 +183,14 @@ machine. **Stop** ends the node's links and runs nothing until **Start**;
 machine. On Linux, in a terminal this is `nerve-node service stop|start|restart`
 ([service](service.md#start-and-stop)).
 
-On Windows the running service takes folder changes at once and every other
-change only when it starts again, a pairing too. So after such a change the
-app restarts the service itself, two seconds after the last one, and says
-so; closed before then, the app restarts it as it closes. The first-run
-steps restart it once, at their end, also when you close them early. The node's links come
-back at once, but a command a center runs at that moment ends. If the
-restart fails, the Overview says that changes wait and offers **Restart**.
+The running service takes every change at once, on Windows over its
+control pipe as on Linux over its socket, so the app restarts it for no
+change and a command a center runs goes on. A stopped service takes the
+changes when it starts; the first-run steps start it at their end.
+**Panic** locks the running node at once and ends every link and command.
+When the node does not take the lock, the app stops the service, says that
+the links ended only once it has stopped, and saves the lock for its next
+start.
 
 ## Settings
 

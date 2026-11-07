@@ -988,7 +988,8 @@ A cancel, the end of a session and the end of its link end it at once.
 - Each command runs in a cgroup of its own, held to its memory, CPU and
   processes ([limits](#limits-per-command)), where systemd hands the node a cgroup: the
   installed service, or a node started with `systemd-run --user --scope -p
-  Delegate=yes`. Windows does not hold commands to these limits yet.
+  Delegate=yes`. On Windows each command's job object holds it to them
+  ([Windows](windows.md#limits-per-command)).
 - On the node [installed as a service](service.md#the-node-as-a-service), `folder` and `allowlist`
   mode commands run as `nerve-run`, an account of its own with no other
   groups and no way to root but the [sudo list](policy-engine.md#sudo-as-the-owner-uses-it)
