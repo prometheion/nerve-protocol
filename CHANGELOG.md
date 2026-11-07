@@ -43,15 +43,20 @@ x86_64. Windows comes with 0.1.0.
   of its own: `ps` there shows its own processes. On Ubuntu 24.04 `install`
   adds an AppArmor profile for the service. Where the kernel cannot do it,
   `status` warns.
+- On Windows an administrator as the owner is warned where Linux warns of
+  root: `center settings on`, `status` and the app.
 - `center add -` and `proxy set -` read the link from stdin, and the
-  center's **Pair a machine** card and the hints show that form. The desktop
-  app no longer keeps a `nerve://` link on its command line.
+  center's **Pair a machine** card and the hints show that form; for a
+  Windows machine the card says to open the link there. The app's Proxy
+  dialog hands the address over on stdin, and the desktop app no longer
+  keeps a `nerve://` link on its command line.
 
 ### Changed
 
 - The center and the node end when a part of them failed while it held a
-  lock, and their service starts them again with clean state; the log names
-  the lock. Before, the center stopped answering without ending.
+  lock, and their service starts them again with clean state (systemd, or
+  the restart actions of the Windows service); the log names the lock.
+  Before, the center stopped answering without ending.
 - A command's process limit leaves room for its own `/proc`: `pids.max` is
   the limit plus 2.
 - Large calls copy far less, and an audit entry no longer waits for the
@@ -70,7 +75,8 @@ x86_64. Windows comes with 0.1.0.
 
 - `install`, `update` and `nerve-node service start` or `restart` return
   only once the node answers: a command typed right after them no longer
-  hears that the node does not run.
+  hears that the node does not run. On Windows the service reports that it
+  runs only once the node's pipes are made.
 
 ## 0.0.7
 

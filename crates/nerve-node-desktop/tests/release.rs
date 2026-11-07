@@ -115,10 +115,12 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
 
 /// The user guide is Linux only until 0.1.0 (Q9 of the PR 6 plan): it names
 /// Windows once, in "Windows comes with 0.1.0", and every Windows text is in
-/// docs/dev/windows.md until then. The notes of the newest release hold no
-/// Windows item either: they wait under `## Unreleased`.
+/// docs/dev/windows.md until then. The notes of a release name everything it
+/// changed, Windows too (owner, 2026-11-07), and begin with the update order;
+/// the Windows items of 0.0.7 and before wait under `## Unreleased` for the
+/// release log of 0.1.0.
 #[test]
-fn the_user_guide_and_the_notes_are_linux_only() {
+fn the_user_guide_is_linux_only_and_the_notes_say_the_update_order() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut found = Vec::new();
     let mut pages = vec![root.join("README.md")];
@@ -144,14 +146,6 @@ fn the_user_guide_and_the_notes_are_linux_only() {
         .split_once('\n')
         .unwrap()
         .1;
-    let windows: Vec<&str> = notes
-        .lines()
-        .filter(|l| {
-            l.replace("Windows comes with 0.1.0", "")
-                .contains("Windows")
-        })
-        .collect();
-    assert!(windows.is_empty(), "{windows:?}");
     assert!(notes.contains("Update the center first, then the nodes."));
     let unreleased = changelog
         .split("\n## Unreleased\n")
