@@ -131,6 +131,53 @@ pub fn private_file(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes a backup file ([`nerve_transport::backup::write_file`]) that is
+/// private from its first moment. On Windows the file is made in a private
+/// folder beside it, which hands its access list down, and then moved into
+/// place (a move on one drive keeps the list): where it was made in the
+/// target folder and given its list after, another account that watched the
+/// folder could open it first (round 2, security 3).
+pub fn write_backup_file(
+    file: &std::path::Path,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use nerve_transport::backup::{check_folder, write_file};
+        check_folder(file)?;
+        let dir = file.parent().filter(|d| !d.as_os_str().is_empty());
+        let dir = dir.unwrap_or(std::path::Path::new("."));
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("backup");
+        let hold = dir.join(format!(
+            ".{name}.{}.tmp",
+            nerve_transport::keys::random_token(8)
+        ));
+        nerve_service::win::dacl::private_folder(&hold, &own_dacl()?)?;
+        let made = hold.join("backup");
+        let done = write_file(&made, bytes, false).and_then(|()| {
+            // The rename would replace a file; the name is taken unless
+            // `--overwrite` says otherwise.
+            if !overwrite && std::fs::symlink_metadata(file).is_ok() {
+                return Err(format!(
+                    "{} exists already; name another file or pass --overwrite",
+                    file.display()
+                ));
+            }
+            std::fs::rename(&made, file)
+                .map_err(|e| format!("cannot write {}: {e}", file.display()))
+        });
+        let _ = std::fs::remove_dir_all(&hold);
+        done?;
+    }
+    #[cfg(not(windows))]
+    nerve_transport::backup::write_file(file, bytes, overwrite)?;
+    private_file(file)
+}
+
 /// The protected DACL of what this account keeps private on Windows.
 #[cfg(windows)]
 fn own_dacl() -> Result<String, String> {
@@ -143,6 +190,47 @@ fn own_dacl() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backup file is made once, private, and leaves nothing beside it;
+    /// a name taken is kept unless `--overwrite` says otherwise (round 2,
+    /// security 3).
+    #[test]
+    fn a_backup_file_is_written_private_and_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("c.bak");
+        write_backup_file(&file, b"first", false).unwrap();
+        let e = write_backup_file(&file, b"second", false).unwrap_err();
+        assert!(e.contains("--overwrite"), "{e}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"first");
+        write_backup_file(&file, b"third", true).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"third");
+        let e = write_backup_file(&d.path().join("nope").join("c.bak"), b"x", false).unwrap_err();
+        assert!(e.contains("does not exist"), "{e}");
+        assert!(!d.path().join("nope").exists());
+        let names: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["c.bak"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // On Windows the file keeps the private list it was made with: no
+        // entry handed down from the folder it was moved into.
+        #[cfg(windows)]
+        {
+            let o = std::process::Command::new("icacls")
+                .arg(&file)
+                .output()
+                .unwrap();
+            let acl = String::from_utf8_lossy(&o.stdout).into_owned();
+            assert_eq!(acl.lines().filter(|l| l.contains(":(")).count(), 3, "{acl}");
+            assert!(!acl.contains("(I)"), "{acl}");
+        }
+    }
 
     /// Every spelling of one Windows folder is one key (round 1, correctness
     /// 2): the installed center's folder is found whichever way an

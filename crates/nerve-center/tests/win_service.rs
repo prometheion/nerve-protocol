@@ -310,13 +310,23 @@ fn the_center_runs_as_a_windows_service() {
         // lock and a start that failed need (round 1, correctness 1), the
         // one privilege, the service's own SID in its token.
         let failure = system("sc.exe", &["qfailure", "nerve-center"]);
+        // The last action is repeated for every later failure, so the
+        // service is never left down for the day (round 2, correctness 3).
+        let restarts: Vec<&str> = failure
+            .lines()
+            .filter(|l| l.contains("RESTART -- Delay"))
+            .map(str::trim)
+            .collect();
         assert_eq!(
-            failure
-                .matches("RESTART -- Delay = 5000 milliseconds")
-                .count(),
-            3,
+            restarts,
+            [
+                "RESTART -- Delay = 5000 milliseconds.",
+                "RESTART -- Delay = 5000 milliseconds.",
+                "RESTART -- Delay = 60000 milliseconds.",
+            ],
             "{failure}"
         );
+        assert!(!failure.contains("NONE"), "{failure}");
         let flag = system("sc.exe", &["qfailureflag", "nerve-center"]);
         assert!(flag.contains("TRUE"), "{flag}");
         let privs = system("sc.exe", &["qprivs", "nerve-center"]);
@@ -438,10 +448,12 @@ fn the_center_runs_as_a_windows_service() {
 Start-Sleep -Seconds 2
 $open = @($all | Where-Object {{ -not ($_.Client.Poll(0, [Net.Sockets.SelectMode]::SelectRead) -and $_.Client.Available -eq 0) }}).Count
 Set-Content -Path '{held}' -Value $open
+Set-Content -Path '{session}' -Value ([Diagnostics.Process]::GetCurrentProcess().SessionId)
 Set-Content -Path '{ready}' -Value 'ready'
 Start-Sleep -Seconds 8
 "#,
                     held = held.display(),
+                    session = hold.join("session").display(),
                     ready = ready.display()
                 ),
             )
@@ -470,11 +482,34 @@ Start-Sleep -Seconds 8
                 "16",
                 "the connections the standard account kept"
             );
-            let (status, _) = http("GET", "/", &[], "");
-            assert_eq!(
-                status, 200,
-                "the owner's page, while another account holds its places"
-            );
+            // The service is no administrator: it tells another account's
+            // process by its session, not by its account (round 2,
+            // correctness 1). The owner's page opens while the places of a
+            // session of another sign-in are full; two accounts in one
+            // session (as the job's accounts may be) share their places,
+            // and then nothing but the 16 is asserted.
+            let mine =
+                std::process::Command::new(system32("WindowsPowerShell\\v1.0\\powershell.exe"))
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        "[Diagnostics.Process]::GetCurrentProcess().SessionId",
+                    ])
+                    .output()
+                    .unwrap();
+            let mine = String::from_utf8_lossy(&mine.stdout).trim().to_string();
+            let theirs = std::fs::read_to_string(hold.join("session")).unwrap();
+            if mine != theirs.trim() {
+                let (status, _) = http("GET", "/", &[], "");
+                assert_eq!(
+                    status, 200,
+                    "the owner's page, while another session holds its places"
+                );
+            } else {
+                eprintln!(
+                    "note: the owner and the standard account run in session {mine}, which share their places"
+                );
+            }
             let ran = holder.join().unwrap();
             assert_eq!(ran.code, Some(0), "{}", ran.err);
         } else {
@@ -689,6 +724,42 @@ if ($wait.Wait(40000)) {{
                 acl.contains("NT SERVICE\\nerve-center:(OI)(CI)(F)"),
                 "{acl}"
             );
+        }
+
+        // A value mistyped in center.env ends the service at its start, and
+        // the reason is in the log of its state folder, where the service
+        // has no terminal to say it (round 2, correctness 2). Written back,
+        // the manager's restarts bring it up again.
+        let env = settings.join("center.env");
+        let good = std::fs::read_to_string(&env).unwrap();
+        let log = state.join(nerve_transport::log::FILE);
+        let _ = system("sc.exe", &["stop", "nerve-center"]);
+        let until = Instant::now() + Duration::from_secs(60);
+        while service_pid().is_some() {
+            assert!(Instant::now() < until, "the service did not stop");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::fs::write(&env, format!("{good}\nNERVE_CENTER_MCP=htttp\n")).unwrap();
+        let _ = system("sc.exe", &["start", "nerve-center"]);
+        let until = Instant::now() + Duration::from_secs(60);
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("the service cannot start")
+        {
+            assert!(Instant::now() < until, "the log names no reason");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("htttp"), "{text}");
+        std::fs::write(&env, &good).unwrap();
+        let until = Instant::now() + Duration::from_secs(120);
+        loop {
+            let _ = system("sc.exe", &["start", "nerve-center"]);
+            if std::net::TcpStream::connect(UI).is_ok() && http("GET", "/", &[], "").0 == 200 {
+                break;
+            }
+            assert!(Instant::now() < until, "the service did not start again");
+            std::thread::sleep(Duration::from_secs(2));
         }
 
         // The same program again: nothing to update.

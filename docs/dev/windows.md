@@ -345,9 +345,12 @@ The install does this, and says each step:
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
    service: no password, no user to keep. It starts with the machine and
-   again 5 seconds after a failure, three times a day at most: a center that
-   finds a lock poisoned ends and starts again, and so does one that stops
-   with an error at its start (an address that is not there yet at boot).
+   again after a failure: 5 seconds after the first two, then a minute after
+   each, as long as it takes (the manager repeats the last action). A
+   center that finds a lock poisoned ends and starts again, and so does one
+   that stops with an error at its start (an address that is not there yet
+   at boot). What stopped a start is in `log.jsonl` in the state folder,
+   also a value mistyped in `center.env`.
    It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
    the node port (`--listen`, 7443 by default) of that program, and nothing
@@ -371,8 +374,11 @@ installed center stops the service and starts it again after.
 `nerve-center update` stops the service, moves the old program aside, puts
 the new one in place and starts the service; a new program that does not
 start is replaced by the old one again. It asks the new program its version
-without the administrators' rights. `nerve-center uninstall` removes the
-service, its account, the firewall rule and the program; the folders stay,
+without the administrators' rights, with an environment of `SystemRoot`
+alone, in the system folder, and in a job object that ends what it starts;
+it still runs as the administrator's own account, so it comes from the
+administrator's own hand (`--from`) or a release asset. `nerve-center
+uninstall` removes the service, its account, the firewall rule and the program; the folders stay,
 open to the administrators only, and `--purge` deletes them. Run from the
 installed program, it moves that aside, and Windows deletes it at its next
 start.
@@ -393,13 +399,17 @@ its log; a second center then says whose the pipe is.
 
 The state folder of a center a harness starts gets an access list of its
 own on Windows: your account, SYSTEM and the administrators, which the owner
-token, the TLS key and the state take. A backup file gets the same. On
-loopback the center counts each Windows account apart, by the process
-Windows names for the connection and the account the system's list of
-processes names for it (the installed service may not open another
-account's process, but the list names it): one local program cannot take
-the places of your browser or your harness. Programs of one account share
-their places, as on Linux.
+token, the TLS key and the state take. A backup file gets the same from its
+first moment: it is written in a private folder beside it and moved into
+place. On loopback the center counts the process Windows names for the
+connection: by its account where the center may open the process (a center
+a harness starts runs as your account and opens yours), else by its session.
+The installed service is no administrator, so it cannot open another
+account's process, and the system's list of processes (which any caller may
+read) names its session only: a program of another sign-in cannot take the
+places of your browser or your harness, but two accounts in one session
+(a program started as another account) share their places. Programs of one
+account share theirs, as on Linux.
 
 The action checker's local model runs in a job object of the center's, so
 it ends with the center also when the center is killed. The installed

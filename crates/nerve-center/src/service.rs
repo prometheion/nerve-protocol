@@ -34,6 +34,21 @@ pub const SETTINGS_FILE: &str = "center.env";
 
 const LINUX_ONLY: &str = "works on Linux with systemd and on Windows only; elsewhere run `nerve-center --mcp http` under your own service manager";
 
+/// A start that cannot go on: the reason on stderr and, for the Windows
+/// service, which has no terminal, in the log in its state folder, where
+/// `install` points (a value mistyped in `center.env` would otherwise end
+/// the service without a trace).
+pub fn refuse_start(state: &Path, is_service: bool, why: &str) {
+    eprintln!("nerve-center: {why}");
+    if is_service {
+        let _ = nerve_transport::log::Log::append_entry(
+            &nerve_transport::log::file_in(state),
+            Level::Error,
+            &format!("the service cannot start: {}", why.trim()),
+        );
+    }
+}
+
 /// Where an installed center lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -1203,6 +1218,20 @@ mod tests {
                 "/var/lib/nerve-center",
             ))
         }
+    }
+
+    /// A service that cannot start says why in the log of its state
+    /// folder (it has no terminal); a command run by hand does not write
+    /// there (round 2, correctness 2).
+    #[test]
+    fn a_refused_start_of_the_service_goes_to_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = nerve_transport::log::file_in(dir.path());
+        refuse_start(dir.path(), false, "a command's refusal");
+        assert!(!log.exists());
+        refuse_start(dir.path(), true, "invalid value 'htttp' for '--mcp'\n");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("the service cannot start: invalid value 'htttp'"));
     }
 
     fn me() -> Account {

@@ -101,8 +101,8 @@ enum Peer {
     /// A loopback peer of this Windows account, by a hash of its SID.
     #[cfg_attr(not(windows), allow(dead_code))]
     Sid(u64),
-    /// A loopback peer on Windows whose account is not named, by its
-    /// session.
+    /// A loopback peer on Windows whose account the center cannot read, by
+    /// its session.
     #[cfg_attr(not(windows), allow(dead_code))]
     Session(u32),
     /// A loopback peer whose account is not known.
@@ -136,11 +136,14 @@ impl Peer {
         }
     }
 
-    /// A loopback peer on Windows: by the account `sid` of its process,
-    /// else by its `session`. The system's list of processes names every
-    /// process's account, also where the center may not open the process
-    /// (nerve_service::win::process::identity_of), so the session is only
-    /// what is left when that list does not name one.
+    /// A loopback peer on Windows: by the account `sid` of its process
+    /// where the center may open the process (its own account's, and
+    /// everything when it runs as that account), else by its `session`,
+    /// which the system's process list names for every process
+    /// (nerve_service::win::process::identity_of). The installed service is
+    /// no administrator, so another account's process is told apart by its
+    /// session only: two accounts in one session (a program started `as`
+    /// another account) share their places.
     #[cfg_attr(not(windows), allow(dead_code))]
     fn of_windows(sid: Option<&[u8]>, session: Option<u32>) -> Peer {
         use std::hash::{Hash, Hasher};

@@ -20,6 +20,7 @@ pub mod job_object;
 pub mod pipe;
 #[cfg(windows)]
 pub mod process;
+pub mod procs;
 #[cfg(windows)]
 pub mod restricted;
 #[cfg(windows)]

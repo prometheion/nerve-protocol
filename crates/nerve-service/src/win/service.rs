@@ -46,10 +46,11 @@ pub struct State {
 /// an error code is a failure too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure {
-    /// Restarts a day at most; the next failure leaves the service down.
-    pub restarts: usize,
-    /// Seconds from the failure to each restart.
-    pub delay_secs: u32,
+    /// Seconds from a failure to the restart, for the first, second, ...
+    /// failure; the manager repeats the last for every later one until the
+    /// failures are counted afresh (a day without one), so the service is
+    /// never left down for good.
+    pub delays_secs: &'static [u32],
     /// Whether a service that reports itself stopped with an error code
     /// (any start that failed: a port taken, an address not there yet) is
     /// restarted, not only a process that ended without saying so. Without
@@ -58,10 +59,10 @@ pub struct Failure {
 }
 
 /// What [`put`] asks of the manager: the Linux unit's `Restart=on-failure`
-/// with `RestartSec=5`, and no more than three a day.
+/// with `RestartSec=5`, then a minute between tries, as long as it takes
+/// (a VPN address that comes 30 seconds after boot is waited for).
 pub const FAILURE: Failure = Failure {
-    restarts: 3,
-    delay_secs: 5,
+    delays_secs: &[5, 5, 60],
     on_error_stop: true,
 };
 
@@ -92,7 +93,7 @@ mod sys {
     };
     use windows_sys::Win32::System::Services::{
         ChangeServiceConfig2W, ChangeServiceConfigW, ControlService, CreateServiceW, DeleteService,
-        QUERY_SERVICE_CONFIGW, QueryServiceConfigW, SC_ACTION, SC_ACTION_NONE, SC_ACTION_RESTART,
+        QUERY_SERVICE_CONFIGW, QueryServiceConfigW, SC_ACTION, SC_ACTION_RESTART,
         SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
         SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS,
         SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
@@ -239,15 +240,14 @@ mod sys {
         let description = SERVICE_DESCRIPTIONW {
             lpDescription: about.as_mut_ptr(),
         };
-        let again = SC_ACTION {
-            Type: SC_ACTION_RESTART,
-            Delay: FAILURE.delay_secs * 1000,
-        };
-        let mut actions = vec![again; FAILURE.restarts];
-        actions.push(SC_ACTION {
-            Type: SC_ACTION_NONE,
-            Delay: 0,
-        });
+        let mut actions: Vec<SC_ACTION> = FAILURE
+            .delays_secs
+            .iter()
+            .map(|secs| SC_ACTION {
+                Type: SC_ACTION_RESTART,
+                Delay: secs * 1000,
+            })
+            .collect();
         let failure = SERVICE_FAILURE_ACTIONSW {
             dwResetPeriod: 24 * 3600,
             lpRebootMsg: std::ptr::null_mut(),
@@ -434,6 +434,10 @@ mod tests {
     fn a_stop_with_an_error_is_restarted() {
         let f = std::hint::black_box(FAILURE);
         assert!(f.on_error_stop);
-        assert_eq!((f.restarts, f.delay_secs), (3, 5));
+        // The last action is repeated for every later failure: it must be
+        // a restart, or three early failures leave the service down for the
+        // day (round 2, correctness 3).
+        assert_eq!(f.delays_secs, &[5, 5, 60]);
+        assert!(f.delays_secs.iter().all(|s| *s > 0));
     }
 }

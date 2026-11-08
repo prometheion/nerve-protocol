@@ -101,8 +101,7 @@ pub fn backup(
     // not written.
     let parsed = parse(contents.clone())?;
     let bytes = backup::seal_with(&contents, pass, rounds)?;
-    backup::write_file(file, &bytes, overwrite)?;
-    crate::util::private_file(file)?;
+    crate::util::write_backup_file(file, &bytes, overwrite)?;
     Ok(BackupReport {
         name: parsed.store.center_name.clone(),
         id: parsed.store.center_id.clone(),

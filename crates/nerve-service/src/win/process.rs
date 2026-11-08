@@ -1,18 +1,20 @@
 //! Who runs a process: the account of its token, and its session. The
 //! center asks it of the process at the other end of its attach pipe and of
-//! a loopback connection, also when that is another account's.
+//! a loopback connection; of another account's process a service that is
+//! no administrator can tell the session only.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
+use windows_sys::Wdk::System::SystemInformation::{
+    NtQuerySystemInformation, SystemProcessInformation,
+};
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::STATUS_INFO_LENGTH_MISMATCH;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFOW, WTSEnumerateProcessesW,
-    WTSFreeMemory,
-};
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -84,77 +86,94 @@ pub fn user_of(pid: Option<u32>) -> io::Result<Vec<u8>> {
 
 /// The session of the process `pid`: each person signed in has one,
 /// services and what they start share session 0. Another account's process
-/// may refuse to be asked, as for its token ([`listed`] does not).
+/// may refuse to be asked, as for its token ([`session_listed`] does not).
 pub fn session_of(pid: u32) -> Option<u32> {
     let mut session = 0u32;
     // SAFETY: a plain call with a place for the answer.
     (unsafe { ProcessIdToSessionId(pid, &mut session) } != 0).then_some(session)
 }
 
-/// The account and the session of the process `pid` as the system's list of
-/// processes names them: the Terminal Services answer for every process,
-/// also another account's, which a service that runs as no administrator
-/// cannot open. The account is `None` where the list names none.
-pub fn listed(pid: u32) -> Option<(Option<Vec<u8>>, u32)> {
-    let mut list: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
-    let mut count = 0u32;
-    // SAFETY: the local server, the version of the structure asked for
-    // (1), and places for the list and its length; the list is freed
-    // below.
-    if unsafe { WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut count) }
-        == 0
-    {
-        return None;
+/// The session of the process `pid` as the system's list of processes
+/// names it ([`super::procs`]): the list is open to every caller, also a
+/// service that runs as no administrator, which can neither open another
+/// account's process nor have the Terminal Services list it (that one is
+/// for administrators when the process is another account's).
+pub fn session_listed(pid: u32) -> Option<u32> {
+    // The list grows while it is read: ask again with room for it.
+    let mut buf = vec![0u64; 64 * 1024 / 8];
+    for _ in 0..8 {
+        let mut need = 0u32;
+        // SAFETY: a buffer of the size given, and a place for the size
+        // needed.
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SystemProcessInformation,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut need,
+            )
+        };
+        if status == STATUS_INFO_LENGTH_MISMATCH {
+            buf = vec![0u64; (need as usize).div_ceil(8) + 64 * 1024 / 8];
+            continue;
+        }
+        if status < 0 {
+            return None;
+        }
+        // SAFETY: the bytes of the buffer the call wrote into.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), buf.len() * 8) };
+        return super::procs::session_in(bytes, pid);
     }
-    // SAFETY: `count` entries at `list`, read before the list is freed.
-    let found = unsafe { std::slice::from_raw_parts(list, count as usize) }
-        .iter()
-        .find(|p| p.ProcessId == pid)
-        .map(|p| {
-            let sid = (!p.pUserSid.is_null()).then(|| {
-                // SAFETY: a valid SID in the list, copied while it lives.
-                unsafe {
-                    let len = GetLengthSid(p.pUserSid) as usize;
-                    std::slice::from_raw_parts(p.pUserSid.cast::<u8>(), len).to_vec()
-                }
-            });
-            (sid, p.SessionId)
-        });
-    // SAFETY: the list the call made, freed once.
-    unsafe { WTSFreeMemory(list.cast()) };
-    found
+    None
 }
 
 /// The account and the session of the process `pid`, as far as they can be
-/// told: from its token where this process may open it, else from the
-/// system's list of processes ([`listed`]).
+/// told: from its token where this process may open it, and else only the
+/// session, from the system's list of processes ([`session_listed`]), since
+/// the account of another account's process stays hidden from a service
+/// that is no administrator.
 pub fn identity_of(pid: u32) -> (Option<Vec<u8>>, Option<u32>) {
     if let Ok(sid) = user_of(Some(pid)) {
-        return (Some(sid), session_of(pid));
+        return (Some(sid), session_of(pid).or_else(|| session_listed(pid)));
     }
-    match listed(pid) {
-        Some((sid, session)) => (sid, Some(session)),
-        None => (None, session_of(pid)),
-    }
+    (None, session_listed(pid).or_else(|| session_of(pid)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The system's list of processes names this process's account and
-    /// session as its token does, and `identity_of` finds both (the list
-    /// is what names another account's process the service cannot open;
-    /// round 1, security 1).
+    /// The system's list names this process's session as its token does
+    /// (the list is what names the session of another account's process the
+    /// service cannot open; round 2, correctness 1), and the offsets of
+    /// the layout are those of the real structure.
     #[test]
-    fn the_process_list_names_a_process_as_its_token_does() {
+    fn the_process_list_names_a_process_session_as_the_system_does() {
         let pid = std::process::id();
-        let mine = user_of(None).unwrap();
-        let (sid, session) = listed(pid).expect("this process is in the list");
-        assert_eq!(sid.as_deref(), Some(mine.as_slice()));
-        assert_eq!(Some(session), session_of(pid));
-        assert_eq!(identity_of(pid), (Some(mine), Some(session)));
+        assert_eq!(session_listed(pid), session_of(pid));
+        assert!(session_listed(pid).is_some());
         // A process that is not there is not named.
-        assert_eq!(listed(u32::MAX - 3), None);
+        assert_eq!(session_listed(u32::MAX - 3), None);
+        let (sid, session) = identity_of(pid);
+        assert_eq!(sid, Some(user_of(None).unwrap()));
+        assert_eq!(session, session_of(pid));
+        use windows_sys::Win32::System::WindowsProgramming::SYSTEM_PROCESS_INFORMATION;
+        assert_eq!(
+            std::mem::offset_of!(SYSTEM_PROCESS_INFORMATION, UniqueProcessId),
+            super::super::procs::ID_OFFSET
+        );
+        assert_eq!(
+            std::mem::offset_of!(SYSTEM_PROCESS_INFORMATION, SessionId),
+            super::super::procs::SESSION_OFFSET
+        );
+    }
+
+    /// The first process of the machine, the System process, belongs to
+    /// session 0 and is one an ordinary caller may not open: the list
+    /// still names its session.
+    #[test]
+    fn a_process_that_cannot_be_opened_still_has_a_session() {
+        assert!(user_of(Some(4)).is_err() || session_of(4).is_some());
+        assert_eq!(session_listed(4), Some(0));
     }
 }

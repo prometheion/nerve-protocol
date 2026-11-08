@@ -21,13 +21,14 @@ use windows_sys::Win32::Security::{
     TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateProcessAsUserW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
+use crate::win::job_object::Job;
 use crate::win::process::{token, token_info};
 use crate::win::sid::{sid_text, well_known_sid, wide};
 
@@ -150,6 +151,16 @@ fn command_line(program: &Path, args: &[&str]) -> String {
         .join(" ")
 }
 
+/// The system folder and an environment of `SystemRoot` alone: the program
+/// is not yet accepted, so it gets none of the variables of the terminal
+/// that runs `update` (tokens often are there), as the Linux service's
+/// check runs with an empty environment.
+fn bare_environment() -> (Vec<u16>, Vec<u16>) {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    let env = format!("SystemRoot={root}\0\0").encode_utf16().collect();
+    (env, wide(format!("{root}\\System32")))
+}
+
 /// An attribute list that names `handle` as the one handle a new process
 /// inherits, freed when dropped: `bInheritHandles` alone hands over every
 /// inheritable handle of the caller, among them those of the terminal that
@@ -233,10 +244,12 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
     };
     let mut pi = PROCESS_INFORMATION::default();
     let mut line = wide(command_line(program, args));
-    // SAFETY: the restricted token, a writable command line, the extended
-    // startup information with the one inheritable output handle (its
-    // list lives until after the call); the handles the call returns are
-    // closed below.
+    let (env, folder) = bare_environment();
+    // SAFETY: the restricted token, a writable command line, a Unicode
+    // environment block ended by two NULs, a NUL-terminated folder, the
+    // extended startup information with the one inheritable output handle
+    // (its list lives until after the call); the handles the call returns
+    // are closed below.
     let ok = unsafe {
         CreateProcessAsUserW(
             t.as_raw_handle(),
@@ -245,9 +258,12 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
-            std::ptr::null(),
-            std::ptr::null(),
+            CREATE_NO_WINDOW
+                | CREATE_SUSPENDED
+                | CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT,
+            env.as_ptr().cast(),
+            folder.as_ptr(),
             (&raw const si).cast::<STARTUPINFOW>(),
             &mut pi,
         )
@@ -259,11 +275,30 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
         return Err(last());
     }
     // SAFETY: handles the call returned, owned from here.
-    let (process, _thread) = unsafe {
+    let (process, thread) = unsafe {
         (
             OwnedHandle::from_raw_handle(pi.hProcess),
             OwnedHandle::from_raw_handle(pi.hThread),
         )
+    };
+    // What it starts ends with it, also on every return below: the job
+    // kills what is in it when it is dropped. The program runs only once it
+    // is in the job.
+    let started = Job::new().and_then(|job| {
+        job.assign(process.as_raw_handle())?;
+        // SAFETY: the main thread's handle of the process just made.
+        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+            return Err(last());
+        }
+        Ok(job)
+    });
+    let job = match started {
+        Ok(job) => job,
+        Err(e) => {
+            // SAFETY: an open process handle; it never ran.
+            unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+            return Err(e);
+        }
     };
     let read = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -275,6 +310,8 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
     if unsafe { WaitForSingleObject(process.as_raw_handle(), ms) } != WAIT_OBJECT_0 {
         // SAFETY: as above.
         unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+        // Whatever it started holds the pipe too: reading ends with them.
+        job.terminate();
         let _ = read.join();
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -286,6 +323,8 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
     if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
         return Err(last());
     }
+    // What it left running goes before the output is read to its end.
+    drop(job);
     Ok((code, read.join().unwrap_or_default()))
 }
 
@@ -318,6 +357,69 @@ mod tests {
             command_line(Path::new("C:\\a b\\p.exe"), &["--version", "x y"]),
             "\"C:\\a b\\p.exe\" --version \"x y\""
         );
+    }
+
+    /// The program gets no variable of the terminal that runs `update` and
+    /// starts in the system folder (round 2, security 2).
+    #[test]
+    fn the_program_gets_a_bare_environment_and_the_system_folder() {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let cmd = std::path::PathBuf::from(&root)
+            .join("System32")
+            .join("cmd.exe");
+        let (code, out) = output_of(&cmd, &["/c", "set"], Duration::from_secs(30)).unwrap();
+        assert_eq!(code, 0);
+        let out = String::from_utf8_lossy(&out).to_lowercase();
+        assert!(out.contains("systemroot="), "{out}");
+        for var in ["userprofile=", "path=", "temp=", "username="] {
+            assert!(!out.lines().any(|l| l.starts_with(var)), "{var} in {out}");
+        }
+        let (_, out) = output_of(&cmd, &["/c", "cd"], Duration::from_secs(30)).unwrap();
+        let out = String::from_utf8_lossy(&out).to_lowercase();
+        let system = std::path::Path::new(&root).join("System32");
+        assert_eq!(out.trim(), system.display().to_string().to_lowercase());
+    }
+
+    /// What the program started ends with it: the job it runs in kills
+    /// them when `output_of` returns.
+    #[test]
+    fn what_the_program_started_ends_with_it() {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let ps = std::path::PathBuf::from(&root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        // It starts a sleeper, says its id and ends.
+        let (code, out) = output_of(
+            &ps,
+            &[
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process -PassThru -WindowStyle Hidden cmd.exe '/c ping -n 60 127.0.0.1 > nul'; $p.Id",
+            ],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let pid: u32 = String::from_utf8_lossy(&out).trim().parse().unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        // SAFETY: a plain call; a handle that opened is closed below.
+        let h = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if !h.is_null() {
+            let mut code = 0u32;
+            // SAFETY: an open process handle and a place for its code.
+            let ok = unsafe { GetExitCodeProcess(h, &mut code) };
+            // SAFETY: the handle opened above.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+            assert!(ok != 0 && code != 259, "the sleeper still runs");
+        }
     }
 
     /// The program gets its output handle and no other (round 1, security
