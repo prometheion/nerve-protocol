@@ -2045,6 +2045,18 @@ pub struct Daemon {
     _keys: crate::secrets::KeysLock,
 }
 
+/// Ends the task that serves one of the node's endpoints (the control socket
+/// or pipe, the owner's, the providers'), and waits until it has let go of
+/// what it held. `abort` alone drops the task later, on the runtime's time:
+/// on Windows a pipe lives as long as an instance of it that the task holds,
+/// so a CLI started right after the node stopped could open it and be cut off
+/// without an answer, where it should find no node and write node.toml
+/// itself.
+async fn end(task: JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
+}
+
 /// Whether a node runs on the control socket. One that takes no connection
 /// now (its queue is full) runs all the same. A socket that cannot be
 /// reached at all says neither way: its error comes back as the start's.
@@ -2382,18 +2394,18 @@ impl Daemon {
             let _ = tokio::time::timeout(Duration::from_secs(2), w).await;
         }
         if let Some(c) = self.ctl {
-            c.abort();
+            end(c).await;
             let socket = self.shared.paths.ctl_socket();
             let _ = std::fs::remove_file(nerve_transport::ctl::token_file(&socket));
             let _ = std::fs::remove_file(socket);
         }
         if let Some((task, _at)) = self.owner {
-            task.abort();
+            end(task).await;
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
         }
         if let Some((task, _at)) = self.providers {
-            task.abort();
+            end(task).await;
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
         }
@@ -3623,6 +3635,41 @@ mod tests {
         let mut opts = NodeOptions::new(paths);
         opts.home = d.path().to_path_buf();
         (d, Daemon::start(opts).await.unwrap())
+    }
+
+    /// Once `stop` returns, the stopped node's control endpoint takes no
+    /// connection. On Windows the control pipe lives as long as an instance
+    /// the endpoint's task holds, so a CLI started right after `stop` could
+    /// open it and be cut off without an answer, where it should have found
+    /// no node and written node.toml itself. Shown here on the socket,
+    /// reached by a second name that `stop` does not remove.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_node_takes_no_connection() {
+        let (_d, daemon) = daemon().await;
+        let socket = daemon.shared.paths.ctl_socket();
+        let other = socket.with_file_name("other.sock");
+        std::fs::hard_link(&socket, &other).unwrap();
+        daemon.stop().await;
+        let e = std::os::unix::net::UnixStream::connect(&other).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused, "{e}");
+    }
+
+    /// Its Windows twin: right after `stop`, a call over the control pipe
+    /// finds no node, as the CLI must to write node.toml itself. A few
+    /// rounds, on a runtime whose other thread could drop the pipe's task
+    /// late.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_node_takes_no_call_on_its_pipe() {
+        for _ in 0..5 {
+            let (_d, daemon) = daemon().await;
+            let paths = daemon.shared.paths.clone();
+            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
+            daemon.stop().await;
+            let r = crate::pipe::call(&paths, "status", json!({})).await;
+            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
+        }
     }
 
     /// A node.toml that keeps the keys in the keyring, made before.
