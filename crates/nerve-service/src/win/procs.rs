@@ -2,9 +2,10 @@
 //! (`SystemProcessInformation`): a chain of entries, each with the process
 //! id and the session of one process. Any caller may read it, a service that
 //! runs as no administrator too, which cannot open another account's
-//! process to ask it ([`super::process`]). Only the layout is here, so it is
-//! tested on every platform; a Windows test holds the offsets to the real
-//! structure.
+//! process to ask it ([`super::process`]). Only the layout, and which of
+//! what can be read of a process names it ([`identity_from`]), are here, so
+//! they are tested on every platform; a Windows test holds the offsets to
+//! the real structure.
 
 /// Where an entry keeps its process id, a pointer-sized number.
 pub const ID_OFFSET: usize = if size_of::<usize>() == 8 { 80 } else { 68 };
@@ -34,9 +35,45 @@ pub fn session_in(list: &[u8], pid: u32) -> Option<u32> {
     }
 }
 
+/// The account and the session of a process from what can be read of it:
+/// `account`, from its token where the caller may open the process; then
+/// its session from the token (`of_token`) or from the system's list
+/// (`listed`). Where the token gives no account the list comes first: it is
+/// what names the session of another account's process to a service that
+/// is no administrator (super::process::identity_of).
+pub fn identity_from(
+    account: Option<Vec<u8>>,
+    of_token: impl Fn() -> Option<u32>,
+    listed: impl Fn() -> Option<u32>,
+) -> (Option<Vec<u8>>, Option<u32>) {
+    match account {
+        Some(sid) => (Some(sid), of_token().or_else(listed)),
+        None => (None, listed().or_else(of_token)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process the caller may not open has no account, and its session
+    /// is the list's; one it may open has both from its token (round 3,
+    /// correctness 2).
+    #[test]
+    fn a_process_that_cannot_be_opened_is_its_listed_session() {
+        assert_eq!(identity_from(None, || None, || Some(3)), (None, Some(3)));
+        assert_eq!(identity_from(None, || Some(1), || Some(3)), (None, Some(3)));
+        assert_eq!(identity_from(None, || Some(1), || None), (None, Some(1)));
+        let sid = vec![1, 2, 3];
+        assert_eq!(
+            identity_from(Some(sid.clone()), || Some(1), || Some(3)),
+            (Some(sid.clone()), Some(1))
+        );
+        assert_eq!(
+            identity_from(Some(sid.clone()), || None, || Some(3)),
+            (Some(sid), Some(3))
+        );
+    }
 
     /// One entry of the list: its size, process and session.
     fn entry(size: usize, pid: u32, session: u32, last: bool) -> Vec<u8> {

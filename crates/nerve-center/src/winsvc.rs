@@ -17,7 +17,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nerve_service::win::dacl::dacl_of;
+use nerve_service::win::dacl::{dacl_of, owned_by_admins};
 use nerve_service::win::service::{service_sid, virtual_account};
 use nerve_service::{Steps, Version, fetch_release, write_file};
 
@@ -79,17 +79,20 @@ pub fn account_sid() -> String {
 
 /// The DACLs of the center's folders: the folder that holds both, the
 /// administrators' and SYSTEM's alone; the state folder, the service's
-/// too; the settings folder, the service may read.
+/// too; the settings folder, the service may read. The administrators own
+/// each, and one there already that another owner holds is refused: also
+/// one the installing administrator's own account made, which the same
+/// person's unelevated programs share (round 3, security 1).
 fn top_dacl() -> String {
-    dacl_of(&["SY", "BA"], &[])
+    owned_by_admins(&dacl_of(&["SY", "BA"], &[]))
 }
 
 fn state_dacl() -> String {
-    dacl_of(&[&account_sid(), "SY", "BA"], &[])
+    owned_by_admins(&dacl_of(&[&account_sid(), "SY", "BA"], &[]))
 }
 
 fn settings_dacl() -> String {
-    dacl_of(&["SY", "BA"], &[&account_sid()])
+    owned_by_admins(&dacl_of(&["SY", "BA"], &[&account_sid()]))
 }
 
 /// The folder that holds the state and the settings folders.
@@ -295,7 +298,7 @@ pub fn install(
     steps.did(format!(
         "the Windows Firewall rule \"{FIREWALL_RULE}\" lets other machines reach the node port {port}, and no other port of the center"
     ));
-    sys.start()?;
+    start(sys, layout)?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
     for line in done_lines(&file, &owner_token, &crate::owner::path(&layout.state)) {
@@ -482,12 +485,12 @@ async fn update_steps(
     }
     let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
     steps.did(format!("replaced {program} {old_v} with {new_v}"));
-    let started = sys.start().and_then(|()| sys.wait_running(layout));
+    let started = start(sys, layout).and_then(|()| sys.wait_running(layout));
     if let Err(e) = started {
         let _ = sys.stop();
         let back = swap(bin, &new_path)
             .and_then(|()| swap(&old_path, bin))
-            .and_then(|()| sys.start())
+            .and_then(|()| start(sys, layout))
             .and_then(|()| sys.wait_running(layout));
         let _ = std::fs::remove_file(&new_path);
         steps.did(format!("put {program} {old_v} back"));
@@ -503,6 +506,18 @@ async fn update_steps(
     // restart, or with the next update or install.
     let _ = sys.remove_program(&old_path);
     Ok(())
+}
+
+/// Starts the service. A center that ends before it reaches the manager (a
+/// setting `center.env` gets wrong) has the start fail at once, with the
+/// manager's "did not respond in time": the error names the log, where that
+/// center wrote why, as [`WinSystem::wait_running`] does (round 3,
+/// correctness 1).
+fn start(sys: &dyn WinSystem, layout: &Layout) -> Result<(), String> {
+    sys.start().map_err(|e| {
+        let log = nerve_transport::log::file_in(&layout.state);
+        format!("{e}; {} says why", log.display())
+    })
 }
 
 /// Runs `restore` with the installed service stopped, and starts it again
@@ -545,6 +560,9 @@ mod tests {
         service: Cell<Option<bool>>,
         /// Whether a center the service starts runs.
         starts: Cell<bool>,
+        /// Whether the manager refuses the start: the center ended before
+        /// it reached the manager.
+        refuses: Cell<bool>,
         /// The folders and the DACLs they were given.
         secured: RefCell<Vec<(PathBuf, String)>>,
         /// The firewall rule's port, while there is one.
@@ -562,6 +580,7 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 service: Cell::new(None),
                 starts: Cell::new(true),
+                refuses: Cell::new(false),
                 secured: RefCell::new(Vec::new()),
                 firewall: Cell::new(None),
                 held: RefCell::new(Vec::new()),
@@ -610,6 +629,11 @@ mod tests {
         }
         fn start(&self) -> Result<(), String> {
             self.call("start");
+            if self.refuses.get() {
+                return Err(
+                    "cannot start the service nerve-center: did not respond in time".into(),
+                );
+            }
             self.service.set(Some(true));
             Ok(())
         }
@@ -706,17 +730,17 @@ mod tests {
         // administrators' alone, and is made first.
         assert_eq!(
             sys.dacl_of(&l.state).unwrap(),
-            format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+            format!("O:BAD:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
         );
         assert_eq!(
             sys.dacl_of(&l.settings_dir).unwrap(),
-            format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;{sid})")
+            format!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;{sid})")
         );
         assert_eq!(
             sys.secured.borrow()[0],
             (
                 d.path().join("ProgramData/nerve-center"),
-                "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
+                "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
             )
         );
         let owner = crate::owner::read(&l.state)
@@ -821,7 +845,7 @@ mod tests {
         assert_eq!(sys.firewall.get(), None);
         assert!(!l.bin.exists());
         assert!(l.state.join(crate::owner::FILE).exists());
-        let admins = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string();
+        let admins = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string();
         assert_eq!(sys.dacl_of(&l.state), Some(admins.clone()));
         assert_eq!(sys.dacl_of(&l.settings_dir), Some(admins));
         assert!(
@@ -927,6 +951,32 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e, NOT_INSTALLED);
+    }
+
+    /// A start the manager refuses at once (the center ended on a setting
+    /// before it reached the manager) names the log that says why, at the
+    /// install as at an update (round 3, correctness 1).
+    #[tokio::test]
+    async fn a_refused_start_names_the_log() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let log = nerve_transport::log::file_in(&l.state)
+            .display()
+            .to_string();
+        sys.refuses.set(true);
+        let e = install(&l, &sys, &download(d.path(), "1.0.0"), &[], &mut Vec::new()).unwrap_err();
+        assert!(e.contains("did not respond in time"), "{e}");
+        assert!(e.ends_with(&format!("; {log} says why")), "{e}");
+        sys.refuses.set(false);
+        install(&l, &sys, &download(d.path(), "1.0.0"), &[], &mut Vec::new()).unwrap();
+        let new = d.path().join("new.exe");
+        std::fs::write(&new, "nerve-center 1.1.0\n").unwrap();
+        sys.refuses.set(true);
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains(&format!("{log} says why")), "{e}");
     }
 
     /// A restore stops the service and starts it again, whether it did its

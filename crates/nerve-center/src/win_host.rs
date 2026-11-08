@@ -157,7 +157,12 @@ fn netsh(args: &[String]) -> Result<String, String> {
 /// installed center reads its settings from that file only, as systemd
 /// gives the Linux one its own. MCP is over HTTP unless the file says
 /// otherwise. Called first in `main`, while the process has one thread.
+/// The settings and the state folder must still be the administrators'
+/// folders the install made: one put in their place since (another
+/// account's, or a link) is refused, not read (round 3, security 2).
 pub fn take_settings(layout: &Layout) -> Result<(), String> {
+    nerve_service::win::dacl::admins_folder(&layout.settings_dir)?;
+    nerve_service::win::dacl::admins_folder(&layout.state)?;
     let path = layout.settings();
     let text = crate::winsvc::settings_text(std::fs::read_to_string(&path), &path)?;
     let set = crate::winsvc::settings_env(&text).map_err(|e| format!("{}: {e}", path.display()))?;

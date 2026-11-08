@@ -133,10 +133,13 @@ pub fn private_file(path: &std::path::Path) -> Result<(), String> {
 
 /// Writes a backup file ([`nerve_transport::backup::write_file`]) that is
 /// private from its first moment. On Windows the file is made in a private
-/// folder beside it, which hands its access list down, and then moved into
-/// place (a move on one drive keeps the list): where it was made in the
-/// target folder and given its list after, another account that watched the
-/// folder could open it first (round 2, security 3).
+/// folder beside it, which hands its access list down, given its own
+/// protected list there, and then moved into place (a move on one drive
+/// keeps the list): where it was made in the target folder and given its
+/// list after, another account that watched the folder could open it
+/// first (round 2, security 3), and a list set by name after the move
+/// would land on whatever that account put in the file's place (round 3,
+/// security 3).
 pub fn write_backup_file(
     file: &std::path::Path,
     bytes: &[u8],
@@ -158,24 +161,26 @@ pub fn write_backup_file(
         ));
         nerve_service::win::dacl::private_folder(&hold, &own_dacl()?)?;
         let made = hold.join("backup");
-        let done = write_file(&made, bytes, false).and_then(|()| {
-            // The rename would replace a file; the name is taken unless
-            // `--overwrite` says otherwise.
-            if !overwrite && std::fs::symlink_metadata(file).is_ok() {
-                return Err(format!(
-                    "{} exists already; name another file or pass --overwrite",
-                    file.display()
-                ));
-            }
-            std::fs::rename(&made, file)
-                .map_err(|e| format!("cannot write {}: {e}", file.display()))
-        });
+        let done = write_file(&made, bytes, false)
+            .and_then(|()| private_file(&made))
+            .and_then(|()| {
+                // The rename would replace a file; the name is taken unless
+                // `--overwrite` says otherwise.
+                if !overwrite && std::fs::symlink_metadata(file).is_ok() {
+                    return Err(format!(
+                        "{} exists already; name another file or pass --overwrite",
+                        file.display()
+                    ));
+                }
+                std::fs::rename(&made, file)
+                    .map_err(|e| format!("cannot write {}: {e}", file.display()))
+            });
         let _ = std::fs::remove_dir_all(&hold);
-        done?;
+        done
     }
+    // The file's mode makes it private here.
     #[cfg(not(windows))]
-    nerve_transport::backup::write_file(file, bytes, overwrite)?;
-    private_file(file)
+    nerve_transport::backup::write_file(file, bytes, overwrite)
 }
 
 /// The protected DACL of what this account keeps private on Windows.

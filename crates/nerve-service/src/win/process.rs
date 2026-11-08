@@ -133,10 +133,11 @@ pub fn session_listed(pid: u32) -> Option<u32> {
 /// the account of another account's process stays hidden from a service
 /// that is no administrator.
 pub fn identity_of(pid: u32) -> (Option<Vec<u8>>, Option<u32>) {
-    if let Ok(sid) = user_of(Some(pid)) {
-        return (Some(sid), session_of(pid).or_else(|| session_listed(pid)));
-    }
-    (None, session_listed(pid).or_else(|| session_of(pid)))
+    super::procs::identity_from(
+        user_of(Some(pid)).ok(),
+        || session_of(pid),
+        || session_listed(pid),
+    )
 }
 
 #[cfg(test)]

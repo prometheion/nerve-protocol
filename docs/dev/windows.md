@@ -337,7 +337,12 @@ The install does this, and says each step:
 1. Makes `C:\ProgramData\nerve-center`, open to SYSTEM and the
    administrators only, with `state` and `settings` in it. The `state`
    folder is open to the service's account too, the `settings` folder only
-   for reading. A folder another account made before is refused.
+   for reading. The administrators own all three. A folder that is there
+   already is taken only from SYSTEM or the administrators: one another
+   account made, one a program of yours made without **Run as
+   administrator** (an agent's shell command could), and a link in its
+   place are refused; delete it and run the install again. The service
+   checks the `state` and `settings` folders again at each start.
 2. Makes the owner token in the state folder (one made before is kept) and
    writes `settings\center.env` with a new harness token; `--name`,
    `--public-url` and `--listen` go into it.

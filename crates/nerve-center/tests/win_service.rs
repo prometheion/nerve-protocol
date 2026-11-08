@@ -266,6 +266,35 @@ fn initialize() -> Value {
 #[ignore = "installs the center as a Windows service: a Windows test machine only"]
 fn the_center_runs_as_a_windows_service() {
     let port = format!("0.0.0.0:{PORT}");
+    // The center's folder, made first by another account (an unelevated
+    // program of the installing person would do the same: it shares the
+    // administrator's account), is refused and named, and the install
+    // makes nothing in it (round 3, security 1).
+    let data = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
+    let home = Path::new(&data).join("nerve-center");
+    match account("STD") {
+        Some(std_user) => {
+            let early = tempfile::tempdir().unwrap();
+            open_to(early.path(), &std_user);
+            let made = as_account(
+                &std_user,
+                early.path(),
+                &system32("cmd.exe"),
+                &format!("/d /c mkdir \"{}\"", home.display()),
+                "",
+                Duration::from_secs(60),
+            );
+            assert_eq!(made.code, Some(0), "{}", made.err);
+            let (ok, said) = center(&["install", "--name", "win-test", "--listen", &port]);
+            assert!(!ok, "{said}");
+            assert!(said.contains("nerve-center: another account"), "{said}");
+            assert!(!home.join("state").exists());
+            std::fs::remove_dir(&home).unwrap();
+        }
+        None => eprintln!(
+            "skipped: a folder another account made first, as NERVE_WIN_STD_ACCOUNT is not set"
+        ),
+    }
     let (ok, said) = center(&["install", "--name", "win-test", "--listen", &port]);
     assert!(ok, "{said}");
     assert!(said.contains("runs as NT SERVICE\\nerve-center"), "{said}");
@@ -292,7 +321,6 @@ fn the_center_runs_as_a_windows_service() {
         );
         // Its folders are its account's and the administrators', its
         // settings the administrators' (the service reads them).
-        let data = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
         let state = Path::new(&data).join("nerve-center").join("state");
         let acl = system("icacls.exe", &[&state.display().to_string()]);
         assert!(
@@ -306,6 +334,19 @@ fn the_center_runs_as_a_windows_service() {
             acl.contains("NT SERVICE\\nerve-center:(OI)(CI)(R)"),
             "{acl}"
         );
+        // The administrators own all three, whoever installed (round 3,
+        // security 1): the service takes no other owner's at its start.
+        for dir in [&home, &state, &settings] {
+            let owner = system(
+                "WindowsPowerShell\\v1.0\\powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!("(Get-Acl -LiteralPath '{}').Owner", dir.display()),
+                ],
+            );
+            assert_eq!(owner.trim(), "BUILTIN\\Administrators", "{}", dir.display());
+        }
         // What the manager does when it fails: the restarts the poisoned
         // lock and a start that failed need (round 1, correctness 1), the
         // one privilege, the service's own SID in its token.
@@ -430,9 +471,10 @@ fn the_center_runs_as_a_windows_service() {
         assert_eq!(o["center"]["os"], "windows");
         assert_eq!(o["mcp"]["mode"], "http", "{o}");
         // Another account's connections to a port are counted apart from
-        // the owner's: the service may not open that account's process and
-        // learns the account from the system's list of processes (round 1,
-        // security 1). A standard account holds more connections than a
+        // the owner's: the service may not open that account's process, so
+        // it tells it apart by its session, from the system's list of
+        // processes (round 1, security 1; round 3, security 4); two
+        // accounts in one session share their places. A standard account holds more connections than a
         // peer has places for, and the owner's page still opens.
         if let Some(std_user) = &std_user {
             let hold = work.path().join("hold");
@@ -728,8 +770,11 @@ if ($wait.Wait(40000)) {{
 
         // A value mistyped in center.env ends the service at its start, and
         // the reason is in the log of its state folder, where the service
-        // has no terminal to say it (round 2, correctness 2). Written back,
-        // the manager's restarts bring it up again.
+        // has no terminal to say it (round 2, correctness 2). The manager
+        // takes a center that ends before it reaches the manager for one
+        // that did not answer, and runs no restart action for it (round 3,
+        // correctness 1), so the file written back, the service is started
+        // again here.
         let env = settings.join("center.env");
         let good = std::fs::read_to_string(&env).unwrap();
         let log = state.join(nerve_transport::log::FILE);

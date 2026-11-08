@@ -13,12 +13,14 @@
 //! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
 //! is, so another account's connections never take the owner's places. On
 //! Linux the kernel names the account ([`nerve_transport::peer`]); on
-//! Windows the table of connections names the process, and the system's
-//! list of processes its account, also where the center may not open the
-//! process; its session (each person signed in has one; services share
-//! one) is only what is left where that list names no account:
-//! [`Peer::of_windows`]. Where neither can be told, all loopback peers are
-//! one.
+//! Windows the table of connections names the process, whose token names
+//! its account where the center may open the process (its own account's,
+//! and every process when it runs as that account). Where it may not (the
+//! installed service, which is no administrator, and another account's
+//! process), the system's list of processes names only its session (each
+//! person signed in has one; services share one), so two accounts in one
+//! session share their places: [`Peer::of_windows`]. Where neither can be
+//! told, all loopback peers are one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
