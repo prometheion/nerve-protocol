@@ -10,7 +10,8 @@
 //! - allowlist mode runs as `nerve-run` in its container, and `--as-owner`
 //!   as the owner;
 //! - a folder outside the owner's profile whose files `nerve-run` made
-//!   changes its flags all the same;
+//!   changes its flags all the same, and one `nerve-run` made there can be
+//!   closed;
 //! - `nerve-run` itself opens neither the node's config and state folders,
 //!   nor the owner's registry, nor the node's pipes;
 //! - with the network off a connection and a sudo command are refused;
@@ -584,6 +585,28 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     assert!(out(&r).contains("made"), "{r}");
     assert_ne!(r["exit_code"], 0, "{r}");
     assert!(!open.join("made").join("g.txt").exists());
+    // Closed by the owner, the folder nerve-run made there is closed all
+    // the same, and the commands run.
+    let made = open.join("made");
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.push(folder(&made, ""));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_in(
+        &mut conn_a,
+        &open,
+        "Get-Content made\\f.txt; exit [int](-not $?)",
+    )
+    .await
+    .expect("a's command after the owner closed what it made");
+    assert_ne!(r["exit_code"], 0, "{r}");
+    assert!(
+        !r["stdout"].as_str().unwrap_or_default().contains("made"),
+        "{r}"
+    );
 
     // Nor its processes: b's command waits, a's does not see or open it.
     let b_dir = b.clone();

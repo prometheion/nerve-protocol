@@ -2774,8 +2774,19 @@ pub mod appcontainer {
                 ),
             ))
         };
-        // The change goes through this handle, on the object it opened.
-        let f = match open(path, READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES) {
+        // The change goes through this handle, on the object it opened. One
+        // the thread may not change is opened as its maker, as below it
+        // ([`Below::maker`]): a folder commands made outside your profile.
+        // The checks below hold for what that opened as well.
+        let access = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
+        let opened = match open(path, access) {
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => match below.maker {
+                Some(t) => as_token(t, || open(path, access))?,
+                None => Err(e),
+            },
+            r => r,
+        };
+        let f = match opened {
             Ok(f) => f,
             // The recorded object is not at the path (moved away meanwhile):
             // not "nothing there" for the record, which the next sync finds
