@@ -2330,6 +2330,10 @@ impl Link {
             let known = account.as_ref().ok().cloned().flatten();
             if !marked.is_empty() && self.shared.separate(&entry.policy) {
                 self.acls_ready(&cfg).await?;
+                // On Windows its paths outside the folders are judged by
+                // the container's entries (Q4), as an `fs` call's are.
+                #[cfg(windows)]
+                self.grants_ready(&entry).await?;
             }
             let (args, targets, named, target) =
                 self.marked_paths(&inv, &action.params, &marked, known.as_ref())?;
@@ -2434,6 +2438,11 @@ impl Link {
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) {
             self.acls_ready(&cfg).await?;
+            // On Windows the reads go by the container's entries (Q4): one
+            // that should be off and is not stops them, as it stops the
+            // pairing's commands.
+            #[cfg(windows)]
+            self.grants_ready(&entry).await?;
         }
         // The pairing's own home and temporary folder are the ones the
         // node made for it: those an earlier pairing under its name
@@ -3856,19 +3865,7 @@ impl Link {
         no_network: bool,
         separate: Option<&NodeConfig>,
     ) -> Result<nerve_sandbox::ContainerSpec, RpcError> {
-        let s = self.shared.clone();
-        // A change that takes long holds the command; the log says how far
-        // it is.
-        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
-            .await
-            .map_err(|e| RpcError::internal(e.to_string()))?;
-        for e in &synced.errors {
-            tracing::warn!("folder grants: {e}");
-        }
-        let name = crate::grants::container(&self.shared.paths, &entry.node_id);
-        if let Some(why) = synced.refusal(&name) {
-            return Err(RpcError::new(ErrorCode::Unavailable, why));
-        }
+        let name = self.grants_ready(entry).await?;
         let env = separate
             .map(|cfg| {
                 cfg.machine
@@ -3884,6 +3881,38 @@ impl Link {
             env,
             ..nerve_sandbox::ContainerSpec::new(name)
         })
+    }
+
+    /// Brings the folder grants in line with the config as it is now
+    /// (crate::grants) and answers with the AppContainer of this pairing
+    /// (`entry`), or says why the pairing's calls do not run: a grant of its
+    /// container that its folders no longer give could not be taken off, a
+    /// folder closed to it could not be closed, or the record of the grants
+    /// cannot be read ([`grants_refusal`]). A command waits for it
+    /// ([`Link::container`]), and so does the node's own file work as the
+    /// container on Windows, whose reads its entries decide (Q4). A change
+    /// that takes long holds the call; the log says how far it is.
+    async fn grants_ready(&self, entry: &CenterEntry) -> Result<String, RpcError> {
+        let s = self.shared.clone();
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+            .await
+            .map_err(|e| RpcError::internal(e.to_string()))?;
+        let name = crate::grants::container(&self.shared.paths, &entry.node_id);
+        grants_refusal(&synced, &name)?;
+        Ok(name)
+    }
+}
+
+/// [`Link::grants_ready`]'s answer once the grants are synced: the sync's
+/// errors go to the log, and a refusal of `container`
+/// ([`crate::grants::Synced::refusal`]) stops the call.
+fn grants_refusal(synced: &crate::grants::Synced, container: &str) -> Result<(), RpcError> {
+    for e in &synced.errors {
+        tracing::warn!("folder grants: {e}");
+    }
+    match synced.refusal(container) {
+        Some(why) => Err(RpcError::new(ErrorCode::Unavailable, why)),
+        None => Ok(()),
     }
 }
 
@@ -4385,6 +4414,48 @@ fn shell_of(configured: Option<&str>, command: Option<&str>) -> Shell {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// A pairing's calls stop where a grant of its container should be off
+    /// and is not, or a folder closed to it is not closed, or the grants
+    /// are not known; another pairing's go on. On Windows the node's own
+    /// file work waits for this too, not only the commands.
+    #[test]
+    fn a_grant_left_on_stops_its_pairings_calls() {
+        use crate::grants::{Grant, Synced};
+        let grant = |container: &str| Grant {
+            container: container.into(),
+            path: "/w/app".into(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+            id: None,
+            unfinished: false,
+            toward: Vec::new(),
+            closed_at: None,
+        };
+        assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());
+        let stale = Synced {
+            stale: vec![grant("c1")],
+            ..Default::default()
+        };
+        let e = super::grants_refusal(&stale, "c1").unwrap_err();
+        assert_eq!(
+            e.kind(),
+            nerve_proto::ErrorCode::Unavailable,
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("/w/app"), "{}", e.message);
+        assert!(super::grants_refusal(&stale, "c2").is_ok());
+        let unclosed = Synced {
+            unclosed: vec![grant("c1")],
+            ..Default::default()
+        };
+        assert!(super::grants_refusal(&unclosed, "c1").is_err());
+        let unknown = Synced {
+            unknown: Some("unreadable".into()),
+            ..Default::default()
+        };
+        assert!(super::grants_refusal(&unknown, "c2").is_err());
+    }
 
     /// A command whose account says `nerve-run` and whose pairing does not
     /// run apart, or the other way round, does not run: a timed mode ended

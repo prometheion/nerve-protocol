@@ -421,8 +421,12 @@ runs in the container as well, unless the pairing runs as you.
   clone`), which the change would reach as well (see hard links below).
   A command may rename a closed folder through the rights of the folder
   around it: it stays closed where it went. Where it went to a place the
-  same pairing is granted, that place gets no entry, and the pairing's
-  commands do not run until the folder is moved back or you open it.
+  same pairing is granted, or above one, that place gets no entry, and the
+  pairing's commands do not run until the folder is moved back or you open
+  it. A link a command puts at a closed folder's path, or above it inside
+  a folder commands may write, is not followed: the folder stays closed
+  where it is, the link gets no entry, and the pairing's commands do not
+  run until the link is gone.
 - A link to another machine (a symbolic link to `\\server\share`) is never
   followed by the node: its walks, the paths of a call and the changes of
   the folders' entries stop there, refused, and a folder closed there gets
@@ -585,8 +589,10 @@ runs in the container as well, unless the pairing runs as you.
   `node_modules` to its store, uv links a `.venv` to its cache, and a local
   `git clone` links its objects. A folder that holds such links does not get
   its entry, and its entry is not changed or taken off. A refused removal
-  stops that pairing's commands, and uninstalling leaves the entry on, until
-  the links are gone. Keep them out of granted folders: pnpm's
+  stops that pairing's commands, and the node's own file calls for it
+  (read, list, grep, find, which outside its folders go by its container's
+  entries), and uninstalling leaves the entry on, until the links are
+  gone. Keep them out of granted folders: pnpm's
   `package-import-method=copy`, `UV_LINK_MODE=copy`, `git clone
   --no-hardlinks`. Or remove them (delete `node_modules` or `.venv`) before
   you add, change or remove the folder.

@@ -499,6 +499,46 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         }
     }
 
+    // A folder taken from a pairing whose entry a hard link holds on (the
+    // take-off would reach the file's other name): the pairing's commands
+    // stop, and so do the node's reads as its container, which the entry
+    // would still let through, until the link is gone.
+    let held = base.join("held");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::write(held.join("f.txt"), "held").unwrap();
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.push(folder(&held, "rw"));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_in(&mut conn_a, &held, "Get-Content f.txt")
+        .await
+        .expect("a's command in the folder");
+    assert!(out(&r).contains("held"), "{r}");
+    let other_name = base.join("other-name.txt");
+    std::fs::hard_link(held.join("f.txt"), &other_name).unwrap();
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.retain(|f| Path::new(&f.path) != held);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let read = json!({"path": nerve_policy::paths::to_wire(&held.join("f.txt"))});
+    let e = call(&mut conn_a, "fs", "read", read)
+        .await
+        .expect_err("a's read of the folder taken from it");
+    assert_eq!(e.kind(), ErrorCode::Unavailable, "{}", e.message);
+    let e = run_in(&mut conn_a, &a, "exit 0").await.unwrap_err();
+    assert_eq!(e.kind(), ErrorCode::Unavailable, "{}", e.message);
+    std::fs::remove_file(&other_name).unwrap();
+    let r = run_in(&mut conn_a, &a, "exit 0")
+        .await
+        .expect("a's command once the link is gone");
+    assert_eq!(r["exit_code"], 0, "{r}");
+
     // Nor the node's pipes from a container.
     let pipe_names: Vec<String> = std::fs::read_dir(r"\\.\pipe\")
         .unwrap()

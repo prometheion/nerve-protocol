@@ -810,16 +810,38 @@ pub fn container_grants(
     // A folder without a flag inside a granted one is closed to the
     // container, whatever it inherits from the folder around (#149): it
     // gets an entry of no flag, which denies every right.
+    let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
     for f in policy.folders.iter().filter(|f| f.access == Access::NONE) {
-        let Some(path) = expand(home, &f.path) else {
+        let Some(spelled) = expand(home, &f.path) else {
             continue;
         };
         // A link to another machine: no container reaches a share (#149's
         // probe), and the sync would follow it to put the entry on.
-        if nerve_policy::paths::remote_link(&path).is_some() {
+        if nerve_policy::paths::remote_link(&spelled).is_some() {
             continue;
         }
-        let path = real(&path);
+        // A closed folder lies inside a granted one, so commands may have
+        // put a link at its path or above it, as for the granted folders
+        // ([`led_away`], [`replaced`]). Followed, it would move the entry
+        // to where the link leads, and the folder the owner closed, which a
+        // command may have renamed meanwhile, would lose its own
+        // (crate::grants::sync). So the entry stays at the path as spelled
+        // from that link on: the sync finds the link there and refuses it,
+        // and the pairing's commands stop until the link is gone.
+        let resolved = real(&spelled);
+        let path = match walk_to(&spelled, &bounds, real) {
+            Ok(_) => match replaced(policy, &f.path, &resolved) {
+                Some(why) => {
+                    tracing::warn!("folder {} is closed at its path as given: {why}", f.path);
+                    spelled
+                }
+                None => resolved,
+            },
+            Err((why, at)) => {
+                tracing::warn!("folder {} is closed at its path as given: {why}", f.path);
+                at.unwrap_or(spelled)
+            }
+        };
         let inside = out
             .iter()
             .any(|(q, a)| *a != Access::NONE && within(&path, q) && !within(q, &path));
@@ -1010,6 +1032,17 @@ fn walk_by(
     writable: &[PathBuf],
     real: impl Fn(&Path) -> PathBuf,
 ) -> Result<PathBuf, String> {
+    walk_to(path, writable, real).map_err(|(why, _)| why)
+}
+
+/// [`walk_by`], and where it refuses a link inside a `w` folder, the path
+/// as spelled from that link on: the place up to it, with the owner's own
+/// links above it followed, and the names after it.
+fn walk_to(
+    path: &Path,
+    writable: &[PathBuf],
+    real: impl Fn(&Path) -> PathBuf,
+) -> Result<PathBuf, (String, Option<PathBuf>)> {
     // The most links one resolution may cross, as the kernel's limit.
     const LINKS: usize = 40;
     let inside = |p: &Path| writable.iter().any(|w| within(p, w));
@@ -1028,9 +1061,12 @@ fn walk_by(
                     Root::Subst(mapped) => {
                         crossed += 1;
                         if crossed > LINKS {
-                            return Err(format!(
-                                "it cannot be resolved through the drive {}",
-                                top.display()
+                            return Err((
+                                format!(
+                                    "it cannot be resolved through the drive {}",
+                                    top.display()
+                                ),
+                                None,
                             ));
                         }
                         // `subst` keeps the folder as it was typed, short
@@ -1046,9 +1082,12 @@ fn walk_by(
                     }
                     Root::Drive => {}
                     Root::Other => {
-                        return Err(format!(
-                            "it passes through a link to {}, which is not a path on a drive",
-                            top.display()
+                        return Err((
+                            format!(
+                                "it passes through a link to {}, which is not a path on a drive",
+                                top.display()
+                            ),
+                            None,
                         ));
                     }
                 }
@@ -1062,9 +1101,12 @@ fn walk_by(
                 // leave the path being walked.
                 #[cfg(windows)]
                 if name.to_string_lossy().contains(':') {
-                    return Err(format!(
-                        "it passes through the name {}, which is not a folder name",
-                        name.to_string_lossy()
+                    return Err((
+                        format!(
+                            "it passes through the name {}, which is not a folder name",
+                            name.to_string_lossy()
+                        ),
+                        None,
                     ));
                 }
                 let at = here.join(&name);
@@ -1078,17 +1120,33 @@ fn walk_by(
                 }
                 let holder = real(&here);
                 if inside(&here) || inside(&holder) {
-                    return Err(format!(
-                        "it passes through the link {} inside a folder where commands may write",
-                        at.display()
+                    let mut spelled = at.clone();
+                    for step in todo.iter().rev() {
+                        match step {
+                            Step::Top(top) => spelled = top.clone(),
+                            Step::Up => {
+                                spelled.pop();
+                            }
+                            Step::Name(name) => spelled.push(name),
+                        }
+                    }
+                    return Err((
+                        format!(
+                            "it passes through the link {} inside a folder where commands may write",
+                            at.display()
+                        ),
+                        Some(spelled),
                     ));
                 }
                 if !(within(&holder, &here) && within(&here, &holder)) {
-                    return Err(format!(
-                        "it passes through the link {}, and {} leads to {} where it was looked at as itself: a link was put there meanwhile",
-                        at.display(),
-                        here.display(),
-                        holder.display()
+                    return Err((
+                        format!(
+                            "it passes through the link {}, and {} leads to {} where it was looked at as itself: a link was put there meanwhile",
+                            at.display(),
+                            here.display(),
+                            holder.display()
+                        ),
+                        None,
                     ));
                 }
                 crossed += 1;
@@ -1096,9 +1154,9 @@ fn walk_by(
                 match target {
                     Some(t) => todo.extend(steps(&long_names(&t))),
                     None => {
-                        return Err(format!(
-                            "it cannot be resolved through the link {}",
-                            at.display()
+                        return Err((
+                            format!("it cannot be resolved through the link {}", at.display()),
+                            None,
                         ));
                     }
                 }
