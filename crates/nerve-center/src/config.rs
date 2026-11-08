@@ -314,6 +314,21 @@ pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
     given
 }
 
+/// Refuses the state folder of an owner command (`status`, `owner-token`,
+/// `backup`, `restore`) when an administrator's terminal took it from the
+/// variable `NERVE_CENTER_STATE_DIR`. An elevated terminal on Windows takes
+/// the account's own variables, which any unelevated program of the account
+/// writes, so a restore or a backup would go to a folder of that program's
+/// instead of the installed center's; `sudo` drops the variable on Linux
+/// (round 7, security 2). `given` is [`settings_given`]; `elevated` is
+/// whether this is Windows and the process an administrator's.
+pub fn refuse_state_variable(given: &[String], elevated: bool) -> Result<(), String> {
+    if elevated && given.iter().any(|g| g == "NERVE_CENTER_STATE_DIR") {
+        return Err("NERVE_CENTER_STATE_DIR is set in this terminal, and an administrator's terminal takes the variables of the account's other programs too; give the folder with --state-dir, or clear the variable".into());
+    }
+    Ok(())
+}
+
 impl Args {
     pub fn state_dir(&self) -> PathBuf {
         self.state_dir.clone().unwrap_or_else(default_state_dir)
@@ -483,6 +498,23 @@ mod tests {
             }
         }
         assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// An administrator's terminal does not steer the owner's commands to a
+    /// state folder by a variable; the flag works, and an unelevated start
+    /// (a harness's, a person's) takes the variable as ever.
+    #[test]
+    fn an_elevated_command_takes_the_state_folder_from_the_flag_only() {
+        let var = vec!["NERVE_CENTER_STATE_DIR".to_string()];
+        let flag = vec!["--state-dir".to_string()];
+        let e = refuse_state_variable(&var, true).unwrap_err();
+        assert!(
+            e.contains("NERVE_CENTER_STATE_DIR") && e.contains("--state-dir"),
+            "{e}"
+        );
+        assert!(refuse_state_variable(&flag, true).is_ok());
+        assert!(refuse_state_variable(&[], true).is_ok());
+        assert!(refuse_state_variable(&var, false).is_ok());
     }
 
     /// The owner's commands take the installed center's folder where there

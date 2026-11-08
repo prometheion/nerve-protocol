@@ -32,8 +32,27 @@ pub fn expand_drive(raw: &str, drive: &str) -> Option<PathBuf> {
     (whole && !text.contains('%')).then(|| PathBuf::from(text))
 }
 
+/// The variables that steer where a program downloads from and whom it
+/// trusts there: an administrator's command takes none of them from the
+/// account's own environment (round 7, security 2).
+pub const STEERING: [&str; 6] = [
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+];
+
+/// Whether the environment variable `name` is one of [`STEERING`]; Windows
+/// does not tell cases apart in a name.
+pub fn is_steering(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    STEERING.iter().any(|s| s.eq_ignore_ascii_case(&name))
+}
+
 #[cfg(windows)]
-pub use sys::{program_data, program_files, system32, windows_dir};
+pub use sys::{program_data, program_files, system32, take_machine_environment, windows_dir};
 
 #[cfg(windows)]
 mod sys {
@@ -89,6 +108,39 @@ mod sys {
             "ProgramFilesDir",
             "Program Files",
         )
+    }
+
+    /// Replaces the [`STEERING`] variables of this process by the
+    /// machine's own (`HKLM\SYSTEM\CurrentControlSet\Control\Session
+    /// Manager\Environment`, which only the administrators change), as
+    /// `sudo` resets them on Linux: an elevated terminal takes the
+    /// account's, which any unelevated program of the account writes. A
+    /// company's proxy is a machine variable, and its TLS inspection puts
+    /// its root into the Windows store, which needs no variable. A value
+    /// that names another variable (`%x%`) is not taken, since that would
+    /// read the account's.
+    ///
+    /// # Safety
+    ///
+    /// Changes the environment: call it before this process starts
+    /// another thread.
+    pub unsafe fn take_machine_environment() {
+        let set: Vec<_> = std::env::vars_os()
+            .map(|(k, _)| k)
+            .filter(|k| super::is_steering(k))
+            .collect();
+        // SAFETY: the caller's promise.
+        unsafe {
+            for k in set {
+                std::env::remove_var(k);
+            }
+            for name in super::STEERING {
+                let key = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+                if let Some(v) = machine_text(key, name).filter(|v| !v.contains('%')) {
+                    std::env::set_var(name, v);
+                }
+            }
+        }
     }
 
     /// The folder the machine's registry names at `key`, `value`, with
@@ -170,6 +222,64 @@ mod tests {
         assert_eq!(expand_drive(r"%USERPROFILE%\ProgramData", "C:"), None);
         assert_eq!(expand_drive(r"%SystemDrive%\%x%", "C:"), None);
         assert_eq!(expand_drive(r"ProgramData", "C:"), None);
+    }
+
+    /// The variables of the steering kind are the ones an administrator's
+    /// command drops, in any case.
+    #[test]
+    fn the_steering_variables_are_named() {
+        use std::ffi::OsStr;
+        for n in [
+            "SSL_CERT_FILE",
+            "ssl_cert_dir",
+            "Https_Proxy",
+            "NO_PROXY",
+            "all_proxy",
+        ] {
+            assert!(is_steering(OsStr::new(n)), "{n}");
+        }
+        for n in ["PATH", "ProgramData", "NERVE_CENTER_NAME", "SSL_CERT", ""] {
+            assert!(!is_steering(OsStr::new(n)), "{n}");
+        }
+    }
+
+    /// Prints the steering variables left after
+    /// [`take_machine_environment`], for [`the_steering_variables_come_from_the_machine`].
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "run by the_steering_variables_come_from_the_machine, in a process of its own"]
+    fn print_the_steering_variables() {
+        // SAFETY: a process of its own, run with `--test-threads=1`, that
+        // reads these variables nowhere else.
+        unsafe { take_machine_environment() };
+        let left: Vec<_> = std::env::vars_os()
+            .filter(|(k, _)| is_steering(k))
+            .collect();
+        println!("steering: {left:?}");
+    }
+
+    /// An elevated terminal's variables of the account (`HTTPS_PROXY`, the
+    /// trusted certificates) do not reach the administrator's commands
+    /// (round 7, security 2). Set for a process of its own.
+    #[cfg(windows)]
+    #[test]
+    fn the_steering_variables_come_from_the_machine() {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([
+            "--exact",
+            "win::folders::tests::print_the_steering_variables",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        for k in STEERING {
+            c.env(k, "decoy-from-the-account");
+        }
+        let o = c.output().unwrap();
+        let said = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{said}");
+        assert!(said.contains("steering: ["), "{said}");
+        assert!(!said.contains("decoy-from-the-account"), "{said}");
     }
 
     /// The machine's folders as this process finds them, for

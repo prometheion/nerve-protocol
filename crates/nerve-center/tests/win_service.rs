@@ -337,6 +337,13 @@ fn the_center_runs_as_a_windows_service() {
         assert!(ok, "{said}");
         assert!(said.contains("center: running"), "{said}");
         assert!(!decoy.path().join("nerve-center").exists());
+        // An administrator's terminal does not take the state folder from
+        // a variable either: `status`, `backup` and `restore` would read
+        // or write a folder of another program's instead of the installed
+        // center's (round 7, security 2).
+        let (ok, said) = center_with(&["status"], &[("NERVE_CENTER_STATE_DIR", decoy.path())]);
+        assert!(!ok && said.contains("NERVE_CENTER_STATE_DIR"), "{said}");
+        assert!(!decoy.path().join("tls.pem").exists());
         // Its folders are its account's and the administrators', its
         // settings the administrators' (the service reads them).
         let state = Path::new(&data).join("nerve-center").join("state");

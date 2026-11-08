@@ -565,6 +565,9 @@ pub fn run(
             let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
             print_backup(&r, file, out);
+            // Which center it is, since an owner command may take another
+            // folder than the installed one (round 7, security 2).
+            let _ = writeln!(out, "The state folder: {}", state.display());
         }
         Cmd::Restore {
             file,
@@ -584,6 +587,7 @@ pub fn run(
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
             print_restore(&r, &parsed, out);
+            let _ = writeln!(out, "The state folder: {}", state.display());
         }
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.

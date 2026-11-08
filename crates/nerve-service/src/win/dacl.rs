@@ -224,6 +224,32 @@ pub fn keeps_lists(flags: Option<u32>) -> bool {
     flags.is_none_or(|f| f & FILE_PERSISTENT_ACLS != 0)
 }
 
+/// Why a folder on a volume with these flags cannot keep the center's
+/// secrets (its owner token, its TLS key), or `Ok` where it can. On a
+/// volume without access lists every account reads and writes what is on
+/// it, so a state folder there is refused, not taken as it is (round 7,
+/// security 1); only the backup's hold folder is ([`private_hold_folder`]),
+/// as its file is encrypted.
+pub fn need_lists(flags: Option<u32>) -> Result<(), String> {
+    if keeps_lists(flags) {
+        return Ok(());
+    }
+    Err("it is on a drive without access lists (FAT32, exFAT), where every account of this machine reads and changes what is in it; use a folder on an NTFS drive".into())
+}
+
+/// Whether `path` names a folder on a network share by its text alone: a
+/// UNC path (`\\server\share\…`, `\\?\UNC\…`). A device path
+/// (`\\.\`, `\\?\C:\`) is no share.
+pub fn is_unc(path: &str) -> bool {
+    let p = path.replace('/', "\\");
+    if let Some(rest) = p.strip_prefix("\\\\?\\") {
+        return rest
+            .get(..4)
+            .is_some_and(|h| h.eq_ignore_ascii_case("UNC\\"));
+    }
+    p.starts_with("\\\\") && !p.starts_with("\\\\.\\")
+}
+
 /// Whether a buffer of `FILE_ID_BOTH_DIR_INFO` entries, as a folder's
 /// listing through its handle fills it, names anything but `.` and `..`.
 /// A buffer cut short counts as naming something.
@@ -261,8 +287,22 @@ pub fn names_more_than_dots(buf: &[u8]) -> bool {
 /// it, since its owner may always change its DACL again. A link in its
 /// place is refused. The checks and the new DACL go through one handle, so
 /// a folder swapped for a junction in between is not what gets the DACL.
+/// A folder on a volume without access lists is refused ([`need_lists`]).
 #[cfg(windows)]
 pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
+    make_private(dir, sddl, true)
+}
+
+/// [`private_folder`] for the backup's hold folder, which a volume without
+/// access lists (a FAT32 stick) may carry: the file in it is encrypted, and
+/// such a volume has nothing to make private.
+#[cfg(windows)]
+pub fn private_hold_folder(dir: &Path, sddl: &str) -> Result<(), String> {
+    make_private(dir, sddl, false)
+}
+
+#[cfg(windows)]
+fn make_private(dir: &Path, sddl: &str, lists_needed: bool) -> Result<(), String> {
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, READ_CONTROL, WRITE_DAC};
 
@@ -270,8 +310,13 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
     use crate::win::sid::wide;
     let at = |e: String| format!("{}: {e}", dir.display());
     if let Some(f) = open_folder(dir, READ_CONTROL | WRITE_DAC, SHARE_ALL)? {
-        if !keeps_lists(volume_flags(&f)) {
-            return Ok(());
+        let flags = volume_flags(&f);
+        if !keeps_lists(flags) {
+            return if lists_needed {
+                need_lists(flags).map_err(at)
+            } else {
+                Ok(())
+            };
         }
         if let Some(owner) = foreign_owner(&f, mine_may_own(sddl)).map_err(|e| at(e.to_string()))? {
             let who = crate::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
@@ -295,7 +340,75 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
     if unsafe { CreateDirectoryW(wide(dir).as_ptr(), &sa) } == 0 {
         return Err(at(std::io::Error::last_os_error().to_string()));
     }
+    if lists_needed {
+        // The volume the new folder is on, not the one its parent is: a
+        // drive can be mounted in a folder. Only an empty folder of its
+        // own goes again.
+        let flags = open_folder(dir, READ_CONTROL, SHARE_ALL)?
+            .as_ref()
+            .and_then(volume_flags);
+        if let Err(e) = need_lists(flags) {
+            let _ = std::fs::remove_dir(dir);
+            return Err(at(e));
+        }
+    }
     Ok(())
+}
+
+/// Whether the folder `dir` is on a network share: its path is a UNC path
+/// or begins with a drive letter that is mapped to one, or the file system
+/// answers the question for the folder's handle (a share mounted in a
+/// folder, a link to one). The center's backup is written as any file there
+/// ([`private_hold_folder`] would make a list of this machine's accounts
+/// that the share's server does not know, and shut it out of its own
+/// folder; round 7, correctness 1).
+#[cfg(windows)]
+pub fn is_remote(dir: &Path) -> bool {
+    use crate::win::sid::wide;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_REMOTE_PROTOCOL_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRemoteProtocolInfo,
+        GetDriveTypeW, GetFileInformationByHandleEx,
+    };
+    const DRIVE_REMOTE: u32 = 4;
+    let full = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if is_unc(&full.to_string_lossy()) {
+        return true;
+    }
+    if let Some(std::path::Component::Prefix(p)) = full.components().next()
+        && let std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) = p.kind()
+    {
+        let root = format!("{}:\\", letter as char);
+        // SAFETY: a NUL-terminated root path.
+        if unsafe { GetDriveTypeW(wide(&root).as_ptr()) } == DRIVE_REMOTE {
+            return true;
+        }
+    }
+    // Followed, not opened as itself: a link to a share is on that share.
+    let Ok(f) = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+    else {
+        return false;
+    };
+    // SAFETY: plain data that the call fills.
+    let mut info: FILE_REMOTE_PROTOCOL_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: an open handle and a buffer of the size given. A local file
+    // makes the call fail; a remote one makes it fill the buffer.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle() as HANDLE,
+            FileRemoteProtocolInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_REMOTE_PROTOCOL_INFO>() as u32,
+        )
+    };
+    ok != 0
 }
 
 /// The share mode of the opens that let others do what they like with the
@@ -598,6 +711,42 @@ mod tests {
     /// entry does; a listing cut short counts as one that does (round 6,
     /// correctness 2).
     #[test]
+    fn a_state_folder_needs_a_volume_with_lists() {
+        assert!(need_lists(Some(0x8)).is_ok());
+        assert!(need_lists(None).is_ok());
+        let e = need_lists(Some(0x6)).unwrap_err();
+        assert!(
+            e.contains("without access lists") && e.contains("NTFS"),
+            "{e}"
+        );
+    }
+
+    /// A path with a server and share name is on the network; a device path
+    /// or a drive is not.
+    #[test]
+    fn a_unc_path_is_a_share() {
+        for p in [
+            r"\\nas\backups\center.backup",
+            "//nas/backups/x",
+            r"\\?\UNC\nas\backups",
+            r"\\?\unc\nas\backups",
+            r"\\127.0.0.1\c$",
+        ] {
+            assert!(is_unc(p), "{p}");
+        }
+        for p in [
+            r"C:\backups",
+            r"\\?\C:\backups",
+            r"\\.\C:",
+            r"backups\x",
+            "/home/x",
+            "",
+        ] {
+            assert!(!is_unc(p), "{p}");
+        }
+    }
+
+    #[test]
     fn only_dots_are_an_empty_listing() {
         // Entries of `FILE_ID_BOTH_DIR_INFO`: the next entry's offset at 0
         // (0 for the last), the name's length in bytes at 60, the name in
@@ -846,8 +995,17 @@ mod tests {
         let me = sid_text(&crate::win::process::user_of(None).unwrap()).unwrap();
         let own = dacl_of(&[&me, "SY", "BA"], &[]);
         let hold = mnt.join("hold");
-        private_folder(&hold, &own).unwrap();
-        private_folder(&hold, &own).unwrap();
+        private_hold_folder(&hold, &own).unwrap();
+        private_hold_folder(&hold, &own).unwrap();
+        // A state folder is not taken there, new or old, and a new one
+        // does not stay (round 7, security 1).
+        let state = mnt.join("state");
+        let e = private_folder(&state, &own).unwrap_err();
+        assert!(e.contains("without access lists"), "{e}");
+        assert!(!state.exists());
+        let e = private_folder(&hold, &own).unwrap_err();
+        assert!(e.contains("without access lists"), "{e}");
+        assert!(!is_remote(&hold));
         let held = hold_folder(&hold, &own).unwrap();
         assert!(!keeps_lists(volume_flags(&held)));
         std::fs::write(hold.join("backup"), "a backup").unwrap();

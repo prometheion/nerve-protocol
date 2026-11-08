@@ -43,10 +43,30 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
+    // An administrator's command takes the proxy and the trusted
+    // certificates from the machine, not from the variables of the account
+    // that other programs of it may set (round 7, security 2). No thread
+    // runs yet.
+    #[cfg(windows)]
+    if args.cmd.is_some() {
+        // SAFETY: nothing here has started another thread.
+        unsafe { nerve_service::win::folders::take_machine_environment() };
+    }
     // `backup`, `restore`, `owner-token` and `status` are the owner's, run
     // by hand: no log, no server; on the installed center's folder where it
     // is installed.
     if let Some(cmd) = args.cmd.as_ref().filter(|c| !c.is_service()) {
+        #[cfg(windows)]
+        let elevated = nerve_service::win::sid::is_admin();
+        #[cfg(not(windows))]
+        let elevated = false;
+        if let Err(e) = nerve_center::config::refuse_state_variable(
+            &nerve_center::config::settings_given(&matches),
+            elevated,
+        ) {
+            eprintln!("nerve-center: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
         let state = args.owner_state_dir();
         let settle = nerve_center::service::settle_user;
         let mut out = std::io::stdout();

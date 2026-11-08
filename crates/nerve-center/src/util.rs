@@ -174,7 +174,7 @@ pub fn private_file(path: &std::path::Path) -> Result<(), String> {
 /// list after, another account that watched the folder could open it
 /// first (round 2, security 3), and a list set by name after the move
 /// would land on whatever that account put in the file's place (round 3,
-/// security 3).
+/// security 3). A folder on a network share gets the file as it is.
 pub fn write_backup_file(
     file: &std::path::Path,
     bytes: &[u8],
@@ -190,12 +190,19 @@ pub fn write_backup_file(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("backup");
+        // On a network share the share's own permissions govern, as on
+        // Linux over CIFS: a list of this machine's accounts means nothing
+        // to the server, and would shut its account out of the folder it
+        // made (round 7, correctness 1). The file is encrypted.
+        if nerve_service::win::dacl::is_remote(dir) {
+            return write_file(file, bytes, overwrite);
+        }
         let hold = dir.join(format!(
             ".{name}.{}.tmp",
             nerve_transport::keys::random_token(8)
         ));
         let own = own_dacl()?;
-        nerve_service::win::dacl::private_folder(&hold, &own)?;
+        nerve_service::win::dacl::private_hold_folder(&hold, &own)?;
         // Held until the file is in place: nobody can rename the folder and
         // put a link of their own under its name (round 4, security 3), and
         // whichever folder is held gets the private list before the file is

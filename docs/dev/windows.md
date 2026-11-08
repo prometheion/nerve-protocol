@@ -380,7 +380,14 @@ folder must be there as the install left it.
 These commands take `C:\ProgramData`, `C:\Program Files` and the system
 folder from Windows, not from the variables `ProgramData`, `ProgramFiles`
 and `SystemRoot`: an administrator's terminal takes those from your
-account's own variables, which any program of yours may set.
+account's own variables, which any program of yours may set. The same
+goes for the proxy and the trusted certificates (`HTTPS_PROXY`,
+`SSL_CERT_FILE` and the like): `update` takes them from the machine's
+environment, which only the administrators change, so a program of yours
+cannot steer its download. In an administrator's terminal `status`,
+`owner-token`, `backup` and `restore` refuse a state folder given by
+`NERVE_CENTER_STATE_DIR` (give `--state-dir`), and `backup` and `restore`
+say which folder they used.
 
 `nerve-center update` stops the service, moves the old program aside, puts
 the new one in place and starts the service; a new program that does not
@@ -416,7 +423,12 @@ own on Windows: your account, SYSTEM and the administrators, which the owner
 token, the TLS key and the state take. A backup file gets the same from its
 first moment: it is written in a private folder beside it, which is held
 open (nobody can rename it) until the file is moved into place, and given
-its private list through that hold. Where the
+its private list through that hold. A backup to a network share
+(`\\nas\backups\center.backup`, a mapped drive) is written there as it
+is, since the share's server knows none of this machine's accounts and its
+own permissions govern, as on Linux over CIFS; the file is encrypted. A
+state folder on a drive without access lists (FAT32, exFAT) is refused: the
+owner token and the TLS key would be open to every account there. Where the
 installed center's path has no service registered (before the first install,
 after `uninstall` without `--purge`) it is open to the administrators only,
 so run a center or a restore there as an administrator (one that is
