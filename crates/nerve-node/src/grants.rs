@@ -1863,6 +1863,11 @@ impl Folders for Acls<'_> {
     ) -> io::Result<Option<String>> {
         use nerve_sandbox::{acl, appcontainer};
         not_remote(path)?;
+        // What commands made belongs to the command account, whose list
+        // the owner may not change outside their profile: the change is
+        // made as that account there (`Below::maker`). Logged on before
+        // the thread acts as the owner.
+        let maker = self.owner.and_then(|_| crate::win_user::run_logon().ok());
         let _as = self.act()?;
         let masks = access.map(masks_of);
         let expect = expect
@@ -1889,6 +1894,7 @@ impl Folders for Acls<'_> {
             let below = appcontainer::Below {
                 links: check.as_mut().map(|c| c as nerve_sandbox::inherit::Links),
                 progress,
+                maker: maker.as_ref().map(|t| t.raw()),
             };
             appcontainer::set_below(path, container, masks, own, whole, expect, below)
         })?;
@@ -1913,6 +1919,7 @@ impl Folders for Acls<'_> {
             let below = appcontainer::Below {
                 links: Some(&mut links),
                 progress,
+                maker: None,
             };
             appcontainer::reaches(dir, container, masks, whole, below)
         })?;
@@ -1948,10 +1955,12 @@ pub fn pairings(paths: &NodePaths, cfg: &NodeConfig) -> Vec<String> {
 /// whose removal failed. A container's profile holds its pairing's home on
 /// the installed service (crate::account::Own), so it goes with the
 /// pairing, not with its last grant: also one that never had a grant.
+#[cfg(any(windows, test))]
 fn profiles_file(paths: &NodePaths) -> PathBuf {
     paths.state_dir.join("profiles.json")
 }
 
+#[cfg(any(windows, test))]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfilesFile<C> {
@@ -1961,6 +1970,7 @@ struct ProfilesFile<C> {
     containers: C,
 }
 
+#[cfg(any(windows, test))]
 fn read_profiles(file: &Path) -> Result<Vec<String>, String> {
     match std::fs::read(file) {
         Ok(b) => Format::of_json(&b)
@@ -1975,6 +1985,7 @@ fn read_profiles(file: &Path) -> Result<Vec<String>, String> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn write_profiles(file: &Path, containers: &[String]) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(&ProfilesFile {
         format: Format::CURRENT,
@@ -3530,11 +3541,11 @@ mod tests {
         sync_outside_in(
             &paths,
             std::slice::from_ref(&b),
-            &[lab.clone()],
+            std::slice::from_ref(&lab),
             &mut f,
             &mut store,
         );
-        let s = sync_outside_in(&paths, &[], &[lab.clone()], &mut f, &mut store);
+        let s = sync_outside_in(&paths, &[], std::slice::from_ref(&lab), &mut f, &mut store);
         assert_eq!(s.emptied, std::slice::from_ref(&lab));
         assert!(
             s.profiles.removed.is_empty() && store.there.contains(&lab),
@@ -4552,7 +4563,7 @@ mod tests {
         // Opened by the owner: both come off.
         let s = sync(&file, std::slice::from_ref(&a), &mut f);
         assert!(s.errors.is_empty(), "{s:?}");
-        assert_eq!(f.all(), [a.clone()]);
+        assert_eq!(f.all(), std::slice::from_ref(&a));
 
         // Uninstall takes a moved one off too.
         sync(&file, &want, &mut f);

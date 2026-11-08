@@ -1242,12 +1242,12 @@ pub mod appcontainer {
         FileHardLinkInformation, NtOpenFile, NtQueryInformationFile,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER,
-        ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE, LocalFree, NTSTATUS, RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW,
-        STATUS_BUFFER_TOO_SMALL, STATUS_DELETE_PENDING, STATUS_INVALID_INFO_CLASS,
-        STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_NOT_FOUND,
-        SetHandleInformation, UNICODE_STRING,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_LEVEL,
+        ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NO_TOKEN, ERROR_NOT_SUPPORTED,
+        GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, NTSTATUS,
+        RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+        STATUS_DELETE_PENDING, STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER,
+        STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_NOT_FOUND, SetHandleInformation, UNICODE_STRING,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -1267,16 +1267,16 @@ pub mod appcontainer {
         GROUP_SECURITY_INFORMATION, GetAce, GetAclInformation, GetKernelObjectSecurity,
         GetLengthSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
         GetSecurityDescriptorGroup, GetSecurityDescriptorLength, GetSecurityDescriptorOwner,
-        GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE, InitializeAcl,
-        InitializeSecurityDescriptor, MakeSelfRelativeSD, OBJECT_INHERIT_ACE,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_AUTO_INHERIT_REQ,
-        SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
-        SECURITY_DESCRIPTOR, SEF_AVOID_OWNER_CHECK, SEF_AVOID_PRIVILEGE_CHECK,
-        SEF_DACL_AUTO_INHERIT, SID_AND_ATTRIBUTES, SetKernelObjectSecurity,
-        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorGroup,
-        SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
-        WinCapabilityPrivateNetworkClientServerSid,
+        GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE, ImpersonateLoggedOnUser,
+        InitializeAcl, InitializeSecurityDescriptor, MakeSelfRelativeSD, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+        SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+        SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR, SEF_AVOID_OWNER_CHECK,
+        SEF_AVOID_PRIVILEGE_CHECK, SEF_DACL_AUTO_INHERIT, SID_AND_ATTRIBUTES,
+        SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SetSecurityDescriptorGroup, SetSecurityDescriptorOwner, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        TOKEN_USER, TokenUser, WinCapabilityInternetClientServerSid,
+        WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, ExtendedFileIdType, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
@@ -1293,11 +1293,11 @@ pub mod appcontainer {
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::Threading::{
         CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetCurrentThread, GetExitCodeProcess,
+        INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        OpenProcessToken, OpenThreadToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, SetThreadToken, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     use super::acl::{self, FileId, Found, Masks, command_line, entries};
@@ -2057,18 +2057,58 @@ pub mod appcontainer {
     struct Volume {
         /// This process' token, which Windows asks for in that.
         token: Obj,
+        /// [`Below::maker`].
+        maker: Option<HANDLE>,
     }
 
     impl Volume {
         fn new() -> io::Result<Volume> {
             Ok(Volume {
                 token: process_token()?,
+                maker: None,
             })
         }
     }
 
     /// This process' token, which Windows asks for as it works out what an
     /// object inherits.
+    /// Runs `f` on this thread as the account of the logon `token`, and
+    /// then as the thread was again (itself, or whoever it acted as). An
+    /// error where it cannot be that again: what follows must not run as
+    /// the account.
+    fn as_token<T>(token: HANDLE, f: impl FnOnce() -> T) -> io::Result<T> {
+        let mut was: HANDLE = null_mut();
+        // SAFETY: the thread's own token, opened as the process, owned by
+        // the Obj below.
+        let had = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut was) };
+        let was = if had != 0 {
+            Some(Obj {
+                h: was,
+                owned: true,
+            })
+        } else {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+                return Err(e);
+            }
+            None
+        };
+        // As the process first: it holds the right to act as another.
+        // SAFETY: plain calls; a logon token.
+        check(unsafe { RevertToSelf() })?;
+        let r = check(unsafe { ImpersonateLoggedOnUser(token) }).map(|()| f());
+        // SAFETY: plain calls; the thread's token opened above.
+        let back = unsafe {
+            RevertToSelf();
+            match &was {
+                Some(t) => SetThreadToken(null(), t.h),
+                None => 1,
+            }
+        };
+        check(back)?;
+        r
+    }
+
     fn process_token() -> io::Result<Obj> {
         let mut token: HANDLE = null_mut();
         // SAFETY: this process' own token, owned by the Obj below.
@@ -2278,8 +2318,18 @@ pub mod appcontainer {
             let list = &list.new;
             // Opened for the change only now, on the same object: one the
             // node may read but not change stops a walk only where its list
-            // changes.
-            let Some(w) = open_in(obj.h, &[], WRITE_DAC)? else {
+            // changes. One the thread may not change is opened as its
+            // maker where one is given ([`Below::maker`]).
+            let w = match open_in(obj.h, &[], WRITE_DAC) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    match self.maker {
+                        Some(t) => as_token(t, || open_in(obj.h, &[], WRITE_DAC))??,
+                        None => return Err(e),
+                    }
+                }
+                r => r?,
+            };
+            let Some(w) = w else {
                 return Err(io::ErrorKind::NotFound.into());
             };
             list.write(w.h)
@@ -2614,6 +2664,12 @@ pub mod appcontainer {
         pub links: Option<inherit::Links<'a>>,
         /// Told how far the change is, now and then.
         pub progress: &'a mut dyn FnMut(Walked),
+        /// A logon token of the account commands run as, which owns what
+        /// they make: a list below the folder the thread may not change is
+        /// changed as that account, which as its owner may. Outside your
+        /// profile Windows gives you no right to change the list of a file
+        /// another account made (#149).
+        pub maker: Option<HANDLE>,
     }
 
     /// Passes the list `next` of the folder open as `f` (at `path`) down
@@ -2630,6 +2686,7 @@ pub mod appcontainer {
         below: Below,
     ) -> io::Result<(Walked, Option<inherit::Stop>)> {
         let mut volume = Volume::new()?;
+        volume.maker = below.maker;
         let top = Obj {
             h: f.as_raw_handle(),
             owned: false,
@@ -2665,6 +2722,7 @@ pub mod appcontainer {
         let below = Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         set_below(path, name, masks, own, false, None, below).map(|(id, _)| id)
     }
@@ -4225,6 +4283,7 @@ mod tests {
             let below = appcontainer::Below {
                 links: None,
                 progress: &mut |_| {},
+                maker: None,
             };
             appcontainer::set_below(&top, &name, masks, false, whole, None, below)
                 .unwrap()
@@ -4257,6 +4316,7 @@ mod tests {
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         let e = appcontainer::set_below(&top, &name, None, false, false, Some(elsewhere), below)
             .unwrap_err();
@@ -4267,6 +4327,7 @@ mod tests {
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         let missing = top.join("moved-away");
         let e =
@@ -4298,6 +4359,7 @@ mod tests {
         let below = appcontainer::Below {
             links: Some(&mut no),
             progress: &mut quiet,
+            maker: None,
         };
         let (found, _) = appcontainer::reaches(&top, &name, Some(m), false, below).unwrap();
         assert_eq!(found, Some((linked.clone(), 2)));
@@ -4305,6 +4367,7 @@ mod tests {
         let below = appcontainer::Below {
             links: Some(&mut no),
             progress: &mut quiet,
+            maker: None,
         };
         let e =
             appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap_err();
