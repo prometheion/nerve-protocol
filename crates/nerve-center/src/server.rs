@@ -322,12 +322,14 @@ async fn signal() {
             _ = term.recv() => {}
         }
     }
-    // The Windows service control manager asks the service to stop.
+    // The Windows service control manager asks the service to stop; a
+    // service has no console that could send Ctrl+C.
     #[cfg(windows)]
     {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = nerve_service::win::dispatch::stop_requested() => {}
+        if nerve_service::win::dispatch::is_service() {
+            nerve_service::win::dispatch::stop_requested().await;
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
         }
     }
     #[cfg(not(any(unix, windows)))]
