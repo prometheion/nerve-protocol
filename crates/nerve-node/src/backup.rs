@@ -1512,7 +1512,7 @@ mod tests {
         paired(&to, SecretStorage::File, &["other"]);
         let before = std::fs::read(to.config_file()).unwrap();
         // A running node holds the keys lock for its life.
-        let lock = KeysLock::try_take(&to).unwrap().unwrap();
+        let lock = crate::secrets::HeldByANode::take(&to);
         let err = restore(
             &to,
             &parsed,

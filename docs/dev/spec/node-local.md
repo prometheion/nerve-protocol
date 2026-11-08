@@ -194,11 +194,17 @@ file it replaces, so the record never goes down.
   writes it again, or the owner deletes it.
 - A save by the running node is numbered above the record as well as above
   the version in force. Another writer may have saved the file meanwhile and
-  raised the record (the CLI on Windows, where a running node takes the file
-  only at its next start; on Linux the CLI before the node's socket is up).
-  The node's save replaces that file, as it always did, but it never lands
-  below the record, so the node does not refuse its own file as an earlier
-  one put back at its next start.
+  raised the record (the CLI before the node's socket or pipe is up).
+  The running node does not save over a file it signed that is ahead of
+  it (a change the CLI made when it found no node): a write is refused,
+  naming the file, until the node took it (a reload or a restart); only a
+  panic saves over it, since a lock never waits; the owner's change in that
+  file is then gone, which the audit log says (`config`, `replaced`) and the
+  answer to `config.write` (`"replaced": true`), `panic` and the app say too.
+  A file nobody signed names
+  no change of the owner's and blocks nothing. Whatever it saves lands above
+  the record, so the node does not refuse its own file as an earlier one
+  put back at its next start.
 - A record that cannot be written after the file was saved changes nothing: it
   only lags, the audit log says `not_recorded`, and the next start records
   the version.
@@ -213,11 +219,12 @@ can write the state folder can delete or lower the record as well. In
 adds is a defence against whoever can write the config folder alone: a
 backup, a sync tool, a process of another account.
 
-On Windows there is no control socket. A running node takes the folder
-changes over its control pipe (§5); for every other change the CLI writes
-the signed file itself, and a running node takes it at its next start. After
-a change no daemon answered for, the CLI says so in one line ("takes effect
-at the next start of the node").
+On Windows there is no control socket: a running node takes every change
+over its control pipe (§5), as over the socket. Only while no node runs does
+the CLI write the signed file itself, which the node takes when it starts;
+the CLI then says so in one line ("takes effect at the next start of the
+node"). A running node saves no change over a file newer than the config in
+force: the write is refused as a conflict.
 
 ### Where the keys are
 
@@ -839,7 +846,21 @@ files, outside folder mode's Landlock, and so can a root one (root as the
 account, a sudo command); one of another account cannot. Any command can
 have work started outside its cgroup by its account's service manager
 (`systemd-run --user`, `at`, cron), which the limits do not hold.
-Windows does not hold commands to these limits yet.
+
+On Windows the command's job object holds it to them, wherever the node
+runs: `JobMemoryLimit` for the memory of the whole job, a hard cap on the
+CPU rate, which Windows counts in hundredths of a percent of every CPU of the
+machine (the node turns `cpu_percent` of one CPU into that share, and sets
+none where it is the whole machine), and `ActiveProcessLimit`, which counts
+processes, not threads, with room for the console host, the stop helper and
+folder mode's shim, which run in the job too. Past its memory Windows only
+refuses it; the node hears `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT` on the job's
+completion port, ends the job and says `killed: "memory"` with the reason,
+as on Linux. A job that cannot be made, or does not take the limits, keeps
+the command from running (`unavailable`). `status` says `cgroup: "the
+command's job object"` and `enforced: ["memory", "cpu", "processes"]`.
+Work a command has started outside its job (the task scheduler, WMI, a
+service) is not held to them.
 
 Windows has no signals either. Each command gets a console of its own,
 without a window (`CREATE_NO_WINDOW`), never the node's. On `timeout_ms`
@@ -973,9 +994,7 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   `status` carries the same under `relay` (§5); on Windows `relay` asks
   the control pipe's `status` for them. `relay rm`, `relay off` and `relay
   set --to` say whether their cut is in force: "now" when a running node
-  took the change; on Windows, where the CLI writes the file for the next
-  start, that a running node keeps its tunnels until then and must be
-  restarted to cut them now.
+  took the change, on Windows over its control pipe as elsewhere.
 - A tunnel goes to one of this node's centers whose URL is `https` and
   that has not revoked it or answered 401, and is on the node's list when
   it has one, matched by host (without case)
@@ -1661,12 +1680,13 @@ holds the kept password again when `machine.sudo` says on and the file is
 the current account's. A sudo command runs what followed `sudo` in the
 shell, started with a fresh batch logon's full token (`CreateProcessAsUserW`)
 with the account's own environment, in a job like every command; the check
-that the account cannot open the node's folders does not apply to it. The
-control pipe takes folder changes only, so `nerve-node sudo on` (elevated) checks the password,
-writes the file and sets `machine.sudo` in the signed file, which the service
-takes at its next start; `nerve-node sudo off` removes the file, and the
-running node drops a held password whose file is gone within a second and
-switches off. `uninstall` removes the file.
+that the account cannot open the node's folders does not apply to it.
+`sudo.on` and `sudo.off` reach the running service over the control pipe,
+as over the socket on Linux: the service checks the password, keeps it in
+the file and sets `machine.sudo` at once, or removes the file and drops the
+password. `sudo on` needs the running node; `sudo off` without one removes
+the file and sets the switch off in the signed file. `uninstall` removes the
+file.
 
 ## 5. Control socket
 
@@ -1784,6 +1804,10 @@ answered, which takes long on a large folder. Methods:
 | `folder.rm` | `center`?, `path`, `given` | takes a folder away |
 | `center.rotate-key` | `center`, `end_grace` | as on the socket |
 | `caps.list` | | as on the socket |
+| `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
+| `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
+| `owner.check` | | as on the socket; the CLI asks it over the pipe as it asks the socket on Linux |
+| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, walked}` |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
 settled the path at (`exec::settle`, as this process sees it: the pipe takes
@@ -1793,9 +1817,11 @@ as typed or, after that lookup, the stored path again; `set` and `rm` find the
 folder by either. A `rm` takes the folder's `places` entry with it (the
 config's validation drops an entry that names no folder). Without `center`
 the only paired center is meant.
-While `node.toml` is newer than the config in force (the CLI wrote another
-change there for the next start), a folder change is refused: the node saves
-its whole config and would undo that change.
+While `node.toml` is newer than the config in force (a CLI wrote a change
+there while it found no node), a folder change is refused, as every write of
+the node is: the node saves its whole config and would undo that change.
+`folder.add` refuses a network folder (`\\server\share`) and a folder on a
+network drive, or on a drive the node's account does not see.
 A field the method does not take refuses the request. The node checks a
 change as the CLI does when it writes the file, saves it, brings the folder
 grants in line, and answers `{center, path, access, mode, version}`
@@ -1823,7 +1849,13 @@ Who may write:
   the installed node, else the CLI's own). When the pipe is another's and no
   node holds `keys.lock` (none runs), the CLI writes the change to
   `node.toml` itself, as with no pipe at all; with a node running it stops
-  with an error that says how to free the name.
+  with an error that says how to free the name. The same holds for a pipe
+  that is missing while `keys.lock` is held (a node that runs without its
+  pipe, or is starting): the CLI never writes behind a running node, and the
+  app's panic, which gets that error, stops the service.
+- A call waits at most 90 s for the answer, as on the socket, and then
+  says `the node did not answer in time`: a node that is stuck must not
+  hold the CLI, nor the app's panic, for ever.
 
 Not covered: a process another program starts for a command (the task
 scheduler, WMI) is in no job of the node's; it opens the pipe only if its
@@ -1950,8 +1982,8 @@ reason) and commands ended because the owner's network switch went on
 (`decision` `killed`, `code` `no_network`, `target` `(running commands)` or
 `(a command being started)`), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config
-file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored` or
-`not_recorded`, with the file and the reason), and what the owner did to the node
+file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored`,
+`replaced` or `not_recorded`, with the file and the reason), and what the owner did to the node
 (`"kind": "node"`, `event` `install`, `setup`, `update` or `uninstall`, with
 its `steps` and the `error` that stopped it), and each key rotation
 (`"kind": "key"`, `center`, `event` `node-key`, `node-key-refused`,

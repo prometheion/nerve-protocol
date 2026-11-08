@@ -355,6 +355,12 @@ impl Ctl {
                 Err(e) => c.no_chooser(e),
                 Ok(None) => {}
                 Ok(Some(path)) => {
+                    // A network folder or drive is said at once: the node
+                    // refuses it.
+                    if let Some(why) = nerve_node::drives::refusal(&path.display().to_string()) {
+                        c.toast(why, Tone::Danger);
+                        return;
+                    }
                     c.with_perm(|p| {
                         p.set_folder_path(path.display().to_string().into());
                         p.set_folder_read(true);
@@ -402,6 +408,24 @@ impl Ctl {
                 c.with_perm(|p| p.set_folder_error(e.into()));
             },
         );
+    }
+
+    /// Walks every folder grant again (`folder sync`), so what was moved
+    /// into a folder gets its rights, and says what that left.
+    fn folder_sync(self: &Rc<Self>) {
+        self.with_perm(|p| p.set_folder_sync_busy(true));
+        self.command(vec!["folder".into(), "sync".into()], None, |c, answer| {
+            c.with_perm(|p| p.set_folder_sync_busy(false));
+            match answer {
+                Ok(v) => {
+                    let said = super::said_of(&v);
+                    let warned = said.lines().any(|l| l.starts_with("warning"));
+                    c.toast(said, if warned { Tone::Warn } else { Tone::Ok });
+                }
+                Err(e) => c.toast(e, Tone::Danger),
+            }
+            c.perm_load();
+        });
     }
 
     fn folder_set(self: &Rc<Self>, path: &str, r: bool, w: bool, x: bool) {
@@ -671,6 +695,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_folder_choose(move || c.folder_choose());
     let c = ctl.clone();
     p.on_folder_add(move || c.folder_add());
+    let c = ctl.clone();
+    p.on_folder_sync(move || c.folder_sync());
     let c = ctl.clone();
     p.on_folder_set(move |path, r, w, x| c.folder_set(&path, r, w, x));
     let c = ctl.clone();

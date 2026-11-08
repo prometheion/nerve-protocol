@@ -727,6 +727,30 @@ pub fn started_after_restore(restored: bool, started: Result<(), &str>) -> Strin
     }
 }
 
+/// What the app says after it stopped the service for a lock the running
+/// node did not take: every link ended with it, and the lock is saved for
+/// its next start, or not (`not_saved`, why).
+pub fn panic_stopped(not_saved: Option<&str>) -> String {
+    match not_saved {
+        None => "Locked: the node did not take the lock, so the app stopped it. Every link ended, and it stays locked when it starts.".into(),
+        Some(e) => format!(
+            "The node did not take the lock, so the app stopped it: every link ended. The lock is not saved ({e}): lock again before you start it."
+        ),
+    }
+}
+
+/// What the app adds to "Locked" when the lock replaced a change that waited
+/// in node.toml for the node's next start.
+pub fn panic_replaced() -> &'static str {
+    "A change waiting in node.toml was replaced by the lock: make it again if you still want it."
+}
+
+/// What the app says when the running node took no lock (`why`) and its
+/// service did not stop either (`e`): nothing ended.
+pub fn panic_not_stopped(why: &str, e: &str) -> String {
+    format!("Not locked: {why}. The app could not stop the node either: {e}")
+}
+
 /// `text` as a sentence: its first letter up, a full stop at its end.
 fn full_sentence(text: &str) -> String {
     let mut out = sentence(text);

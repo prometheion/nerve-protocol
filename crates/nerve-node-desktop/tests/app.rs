@@ -235,69 +235,75 @@ fn the_app_drives_the_cli_end_to_end() {
         store.get_toast()
     );
     window.global::<Perm>().set_owner_is_root(false);
-    assert!(!store.get_restart_due());
-    // With the service running, the app restarts it for such a change, a
-    // moment later. The service here is none, so the restart fails, and
-    // the Overview goes on offering it.
+    // The app restarts no service for a change: a running node takes each
+    // at once (on Windows over its control pipe), and one that does not run
+    // takes it when it starts. Here none runs, whatever the Overview shows.
     store.set_service_state("running".into());
     store.invoke_center_pause("home".into(), true);
-    assert!(store.get_restart_due());
     assert!(
         store
             .get_toast()
-            .ends_with("The node restarts in a moment to take it."),
+            .ends_with("The node takes it when it starts.")
+            && !store.get_toast().contains("restart"),
         "{}",
         store.get_toast()
     );
-    ctl.tick();
-    assert!(
-        store.get_toast().starts_with("The node did not restart")
-            && store.get_toast().contains("Restart it on the Overview"),
-        "{}",
-        store.get_toast()
-    );
-    assert!(store.get_restart_due());
-    assert_eq!(ctl.end(), None, "the restart ran");
-    // The app ends before that moment: its end restarts the service, or
-    // the change would wait for the next start of the machine.
     store.invoke_center_pause("home".into(), false);
-    let ended = ctl.end();
-    assert!(
-        matches!(&ended, Some(Err(e)) if e.contains("--config-dir")),
-        "{ended:?}"
-    );
-    assert_eq!(ctl.end(), None, "once");
-    // The first-run steps restart it once, at their end: a change made
-    // before them waits for it meanwhile.
+    // The first-run steps start a stopped service at their end, and leave
+    // a running one alone, also when they are closed before.
     store.invoke_setup_start();
-    store.set_restart_due(true);
     store.set_toast("".into());
     store.invoke_setup_skip();
     assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
-    // The service's restart ran (and failed: there is none).
-    assert_eq!(store.get_toast_tone(), nerve_node_desktop::Tone::Danger);
-    assert!(
-        store.get_toast().contains("--config-dir"),
-        "{}",
-        store.get_toast()
-    );
-    // Closed with × or Escape before their end, the steps restart it all
-    // the same.
+    assert_eq!(store.get_toast(), "");
     store.invoke_setup_start();
-    store.set_restart_due(true);
-    store.set_toast("".into());
     store.invoke_setup_close();
     assert!(!store.get_setup_open());
+    assert_eq!(store.get_toast(), "");
+    store.set_service_state("".into());
+    // Panic. A node that runs takes it at once; when it does not take it,
+    // the app stops the installed service and says "ended" only once the
+    // service stopped. Here a control socket answers every call with a
+    // refusal, and the service cannot stop (the test's node is none), so
+    // the app says that nothing ended.
+    #[cfg(unix)]
+    {
+        use nerve_transport::ctl::{Reply, bind, serve_on};
+        let socket = paths.ctl_socket();
+        let listener = rt.block_on(bind(&socket)).unwrap();
+        let refusing = rt.spawn(serve_on(listener, |_, _| async {
+            Reply::Err("refused: a test".into())
+        }));
+        ctl.watch_service(true, &root.join("bin/nerve-node-desktop"));
+        store.invoke_panic();
+        let toast = store.get_toast();
+        assert!(
+            toast.starts_with("Not locked: refused: a test")
+                && toast.contains("could not stop the node either")
+                && !toast.contains("ended"),
+            "{toast}"
+        );
+        assert_eq!(store.get_toast_tone(), nerve_node_desktop::Tone::Danger);
+        assert!(!config(&paths).locked);
+        refusing.abort();
+        let _ = std::fs::remove_file(&socket);
+        ctl.watch_service(false, &root.join("bin/nerve-node-desktop"));
+    }
+    // With no node running, the lock is saved for its start.
+    store.invoke_panic();
+    assert!(config(&paths).locked);
     assert!(
-        store.get_toast_tone() == nerve_node_desktop::Tone::Danger
-            && store.get_toast().contains("--config-dir"),
+        store.get_toast().starts_with("Locked:")
+            && store
+                .get_toast()
+                .ends_with("The node takes it when it starts."),
         "{}",
         store.get_toast()
     );
-    store.set_service_state("".into());
-    store.set_restart_due(false);
+    store.invoke_unlock();
+    assert!(!config(&paths).locked);
     let settings = audit(&paths)
         .iter()
         .filter(|e| e["kind"] == "settings" && e["by"] == "local")
@@ -528,6 +534,20 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // Sync folders walks the grants again. No node runs here: on Linux the
+    // node walks them when it starts, on Windows this command does.
+    perm.invoke_folder_sync();
+    assert!(!perm.get_folder_sync_busy());
+    let said = store.get_toast();
+    if cfg!(windows) {
+        assert!(
+            said.starts_with("every pairing's commands reach")
+                || said.starts_with("nothing to sync"),
+            "{said}"
+        );
+    } else {
+        assert!(said.contains("walks the folders when it starts"), "{said}");
+    }
     // The network switch of its folder-mode commands, off and on again.
     perm.invoke_no_network_set(true);
     assert!(config(&paths).centers[0].policy.no_network);

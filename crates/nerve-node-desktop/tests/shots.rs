@@ -482,16 +482,12 @@ fn every_page_light_and_dark() {
     store.set_busy("service-restart".into());
     shots.take("overview-service-restarting");
     store.set_busy("".into());
-    // A change the running service takes only when it starts again.
-    store.set_restart_due(true);
-    shots.take("overview-restart-due");
-    // A change the app restarts the service for.
-    store.set_toast("home is paused: its link ends until you resume it.\nThe node restarts in a moment to take it.".into());
-    store.set_toast_tone(nerve_node_desktop::Tone::Ok);
+    // The lock the running node did not take: the app stopped it.
+    store.set_toast(nerve_node_desktop::view::panic_stopped(None).into());
+    store.set_toast_tone(nerve_node_desktop::Tone::Warn);
     store.set_toast_shown(true);
-    shots.take_as_is("overview-restart-soon");
+    shots.take_as_is("overview-panic-stopped");
     store.set_toast_shown(false);
-    store.set_restart_due(false);
     // Commands without their limits: one line, and the restart.
     let st = store.get_status();
     let mut off = st.clone();

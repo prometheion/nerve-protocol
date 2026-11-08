@@ -1487,6 +1487,9 @@ mod tests {
         assert!(pid >= 0);
         if pid == 0 {
             unsafe {
+                // It stays for the test: no copy of another test's pipe or
+                // lock stays with it.
+                crate::secrets::keep_only(fds[1]);
                 libc::signal(libc::SIGIO, libc::SIG_IGN);
                 let fd = libc::open(c.as_ptr(), libc::O_RDWR);
                 let ok = fd >= 0 && libc::fcntl(fd, libc::F_SETLEASE, libc::F_WRLCK) == 0;

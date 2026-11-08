@@ -427,7 +427,7 @@ async fn pair(
     let before = std::fs::read(paths.config_file()).ok();
     let e = crate::pair::pair(paths, &link, name).await?;
     let mut v = json!({ "paired": true, "name": e.name, "url": e.url, "messages": [] });
-    if std::fs::read(paths.config_file()).ok() != before && !daemon_answers(paths, false).await {
+    if std::fs::read(paths.config_file()).ok() != before && !daemon_answers(paths).await {
         v["messages"] = json!([in_file_line()]);
         v["next_start"] = json!(true);
     }

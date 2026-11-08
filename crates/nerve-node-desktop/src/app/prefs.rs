@@ -710,20 +710,10 @@ impl Ctl {
                 Ok(v) => {
                     c.with_prefs(|p| p.set_relay_add_open(false));
                     let (mut text, copy) = view::relay_token(&v);
-                    let restart = c.restart_for(&v);
-                    match restart {
-                        super::Restart::Soon | super::Restart::AtEnd => text.push_str(
-                            " This node restarts in a moment, so that the relay takes it.",
-                        ),
-                        super::Restart::AtStart => {
-                            text.push_str(" The relay takes it when this node starts.")
-                        }
-                        super::Restart::No => {}
+                    if super::waits_for_start(&v) {
+                        text.push_str(" The relay takes it when this node starts.");
                     }
                     c.show_once(&title, super::KEY_NOTE, &text, &copy);
-                    if restart == super::Restart::Soon {
-                        c.restart_soon();
-                    }
                 }
                 Err(e) => {
                     c.with_prefs(|p| p.set_relay_add_error(e.into()));
@@ -1066,9 +1056,6 @@ impl Ctl {
                 }
                 answer => {
                     c.with_prefs(|p| p.set_restore_pass(SharedString::new()));
-                    if answer.is_ok() {
-                        c.with_store(|s| s.set_restart_due(false));
-                    }
                     let then = view::started_after_restore(answer.is_ok(), Ok(()));
                     c.restored(answer, then, false);
                 }
@@ -1146,9 +1133,6 @@ impl Ctl {
                 vec!["service".into(), "start".into()],
                 None,
                 move |c, started| {
-                    if started.is_ok() {
-                        c.with_store(|s| s.set_restart_due(false));
-                    }
                     let started = started.as_ref().map(|_| ()).map_err(String::as_str);
                     let then = view::started_after_restore(answer.is_ok(), started);
                     c.restored(answer, then, true);

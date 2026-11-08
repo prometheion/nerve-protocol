@@ -1,14 +1,15 @@
 //! The installed node's entries in the Windows Event Log: its start, its
 //! stop, a start that fails and a crash (docs/dev/windows.md). The program
-//! carries the message table that gives each entry its text: `build.rs`
-//! links the resource [`resource`] makes into `nerve-node.exe`, and `install`
-//! registers the program as the message file of the source [`SOURCE`] in the
-//! Application log (crate::win_host). Without that the Event Viewer still
-//! shows an entry, with a note that its description is missing.
+//! carries the message table that gives each entry its text: nerve-node's
+//! `build.rs` links the resource [`resource`] makes into `nerve-node.exe`,
+//! and `install` registers the program as the message file of the source
+//! [`SOURCE`] in the Application log ([`crate::win::event::put_source`]).
+//! Without that the Event Viewer still shows an entry, with a note that its
+//! description is missing.
 //!
-//! This file is plain std, so `build.rs` includes it as it is and the tests
-//! check the resource on every platform; the writing itself is
-//! crate::win_service.
+//! This file is plain std, so the `build.rs` files include it as it is and
+//! the tests check the resource on every platform; the writing itself is
+//! [`crate::win::event::report`].
 
 /// The source the entries come from: the service's name.
 pub const SOURCE: &str = "nerve-node";
@@ -178,7 +179,6 @@ mod tests {
         assert_eq!(ids, [1, 2, 3, 4]);
         let errors: Vec<Event> = Event::ALL.into_iter().filter(|e| e.is_error()).collect();
         assert_eq!(errors, [Event::NotStarted, Event::Crashed]);
-        assert_eq!(SOURCE, crate::winsvc::SERVICE_NAME);
         assert!(SOURCE_KEY.ends_with(&format!("\\Application\\{SOURCE}")));
     }
 }

@@ -1197,6 +1197,13 @@ pub(crate) mod tests {
             .user
     }
 
+    /// The node's Event Log entries come from a source of the service's
+    /// name.
+    #[test]
+    fn the_event_source_is_the_service() {
+        assert_eq!(crate::eventlog::SOURCE, SERVICE_NAME);
+    }
+
     #[test]
     fn the_secret_holds_name_and_password() {
         let s = secret("alice", "a\0b c");

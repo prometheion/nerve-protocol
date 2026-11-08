@@ -1,5 +1,6 @@
 //! Links the message table of the node's Windows Event Log entries
-//! (src/eventlog.rs) into the program, so the Event Viewer shows their text.
+//! (nerve-service/src/eventlog.rs) into the program, so the Event Viewer
+//! shows their text.
 //! Windows' linker takes a `.res` file as it takes an object; the GNU one
 //! does not, so a windows-gnu build goes without it.
 //!
@@ -11,7 +12,7 @@
 //! only (tests/dlls.rs checks that no other is loaded at start).
 
 #[allow(dead_code)]
-#[path = "src/eventlog.rs"]
+#[path = "../nerve-service/src/eventlog.rs"]
 mod eventlog;
 
 /// The DLLs the Windows program imports that are not among Windows'
@@ -26,7 +27,7 @@ const DELAYED: [&str; 5] = [
 ];
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/eventlog.rs");
+    println!("cargo:rerun-if-changed=../nerve-service/src/eventlog.rs");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if os != "windows" || env != "msvc" {

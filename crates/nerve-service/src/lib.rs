@@ -2,7 +2,9 @@
 //! the accounts, systemd, the files root writes for a service, the owner's
 //! passphrase prompt, and `update`, which replaces the program, writes the
 //! service's files as the new program has them and puts both back when it
-//! does not start. Each service names its own program, user and files.
+//! does not start. Each service names its own program, user and files. On
+//! Windows they share the service control manager, the protected DACL, the
+//! Event Log, the control pipe's checks and the job object ([`win`]).
 //!
 //! What a step does to the machine beyond the service's files (accounts,
 //! systemd, running a program) goes through [`System`], so the tests run
@@ -11,11 +13,13 @@
 use std::path::{Path, PathBuf};
 
 pub mod account;
+pub mod eventlog;
 #[doc(hidden)]
 pub mod fake;
 mod files;
 pub mod prompt;
 mod update;
+pub mod win;
 
 pub use account::Account;
 #[cfg(unix)]

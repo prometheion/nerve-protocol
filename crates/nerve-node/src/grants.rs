@@ -38,7 +38,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 
@@ -238,6 +238,39 @@ impl Synced {
             )
         })
     }
+
+    /// What `folder sync` hears of the sync: its errors, the folders of the
+    /// grants left stale, and how many grants it walked (`walked`).
+    pub fn json(&self, walked: usize) -> serde_json::Value {
+        serde_json::json!({
+            "errors": self.errors,
+            "stale": self.stale.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
+            "walked": walked,
+        })
+    }
+}
+
+/// Has the next sync walk every grant of the record `file` again, into
+/// every folder below it, as after a change that stopped part way: what was
+/// moved into a granted folder since, which keeps the list it had, gets the
+/// grant then (`folder sync`). How many grants there are.
+pub fn walk_every(file: &Path) -> Result<usize, String> {
+    let _one = nerve_transport::sync::turn(&SYNC);
+    let _held =
+        RecordLock::take(file).map_err(|e| format!("{}: {e}", lock_file(file).display()))?;
+    let record = read_record(file)?;
+    if record.is_empty() {
+        return Ok(0);
+    }
+    let marked: Vec<Grant> = record
+        .iter()
+        .map(|g| Grant {
+            unfinished: true,
+            ..g.clone()
+        })
+        .collect();
+    write_record(file, &marked)?;
+    Ok(record.len())
 }
 
 /// What a sync looks at and changes on the folders: on Windows their
@@ -681,6 +714,12 @@ impl RecordLock {
 /// not be found again.
 pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
+    sync_in_turn(file, want, folders)
+}
+
+/// [`sync`] by a caller that holds the turn ([`SYNC`]) already: the node,
+/// which removes profiles in the same turn ([`apply_in`]).
+fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     let out = Synced::default();
     // Without a state folder nothing is recorded, and with nothing wanted
     // there is nothing to do: no folder and no lock file are made for it
@@ -1064,28 +1103,31 @@ pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     out
 }
 
-/// Brings the grants on this machine in line with `cfg` ([`wanted`],
-/// [`sync`]), and removes the profile of a container left without grants.
-/// Nothing to do where commands are not confined by grants (Linux).
-/// `report` is told how far a change is once it takes long (`Pace`): it
-/// passes down to every file and folder below the folder that it changes.
-/// For the node itself, which holds the lock that [`apply_outside`] looks
-/// at.
+/// Brings the grants on this machine in line with the config `current`
+/// gives, with the `~` of its rules ([`wanted`], [`sync`]), and removes the
+/// profile of a container left without grants. `current` is asked once this
+/// sync's turn has come ([`apply_in`]). Nothing to do where commands are not
+/// confined by grants (Linux). `report` is told how far a change is once it
+/// takes long (`Pace`): it passes down to every file and folder below the
+/// folder that it changes. For the node itself, which holds the lock that
+/// [`apply_outside`] looks at.
 pub fn apply(
     paths: &NodePaths,
-    cfg: &NodeConfig,
-    home: &Path,
+    current: impl FnOnce() -> (Arc<NodeConfig>, PathBuf),
     report: &mut dyn FnMut(&str),
 ) -> Synced {
     #[cfg(windows)]
     {
         let installed = crate::service::is_service_node(paths);
-        let want = wanted_on(installed, cfg, paths, home, &crate::paths::platform());
-        windows_sync(paths, &want, report)
+        let want = || {
+            let (cfg, home) = current();
+            wanted_on(installed, &cfg, paths, &home, &crate::paths::platform())
+        };
+        apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
     }
     #[cfg(not(windows))]
     {
-        let _ = (paths, cfg, home, report);
+        let _ = (paths, current, report);
         Synced::default()
     }
 }
@@ -1300,6 +1342,10 @@ fn hold(paths: &NodePaths) -> Result<Option<crate::secrets::KeysLock>, String> {
 #[cfg(any(windows, test))]
 fn drop_profiles(paths: &NodePaths, names: &[String], store: &mut impl ProfileStore) -> Profiles {
     let mut p = Profiles::default();
+    // Nothing to remove takes no lock.
+    if names.is_empty() {
+        return p;
+    }
     let there: Vec<String> = names.iter().filter(|n| store.exists(n)).cloned().collect();
     let _held = match hold(paths) {
         Ok(h) => h,
@@ -1600,11 +1646,38 @@ impl Folders for Acls<'_> {
     }
 }
 
-#[cfg(windows)]
+/// [`apply`] for the grants `want`, as the tests on Windows give them.
+#[cfg(all(windows, test))]
 fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str)) -> Synced {
-    let mut s = sync(&record_file(paths), want, &mut Acls { report });
+    apply_in(
+        paths,
+        || want.to_vec(),
+        &mut Acls { report },
+        &mut WinProfiles,
+    )
+}
+
+/// [`apply`] for the grants `want` gives, on `folders` and the profiles in
+/// `store`. `want` is asked once this sync's turn has come: the node starts a
+/// sync for each change, and one that waited for a sync of a newer config
+/// would otherwise put back a grant the owner took away since. The profile
+/// of each container the sync left without grants goes in the same turn as
+/// the grants, so a sync that waited for this one returns only once it is
+/// gone. `center rm` asks the node for one (`folder.grants`) while the
+/// node's own sync of the change may hold the turn, and then looks at the
+/// profiles itself: one still on its way out would be said to stay.
+#[cfg(any(windows, test))]
+fn apply_in(
+    paths: &NodePaths,
+    want: impl FnOnce() -> Vec<Grant>,
+    folders: &mut impl Folders,
+    store: &mut impl ProfileStore,
+) -> Synced {
+    let _one = nerve_transport::sync::turn(&SYNC);
+    let want = want();
+    let mut s = sync_in_turn(&record_file(paths), &want, folders);
     for c in &s.emptied {
-        if let Err(e) = nerve_sandbox::appcontainer::remove_profile(c) {
+        if let Err(e) = store.remove(c) {
             s.errors.push(e.to_string());
         }
     }
@@ -2808,6 +2881,46 @@ mod tests {
         assert!(node_ids(&paths).unwrap_err().contains("node.toml"));
     }
 
+    /// `folder sync`: once every grant is marked for a walk, the next sync
+    /// puts each on again into every folder below it, and the marks go; a
+    /// sync after that walks nothing.
+    #[test]
+    fn folder_sync_walks_every_grant_once() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let (a, b) = (PathBuf::from("/srv/a"), PathBuf::from("/srv/b"));
+        let mut f = Fake::default();
+        f.make("/srv/a");
+        f.make("/srv/b");
+        let want = [grant("lab", "/srv/a", "rw"), grant("lab", "/srv/b", "r")];
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        f.changes.clear();
+        // Nothing changed: a plain sync walks nothing.
+        sync(&file, &want, &mut f);
+        assert!(f.changes.is_empty(), "{:?}", f.changes);
+        assert_eq!(walk_every(&file), Ok(2));
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.stale.is_empty(), "{s:?}");
+        let mut walked: Vec<_> = f
+            .changes
+            .iter()
+            .filter(|c| c.2)
+            .map(|c| c.0.clone())
+            .collect();
+        walked.sort();
+        assert_eq!(walked, [a.clone(), b.clone()]);
+        assert!(recorded(&file).iter().all(|g| !g.unfinished));
+        f.changes.clear();
+        sync(&file, &want, &mut f);
+        assert!(f.changes.is_empty(), "{:?}", f.changes);
+        let json = s.json(2);
+        assert_eq!(json["walked"], 2);
+        assert_eq!(json["errors"], serde_json::json!([]));
+        // No record yet: nothing to walk.
+        assert_eq!(walk_every(&d.path().join("none.json")), Ok(0));
+    }
+
     /// Profiles by name, as an account has them.
     #[derive(Default)]
     struct FakeProfiles {
@@ -2865,7 +2978,7 @@ mod tests {
             ..Default::default()
         };
         std::fs::create_dir_all(&paths.state_dir).unwrap();
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let held = crate::secrets::HeldByANode::take(&paths);
         let p = forget_in(&paths, &node("lab"), &mut store);
         assert_eq!(p.kept, std::slice::from_ref(&name));
         assert!(p.why.unwrap().contains("runs"));
@@ -2906,7 +3019,10 @@ mod tests {
         let both = [a.clone(), b.clone()];
         let s = sync_outside_in(&paths, &both, &mut f, &mut store);
         assert_eq!(s.profiles, Profiles::default());
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        // No container emptied, so no profile to remove: the keys' lock is
+        // not taken, and its file not made.
+        assert!(!paths.keys_lock().exists());
+        let held = crate::secrets::HeldByANode::take(&paths);
         let s = sync_outside_in(&paths, std::slice::from_ref(&b), &mut f, &mut store);
         assert_eq!(s.removed, 1);
         assert_eq!(s.profiles.kept, std::slice::from_ref(&lab));
@@ -2919,6 +3035,136 @@ mod tests {
         assert_eq!(s.profiles.removed, std::slice::from_ref(&lab));
         assert_eq!(store.there, std::slice::from_ref(&home));
         assert!(s.errors.is_empty(), "{s:?}");
+    }
+
+    /// The node removes the profile of a container its sync left without
+    /// grants in the same turn: another sync, as the `folder.grants` that
+    /// `center rm` asks for while the node's own sync of the change runs,
+    /// returns only once the profile is gone. `center rm` looks at the
+    /// profiles right after it and says one it finds stays.
+    #[test]
+    fn a_sync_after_the_nodes_own_finds_the_emptied_profile_gone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        /// A profile whose removal waits for the test's word.
+        struct Slow {
+            removing: mpsc::Sender<()>,
+            go: mpsc::Receiver<()>,
+            gone: Arc<AtomicBool>,
+        }
+        impl ProfileStore for Slow {
+            fn exists(&mut self, _: &str) -> bool {
+                !self.gone.load(Ordering::SeqCst)
+            }
+            fn remove(&mut self, _: &str) -> io::Result<()> {
+                self.removing.send(()).unwrap();
+                self.go.recv().unwrap();
+                self.gone.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let lab = container(&paths, &node("lab"));
+        let mut f = Fake::default();
+        f.make("/w/a");
+        sync(&record_file(&paths), &[grant(&lab, "/w/a", "r")], &mut f);
+        let gone = Arc::new(AtomicBool::new(false));
+        let (removing, removing_rx) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        // The node's own sync of the change: the grant goes, then the
+        // profile, which waits.
+        let own = {
+            let (paths, gone) = (paths.clone(), gone.clone());
+            std::thread::spawn(move || {
+                let mut store = Slow {
+                    removing,
+                    go: go_rx,
+                    gone,
+                };
+                apply_in(&paths, Vec::new, &mut f, &mut store)
+            })
+        };
+        let wait = std::time::Duration::from_secs(20);
+        removing_rx.recv_timeout(wait).unwrap();
+        // The one `center rm` asks for: it finds nothing left to take off,
+        // and says whether the profile was gone when it returned.
+        let (done, done_rx) = mpsc::channel();
+        let asked = {
+            let (paths, gone) = (paths.clone(), gone.clone());
+            std::thread::spawn(move || {
+                let mut store = FakeProfiles::default();
+                let s = apply_in(&paths, Vec::new, &mut Fake::default(), &mut store);
+                done.send(gone.load(Ordering::SeqCst)).unwrap();
+                s
+            })
+        };
+        let short = std::time::Duration::from_millis(300);
+        assert!(
+            done_rx.recv_timeout(short).is_err(),
+            "the sync returned while the profile was still there"
+        );
+        go.send(()).unwrap();
+        assert!(done_rx.recv_timeout(wait).unwrap());
+        let s = own.join().unwrap();
+        assert_eq!(s.emptied, [lab]);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let s = asked.join().unwrap();
+        assert!(s.emptied.is_empty() && s.errors.is_empty(), "{s:?}");
+    }
+
+    /// A sync that waited for its turn applies the config as it is once
+    /// its turn has come: the node starts one for each change, and one
+    /// started for the older config of two quick changes, which waited while
+    /// the newer one took a grant off, must not put that grant back.
+    #[test]
+    fn a_sync_that_waited_applies_the_newest_config() {
+        use std::sync::mpsc;
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let file = record_file(&paths);
+        let a = grant(&container(&paths, &node("lab")), "/w/a", "r");
+        // The grants the node's config wants: `a`, until the owner takes it
+        // away.
+        let current = Arc::new(Mutex::new(vec![a.clone()]));
+        let mut f = Fake::default();
+        f.make("/w/a");
+        let mut store = FakeProfiles::default();
+        apply_in(
+            &paths,
+            || current.lock().unwrap().clone(),
+            &mut f,
+            &mut store,
+        );
+        assert_eq!(recorded(&file), std::slice::from_ref(&a));
+        // A sync runs: the one the node started for the change before.
+        let running = nerve_transport::sync::turn(&SYNC);
+        let (read, read_rx) = mpsc::channel();
+        let waited = {
+            let (paths, current) = (paths.clone(), current.clone());
+            std::thread::spawn(move || {
+                let mut f = Fake::default();
+                f.make("/w/a");
+                let want = || {
+                    let _ = read.send(());
+                    current.lock().unwrap().clone()
+                };
+                let s = apply_in(&paths, want, &mut f, &mut FakeProfiles::default());
+                (s, f.all())
+            })
+        };
+        // Time for it to read the config, were it to read it before its
+        // turn; then the owner takes `a` away, and the running sync takes
+        // it off.
+        let _ = read_rx.recv_timeout(std::time::Duration::from_millis(300));
+        current.lock().unwrap().clear();
+        let s = sync_in_turn(&file, &[], &mut f);
+        assert_eq!(s.removed, 1);
+        drop(running);
+        let (s, on) = waited.join().unwrap();
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert!(on.is_empty(), "the grant came back: {on:?}");
+        assert!(recorded(&file).is_empty());
     }
 
     /// What two cleanups did, each profile once.
@@ -2953,7 +3199,7 @@ mod tests {
         f.make("/w/a");
         sync(&record_file(&paths), &[grant(&lab, "/w/a", "r")], &mut f);
         let ids = [node("lab"), node("home")];
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let held = crate::secrets::HeldByANode::take(&paths);
         let mut store = FakeProfiles {
             there: vec![lab.clone(), home.clone()],
             ..Default::default()
@@ -3867,6 +4113,56 @@ mod tests {
             sorted(vec![g(&real_work, "rw"), g(&outbox, "w")]),
             "the outbox must not gain the nested folder's flags"
         );
+    }
+
+    /// The same on Windows (#82): the owner gives the write folder through a
+    /// junction of their own and the folder inside it by its real path, in
+    /// another case. A command's junction in place of the nested folder is
+    /// still caught, because the boundary is judged by resolved places
+    /// (`exec::led_away`): the outbox does not gain the nested folder's
+    /// flags.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_with_two_spellings_gets_no_grant_on_windows() {
+        use nerve_sandbox::acl::same_path;
+        let d = tempfile::tempdir().unwrap();
+        let root = canonical(d.path());
+        let (real_work, outbox) = (root.join("real-work"), root.join("outbox"));
+        let work = root.join("work");
+        let bin = real_work.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&outbox).unwrap();
+        junction(&work, &real_work);
+        let spelled = root.join("REAL-WORK").join("BIN");
+        let paths = NodePaths::new(root.join("cfg"), root.join("state"));
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(center(
+            "lab",
+            &[(&work, "rw"), (&spelled, "rwx"), (&outbox, "w")],
+        ));
+        let platform = crate::paths::platform();
+        let on = |want: &[Grant], p: &Path| -> Vec<String> {
+            let p = p.display().to_string();
+            want.iter()
+                .filter(|g| same_path(&g.path.display().to_string(), &p))
+                .map(|g| g.access.to_string())
+                .collect()
+        };
+        let want = wanted(&cfg, &paths, &root, &platform);
+        assert_eq!(on(&want, &bin), ["rwx"], "{want:?}");
+        assert_eq!(on(&want, &outbox), ["w"], "{want:?}");
+
+        // A command swaps the real nested folder for a junction to the
+        // outbox.
+        std::fs::remove_dir(&bin).unwrap();
+        junction(&bin, &outbox);
+        let swapped = wanted(&cfg, &paths, &root, &platform);
+        assert_eq!(
+            on(&swapped, &outbox),
+            ["w"],
+            "the outbox must not gain the nested folder's flags: {swapped:?}"
+        );
+        assert!(on(&swapped, &bin).is_empty(), "{swapped:?}");
     }
 
     /// Issue #77: a link a command put in place of a nested folder while the

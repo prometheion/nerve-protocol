@@ -121,9 +121,6 @@ export global Store {
     in-out property <bool> service-enabled;
     // start, stop or restart.
     callback service(string);
-    // A change was made that the running service takes only when it starts
-    // again (src/app.rs, Ctl::done): the Overview offers the restart.
-    in-out property <bool> restart-due;
     // Whether the node's keys may go into the system keyring here, and why
     // not (src/app.rs, Ctl::keyring_state).
     in-out property <bool> keyring-usable;
@@ -259,6 +256,10 @@ export global Perm {
     callback no-network-set(bool);
     callback folder-choose();
     callback folder-add();
+    // Walks every folder grant again (`folder sync`): what was moved into a
+    // folder since gets the folder's rights.
+    callback folder-sync();
+    in-out property <bool> folder-sync-busy;
     callback folder-set(string, bool, bool, bool);
     callback folder-remove(string);
     callback rule-add(int);

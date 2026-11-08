@@ -200,7 +200,7 @@ pub(super) async fn ui_cmd(
             })
             .await?;
             w(out, "web UI off".into());
-            if daemon_answers(paths, false).await {
+            if daemon_answers(paths).await {
                 w(
                     out,
                     "it stops listening, and every session ends, now".into(),

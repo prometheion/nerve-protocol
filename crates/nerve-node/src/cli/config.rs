@@ -235,14 +235,9 @@ async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
             n.why()
         ));
     }
-    #[cfg(unix)]
-    match nerve_transport::ctl::call(
-        &paths.ctl_socket(),
-        "config.accept",
-        json!({"user": changed_by()}),
-    )
-    .await
-    {
+    // On Windows over the control pipe: a file signed here would be ahead of
+    // the node that runs, which would then refuse every change.
+    match crate::cli::node_call(paths, "config.accept", json!({"user": changed_by()})).await {
         Ok(v) => {
             let of = |key: &str| -> Vec<(String, String)> {
                 serde_json::from_value(v[key].clone()).unwrap_or_default()
@@ -256,7 +251,7 @@ async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
                 .collect();
             return Ok((v["version"].as_u64().unwrap_or_default(), notes));
         }
-        Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
+        Err(e) if !crate::cli::no_node(paths, &e) => return Err(e),
         Err(_) => {}
     }
     let (_, v) = SettingsStore::open_accepting_with(

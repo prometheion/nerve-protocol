@@ -42,7 +42,6 @@ mod sudo;
 pub mod ui;
 
 use cap::{added_by_other, cap_listing};
-#[cfg(unix)]
 use cap::{dropped_note, held_note, shadowed_note, with_own_note};
 use center::tell_pairings_apart;
 pub(crate) use center::{given_link, pairings_warning_here};
@@ -65,7 +64,6 @@ use network::{NO_NETWORK_LINE, apart_by_hand_here, network_mode_note, set_networ
 use provider::program_lines;
 use proxy::keys_place;
 pub use proxy::{proxy_password, proxy_wants_password};
-use relay::RELAY_AT_NEXT_START;
 pub use relay::link_address;
 use rule::stale_rules;
 pub use rule::wildcard_target;
@@ -823,16 +821,45 @@ pub enum RelayCmd {
     },
 }
 
+/// One call to the running node: over its control socket, on Windows over
+/// its control pipe (crate::pipe). [`nerve_transport::ctl::NOT_RUNNING`]
+/// when no node runs.
+pub(crate) async fn node_call(
+    paths: &NodePaths,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    #[cfg(unix)]
+    return nerve_transport::ctl::call(&paths.ctl_socket(), method, params).await;
+    #[cfg(windows)]
+    return crate::pipe::call(paths, method, params).await;
+}
+
+/// Whether a call that failed with `e` leaves a change to the CLI, which
+/// then writes node.toml itself: no node runs. On Windows also a pipe of the
+/// node's name that another account made while no node runs
+/// (crate::pipe::file_instead); a node that runs holds the keys' lock.
+pub(crate) fn no_node(paths: &NodePaths, e: &str) -> bool {
+    #[cfg(windows)]
+    let runs = || crate::secrets::KeysLock::node_runs(paths);
+    // Only Windows' pipe can be another account's.
+    #[cfg(not(windows))]
+    let runs = || {
+        let _ = paths;
+        false
+    };
+    crate::pipe::file_instead(e, runs)
+}
+
 /// Reads the config: from the daemon when it runs, else from the file.
 /// The version is the daemon's (`None` when read from the file).
 pub async fn read_config(paths: &NodePaths) -> Result<(NodeConfig, Option<u64>), String> {
-    #[cfg(unix)]
-    match nerve_transport::ctl::call(&paths.ctl_socket(), "config.read", json!({})).await {
+    match node_call(paths, "config.read", json!({})).await {
         Ok(v) => {
             let text = v["config"].as_str().unwrap_or_default();
             return Ok((NodeConfig::parse(text)?, v["version"].as_u64()));
         }
-        Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
+        Err(e) if !no_node(paths, &e) => return Err(e),
         Err(_) => {}
     }
     Ok((
@@ -863,7 +890,13 @@ pub async fn edit(
 pub struct Saved {
     pub cfg: NodeConfig,
     pub grants: crate::grants::Synced,
+    /// A panic that the node saved over a change waiting in node.toml.
+    pub replaced: bool,
 }
+
+/// What `panic` says when the node's lock replaced a change that waited in
+/// node.toml for the node's next start: the owner was told it would count.
+pub const PANIC_REPLACED: &str = "node.toml held a change the node had not taken yet, and the lock replaced it: make that change again if you still want it";
 
 /// Why the folder grants do not follow a saved config, if they do not.
 fn grants_failed(s: &crate::grants::Synced) -> Option<String> {
@@ -887,18 +920,13 @@ async fn edit_saved_as(
     panic: bool,
     f: impl Fn(&mut NodeConfig) -> Result<(), String>,
 ) -> Result<Saved, String> {
-    // Windows has no node to ask: the file is the node's.
-    #[cfg(not(unix))]
-    let _ = panic;
-    #[cfg(unix)]
     {
-        let sock = paths.ctl_socket();
         let mut conflicts = 0;
         loop {
-            let read = match nerve_transport::ctl::call(&sock, "config.read", json!({})).await {
+            let read = match node_call(paths, "config.read", json!({})).await {
                 Ok(v) => v,
                 // Only a node that is not there leaves the file to the CLI.
-                Err(e) if e == nerve_transport::ctl::NOT_RUNNING => break,
+                Err(e) if no_node(paths, &e) => break,
                 Err(e) => return Err(e),
             };
             let old = NodeConfig::parse(read["config"].as_str().unwrap_or_default())?;
@@ -922,11 +950,12 @@ async fn edit_saved_as(
             if panic {
                 params["panic"] = json!(true);
             }
-            match nerve_transport::ctl::call(&sock, "config.write", params).await {
-                Ok(_) => {
+            match node_call(paths, "config.write", params).await {
+                Ok(v) => {
                     return Ok(Saved {
                         cfg,
                         grants: Default::default(),
+                        replaced: v["replaced"] == true,
                     });
                 }
                 Err(e) if e.starts_with("conflict") => {
@@ -974,7 +1003,11 @@ async fn edit_saved_as(
                 crate::grants::apply_outside(paths, &cfg, &crate::paths::home_dir(), &mut |m| {
                     eprintln!("{m}")
                 });
-            Ok(Saved { cfg, grants })
+            Ok(Saved {
+                cfg,
+                grants,
+                replaced: false,
+            })
         }
         Err(SetError::Conflict { .. }) => Err("the config changed meanwhile; try again".into()),
         Err(e) => Err(e.to_string()),
@@ -1056,9 +1089,8 @@ async fn edit_center(
 pub(crate) const NEXT_START: &str = "takes effect at the next start of the node";
 
 /// Runs one command line, writing what it shows to `out`. A change made
-/// while no daemon answers on the control socket (none runs, or Windows,
-/// whose pipe takes folder changes only) is only in the file, so the output
-/// says when it counts.
+/// while no daemon answers on the control socket (on Windows its pipe) is
+/// only in the file, so the output says when it counts.
 pub async fn execute(cli: Cli, out: &mut dyn Write) -> Result<(), String> {
     let service = cli.cmd.is_service();
     if service && (cli.config_dir.is_some() || cli.state_dir.is_some()) {
@@ -1084,16 +1116,13 @@ pub async fn execute(cli: Cli, out: &mut dyn Write) -> Result<(), String> {
     json::changed(paths, cli.cmd, out).await
 }
 
-/// Whether `line` is one a change prints to say that the node takes it
-/// only at its next start: a node that does not run, the installed node on
-/// Windows for anything but folders, a relay change or sudo on Windows. The
-/// desktop app shows such a line in words of its own. Only the whole line
-/// counts: a change also prints what others chose (a rule a center's
-/// command became), and such text could hold the same words.
+/// Whether `line` is the one a change prints to say that the node takes it
+/// only at its next start: no node runs. The desktop app shows such a line
+/// in words of its own. Only the whole line counts: a change also prints
+/// what others chose (a rule a center's command became), and such text
+/// could hold the same words.
 pub fn takes_at_next_start(line: &str) -> bool {
     line == in_file_line()
-        || line == RELAY_AT_NEXT_START
-        || line == crate::winsudo::next_start_line()
 }
 
 /// What a change says when only node.toml holds it.
@@ -1114,27 +1143,16 @@ pub(crate) fn waits_for_next_start() {
 async fn said(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), String> {
     let service = cmd.is_service();
     // The daemon writes the file itself while it runs; the service commands
-    // leave it alone (or delete it with the rest). Sudo on Windows says
-    // itself when its change counts (crate::winsudo).
-    // A restore says itself what comes next.
-    let own_say =
-        (cfg!(windows) && matches!(cmd, Cmd::Sudo { .. })) || matches!(cmd, Cmd::Restore { .. });
+    // leave it alone (or delete it with the rest). A restore says itself
+    // what comes next.
+    let own_say = matches!(cmd, Cmd::Restore { .. });
     let before = (!matches!(cmd, Cmd::Run) && !service && !own_say)
         .then(|| std::fs::read(paths.config_file()).ok());
-    // On Windows the running node takes folder changes over its pipe, and
-    // nothing else yet.
-    let folders = matches!(
-        cmd,
-        Cmd::Folder {
-            cmd: Some(FolderCmd::Add { .. } | FolderCmd::Rm { .. }),
-            ..
-        }
-    );
     let r = command(paths.clone(), cmd, out).await;
     if r.is_ok()
         && let Some(before) = before
         && std::fs::read(paths.config_file()).ok() != before
-        && !daemon_answers(&paths, folders).await
+        && !daemon_answers(&paths).await
     {
         let _ = writeln!(out, "{}", in_file_line());
         waits_for_next_start();
@@ -1270,27 +1288,33 @@ fn invoker_of(
 /// nothing a command of a center starts may install, set up, update or
 /// remove the node, nor back it up or restore it. The node that runs knows
 /// its commands, so it is asked over its control socket, and refuses a
-/// caller below one of them.
+/// caller below one of them. On Windows the node is asked over its control
+/// pipe, which refuses a caller in the job of one of its commands.
 pub async fn owner_check(paths: &[&NodePaths]) -> Result<(), String> {
-    let sockets: Vec<PathBuf> = paths.iter().map(|p| p.ctl_socket()).collect();
-    nerve_service::owner_check(&sockets).await
+    for p in paths {
+        match node_call(p, "owner.check", json!({})).await {
+            Ok(_) => {}
+            // No node runs, so no command of one does.
+            Err(e) if no_node(p, &e) => {}
+            // A node that does not know the method cannot answer it. It is let
+            // through.
+            Err(e) if e.starts_with("unknown method") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
-/// Whether a daemon runs on the control socket; it then took every change
-/// at once. One that takes no connection now runs all the same; a socket
-/// that cannot be reached at all is none. On Windows it takes only `folders`
-/// changes over its pipe, so only those count as taken when it answers.
-async fn daemon_answers(paths: &NodePaths, folders: bool) -> bool {
+/// Whether a daemon runs on the control socket (on Windows its pipe); it
+/// then took every change at once. One that takes no connection now runs all
+/// the same; a socket that cannot be reached at all is none. On Windows only
+/// a node that answers, or is busy, counts: a pipe another account made is none.
+async fn daemon_answers(paths: &NodePaths) -> bool {
+    let outcome = node_call(paths, "status", json!({})).await;
     #[cfg(unix)]
-    {
-        let _ = folders;
-        let outcome = nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await;
-        nerve_transport::ctl::node_is_there(&outcome).unwrap_or(false)
-    }
+    return nerve_transport::ctl::node_is_there(&outcome).unwrap_or(false);
     #[cfg(windows)]
-    {
-        folders && crate::pipe::call(paths, "status", json!({})).await.is_ok()
-    }
+    return crate::pipe::node_answered(&outcome);
 }
 
 /// Writes `s` as one line of what a command shows.
@@ -1504,6 +1528,9 @@ async fn lock(paths: NodePaths, out: &mut dyn Write) -> Result<(), String> {
         out,
         "locked: every link ends and nothing runs until `nerve-node unlock`".into(),
     );
+    if saved.replaced {
+        w(out, format!("warning: {PANIC_REPLACED}"));
+    }
     Ok(())
 }
 
@@ -1912,6 +1939,47 @@ mod tests {
         assert!(!load(&paths).locked);
     }
 
+    /// A panic the node saved over a change that waited in node.toml says so:
+    /// the owner was told that change counts at the next start.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_over_a_waiting_change_says_it_replaced_it() {
+        use nerve_transport::ctl::{Reply, serve};
+        let (_d, paths) = setup(&["home"]);
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let replaced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (sock, says) = (paths.ctl_socket(), replaced.clone());
+        rt.spawn(async move {
+            let _ = serve(&sock, move |req, _| {
+                let (text, says) = (text.clone(), says.clone());
+                async move {
+                    match req.method.as_str() {
+                        "config.read" => Reply::Ok(json!({"config": text, "version": 7})),
+                        "config.write" => Reply::Ok(json!({
+                            "version": 8,
+                            "replaced": says.load(std::sync::atomic::Ordering::SeqCst),
+                        })),
+                        _ => Reply::Ok(json!({})),
+                    }
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let said = run(&paths, &["panic"]).unwrap();
+        assert!(said.contains(PANIC_REPLACED), "{said}");
+        replaced.store(false, std::sync::atomic::Ordering::SeqCst);
+        let said = run(&paths, &["panic"]).unwrap();
+        assert!(!said.contains(PANIC_REPLACED), "{said}");
+    }
+
     /// The callers that only ask whether a node runs take a busy one for a
     /// node: it is not told that a change waits for the next start, and a
     /// second node does not start beside it.
@@ -1919,9 +1987,9 @@ mod tests {
     #[tokio::test]
     async fn a_busy_node_still_counts_as_running() {
         let (d, paths) = setup(&["home"]);
-        assert!(!daemon_answers(&paths, false).await);
+        assert!(!daemon_answers(&paths).await);
         let node = BusyNode::start(&paths).await;
-        assert!(daemon_answers(&paths, false).await);
+        assert!(daemon_answers(&paths).await);
         let mut out = Vec::new();
         after_keyring_answers(&paths, None, &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -1942,12 +2010,12 @@ mod tests {
             .expect("a second node");
         assert!(e.contains("already runs"), "{e}");
         node.stop(&paths);
-        assert!(!daemon_answers(&paths, false).await);
+        assert!(!daemon_answers(&paths).await);
         // A socket that cannot be reached at all is neither a node nor the
         // lack of one: the start says what is wrong.
         std::fs::remove_dir_all(paths.state_dir.join("run")).unwrap();
         std::fs::write(paths.state_dir.join("run"), b"").unwrap();
-        assert!(!daemon_answers(&paths, false).await);
+        assert!(!daemon_answers(&paths).await);
         let mut opts = crate::NodeOptions::new(paths.clone());
         opts.home = d.path().to_path_buf();
         let e = crate::Daemon::start(opts).await.err().expect("no socket");

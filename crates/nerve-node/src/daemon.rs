@@ -11,7 +11,6 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-#[cfg(unix)]
 use nerve_policy::SetError;
 use nerve_policy::audit::{AuditLog, Change, Entry, diff};
 use nerve_policy::config::SecretStorage;
@@ -949,6 +948,22 @@ impl Shared {
             return crate::own_dirs::ready(run, &entry.name, &entry.node_id, &file);
         }
         Ok(crate::account::Own::of(&run.home, &entry.name))
+    }
+
+    /// Brings the folder grants of Windows folder mode in line with the
+    /// config (crate::grants::apply): the config as it is once the sync's
+    /// turn has come, not one read before it waited, which a sync of a newer
+    /// one may have overtaken. Blocks; the log says how far a change that
+    /// takes long is.
+    pub fn sync_grants(&self) -> crate::grants::Synced {
+        let current = || {
+            let cfg = self.config();
+            let home = self.rules_home(&cfg);
+            (cfg, home)
+        };
+        crate::grants::apply(&self.paths, current, &mut |m| {
+            tracing::info!("folder grants: {m}")
+        })
     }
 
     /// Brings the pairings' home and temporary folders in line with the
@@ -2030,6 +2045,18 @@ pub struct Daemon {
     _keys: crate::secrets::KeysLock,
 }
 
+/// Ends the task that serves one of the node's endpoints (the control socket
+/// or pipe, the owner's, the providers'), and waits until it has let go of
+/// what it held. `abort` alone drops the task later, on the runtime's time:
+/// on Windows a pipe lives as long as an instance of it that the task holds,
+/// so a CLI started right after the node stopped could open it and be cut off
+/// without an answer, where it should find no node and write node.toml
+/// itself.
+async fn end(task: JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
+}
+
 /// Whether a node runs on the control socket. One that takes no connection
 /// now (its queue is full) runs all the same. A socket that cannot be
 /// reached at all says neither way: its error comes back as the start's.
@@ -2276,6 +2303,11 @@ impl Daemon {
         );
         // After the start line, which opens the node's part of the log.
         match &shared.cgroups {
+            Ok(c) if cfg!(windows) => tracing::info!(
+                "commands are held to their limits ({}) by {}",
+                c.enforced().join(", "),
+                c.name()
+            ),
             Ok(c) => tracing::info!(
                 "commands are held to their limits ({}) in the cgroup {}",
                 c.enforced().join(", "),
@@ -2362,18 +2394,18 @@ impl Daemon {
             let _ = tokio::time::timeout(Duration::from_secs(2), w).await;
         }
         if let Some(c) = self.ctl {
-            c.abort();
+            end(c).await;
             let socket = self.shared.paths.ctl_socket();
             let _ = std::fs::remove_file(nerve_transport::ctl::token_file(&socket));
             let _ = std::fs::remove_file(socket);
         }
         if let Some((task, _at)) = self.owner {
-            task.abort();
+            end(task).await;
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
         }
         if let Some((task, _at)) = self.providers {
-            task.abort();
+            end(task).await;
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
         }
@@ -2509,11 +2541,9 @@ async fn supervise(shared: Arc<Shared>) {
         // a command syncs them as well before it runs.
         if shared.confinement.appcontainer && granted != Some(cfg.version) {
             granted = Some(cfg.version);
-            let (s, c) = (shared.clone(), cfg.clone());
+            let s = shared.clone();
             tokio::task::spawn_blocking(move || {
-                let synced = crate::grants::apply(&s.paths, &c, &s.rules_home(&c), &mut |m| {
-                    tracing::info!("folder grants: {m}")
-                });
+                let synced = s.sync_grants();
                 for e in synced.errors {
                     tracing::warn!("folder grants: {e}");
                 }
@@ -2604,18 +2634,17 @@ async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
 }
 
 /// Windows: the control pipe (crate::pipe). A node whose pipe cannot be
-/// made runs on without it, as a node without a channel did before: the CLI
-/// then writes the signed file, which the node takes at its next start.
-/// Failing the start instead would let any account that takes the pipe's
-/// name first keep the node from running.
+/// made runs on without it. The CLI finds the node by the keys' lock it
+/// holds and answers [`crate::pipe::NO_PIPE`] to every change, so nothing
+/// is written behind it and the app, whose panic the node cannot take,
+/// stops the service. Failing the start instead would let any account that
+/// takes the pipe's name first keep the node from running.
 #[cfg(windows)]
 async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
     match crate::pipe::serve(shared) {
         Ok(task) => Ok(task),
         Err(e) => {
-            tracing::error!(
-                "{e}; a change from the CLI takes effect at the next start of the node"
-            );
+            tracing::error!("{e}; the CLI cannot change a running node until it is restarted");
             Ok(tokio::spawn(async {}))
         }
     }
@@ -2654,11 +2683,12 @@ fn look_at_link(windows: bool) -> &'static str {
     }
 }
 
-/// Why the pipe refuses a folder change while `node.toml` (version
-/// `on_disk`) holds changes the node (version `in_force`) has not taken.
+/// Why a change is refused while `node.toml` (version `on_disk`) holds
+/// changes the node (version `in_force`) has not taken: a CLI that found no
+/// node wrote them, and the node saves its whole config.
 fn file_ahead(on_disk: u64, in_force: u64) -> String {
     format!(
-        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (Restart on the app's Overview), then change the folder again"
+        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (Restart on the app's Overview), then make the change again"
     )
 }
 
@@ -2666,13 +2696,13 @@ fn file_ahead(on_disk: u64, in_force: u64) -> String {
 const FROM_A_COMMAND: &str =
     "refused: this request comes from a command the node runs for a center";
 
-/// One request on Windows' control pipe (crate::pipe): the status, the
-/// capabilities for `cap` (crate::provider::listing), and the changes to
-/// a center's folders, checked and made as the CLI makes them on
-/// the file (crate::folder_change). The node then brings the folder grants
-/// in line before it answers, as the CLI does after it wrote the file.
-/// Nothing is taken from a process of a command the node runs, not even the
-/// status. The socket's other methods are not served here yet.
+/// One request on Windows' control pipe (crate::pipe): what the control
+/// socket takes ([`control`]: the status, the config read and written, the
+/// sudo switch, `owner.check`, a reload), a key rotation, and the changes to
+/// a center's folders, checked and made as the CLI makes them on the file
+/// (crate::folder_change). After a folder change the node brings the folder
+/// grants in line before it answers. Nothing is taken from a process of a
+/// command the node runs, not even the status.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) async fn pipe_control(
     shared: &Arc<Shared>,
@@ -2685,15 +2715,13 @@ pub(crate) async fn pipe_control(
         return Reply::Err(FROM_A_COMMAND.into());
     }
     match method {
-        "status" => Reply::Ok(shared.status()),
-        "caps.list" => Reply::Ok(crate::provider::listing(
-            &shared.config(),
-            Some(shared),
-            shared.config_caps,
-        )),
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.rm" => pipe_folder_change(shared, method, params).await,
-        other => Reply::Err(format!("unknown method {other}")),
+        "folder.grants" => pipe_folder_grants(shared, &params).await,
+        // Checking the password takes a logon, so it cannot block inside
+        // `control`.
+        "sudo.on" => sudo_on(shared, params, false).await,
+        m => control(shared, m, params, false),
     }
 }
 
@@ -2710,6 +2738,13 @@ async fn pipe_folder_change(
         Ok(r) => r,
         Err(e) => return Reply::Err(e),
     };
+    // What the node, in its own session, cannot reach: a network folder,
+    // a drive mapped at a person's sign-in (crate::drives).
+    if let crate::folder_change::FolderChange::Add { path, .. } = &change
+        && let Some(why) = crate::drives::refusal(path)
+    {
+        return Reply::Err(why);
+    }
     let mut applied = None;
     let r = {
         let mut store = lock(&shared.store);
@@ -2740,15 +2775,10 @@ async fn pipe_folder_change(
     shared.bump();
     if shared.confinement.appcontainer {
         let s = shared.clone();
-        let synced = tokio::task::spawn_blocking(move || {
-            let cfg = s.config();
-            crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
-                tracing::info!("folder grants: {m}")
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
         if let Err(e) = synced {
             return Reply::Err(format!(
                 "the config is saved, but the folder grants do not follow it: {e}"
@@ -2758,6 +2788,31 @@ async fn pipe_folder_change(
     let mut answer = serde_json::to_value(applied).unwrap_or_default();
     answer["version"] = json!(version);
     Reply::Ok(answer)
+}
+
+/// `folder.grants {every}` on the control pipe: the folder grants brought in
+/// line with the config now, with `every` (`folder sync`) each one walked
+/// again into every folder below it, so what was moved into a granted
+/// folder gets its grant (crate::grants::walk_every); and what that left.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn pipe_folder_grants(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let every = params.get("every").and_then(Value::as_bool) == Some(true);
+    let s = shared.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        let walked = if every {
+            crate::grants::walk_every(&crate::grants::record_file(&s.paths))?
+        } else {
+            0
+        };
+        Ok::<Value, String>(s.sync_grants().json(walked))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Reply::Ok(v),
+        Ok(Err(e)) => Reply::Err(e),
+        Err(e) => Reply::Err(e.to_string()),
+    }
 }
 
 /// `center.rotate-key {center, end_grace}`: the owner rotates the node's key
@@ -2801,7 +2856,7 @@ async fn answer(
     match req.method.as_str() {
         // Checking the password runs `sudo -v`, so it cannot block inside
         // `control`.
-        "sudo.on" => sudo_on(shared, req.params, peer.pid).await,
+        "sudo.on" => sudo_on(shared, req.params, shared.below_command(peer.pid)).await,
         // A rotation waits for the center's answer.
         "center.rotate-key" => {
             if shared.below_command(peer.pid) {
@@ -2818,7 +2873,7 @@ async fn answer(
         // A capability provider attaches; its connection stays
         // (crate::provider).
         "hello" => answer_hello(shared, req, peer).await,
-        m => control(shared, m, req.params, peer.pid),
+        m => control(shared, m, req.params, shared.below_command(peer.pid)),
     }
 }
 
@@ -2883,15 +2938,16 @@ async fn answer_hello(
 }
 
 /// `sudo.on {password}`: the CLI on this machine turns the switch on. The
-/// socket is the owner's only, so the password travels in the clear here.
-#[cfg(unix)]
+/// socket and the pipe are the owner's only, so the password travels in the
+/// clear here. `from_command` says the caller is a process of a command the
+/// node runs.
 async fn sudo_on(
     shared: &Arc<Shared>,
     params: Value,
-    pid: Option<u32>,
+    from_command: bool,
 ) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
-    if shared.below_command(pid) {
+    if from_command {
         return Reply::Err(FROM_A_COMMAND.into());
     }
     let Some(password) = params.get("password").and_then(Value::as_str) else {
@@ -2906,21 +2962,21 @@ async fn sudo_on(
     }
 }
 
-/// One control-socket request. Every method is refused from below a center's
-/// command: the reading ones too, as `status` and `config.read` hand over the
-/// whole config, which the command's sandbox keeps from it as a file.
+/// One control-socket (on Windows control-pipe) request. Every method is
+/// refused from a process of a center's command (`from_command`): the
+/// reading ones too, as `status` and `config.read` hand over the whole
+/// config, which the command's sandbox keeps from it as a file.
 /// `owner.check` changes nothing itself: the CLI asks it before `install`,
 /// `setup`, `update`, `uninstall`, `backup` and `restore`, which change the
 /// node or take its keys.
-#[cfg(unix)]
 pub(crate) fn control(
     shared: &Arc<Shared>,
     method: &str,
     params: Value,
-    pid: Option<u32>,
+    from_command: bool,
 ) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
-    if shared.below_command(pid) {
+    if from_command {
         return Reply::Err(FROM_A_COMMAND.into());
     }
     match method {
@@ -2943,6 +2999,7 @@ pub(crate) fn control(
             Reply::Ok(json!({"config": s.config().to_toml(), "version": s.version()}))
         }
         "config.write" => control_config_write(shared, &params),
+        #[cfg(unix)]
         "folder.add" => control_folder_add(shared, &params),
         "config.accept" => control_config_accept(shared, &params),
         "reload" => match shared.reload() {
@@ -2955,7 +3012,6 @@ pub(crate) fn control(
 
 /// `config.write {config, if_version, user, web_locks, panic}`: the CLI writes
 /// node.toml through the running node.
-#[cfg(unix)]
 fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
     let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
@@ -3016,7 +3072,19 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     // Who made it, as the CLI names its user (crate::cli::invoker):
     // only the owner's programs hold the token.
     store.set_user(str_of("user"));
-    let r = store.set_local(new, if_version);
+    let panic = params.get("panic").and_then(Value::as_bool) == Some(true);
+    // A panic saves over a file the node has not taken yet: the lock never
+    // waits for the owner to look at a change that is waiting.
+    let (before, waiting) = (store.version(), panic && store.file_ahead());
+    let r = if panic {
+        store.set_local_panic(new, if_version)
+    } else {
+        store.set_local(new, if_version)
+    };
+    // The file's version, for a conflict that is the file ahead and no
+    // change in between: the CLI's retry cannot fix that one.
+    let on_disk = store.version_on_disk().unwrap_or(0);
+    let in_force = store.version();
     store.set_user(None);
     // A lock ends the web UI's sessions and counts, before another
     // write can be checked against the count.
@@ -3024,7 +3092,7 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     if r.is_ok() {
         // A panic counts also when the node is locked already: the
         // owner's way to end a session that started in the lock.
-        if params.get("panic").and_then(Value::as_bool) == Some(true) {
+        if panic {
             shared.webui.settle_panic(store.config());
         } else {
             shared.webui.settle(store.config());
@@ -3034,7 +3102,13 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     match r {
         Ok(v) => {
             shared.bump();
-            Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
+            // The change that waited in the file went with it: the CLI and
+            // the app say so (the audit log has `replaced`).
+            let replaced = waiting && v > before;
+            Reply::Ok(json!({"version": v, "held": held, "dropped": dropped, "replaced": replaced}))
+        }
+        Err(SetError::Conflict { current }) if current > in_force && on_disk == current => {
+            Reply::Err(file_ahead(current, in_force))
         }
         Err(SetError::Conflict { current }) => {
             Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -3071,7 +3145,6 @@ fn control_folder_add(shared: &Arc<Shared>, params: &Value) -> nerve_transport::
 }
 
 /// `config.accept {user}`: the node takes node.toml as the owner edited it.
-#[cfg(unix)]
 fn control_config_accept(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
     let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
@@ -3452,13 +3525,13 @@ mod tests {
         let s = daemon.shared.clone();
         let paths = daemon.paths().clone();
         let write = |to| {
-            let Reply::Ok(v) = control(&s, "config.read", json!({}), None) else {
+            let Reply::Ok(v) = control(&s, "config.read", json!({}), false) else {
                 panic!("config.read failed")
             };
             let mut cfg = NodeConfig::parse(v["config"].as_str().unwrap()).unwrap();
             cfg.machine.secret_storage = to;
             let params = json!({"config": cfg.to_toml(), "if_version": v["version"]});
-            control(&s, "config.write", params, None)
+            control(&s, "config.write", params, false)
         };
         let storage = || s.config().machine.secret_storage;
         let one = s.open_to_bus().unwrap();
@@ -3562,6 +3635,58 @@ mod tests {
         let mut opts = NodeOptions::new(paths);
         opts.home = d.path().to_path_buf();
         (d, Daemon::start(opts).await.unwrap())
+    }
+
+    /// Once `stop` returns, the stopped node holds no control endpoint. On
+    /// Windows the control pipe lives as long as an instance the endpoint's
+    /// task holds, so a CLI started right after `stop` could open it and be
+    /// cut off without an answer, where it should have found no node and
+    /// written node.toml itself. Shown here on the socket's listener, looked
+    /// for among this process's own descriptors: a process forked meanwhile
+    /// (another test's command, before its exec) holds a copy for a moment,
+    /// which a connect would reach.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stopped_node_holds_no_control_endpoint() {
+        let (_d, daemon) = daemon().await;
+        let socket = daemon.shared.paths.ctl_socket();
+        // The listener's inode, from the kernel's list of Unix sockets:
+        // `Num RefCount Protocol Flags Type St Inode Path`, a listener
+        // flagged 00010000.
+        let unix = std::fs::read_to_string("/proc/net/unix").unwrap();
+        let inode = unix
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .find(|f| f.len() == 8 && f[3] == "00010000" && std::path::Path::new(f[7]) == socket)
+            .map(|f| f[6].to_string())
+            .expect("the listener in /proc/net/unix");
+        let held = || {
+            let listener = std::path::PathBuf::from(format!("socket:[{inode}]"));
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+                .any(|l| l == listener)
+        };
+        assert!(held());
+        daemon.stop().await;
+        assert!(!held(), "the stopped node still holds its control socket");
+    }
+
+    /// Its Windows twin: right after `stop`, a call over the control pipe
+    /// finds no node, as the CLI must to write node.toml itself. A few
+    /// rounds, on a runtime whose other thread could drop the pipe's task
+    /// late.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_node_takes_no_call_on_its_pipe() {
+        for _ in 0..5 {
+            let (_d, daemon) = daemon().await;
+            let paths = daemon.shared.paths.clone();
+            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
+            daemon.stop().await;
+            let r = crate::pipe::call(&paths, "status", json!({})).await;
+            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
+        }
     }
 
     /// A node.toml that keeps the keys in the keyring, made before.
@@ -4031,7 +4156,7 @@ mod tests {
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
         let write = |locked: bool, web_locks: Option<u64>| {
-            let Reply::Ok(v) = control(&s, "config.read", json!({}), None) else {
+            let Reply::Ok(v) = control(&s, "config.read", json!({}), false) else {
                 panic!("config.read failed")
             };
             let mut cfg = NodeConfig::parse(v["config"].as_str().unwrap()).unwrap();
@@ -4040,7 +4165,7 @@ mod tests {
             if let Some(n) = web_locks {
                 params["web_locks"] = json!(n);
             }
-            control(&s, "config.write", params, None)
+            control(&s, "config.write", params, false)
         };
         let before = s.webui.lock_count();
         assert!(matches!(write(false, Some(before)), Reply::Ok(_)));
@@ -4103,7 +4228,7 @@ mod tests {
             if let Some(n) = web_locks {
                 params["web_locks"] = json!(n);
             }
-            control(&s, "folder.add", params, None)
+            control(&s, "folder.add", params, false)
         };
         let folders = || s.config().centers[0].policy.folders.len();
         let before = s.webui.lock_count();
@@ -4114,7 +4239,7 @@ mod tests {
             &s,
             "config.write",
             json!({"config": locked.to_toml(), "if_version": locked.version}),
-            None,
+            false,
         ) else {
             panic!("the panic was not written")
         };
@@ -4151,13 +4276,13 @@ mod tests {
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
         let write = |f: &dyn Fn(&mut NodeConfig)| {
-            let Reply::Ok(v) = control(&s, "config.read", json!({}), None) else {
+            let Reply::Ok(v) = control(&s, "config.read", json!({}), false) else {
                 panic!("config.read failed")
             };
             let mut cfg = NodeConfig::parse(v["config"].as_str().unwrap()).unwrap();
             f(&mut cfg);
             let params = json!({"config": cfg.to_toml(), "if_version": v["version"]});
-            let r = control(&s, "config.write", params, None);
+            let r = control(&s, "config.write", params, false);
             assert!(matches!(r, Reply::Ok(_)));
         };
         let told = || {
@@ -4906,7 +5031,7 @@ mod tests {
                     &s,
                     "config.write",
                     json!({"config": cfg.to_toml(), "if_version": cfg.version}),
-                    None,
+                    false,
                 );
                 assert!(matches!(r, nerve_transport::ctl::Reply::Ok(_)));
             };
@@ -5032,7 +5157,7 @@ mod tests {
     /// A job of a command, as the pipe asks it: the processes it holds.
     struct FakeJob(Vec<u32>);
 
-    impl crate::job::Members for FakeJob {
+    impl nerve_service::win::job::Members for FakeJob {
         fn pids(&self) -> std::io::Result<Vec<u32>> {
             Ok(self.0.clone())
         }
@@ -5040,10 +5165,11 @@ mod tests {
 
     /// Windows' control pipe, with a stream for the pipe and a fake job for
     /// the commands: a folder change reaches the running node, which makes
-    /// it, saves it and answers; a caller in a command's job is refused
-    /// whatever it asks, and the pipe serves no other change.
+    /// it, saves it and answers, as every other change does (the config
+    /// written, a panic, the sudo switch); a caller in a command's job is
+    /// refused whatever it asks.
     #[tokio::test]
-    async fn the_pipe_takes_folder_changes_and_refuses_commands() {
+    async fn the_pipe_takes_changes_at_once_and_refuses_commands() {
         use crate::folder_change::FolderChange;
         use nerve_policy::config::Access;
         use nerve_transport::ctl::{CtlRequest, call_on, serve_stream};
@@ -5083,7 +5209,8 @@ mod tests {
                 Arc::new(move |req: CtlRequest, pid: Option<u32>| {
                     let (s, job) = (s.clone(), job.clone());
                     async move {
-                        let from_command = crate::job::from_a_command(pid, [Some(&*job)]);
+                        let from_command =
+                            nerve_service::win::job::from_a_command(pid, [Some(&*job)]);
                         pipe_control(&s, &req.method, req.params, from_command).await
                     }
                 }),
@@ -5103,6 +5230,14 @@ mod tests {
             (add.method(), add.params(None)),
             ("status", json!({})),
             ("caps.list", json!({})),
+            ("config.read", json!({})),
+            ("config.write", json!({"config": "", "panic": true})),
+            ("config.accept", json!({})),
+            ("reload", json!({})),
+            ("sudo.on", json!({"password": "x"})),
+            ("sudo.off", json!({})),
+            ("sudo.status", json!({})),
+            ("owner.check", json!({})),
         ] {
             let e = call(4242, method, params).await.unwrap_err();
             assert_eq!(e, FROM_A_COMMAND);
@@ -5171,10 +5306,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("not absolute"), "{e}");
-        let e = call(1000, "config.write", json!({"config": ""}))
-            .await
-            .unwrap_err();
-        assert_eq!(e, "unknown method config.write");
+        // A network folder, which the node cannot hold (crate::drives).
+        #[cfg(windows)]
+        {
+            let unc = json!({"path": r"\\server\share\work", "access": "r"});
+            let e = call(1000, "folder.add", unc).await.unwrap_err();
+            assert!(e.contains("is a network folder"), "{e}");
+        }
         assert_eq!(folders()[0].access.to_chmod(), "rw-");
         let rm = FolderChange::Rm {
             path: folder.clone(),
@@ -5185,13 +5323,67 @@ mod tests {
         assert!(folders().is_empty());
         assert!(places().is_empty());
         assert!(call(1000, "status", json!({})).await.is_ok());
+        // `folder sync`: the grants walked again, and what that left.
+        let v = call(1000, "folder.grants", json!({"every": true}))
+            .await
+            .unwrap();
+        assert_eq!(v["errors"], json!([]), "{v}");
+        let e = call(4242, "folder.grants", json!({"every": true}))
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_A_COMMAND);
+        // What the CLI asks before install, backup and the rest, and the
+        // switch's state.
+        assert_eq!(
+            call(1000, "owner.check", json!({})).await.unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            call(1000, "sudo.status", json!({})).await.unwrap()["sudo"],
+            "off"
+        );
+        let e = call(1000, "sudo.on", json!({})).await.unwrap_err();
+        assert_eq!(e, "password is missing");
+        // The config, read and written through the node: in force at once,
+        // and a write on an old version is a conflict.
+        let read = call(1000, "config.read", json!({})).await.unwrap();
+        let version = read["version"].as_u64().unwrap();
+        assert_eq!(version, daemon.config().version);
+        let mut cfg = NodeConfig::parse(read["config"].as_str().unwrap()).unwrap();
+        cfg.limits.max_running = 7;
+        let write = |cfg: &NodeConfig, at: u64, panic: bool| json!({"config": cfg.to_toml(), "if_version": at, "user": "alice", "panic": panic});
+        let v = call(1000, "config.write", write(&cfg, version, false))
+            .await
+            .unwrap();
+        assert_eq!(v["version"], version + 1);
+        assert_eq!(daemon.config().limits.max_running, 7);
+        let e = call(1000, "config.write", write(&cfg, version, false))
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("conflict"), "{e}");
+        // A panic locks the running node now, and the links hear it.
+        let ticks = *s.changed.borrow();
+        cfg.locked = true;
+        call(1000, "config.write", write(&cfg, version + 1, true))
+            .await
+            .unwrap();
+        assert!(daemon.config().locked);
+        assert!(*s.changed.borrow() > ticks, "the links were not told");
+        let saved = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
+        assert!(saved.locked);
+        let log = lock(&s.store).audit().read().unwrap();
+        let entry = log.last().unwrap();
+        assert_eq!(entry["user"], "alice", "{entry}");
+        assert_eq!(
+            call(1000, "reload", json!({})).await.unwrap(),
+            json!({"changed": false})
+        );
         daemon.stop().await;
     }
 
-    /// On Windows the CLI writes every change but the folders' to node.toml
-    /// for the next start. A folder change over the pipe after that is
-    /// refused: the node would save its own config over the file and lose
-    /// the CLI's change.
+    /// A CLI that found no node wrote node.toml for the next start. A folder
+    /// change over the pipe after that is refused: the node would save its
+    /// own config over the file and lose the CLI's change.
     #[tokio::test]
     async fn a_pipe_change_does_not_undo_a_change_waiting_in_the_file() {
         use crate::folder_change::FolderChange;
@@ -5265,6 +5457,81 @@ mod tests {
         assert!(matches!(r, Reply::Ok(_)), "refused");
         assert_eq!(saved().mode, nerve_policy::Mode::Folder);
         assert_eq!(saved().folders.len(), 1);
+        daemon.stop().await;
+    }
+
+    /// A signed file ahead of the node (a CLI's change that waits) refuses a
+    /// change, with a text that says so and no retry can fix; a panic locks
+    /// over it. A file nobody signed, whatever version it names, blocks
+    /// nothing: it holds no change of the owner's.
+    #[tokio::test]
+    async fn a_panic_locks_over_a_file_ahead_and_an_unsigned_one_blocks_nothing() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let paths = daemon.paths().clone();
+        let write = |cfg: &NodeConfig, at: u64, panic: bool| json!({"config": cfg.to_toml(), "if_version": at, "user": "alice", "panic": panic});
+        lock(&s.store)
+            .update(|c| {
+                c.limits.max_running = 6;
+                Ok(())
+            })
+            .unwrap();
+        let mut cfg = s.config().as_ref().clone();
+        let version = cfg.version;
+        // A file nobody signed, with a version far ahead.
+        let file = paths.config_file();
+        let signed = std::fs::read_to_string(&file).unwrap();
+        let body = signed.split_once('\n').unwrap().1;
+        std::fs::write(
+            &file,
+            body.replace(&format!("version = {version}"), "version = 900"),
+        )
+        .unwrap();
+        cfg.limits.max_running = 7;
+        let r = control(&s, "config.write", write(&cfg, version, false), false);
+        assert!(
+            matches!(r, Reply::Ok(_)),
+            "an unsigned file blocked a write"
+        );
+        let version = s.config().version;
+        // A CLI's signed change that waits.
+        let mut cli = SettingsStore::open_with(
+            paths.config_file(),
+            Box::new(crate::secrets::NodeSecrets::for_cli(&paths)),
+            AuditLog::new(paths.audit_log()),
+        )
+        .unwrap();
+        cli.update(|c| {
+            c.limits.max_running = 9;
+            Ok(())
+        })
+        .unwrap();
+        cfg.limits.max_running = 5;
+        let Reply::Err(e) = control(&s, "config.write", write(&cfg, version, false), false) else {
+            panic!("a write went over the file ahead")
+        };
+        assert_eq!(e, file_ahead(version + 1, version));
+        assert!(!s.config().locked);
+        cfg.locked = true;
+        let r = control(&s, "config.write", write(&cfg, version, true), false);
+        // The answer says that the change waiting in the file went with it.
+        let Reply::Ok(answer) = r else {
+            panic!("the panic was refused")
+        };
+        assert_eq!(answer["replaced"], true, "{answer}");
+        assert!(s.config().locked);
+        let saved = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
+        assert!(saved.locked);
+        assert!(saved.version > version + 1);
+        // A write that waits for nothing says nothing was replaced.
+        let version = s.config().version;
+        cfg.locked = false;
+        let Reply::Ok(answer) = control(&s, "config.write", write(&cfg, version, false), false)
+        else {
+            panic!("an owner's write was refused")
+        };
+        assert_eq!(answer["replaced"], false, "{answer}");
         daemon.stop().await;
     }
 
@@ -5386,7 +5653,7 @@ mod tests {
                 "path": p.display().to_string(),
                 "access": access,
             });
-            control(&s, "folder.add", params, pid)
+            control(&s, "folder.add", params, s.below_command(pid))
         };
         let add = |p: &std::path::Path, access: &str| {
             let Reply::Ok(v) = ask("home", p, access, None) else {
@@ -5451,34 +5718,34 @@ mod tests {
         let (_d, daemon) = daemon().await;
         let s = daemon.shared.clone();
         let me = std::process::id();
-        let read = control(&s, "config.read", json!({}), Some(me));
+        let read = control(&s, "config.read", json!({}), s.below_command(Some(me)));
         let nerve_transport::ctl::Reply::Ok(v) = read else {
             panic!("config.read failed")
         };
         let write = json!({"config": v["config"], "if_version": v["version"]});
         // This process stands in for a command the node started.
         lock(&s.commands).insert(me, "home".into());
-        let r = control(&s, "config.write", write.clone(), Some(me));
+        let r = control(&s, "config.write", write.clone(), s.below_command(Some(me)));
         assert!(matches!(r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")));
         // What reads the config is refused as well: `status` and
         // `config.read` hand it over whole, `caps.list` the programs and
         // every center's switches.
         for method in ["status", "config.read", "sudo.status", "caps.list"] {
-            let r = control(&s, method, json!({}), Some(me));
+            let r = control(&s, method, json!({}), s.below_command(Some(me)));
             assert!(
                 matches!(&r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")),
                 "{method} answered a command"
             );
         }
         // What install, setup, update and uninstall ask first.
-        let r = control(&s, "owner.check", json!({}), Some(me));
+        let r = control(&s, "owner.check", json!({}), s.below_command(Some(me)));
         assert!(matches!(r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")));
         lock(&s.commands).clear();
-        let r = control(&s, "status", json!({}), Some(me));
+        let r = control(&s, "status", json!({}), s.below_command(Some(me)));
         assert!(matches!(r, nerve_transport::ctl::Reply::Ok(_)));
-        let r = control(&s, "config.write", write, Some(me));
+        let r = control(&s, "config.write", write, s.below_command(Some(me)));
         assert!(matches!(r, nerve_transport::ctl::Reply::Ok(_)));
-        let r = control(&s, "owner.check", json!({}), Some(me));
+        let r = control(&s, "owner.check", json!({}), s.below_command(Some(me)));
         assert!(matches!(r, nerve_transport::ctl::Reply::Ok(_)));
         daemon.stop().await;
     }

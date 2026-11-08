@@ -1,9 +1,15 @@
 //! The control pipe of a node on Windows, where Unix has its control socket
 //! (nerve_transport::ctl): the same lines, on a named pipe of the node's
-//! state folder ([`crate::paths::NodePaths::ctl_pipe`]). For now it serves
-//! the status and the changes to a center's folders
-//! ([`crate::daemon::pipe_control`]); every other change the CLI still
-//! writes to `node.toml`, which the node takes at its next start.
+//! state folder ([`crate::paths::NodePaths::ctl_pipe`]). It serves what the
+//! socket serves ([`crate::daemon::control`]: the status, the whole config
+//! read and written, the sudo switch, `owner.check`, a reload, `config
+//! accept`) and the key rotation and the changes to a center's folders
+//! ([`crate::daemon::pipe_control`]). Only while no node runs does the CLI
+//! write `node.toml` itself, which the node takes when it starts. A node
+//! counts as running by the keys' lock it holds, so one that runs without
+//! its pipe is an error to the CLI ([`NO_PIPE`]), not a node to write
+//! behind. A call waits for the answer as long as one on the socket does
+//! ([`nerve_transport::ctl::ANSWER_WAIT`]).
 //!
 //! Who may write to it:
 //! - Its DACL lets SYSTEM, the administrators (elevated) and the node's own
@@ -13,7 +19,7 @@
 //!   in effect, and gets none either.
 //! - It refuses remote clients (PIPE_REJECT_REMOTE_CLIENTS).
 //! - A caller in the job of a command the node runs is refused whatever it
-//!   asks ([`crate::job::from_a_command`]). That is for those the DACL lets
+//!   asks ([`nerve_service::win::job::from_a_command`]). That is for those the DACL lets
 //!   in: a sudo command (the account's elevated token), and every command
 //!   of a node run by hand, which runs as the node's own account.
 //!
@@ -33,144 +39,99 @@
 //! instance with FILE_FLAG_FIRST_PIPE_INSTANCE and keeps one open while it
 //! runs, so it never serves on a pipe someone else made; the CLI opens it
 //! for identification only and talks to it only when its owner is SYSTEM,
-//! the administrators or the node's account ([`trusted_owner`]).
+//! the administrators or the node's account
+//! ([`nerve_service::win::pipe::trusted_owner`]).
 
 /// How the CLI's error starts when the pipe of the node's name is another
 /// account's.
 pub const NOT_THE_NODES: &str = "the control pipe is not the node's";
 
+/// How the CLI's error reads when a node runs (it holds the keys' lock) and
+/// there is no pipe of its name: it could not make one at its start because
+/// another account held the name, or it is starting. Not
+/// [`nerve_transport::ctl::NOT_RUNNING`]: nothing may be written behind a
+/// node that runs, and the app, which stops the service for a panic the node
+/// did not take, sees an error.
+pub const NO_PIPE: &str = "the node runs without its control pipe: it is still starting, or another process held the pipe's name when it started (docs/dev/windows.md, \"The control pipe is not the node's\"); try again in a moment, or restart the node";
+
+/// The error of a call that found no pipe of the node's name:
+/// [`nerve_transport::ctl::NOT_RUNNING`], unless the node runs all the same
+/// (`node_runs`, the keys' lock held).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn missing_pipe(node_runs: impl FnOnce() -> bool) -> String {
+    if node_runs() {
+        NO_PIPE.into()
+    } else {
+        nerve_transport::ctl::NOT_RUNNING.into()
+    }
+}
+
+/// `call` ended with an error after `limit` when no answer came: the same
+/// error and limit as the socket's.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub async fn within<T>(
+    limit: std::time::Duration,
+    call: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(limit, call)
+        .await
+        .unwrap_or_else(|_| Err(nerve_transport::ctl::NO_ANSWER.to_string()))
+}
+
 /// Whether the CLI makes a folder change in node.toml itself after the pipe
-/// call failed with `e`: when no node made a pipe, and when the pipe is
-/// another account's but no node runs (`node_runs`, asked only then), so a
-/// pipe someone made of the node's name does not keep the owner from
-/// changing folders with the node stopped. Any other failure is the
-/// answer.
+/// call failed with `e`: when no node made a pipe and none runs
+/// ([`missing_pipe`]), and when the pipe is another account's but no node
+/// runs (`node_runs`, asked only then), so a pipe someone made of the node's
+/// name does not keep the owner from changing folders with the node stopped.
+/// Any other failure is the answer.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn file_instead(e: &str, node_runs: impl FnOnce() -> bool) -> bool {
     e == nerve_transport::ctl::NOT_RUNNING || (e.starts_with(NOT_THE_NODES) && !node_runs())
 }
 
-/// The pipe's DACL in SDDL: full access for SYSTEM, the administrators and
-/// `own` (the SID of the node's account, `S-1-5-…`), nothing for anyone
-/// else. `P` keeps out anything inherited.
-pub fn dacl_text(own: &str) -> String {
-    let mut s = String::from("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-    if !matches!(own, "S-1-5-18" | "S-1-5-32-544") {
-        s.push_str(&format!("(A;;GA;;;{own})"));
-    }
-    s
-}
-
-/// Whether a pipe whose owner is `owner` may be the node's: SYSTEM, the
-/// administrators, or `node` (the account the node runs as). Another
-/// account cannot make an object one of them owns.
+/// Whether the outcome of a call over the pipe says that a node answered: an
+/// answer or a refusal of its own, [`nerve_transport::ctl::BUSY`] (a node
+/// that takes no connection now runs all the same), no answer in time (a
+/// node that is stuck runs too), or [`NO_PIPE`]. No node made the pipe, the
+/// pipe is another account's, or this one may not open it: none.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn trusted_owner<S: PartialEq>(owner: &S, system: &S, admins: &S, node: Option<&S>) -> bool {
-    owner == system || owner == admins || node.is_some_and(|n| owner == n)
+pub fn node_answered(outcome: &Result<serde_json::Value, String>) -> bool {
+    use nerve_transport::ctl::{BUSY, NO_ANSWER};
+    match outcome {
+        Ok(_) => true,
+        Err(e) => e == BUSY || e == NO_ANSWER || e == NO_PIPE || e.starts_with("refused"),
+    }
 }
 
+pub use nerve_service::win::pipe::dacl_text;
 #[cfg(windows)]
-pub(crate) use sys::{Descriptor, check_owner, client_pid, instance};
+pub(crate) use nerve_service::win::pipe::{Descriptor, client_pid, instance};
+#[cfg(windows)]
+pub(crate) use sys::check_owner;
 #[cfg(windows)]
 pub use sys::{call, serve};
 
 #[cfg(windows)]
 mod sys {
-    use std::ffi::c_void;
     use std::io;
     use std::os::windows::io::AsRawHandle;
     use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::Value;
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer};
     use tokio::task::JoinHandle;
     use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, LocalFree,
-    };
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-        SE_KERNEL_OBJECT,
-    };
-    use windows_sys::Win32::Security::{
-        GetLengthSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE,
     };
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
-    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 
-    use nerve_transport::ctl::NOT_RUNNING;
+    use nerve_service::win::pipe::{Descriptor, client_pid, foreign_owner, instance};
+    use nerve_transport::ctl::{ANSWER_WAIT, BUSY};
 
-    use super::{NOT_THE_NODES, dacl_text, trusted_owner};
+    use super::{NOT_THE_NODES, dacl_text};
     use crate::daemon::Shared;
     use crate::paths::NodePaths;
-    use crate::win_user::{well_known_sid, wide};
-
-    /// A security descriptor made from SDDL, freed when dropped.
-    pub(crate) struct Descriptor(PSECURITY_DESCRIPTOR);
-
-    // SAFETY: the descriptor is plain memory that is only read once made.
-    unsafe impl Send for Descriptor {}
-    // SAFETY: as above.
-    unsafe impl Sync for Descriptor {}
-
-    impl Descriptor {
-        pub(crate) fn from_sddl(sddl: &str) -> io::Result<Descriptor> {
-            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-            // SAFETY: a NUL-terminated SDDL string; the descriptor is freed
-            // on drop.
-            if unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    wide(sddl).as_ptr(),
-                    SDDL_REVISION_1,
-                    &mut sd,
-                    std::ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Descriptor(sd))
-        }
-    }
-
-    impl Drop for Descriptor {
-        fn drop(&mut self) {
-            // SAFETY: the descriptor from the conversion, freed once.
-            unsafe { LocalFree(self.0) };
-        }
-    }
-
-    /// One instance of the pipe `name` with the node's DACL; the first one
-    /// only where no pipe of that name is.
-    pub(crate) fn instance(
-        name: &str,
-        sd: &Descriptor,
-        first: bool,
-    ) -> io::Result<NamedPipeServer> {
-        let mut sa = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: sd.0,
-            bInheritHandle: 0,
-        };
-        // SAFETY: the attributes are valid and their descriptor lives
-        // through the call.
-        unsafe {
-            ServerOptions::new()
-                .first_pipe_instance(first)
-                .reject_remote_clients(true)
-                .create_with_security_attributes_raw(name, (&raw mut sa).cast::<c_void>())
-        }
-    }
-
-    /// The id of the process at the other end of a connected instance.
-    pub(crate) fn client_pid(pipe: &NamedPipeServer) -> Option<u32> {
-        let mut pid = 0u32;
-        // SAFETY: a connected pipe instance and a place for the id.
-        let ok =
-            unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } != 0;
-        (ok && pid != 0).then_some(pid)
-    }
 
     /// Serves the control pipe of `shared`'s node until the task is
     /// aborted. The first instance is made before this returns, so a CLI
@@ -260,37 +221,6 @@ mod sys {
         }
     }
 
-    /// The SID that owns the pipe `pipe` is open on.
-    fn owner_of(pipe: HANDLE) -> io::Result<Vec<u8>> {
-        let mut owner: PSID = std::ptr::null_mut();
-        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: an open handle; the owner points into the descriptor,
-        // which is freed below.
-        let r = unsafe {
-            GetSecurityInfo(
-                pipe,
-                SE_KERNEL_OBJECT,
-                OWNER_SECURITY_INFORMATION,
-                &mut owner,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut sd,
-            )
-        };
-        if r != 0 {
-            return Err(io::Error::from_raw_os_error(r as i32));
-        }
-        // SAFETY: a valid SID in the descriptor, copied before it is freed.
-        let sid = unsafe {
-            let len = GetLengthSid(owner) as usize;
-            let v = std::slice::from_raw_parts(owner.cast::<u8>(), len).to_vec();
-            LocalFree(sd);
-            v
-        };
-        Ok(sid)
-    }
-
     /// The account the node at `paths` runs as: `nerve` for the installed
     /// node, else this one (a node run by hand is its owner's).
     fn node_account(paths: &NodePaths) -> Option<Vec<u8>> {
@@ -301,9 +231,21 @@ mod sys {
         }
     }
 
-    /// One call to the node at `paths` over its pipe: [`NOT_RUNNING`] when
-    /// no node made one.
+    /// One call to the node at `paths` over its pipe:
+    /// [`nerve_transport::ctl::NOT_RUNNING`] when no node made one and none
+    /// runs, [`super::NO_PIPE`] when one runs without,
+    /// and [`nerve_transport::ctl::NO_ANSWER`] when it does not answer in
+    /// time, as on the socket: a node that is stuck must not hold the
+    /// caller, the app's panic least of all, for ever.
     pub async fn call(paths: &NodePaths, method: &str, params: Value) -> Result<Value, String> {
+        super::within(ANSWER_WAIT, call_unlimited(paths, method, params)).await
+    }
+
+    async fn call_unlimited(
+        paths: &NodePaths,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
         let name = paths.ctl_pipe();
         let mut busy = 0;
         let client = loop {
@@ -315,9 +257,16 @@ mod sys {
             {
                 Ok(c) => break c,
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
-                    return Err(NOT_RUNNING.into());
+                    // A node that runs holds the keys' lock.
+                    return Err(super::missing_pipe(|| {
+                        crate::secrets::KeysLock::node_runs(paths)
+                    }));
                 }
-                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && busy < 50 => {
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                    // Every instance in use: a node is there, and busy.
+                    if busy == 50 {
+                        return Err(BUSY.into());
+                    }
                     busy += 1;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -340,12 +289,10 @@ mod sys {
         client: &tokio::net::windows::named_pipe::NamedPipeClient,
         name: &str,
     ) -> Result<(), String> {
-        let owner = owner_of(client.as_raw_handle() as HANDLE)
-            .map_err(|e| format!("cannot check the control pipe {name}: {e}"))?;
-        let system = well_known_sid(WinLocalSystemSid).map_err(|e| e.to_string())?;
-        let admins = well_known_sid(WinBuiltinAdministratorsSid).map_err(|e| e.to_string())?;
         let node = node_account(paths);
-        if !trusted_owner(&owner, &system, &admins, node.as_ref()) {
+        let foreign = foreign_owner(client.as_raw_handle() as HANDLE, node.as_deref())
+            .map_err(|e| format!("cannot check the control pipe {name}: {e}"))?;
+        if let Some(owner) = foreign {
             let who = crate::win_host::sid_text(&owner).unwrap_or_else(|e| e);
             return Err(format!(
                 "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/dev/windows.md, \"The control pipe is not the node's\"). With the node stopped, folder changes go to node.toml"
@@ -359,20 +306,26 @@ mod sys {
 mod tests {
     use super::*;
 
-    /// SYSTEM, the administrators and the node's account, nobody else; no
-    /// entry twice where the node runs as one of the first two.
+    /// A node that is busy, or that refuses the caller, is a node that runs;
+    /// no pipe, another account's pipe and a pipe this account may not open
+    /// are not one.
     #[test]
-    fn the_dacl_names_the_owners_accounts_only() {
-        let nerve = "S-1-5-21-1-2-3-1001";
-        assert_eq!(
-            dacl_text(nerve),
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1001)"
-        );
-        assert_eq!(dacl_text("S-1-5-18"), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-        assert_eq!(dacl_text("S-1-5-32-544"), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-        // No entry for everyone, the users, the network or an AppContainer.
-        for other in ["WD", "BU", "AU", "NU", "AC", "S-1-15-"] {
-            assert!(!dacl_text(nerve).contains(other), "{other}");
+    fn a_busy_or_refusing_node_counts_as_running() {
+        use nerve_transport::ctl::{BUSY, NO_ANSWER, NOT_RUNNING};
+        assert!(node_answered(&Ok(serde_json::json!({}))));
+        assert!(node_answered(&Err(BUSY.into())));
+        assert!(node_answered(&Err(NO_ANSWER.into())));
+        assert!(node_answered(&Err(NO_PIPE.into())));
+        assert!(node_answered(&Err(
+            "refused: this request comes from a command the node runs for a center".into()
+        )));
+        for none in [
+            NOT_RUNNING,
+            "the control pipe is not the node's: \\\\.\\pipe\\nerve-node-1 belongs to S-1-5-21-9",
+            "the running node lets only the administrators, SYSTEM and its own account change it",
+            "cannot reach the running node: the pipe is gone (os error 109)",
+        ] {
+            assert!(!node_answered(&Err(none.into())), "{none}");
         }
     }
 
@@ -405,17 +358,57 @@ mod tests {
         }
     }
 
-    /// The CLI talks to a pipe only when SYSTEM, the administrators or the
-    /// node's account own it.
+    /// No pipe of the node's name is no node only when none runs: a node
+    /// that runs without its pipe (another account held the name when it
+    /// started) is an error, so a change is not written behind it and the
+    /// app's panic sees a lock that was not taken.
     #[test]
-    fn a_pipe_another_account_made_is_not_the_nodes() {
-        let (system, admins, nerve, other) = ("SY", "BA", "nerve", "mallory");
-        assert!(trusted_owner(&system, &system, &admins, Some(&nerve)));
-        assert!(trusted_owner(&admins, &system, &admins, Some(&nerve)));
-        assert!(trusted_owner(&nerve, &system, &admins, Some(&nerve)));
-        assert!(!trusted_owner(&other, &system, &admins, Some(&nerve)));
-        // Without the node's account, only the first two.
-        assert!(!trusted_owner(&nerve, &system, &admins, None));
-        assert!(trusted_owner(&system, &system, &admins, None));
+    fn a_node_that_runs_without_its_pipe_is_no_node_to_write_behind() {
+        use nerve_transport::ctl::NOT_RUNNING;
+        assert_eq!(missing_pipe(|| false), NOT_RUNNING);
+        let e = missing_pipe(|| true);
+        assert_eq!(e, NO_PIPE);
+        assert!(!file_instead(&e, || true));
+        assert!(!file_instead(&e, || false));
+    }
+
+    /// A call that is not answered ends with the socket's error and does not
+    /// wait for ever: the node may be stuck with its pipe still listening.
+    #[tokio::test]
+    async fn a_call_that_is_not_answered_ends() {
+        use nerve_transport::ctl::NO_ANSWER;
+        let silent = std::future::pending::<Result<(), String>>();
+        // Bounded here, so that a call without its limit fails this test
+        // and does not hang it.
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            within(std::time::Duration::from_millis(100), silent),
+        )
+        .await
+        .expect("within ends by itself");
+        assert_eq!(r, Err(NO_ANSWER.to_string()));
+        let r = within(std::time::Duration::from_secs(5), async { Ok(1) }).await;
+        assert_eq!(r, Ok(1));
+        let r = within(std::time::Duration::from_secs(5), async {
+            Err::<u8, _>("x".to_string())
+        })
+        .await;
+        assert_eq!(r, Err("x".to_string()));
+    }
+
+    /// The call itself, on a state folder with no pipe: no node, until the
+    /// keys' lock is held as a running node holds it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_call_finds_no_pipe_while_a_node_holds_its_lock() {
+        use nerve_transport::ctl::NOT_RUNNING;
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let e = call(&paths, "status", serde_json::json!({})).await;
+        assert_eq!(e, Err(NOT_RUNNING.to_string()));
+        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let e = call(&paths, "status", serde_json::json!({})).await;
+        assert_eq!(e, Err(NO_PIPE.to_string()));
+        drop(held);
     }
 }

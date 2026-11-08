@@ -12,10 +12,8 @@
 //! paths) runs while the thread impersonates that account ([`FsAs`]), as
 //! Linux switches the thread's file system ids.
 
-use std::ffi::OsStr;
 use std::io;
 use std::marker::PhantomData;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -39,17 +37,17 @@ use windows_sys::Win32::Security::Cryptography::{
     CryptUnprotectData,
 };
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE,
-    EqualSid, GetLengthSid, GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount,
-    GetTokenInformation, ImpersonateLoggedOnUser, IsWellKnownSid, LOGON32_LOGON,
-    LOGON32_LOGON_BATCH, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES,
-    LogonUserW, LookupAccountSidW, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
-    SID_NAME_USE, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
-    TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
-    TokenDefaultDacl, TokenGroups, TokenOwner, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
-    WinBuiltinAdministratorsSid, WinBuiltinBackupOperatorsSid, WinLocalSystemSid,
+    AdjustTokenPrivileges, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, EqualSid, GetLengthSid,
+    GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    ImpersonateLoggedOnUser, IsWellKnownSid, LOGON32_LOGON, LOGON32_LOGON_BATCH,
+    LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES, LogonUserW,
+    LookupAccountSidW, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SID_NAME_USE,
+    SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_OWNER,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenOwner,
+    TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid, WinBuiltinBackupOperatorsSid,
+    WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_DATA,
@@ -69,6 +67,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
 
+pub(crate) use nerve_service::win::sid::{from_wide, well_known_sid, wide};
+
 use crate::service::Account;
 
 /// How long a logon of the command account is used before the node logs
@@ -81,29 +81,6 @@ const REACH_MAX: usize = 4096;
 /// What DPAPI mixes into the stored password, so that a blob of another
 /// program's does not pass for it.
 const ENTROPY: &[u8] = b"nerve-node: the password of the account commands run as";
-
-/// `s` as a NUL-terminated UTF-16 string.
-pub(crate) fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
-    s.as_ref().encode_wide().chain(Some(0)).collect()
-}
-
-/// The NUL-terminated UTF-16 string at `p`, empty for a null pointer.
-///
-/// # Safety
-/// `p` is null or points to a NUL-terminated UTF-16 string.
-pub(crate) unsafe fn from_wide(p: *const u16) -> String {
-    if p.is_null() {
-        return String::new();
-    }
-    let mut n = 0;
-    // SAFETY: the string ends with a NUL, which bounds the walk.
-    unsafe {
-        while *p.add(n) != 0 {
-            n += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-    }
-}
 
 fn last() -> io::Error {
     io::Error::last_os_error()
@@ -166,26 +143,6 @@ unsafe fn rid(sid: PSID) -> u32 {
             *GetSidSubAuthority(sid, u32::from(n) - 1)
         }
     }
-}
-
-/// A well-known SID, such as the Administrators group.
-pub(crate) fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> io::Result<Vec<u8>> {
-    let mut sid = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
-    let mut len = SECURITY_MAX_SID_SIZE;
-    // SAFETY: a buffer of the largest SID size, with that size.
-    if unsafe {
-        CreateWellKnownSid(
-            kind,
-            std::ptr::null_mut(),
-            sid.as_mut_ptr().cast(),
-            &mut len,
-        )
-    } == 0
-    {
-        return Err(last());
-    }
-    sid.truncate(len as usize);
-    Ok(sid)
 }
 
 /// The name of the account whose SID is `text` (`S-1-5-21-…`).

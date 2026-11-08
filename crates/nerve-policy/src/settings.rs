@@ -334,7 +334,7 @@ impl SettingsStore {
             let mut c =
                 NodeConfig::parse(&text).map_err(|e| format!("{}: {e}", s.path.display()))?;
             c.version = c.version.max(last);
-            s.write(&c, None).map_err(|e| e.to_string())?;
+            s.write(&c, None, false).map_err(|e| e.to_string())?;
             s.config = Arc::new(c);
             let _ = s
                 .audit
@@ -519,7 +519,7 @@ impl SettingsStore {
         new.version = self.config.version.max(new.version).max(last) + 1;
         let made = change(&self.config, &mut new);
         // Taken as it is: whoever wrote it last.
-        self.write(&new, None)?;
+        self.write(&new, None, false)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
         self.config = Arc::new(new);
@@ -548,13 +548,34 @@ impl SettingsStore {
     /// have written the file meanwhile ([`Secrets::begin`]), a file that is
     /// no longer that version is a conflict and nothing is written: a
     /// change made on the old file would undo the other one, and with it a
-    /// move of the keys that one made.
-    fn write(&mut self, c: &NodeConfig, opened: Option<u64>) -> Result<(), SetError> {
+    /// move of the keys that one made. The node's own store, which no other
+    /// process writes while it runs, refuses a file ahead of it the same
+    /// way: that file holds a change the owner made behind the running node
+    /// (a CLI that found no node), and a write of a center or a timed mode
+    /// would undo it, a panic included.
+    ///
+    /// `over_newer` lets the node's own store save over a file ahead of it:
+    /// only a panic does, which never waits for the owner to look at a change
+    /// that is waiting (docs/dev/spec/node-local.md §1).
+    fn write(
+        &mut self,
+        c: &NodeConfig,
+        opened: Option<u64>,
+        over_newer: bool,
+    ) -> Result<(), SetError> {
         let shared = self.secrets.begin().map_err(SetError::Io)?;
         let r = (|| {
-            if let Some(opened) = opened.filter(|_| shared) {
-                let now = self.version_on_disk().map_err(SetError::Io)?;
-                if now != opened {
+            if let Some(opened) = opened {
+                // Another writer's file counts whoever signed it; the
+                // node's own store goes by the files the node signed. A file
+                // it cannot read is no change ahead of it; the write then
+                // says what is wrong with it.
+                let now = match self.disk_version(!shared) {
+                    Ok(v) => v,
+                    Err(e) if shared => return Err(SetError::Io(e)),
+                    Err(_) => 0,
+                };
+                if (shared && now != opened) || (!over_newer && now > opened) {
                     return Err(SetError::Conflict { current: now });
                 }
             }
@@ -573,14 +594,27 @@ impl SettingsStore {
         r
     }
 
-    /// The version of the file as it is now, read without checking its MAC
-    /// (the version a write must not go behind): 0 for no file, and for one
-    /// that names none.
+    /// The version of the file as it is now, when the node signed it (the
+    /// version a running node's write must not go behind): 0 for no file, for
+    /// one that names none and for one whose MAC does not verify. A file
+    /// nobody signed holds no change the owner made, so it is no reason to
+    /// refuse a write; `reload` refuses it in its own way.
     pub fn version_on_disk(&self) -> Result<u64, String> {
+        self.disk_version(true)
+    }
+
+    /// [`SettingsStore::version_on_disk`], with the MAC left unchecked when
+    /// `signed_only` is not set: the version another writer's save is told
+    /// from, whoever signed it.
+    fn disk_version(&self, signed_only: bool) -> Result<u64, String> {
         let Some(text) = read_file(&self.path)? else {
             return Ok(0);
         };
-        let table: Option<toml::Table> = toml::from_str(unseal(&text).1).ok();
+        let (mac, body) = unseal(&text);
+        if signed_only && !mac.is_some_and(|m| self.key.verify(&mac_input(body), m)) {
+            return Ok(0);
+        }
+        let table: Option<toml::Table> = toml::from_str(body).ok();
         Ok(table
             .as_ref()
             .and_then(|t| t.get("version"))
@@ -619,6 +653,28 @@ impl SettingsStore {
     /// Replaces the whole config as the owner; `if_version` guards against a
     /// concurrent writer.
     pub fn set_local(&mut self, new: NodeConfig, if_version: Option<u64>) -> Result<u64, SetError> {
+        self.set_local_as(new, if_version, false)
+    }
+
+    /// [`SettingsStore::set_local`] for a panic: the save goes over a file
+    /// ahead of the node (a change that waits for the node to take it), as a
+    /// lock never waits for that. The owner's change in that file is undone,
+    /// which the audit log says (`replaced`) and [`SettingsStore::file_ahead`]
+    /// lets the caller say; the file's version stays below the one saved.
+    pub fn set_local_panic(
+        &mut self,
+        new: NodeConfig,
+        if_version: Option<u64>,
+    ) -> Result<u64, SetError> {
+        self.set_local_as(new, if_version, true)
+    }
+
+    fn set_local_as(
+        &mut self,
+        new: NodeConfig,
+        if_version: Option<u64>,
+        over_newer: bool,
+    ) -> Result<u64, SetError> {
         if let Some(v) = if_version
             && v != self.config.version
         {
@@ -626,7 +682,34 @@ impl SettingsStore {
                 current: self.config.version,
             });
         }
-        self.commit(Writer::Local, new)
+        let in_force = self.config.version;
+        let ahead = if over_newer {
+            self.version_on_disk().unwrap_or(0)
+        } else {
+            0
+        };
+        let saved = self.commit(Writer::Local, new, over_newer)?;
+        // The owner was told that the change in that file takes effect at the
+        // next start: a save that wrote the file replaced it, and the audit
+        // log says so. A lock that changed nothing leaves the file alone.
+        if ahead > in_force && saved > in_force {
+            let _ = self.audit.config(
+                "replaced",
+                &self.path,
+                &format!(
+                    "a panic saved over node.toml, which held a change the node had not taken yet (version {ahead}, the node runs version {in_force})"
+                ),
+            );
+        }
+        Ok(saved)
+    }
+
+    /// Whether node.toml is a file the node signed that is ahead of the
+    /// config in force: a change the owner made while no node answered, which
+    /// the node takes when it starts. A panic saves over it.
+    pub fn file_ahead(&self) -> bool {
+        self.version_on_disk()
+            .is_ok_and(|v| v > self.config.version)
     }
 
     /// Changes the config as the owner through a closure (CLI commands).
@@ -636,7 +719,7 @@ impl SettingsStore {
     ) -> Result<u64, SetError> {
         let mut new = NodeConfig::clone(&self.config);
         f(&mut new).map_err(SetError::Invalid)?;
-        self.commit(Writer::Local, new)
+        self.commit(Writer::Local, new, false)
     }
 
     /// Updates bookkeeping the node itself sets (revoked, unknown) without
@@ -648,7 +731,7 @@ impl SettingsStore {
             return Ok(());
         }
         new.version = self.next_version();
-        self.write(&new, Some(self.config.version))
+        self.write(&new, Some(self.config.version), false)
             .map_err(|e| e.to_string())?;
         self.config = Arc::new(new);
         Ok(())
@@ -716,7 +799,7 @@ impl SettingsStore {
         let e = cfg.center_mut(center).expect("checked above");
         e.paused = new.paused;
         e.policy = new.policy;
-        self.commit(Writer::Center(center), cfg)
+        self.commit(Writer::Center(center), cfg, false)
     }
 
     /// Sets the node's sudo switch: the one machine setting a center with the
@@ -728,7 +811,7 @@ impl SettingsStore {
         }
         let mut cfg = NodeConfig::clone(&self.config);
         cfg.machine.sudo = sudo;
-        self.commit(by, cfg)
+        self.commit(by, cfg, false)
     }
 
     /// A change of `center` to the capabilities it added itself
@@ -744,7 +827,7 @@ impl SettingsStore {
         self.granted(center)?;
         let mut cfg = NodeConfig::clone(&self.config);
         f(&mut cfg)?;
-        self.commit(Writer::Center(center), cfg)
+        self.commit(Writer::Center(center), cfg, false)
     }
 
     /// `center`'s entry, when it has the settings grant `write`.
@@ -761,7 +844,12 @@ impl SettingsStore {
         Ok(entry)
     }
 
-    fn commit(&mut self, by: Writer, mut new: NodeConfig) -> Result<u64, SetError> {
+    fn commit(
+        &mut self,
+        by: Writer,
+        mut new: NodeConfig,
+        over_newer: bool,
+    ) -> Result<u64, SetError> {
         // A center's pin changed by hand to another one (after a rotation
         // of the center's key the node missed) counts as a rotation the node
         // took: a restore then keeps it over a backup's older pin.
@@ -786,15 +874,21 @@ impl SettingsStore {
         }
         new.version = self.config.version;
         new.validate().map_err(SetError::Invalid)?;
-        if new == *self.config {
+        // A panic that changes nothing still saves over a change waiting in
+        // the file: a lock the owner asked for must not lose to an `unlock`
+        // that the next start would take.
+        let clears_file = over_newer && self.file_ahead();
+        if new == *self.config && !clears_file {
             return Ok(self.config.version);
         }
         new.version = self.next_version();
-        self.write(&new, Some(self.config.version))?;
+        self.write(&new, Some(self.config.version), over_newer)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
         self.config = Arc::new(new);
-        self.changed(&by.label(), version, &changes);
+        if !changes.is_empty() {
+            self.changed(&by.label(), version, &changes);
+        }
         Ok(version)
     }
 
@@ -2697,10 +2791,11 @@ mod tests {
     }
 
     /// Another writer saved the file while a node holds its config in memory
-    /// (the CLI on Windows, which has no socket to ask the node), and raised
-    /// the record by more than one. The node's own next save must go above
-    /// the record, or its next start refuses the node's own file as an
-    /// earlier one put back, whatever kind of write it was.
+    /// (a CLI that found no node), and raised the record by more than one.
+    /// The node saves nothing over that file; once it took it, its own next
+    /// save goes above the record, or its next start would refuse the
+    /// node's own file as an earlier one put back, whatever kind of write it
+    /// was.
     #[test]
     fn a_running_nodes_save_goes_above_the_record_another_writer_raised() {
         type Save = fn(&mut SettingsStore) -> Result<(), String>;
@@ -2735,6 +2830,8 @@ mod tests {
             bump(&mut cli);
             let newest = bump(&mut cli);
             assert!(newest > running.version() + 1, "{what}");
+            assert!(save(&mut running).is_err(), "{what}");
+            running.reload().unwrap();
             save(&mut running).unwrap_or_else(|e| panic!("{what}: {e}"));
             assert!(running.version() > newest, "{what}");
             assert_eq!(recorded(d.path()), Some(running.version()), "{what}");
@@ -2943,5 +3040,212 @@ mod tests {
         // An unchanged config is no new version.
         let same = s.config().clone();
         assert_eq!(s.set_local(same, None).unwrap(), v + 1);
+    }
+
+    /// A store that no other process writes (the running node's) refuses
+    /// every write while the file holds a newer version, a change made
+    /// behind it: a center's write, a mark, the sudo switch or a local
+    /// change would undo it. Once the file is taken, writes go on.
+    #[test]
+    fn a_write_never_undoes_a_newer_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        let ahead = other
+            .update(|c| {
+                c.locked = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(ahead > node.version());
+        let conflict = Err(SetError::Conflict { current: ahead });
+        assert_eq!(
+            node.update(|c| {
+                c.limits.max_running = 7;
+                Ok(())
+            }),
+            conflict
+        );
+        assert_eq!(node.set_sudo(Writer::Center("home"), Sudo::On), conflict);
+        assert!(node.mark(|c| c.centers[0].unknown = true).is_err());
+        let (mut doc, v) = (doc(&node), node.version());
+        doc["policy"]["caps"] = json!({"exec": "off"});
+        assert_eq!(
+            node.set_center_document("home", doc, v, |_| false, host, &|_, _| None),
+            conflict
+        );
+        // The file still holds the owner's change.
+        assert!(
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key"))
+                .unwrap()
+                .locked
+        );
+        // Taken, it is the store's, and the next write goes on from it.
+        assert!(node.reload().unwrap());
+        node.update(|c| {
+            c.limits.max_running = 7;
+            Ok(())
+        })
+        .unwrap();
+        assert!(node.config().locked);
+    }
+
+    /// A panic saves over a file ahead of the node: the lock never waits for
+    /// the owner to look at a change that waits. The save goes above the
+    /// file's version, so the node does not refuse its own file at its next
+    /// start.
+    #[test]
+    fn a_panic_saves_over_a_newer_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        let bump = |s: &mut SettingsStore| {
+            s.update(|c| {
+                c.limits.max_running += 1;
+                Ok(())
+            })
+            .unwrap()
+        };
+        bump(&mut other);
+        let ahead = bump(&mut other);
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        assert_eq!(
+            node.set_local(locked.clone(), Some(node.version())),
+            Err(SetError::Conflict { current: ahead })
+        );
+        assert!(node.file_ahead());
+        let replaced = |s: &SettingsStore| {
+            s.audit()
+                .read()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e["kind"] == "config" && e["event"] == "replaced")
+                .collect::<Vec<_>>()
+        };
+        assert!(replaced(&node).is_empty());
+        let v = node.set_local_panic(locked, Some(node.version())).unwrap();
+        assert!(v > ahead);
+        let saved =
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key")).unwrap();
+        assert!(saved.locked);
+        assert_eq!(saved.version, v);
+        // The change that waited in the file is gone, and the audit log says so.
+        let said = replaced(&node);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let reason = said[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("had not taken yet") && reason.contains(&format!("version {ahead}")),
+            "{reason}"
+        );
+        assert!(!node.file_ahead());
+    }
+
+    /// A panic that finds no change waiting says nothing of one, and saves
+    /// nothing when the config does not change.
+    #[test]
+    fn a_panic_with_nothing_waiting_replaces_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        let v = node.set_local_panic(locked, Some(node.version())).unwrap();
+        let again = node.config().clone();
+        assert_eq!(node.set_local_panic(again, Some(v)).unwrap(), v);
+        let said: Vec<_> = node
+            .audit()
+            .read()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["event"] == "replaced")
+            .collect();
+        assert!(said.is_empty(), "{said:?}");
+    }
+
+    /// A node that is locked already and a change waiting in the file (an
+    /// `unlock`, say): the panic saves over it, or the next start would run
+    /// unlocked.
+    #[test]
+    fn a_panic_on_a_locked_node_saves_over_a_waiting_unlock() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        node.set_local_panic(locked, Some(node.version())).unwrap();
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        other
+            .update(|c| {
+                c.locked = false;
+                Ok(())
+            })
+            .unwrap();
+        assert!(node.file_ahead());
+        let before = node.version();
+        let again = node.config().clone();
+        let v = node.set_local_panic(again, Some(before)).unwrap();
+        assert!(v > before);
+        assert!(!node.file_ahead());
+        let saved =
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key")).unwrap();
+        assert!(saved.locked, "the waiting unlock came back");
+        let said: Vec<_> = node
+            .audit()
+            .read()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["event"] == "replaced")
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+    }
+
+    /// A file the node did not sign names a version, and it holds no change of
+    /// the owner's: it blocks no write of the running node, a lock least of
+    /// all (a sync tool or another account can put such a file there).
+    #[test]
+    fn an_unsigned_file_ahead_blocks_no_write() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let file = d.path().join("node.toml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let body = text.split_once('\n').unwrap().1;
+        let forged = body.replace(
+            &format!("version = {}", node.version()),
+            &format!("version = {}", node.version() + 50),
+        );
+        assert_ne!(forged, body);
+        std::fs::write(&file, &forged).unwrap();
+        assert_eq!(node.version_on_disk(), Ok(0));
+        // Signed by another key, the version is as unproven.
+        let other_key = d.path().join("other.key");
+        let other = SettingsStore::open(
+            d.path().join("other.toml"),
+            other_key,
+            AuditLog::new(d.path().join("other-audit.jsonl")),
+        )
+        .unwrap();
+        let theirs = sealed(&other.key, &NodeConfig::parse(&forged).unwrap());
+        std::fs::write(&file, theirs).unwrap();
+        assert_eq!(node.version_on_disk(), Ok(0));
+        node.update(|c| {
+            c.locked = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(node.config().locked);
     }
 }
