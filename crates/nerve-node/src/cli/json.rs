@@ -349,15 +349,15 @@ async fn node_status(paths: &NodePaths) -> Result<Value, String> {
 }
 
 /// The `status` of a node that does not run, with its `owner` as the unit
-/// names it, whether `sudo` is on, and its `centers`.
+/// (or the service's key) names it, whether `sudo` is on, and its `centers`.
 fn stopped(cfg: &NodeConfig, owner: Option<String>, sudo: bool, centers: Vec<Value>) -> Value {
     json!({
         "daemon": "not running",
         "version": cfg.version,
         "locked": cfg.locked,
         "owner_is_root": crate::owner::is_root(owner.as_deref()),
-        "owner_is_admin": crate::owner::admin_owner(cfg).is_some(),
-        "owner": owner.or_else(|| cfg.machine.user.clone().filter(|_| cfg!(windows))),
+        "owner_is_admin": crate::owner::admin_owner(owner.as_deref()).is_some(),
+        "owner": owner,
         "sudo": if sudo { "on" } else { "off" },
         "command_limits": crate::cgroup::status(
             &cfg.limits.command,

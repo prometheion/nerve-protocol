@@ -45,8 +45,8 @@ use cap::{added_by_other, cap_listing};
 use cap::{dropped_note, held_note, shadowed_note, with_own_note};
 use center::tell_pairings_apart;
 pub(crate) use center::{given_link, pairings_warning_here};
+pub use config::moves_keys_to_keyring;
 use config::setting;
-pub use config::{NO_ACCOUNT_TO_CHOOSE, moves_keys_to_keyring};
 use folder::{add_folder, grant_lines};
 pub use help::{
     ArgHelp, Card, Help, Section, TOP_TEMPLATE, Verb, doc_of, everyday, guide_url, help,
@@ -1997,9 +1997,8 @@ mod tests {
             out.contains("was not asked whether it found a keyring"),
             "{out}"
         );
-        let cfg = NodeConfig::load(&paths.config_file()).unwrap();
         let mut out = Vec::new();
-        tell_folder_commands(&paths, &cfg, &mut out).await;
+        tell_folder_commands(&paths, &mut out).await;
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("was not asked whether folder mode"), "{out}");
         let mut opts = crate::NodeOptions::new(paths.clone());

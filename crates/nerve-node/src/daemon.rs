@@ -84,8 +84,9 @@ pub struct NodeOptions {
     /// socket (crate::owner): the installed node's, unless a test gives
     /// one. Served only with `ctl`.
     pub owners: Option<crate::owner::Endpoint>,
-    /// Linux: the owner of the installed node, as its unit names it
-    /// (crate::owner::of_service): user mode runs commands as it, and sudo.
+    /// The owner of the installed node, as its unit (Linux) or its service's
+    /// key (Windows) names it (crate::owner::of_service): user mode runs
+    /// commands as it, and sudo.
     pub owner: Option<String>,
     /// Where work goes that runs while the node is stopped, after which it
     /// starts again: an owner's restore ([`Daemon::run_until`] sets it).
@@ -1203,17 +1204,12 @@ impl Shared {
         lock(&self.acl).refusal()
     }
 
-    /// The name of the installed node's owner: on Linux the account that
-    /// ran `install`, which the unit names ([`NodeOptions::owner`]); on
-    /// Windows the account commands run as (`machine.user`).
+    /// The name of the installed node's owner, the account that ran
+    /// `install`: the unit names it on Linux, the service's key on Windows
+    /// ([`NodeOptions::owner`]).
     pub fn owner_name(&self, cfg: &NodeConfig) -> Option<String> {
-        #[cfg(windows)]
-        return cfg.machine.user.clone();
-        #[cfg(not(windows))]
-        {
-            let _ = cfg;
-            self.owner.clone()
-        }
+        let _ = cfg;
+        self.owner.clone()
     }
 
     /// The account `name`, looked up at most every [`ACCOUNT_FRESH`].
@@ -1831,7 +1827,7 @@ impl Shared {
             "owner": self.owner_name(&cfg),
             "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
             // Its Windows twin: the owner is an administrator.
-            "owner_is_admin": crate::owner::admin_owner(&cfg).is_some(),
+            "owner_is_admin": crate::owner::admin_owner(self.owner_name(&cfg).as_deref()).is_some(),
             // Whether this is the installed node, which an owner may not
             // have been found for (the web UI words its advice by it).
             "installed": self.service,
@@ -3334,7 +3330,7 @@ mod every_platform {
     use super::*;
 
     /// The installed node names the account each pairing's commands run as
-    /// without a lookup: on Windows always the owner (`machine.user`), whose
+    /// without a lookup: on Windows always the owner (the service's key), whose
     /// commands run in an AppContainer, never `nerve-run`, which does not
     /// exist there; elsewhere `nerve-run` unless the pairing runs as the
     /// owner. Runs on every platform, so each half is checked where it holds.
@@ -3354,8 +3350,7 @@ mod every_platform {
         o.owner = Some("alice".into());
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
-        let mut cfg = NodeConfig::clone(&s.config());
-        cfg.machine.user = Some("alice".into());
+        let cfg = NodeConfig::clone(&s.config());
         let named = |mode: Mode, as_owner: bool| {
             s.account_name(
                 &cfg,

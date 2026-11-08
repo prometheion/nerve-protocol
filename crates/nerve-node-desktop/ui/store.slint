@@ -504,8 +504,8 @@ export global Prefs {
     callback raw-set();
     callback raw-unset();
     callback raw-add();
-    // Windows: the account commands run as (machine.user), and giving the
-    // service its new password.
+    // Windows: the owner, as whom user mode runs commands, and giving the
+    // service the owner's new password.
     in-out property <string> account;
     in-out property <string> account-password;
     in-out property <string> account-error;

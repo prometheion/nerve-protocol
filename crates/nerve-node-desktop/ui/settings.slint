@@ -172,40 +172,40 @@ export component SettingsPage inherits PageFrame {
             Group {
                 icon: @image-url("icons/shield.svg");
                 title: "Account for commands";
-                text: Install.windows
-                    ? "Commands from centers run as this account."
-                    : Perm.owner-is-root ? "Commands run as nerve-run, which reaches only your folders (user mode: as root)."
+                text: Perm.owner-is-root ? "Commands run as nerve-run, which reaches only your folders (user mode: as root)."
                     : "Commands run as nerve-run, which reaches only your folders (user mode: as you).";
-                more: Install.windows ? "" : "Folder and allowlist mode run commands as nerve-run, an account of their own. User mode runs them as " + (Perm.owner-is-root ? "root, the owner of this node, with every right on this machine." : "you.");
+                more: "Folder and allowlist mode run commands as nerve-run, an account of their own"
+                    + (Install.windows ? ", each pairing's in an AppContainer of its own. " : ". ")
+                    + "User mode runs them as " + (Perm.owner-is-root ? "root, the owner of this node, with every right on this machine." : "you.");
                 // One block: a hidden part takes no room, nor the space around it.
                 VerticalLayout {
                     Reveal {
                         shown: Install.windows;
                         gap: Space.sm;
                         Text {
-                            text: Prefs.account != "" ? "Commands run as " + Prefs.account + "."
-                                : "No account yet: with your Windows password, commands run as you, " + Install.account + ".";
+                            text: "User mode, allowlist mode as you and sudo run commands as "
+                                + (Prefs.account != "" ? Prefs.account : Install.account)
+                                + ", with your Windows password, which the install stored.";
                             color: Theme.text;
                             font-size: Type.small;
                             wrap: word-wrap;
                         }
                     }
-                    // Also without an account, as after a mistyped password at
-                    // install: then it is the password of the app's user.
+                    // Also without a stored one, as after a mistyped password
+                    // at install: the password of the app's user.
                     Reveal {
                         shown: Install.windows;
                         gap: Space.lg;
                         Field {
-                            label: Prefs.account != "" ? "Its password" : "Your Windows password";
-                            hint: Prefs.account != "" ? "Enter it again when it changes."
-                                : "The password of " + Install.account + ", not a PIN.";
+                            label: "Your Windows password";
+                            hint: "Enter it again when it changes: the password, not a PIN.";
                             HorizontalLayout {
                                 spacing: Space.md;
                                 TextField {
                                     horizontal-stretch: 1;
                                     text <=> Prefs.account-password;
                                     password: true;
-                                    label: "Its password";
+                                    label: "Your Windows password";
                                     accepted => {
                                         Prefs.account-password-save();
                                     }

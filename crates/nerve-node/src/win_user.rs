@@ -1,9 +1,9 @@
 //! The account a center's commands run as on a node installed as a Windows
 //! service (docs/dev/windows.md). The service runs as `nerve`, which alone
 //! (with SYSTEM and the administrators) may open the node's config, keys and
-//! state; every command runs as the account `machine.user` names instead,
-//! logged on with the password `install` stored with DPAPI in the config
-//! folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
+//! state; every command runs as the owner instead, the account that ran
+//! `install`, logged on with the password `install` stored with DPAPI in the
+//! config folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
 //! account's token the service keeps two privileges,
 //! SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege; the command
 //! gets none of them, since it gets the account's own token.
@@ -608,6 +608,56 @@ fn opens(p: &Path) -> bool {
             return true;
         }
         GetLastError() == ERROR_SHARING_VIOLATION
+    }
+}
+
+/// Makes the profile of `name`, whose logon `t` is, where Windows has none,
+/// by loading it once: the folder and the registry Windows makes at the
+/// first logon. Needs an administrator (`install`). Its folder.
+pub fn make_profile(t: &Token, name: &str) -> io::Result<PathBuf> {
+    use windows_sys::Win32::UI::Shell::{LoadUserProfileW, PROFILEINFOW, UnloadUserProfile};
+    /// PI_NOUI: no message box when it fails.
+    const PI_NOUI: u32 = 1;
+    let mut user = wide(name);
+    let mut info = PROFILEINFOW {
+        dwSize: std::mem::size_of::<PROFILEINFOW>() as u32,
+        dwFlags: PI_NOUI,
+        lpUserName: user.as_mut_ptr(),
+        ..Default::default()
+    };
+    // SAFETY: a logon token and a filled PROFILEINFOW whose name lives for
+    // the call; the profile is unloaded below.
+    if unsafe { LoadUserProfileW(t.raw(), &mut info) } == 0 {
+        return Err(failed("LoadUserProfileW"));
+    }
+    // SAFETY: the token and the profile handle the load gave.
+    unsafe { UnloadUserProfile(t.raw(), info.hProfile) };
+    let buf = token_info(t.raw(), TokenUser)?;
+    // SAFETY: the buffer holds a TOKEN_USER whose SID points into it.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: a valid SID.
+    unsafe { profile_dir(sid) }
+        .ok_or_else(|| io::Error::other("Windows names no profile folder for it"))
+}
+
+/// Whether the account of `t` may read the registry key `key` below
+/// `HKEY_USERS`: one that is not there (a hive not loaded) is not read.
+pub fn opens_key(t: &Token, key: &str) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+    use windows_sys::Win32::System::Registry::{HKEY_USERS, KEY_READ, RegCloseKey, RegOpenKeyExW};
+    let _as = Impersonation::new(t)?;
+    let mut h = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated key name and a place for the handle, closed
+    // below.
+    let r = unsafe { RegOpenKeyExW(HKEY_USERS, wide(key).as_ptr(), 0, KEY_READ, &mut h) };
+    match r {
+        0 => {
+            // SAFETY: the handle the call opened.
+            unsafe { RegCloseKey(h) };
+            Ok(true)
+        }
+        ERROR_ACCESS_DENIED | ERROR_FILE_NOT_FOUND => Ok(false),
+        e => Err(io::Error::from_raw_os_error(e as i32)),
     }
 }
 

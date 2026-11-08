@@ -146,17 +146,11 @@ pub struct Machine {
     pub sudo_path: Option<String>,
     #[serde(default)]
     pub secret_storage: SecretStorage,
-    /// Windows: the account the installed node runs commands as, which
-    /// `install` takes with its password. Unset, they run as the node's own
-    /// user; the installed service then runs none. Linux does not read it:
-    /// there commands run as `nerve-run` or as the owner, the account that
-    /// ran `install`, and `nerve-node config set` refuses it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    /// Linux, the installed node: the variables of the service's environment
-    /// a command of `nerve-run` gets besides the few it always gets (`PATH`,
-    /// `LANG`, `TERM`, `TMPDIR`, and what the node sets itself). Names only:
-    /// the values are the service's.
+    /// The installed node: the variables of the service's environment a
+    /// command of `nerve-run` gets besides the few it always gets (`PATH`,
+    /// `LANG`, `TERM`, `TMPDIR`, and what the node sets itself; on Windows
+    /// the system's own and its home in the pairing's container). Names
+    /// only: the values are the service's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_env: Vec<String>,
 }
@@ -1262,13 +1256,6 @@ impl NodeConfig {
                 "node.name {n:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit"
             ));
         }
-        if let Some(u) = &self.machine.user
-            && !valid_account_name(u)
-        {
-            return Err(format!(
-                "machine.user {u:?}: an account name, 1 to 32 characters of a-z, A-Z, 0-9, ., _ and -"
-            ));
-        }
         if let Some(n) = self.machine.command_env.iter().find(|n| !valid_env_name(n)) {
             return Err(format!(
                 "machine.command_env {n:?}: the name of a variable, letters, digits and _"
@@ -2216,16 +2203,12 @@ sudo_allow = ["sudo apt update"]
         assert!(e.contains("proxy set") && !e.contains("s3cret"), "{e}");
     }
 
+    /// The node chooses no account for the commands on any platform (#149):
+    /// `machine.user` is no setting.
     #[test]
-    fn the_account_of_the_commands_on_windows_is_an_account_name() {
-        let c = NodeConfig::parse("[machine]\nuser = \"alice.b\"\n").unwrap();
-        assert_eq!(c.machine.user.as_deref(), Some("alice.b"));
-        assert_eq!(NodeConfig::parse(&c.to_toml()).unwrap(), c);
-        assert_eq!(NodeConfig::default().machine.user, None);
-        for bad in ["", "-x", "a b", "a:b", "a/b"] {
-            let e = NodeConfig::parse(&format!("[machine]\nuser = {bad:?}\n")).unwrap_err();
-            assert!(e.contains("machine.user"), "{bad}: {e}");
-        }
+    fn no_account_is_chosen_for_the_commands() {
+        let e = NodeConfig::parse("[machine]\nuser = \"alice\"\n").unwrap_err();
+        assert!(e.contains("user"), "{e}");
     }
 
     /// The owner names the variables a command of nerve-run gets; a name

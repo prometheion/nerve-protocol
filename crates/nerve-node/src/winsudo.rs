@@ -1,6 +1,7 @@
 //! The sudo switch on Windows (docs/dev/windows.md, docs/dev/spec/node-local.md
 //! §4). Windows has no sudo program: a sudo command starts with the full
-//! token of the account the commands run as. That is the account's logon
+//! token of the owner, the account that ran `install` (crate::owner). That is
+//! the account's logon
 //! as a batch job, which UAC does not filter, as the task scheduler logs an
 //! account on for a task that runs with highest privileges; an
 //! administrator then has the Administrators group in effect. It takes the
@@ -8,7 +9,7 @@
 //! process with another account's token (crate::win_user).
 //!
 //! The switch keeps that password with DPAPI in the config folder
-//! ([`SUDO_FILE`]), as `install` keeps the account's password
+//! ([`SUDO_FILE`]), as `install` keeps the owner's password
 //! (crate::winsvc::SECRET_FILE), and a restart holds it again ([`settle`]).
 //! `sudo on` and `sudo off` go to the running service over its control
 //! pipe, which checks the password and keeps it ([`take`]) or drops it at
@@ -33,12 +34,15 @@ use crate::winsvc::{WinSystem, parse_secret, secret};
 pub const SUDO_FILE: &str = "sudo.dpapi";
 
 /// Why a node that is not the installed service has no sudo switch.
-pub const INSTALLED_ONLY: &str = "on Windows the sudo switch works on the node installed as a service (Nerve's installer installs it): only the service may start a command with the administrator token of the account commands run as";
+pub const INSTALLED_ONLY: &str = "on Windows the sudo switch works on the node installed as a service (Nerve's installer installs it): only the service may start a command with the administrator token of the node's owner";
+
+/// Why `sudo on` finds no account: the service names no owner.
+pub const NO_OWNER: &str = "this node has no owner, whose administrator rights sudo commands run with: install it again with Nerve's installer, as yourself";
 
 /// Why `name`, not an administrator, cannot have the switch.
 pub fn not_admin(name: &str) -> String {
     format!(
-        "{name} is not an administrator: on Windows a sudo command runs with the administrator rights of the account commands run as, so that account must be in the Administrators group. Then every command of {name}, not only sudo commands, can get those rights back (UAC is no security boundary) and read the node's keys"
+        "{name} is not an administrator: on Windows a sudo command runs with the administrator rights of the node's owner, so the owner must be in the Administrators group. Then every command that runs as {name}, not only sudo commands, can get those rights back (UAC is no security boundary) and read the node's keys"
     )
 }
 
@@ -51,7 +55,7 @@ pub fn warning(name: &str) -> String {
     )
 }
 
-/// What `sudo off` adds while the account is still in `groups`, the ones
+/// What `sudo off` adds while the owner is still in `groups`, the ones
 /// whose members can read every file (crate::winsvc::admin_warning).
 pub fn still_admin(name: &str, groups: &[String]) -> String {
     let groups = groups.join(", ");
@@ -116,8 +120,8 @@ pub fn kept(paths: &NodePaths) -> bool {
     paths.config_dir.join(SUDO_FILE).is_file()
 }
 
-/// The password [`keep`] kept, when it is `user`'s: the account the
-/// commands run as now (`machine.user`).
+/// The password [`keep`] kept, when it is `user`'s: the owner now
+/// (crate::owner).
 pub fn stored(paths: &NodePaths, sys: &dyn WinSystem, user: Option<&str>) -> Option<String> {
     let user = user?;
     let blob = std::fs::read(paths.config_dir.join(SUDO_FILE)).ok()?;
@@ -161,7 +165,6 @@ fn read(paths: &NodePaths) -> Result<nerve_policy::NodeConfig, String> {
 /// which checks it, keeps it ([`take`]) and turns the switch on at once.
 /// `installed` says whether `paths` are the installed service's.
 pub async fn on(
-    paths: &NodePaths,
     sys: &dyn WinSystem,
     installed: bool,
     call: impl AsyncFn(&str, Value) -> Result<Value, String>,
@@ -181,20 +184,12 @@ pub async fn on(
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => return Err(NEEDS_THE_NODE.into()),
         Err(e) => return Err(e),
     }
-    let cfg = read(paths)?;
-    let name = cfg.machine.user.ok_or(
-        "no account is chosen for commands; choose it under Settings › General › Account for commands in the app",
-    )?;
+    let (_, name) = sys.owner()?.ok_or(NO_OWNER)?;
     let a = sys
         .account(&name)?
         .ok_or_else(|| format!("there is no local account {name}"))?;
-    let password = sys.read_password(
-        &format!(
-            "Password of {}, the account commands from centers run as: ",
-            a.name
-        ),
-        out,
-    )?;
+    let password =
+        sys.read_password(&format!("Password of {}, the node's owner: ", a.name), out)?;
     call("sudo.on", json!({ "password": password })).await?;
     let _ = writeln!(
         out,
@@ -232,10 +227,11 @@ pub async fn off(
     }
     let _ = writeln!(out, "sudo: off");
     // What `sudo on` asked for stays: the account is still in the group.
-    let account = read(paths)
+    let account = sys
+        .owner()
         .ok()
-        .and_then(|c| c.machine.user)
-        .and_then(|n| sys.account(&n).ok().flatten());
+        .flatten()
+        .and_then(|(_, n)| sys.account(&n).ok().flatten());
     if let Some(a) = account {
         let groups = sys.admin_groups(&a);
         if !groups.is_empty() {
@@ -330,7 +326,7 @@ mod tests {
                     Ok(json!({"sudo": if kept_on(self.paths)? { "on" } else { "off" }}))
                 }
                 "sudo.on" => {
-                    let user = read(self.paths)?.machine.user;
+                    let user = self.sys.owner()?.map(|(_, n)| n);
                     let account = user.and_then(|n| self.sys.account(&n).ok().flatten());
                     let password = params["password"].as_str().unwrap_or_default();
                     take(self.paths, self.sys, account.as_ref(), password)?;
@@ -391,38 +387,33 @@ mod tests {
         let call = async |m: &str, v: Value| node.call(m, v).await;
         // Alice, who installed the node, is no administrator.
         sys.types("alice's");
-        let e = on(p, &sys, true, call, &mut Vec::new()).await.unwrap_err();
+        let e = on(&sys, true, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("alice is not an administrator"), "{e}");
         assert!(!file.exists());
-        crate::cli::edit(p, |c| {
-            c.machine.user = Some("bob".into());
-            Ok(())
-        })
-        .await
-        .unwrap();
+        sys.put_owner("S-1-5-21-1-2-3-1002").unwrap();
         sys.passwords
             .borrow_mut()
             .push(("bob".into(), "bob's".into()));
         // Neither a node that is not installed nor a terminal without the
         // administrators' rights asks for the password, nor a node that
         // does not run, which alone takes it.
-        let e = on(p, &sys, false, call, &mut Vec::new()).await.unwrap_err();
+        let e = on(&sys, false, call, &mut Vec::new()).await.unwrap_err();
         assert_eq!(e, INSTALLED_ONLY);
         let mut user = Fake::new();
         user.admin = false;
-        let e = on(p, &user, true, call, &mut Vec::new()).await.unwrap_err();
+        let e = on(&user, true, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("needs an administrator"), "{e}");
         let e = off(p, &user, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("needs an administrator"), "{e}");
         node.down.set(true);
         let mut out = Vec::new();
-        let e = on(p, &sys, true, call, &mut out).await.unwrap_err();
+        let e = on(&sys, true, call, &mut out).await.unwrap_err();
         assert_eq!(e, NEEDS_THE_NODE);
         assert!(String::from_utf8(out).unwrap().is_empty());
         node.down.set(false);
         // A wrong password leaves the switch off and keeps nothing.
         sys.types("wrong");
-        let e = on(p, &sys, true, call, &mut Vec::new()).await.unwrap_err();
+        let e = on(&sys, true, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("password of bob is wrong"), "{e}");
         assert!(!file.exists());
         assert_eq!(sudo_of(p), Sudo::Off);
@@ -430,7 +421,7 @@ mod tests {
         // The right one: the node has it, keeps it sealed and is on now.
         sys.types("bob's");
         let mut out = Vec::new();
-        on(p, &sys, true, call, &mut out).await.unwrap();
+        on(&sys, true, call, &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("Password of bob"), "{out}");
         assert!(out.contains("sudo: on"), "{out}");
@@ -502,12 +493,8 @@ mod tests {
             ("dave", Some("dave is still in the group Backup Operators")),
             ("alice", None),
         ] {
-            crate::cli::edit(p, |c| {
-                c.machine.user = Some(who.into());
-                Ok(())
-            })
-            .await
-            .unwrap();
+            let uid = sys.account(who).unwrap().unwrap().uid;
+            sys.put_owner(&format!("S-1-5-21-1-2-3-{uid}")).unwrap();
             let mut out = Vec::new();
             off(p, &sys, call, &mut out).await.unwrap();
             let out = String::from_utf8(out).unwrap();

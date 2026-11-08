@@ -207,7 +207,7 @@ impl Ctl {
                         r.run(&["config", "get", "machine.secret_storage"]),
                         r.run(&["proxy"]),
                         r.run(&["relay"]),
-                        r.run(&["config", "get", "machine.user"]),
+                        r.run(&["status"]),
                     ),
                     (
                         r.run(&["config", "get", "limits"]),
@@ -251,10 +251,11 @@ impl Ctl {
                 }
                 let keyring = storage.is_ok_and(|v| v["value"] == "keyring");
                 let all = proxy.and_then(|p| Ok((p, relay?)));
-                // Not set: no account, and the node runs no command.
+                // The owner, whose commands run with the password the
+                // install stored (Windows); none before an install.
                 let account = account
                     .ok()
-                    .and_then(|v| v["value"].as_str().map(str::to_string))
+                    .and_then(|v| v["owner"].as_str().map(str::to_string))
                     .unwrap_or_default();
                 c.with_prefs(|p| {
                     p.set_name(name.into());
@@ -876,8 +877,8 @@ impl Ctl {
         });
     }
 
-    /// `install` again with the account's new password on stdin: on
-    /// Windows the service starts commands with it.
+    /// `install` again with the owner's new password on stdin: on Windows
+    /// the service starts the commands that run as the owner with it.
     fn account_password_save(self: &Rc<Self>) {
         let Some(password) = self.with_prefs(|p| p.get_account_password().to_string()) else {
             return;
@@ -885,7 +886,7 @@ impl Ctl {
         if password.is_empty() {
             return;
         }
-        // No account yet: install takes the user of the app, as at install.
+        // No owner yet: install takes the user of the app, as at install.
         let account = self
             .with_prefs(|p| p.get_account().to_string())
             .filter(|a| !a.is_empty())
@@ -911,11 +912,11 @@ impl Ctl {
             match answer {
                 Ok(v) => {
                     let (_, warnings) = super::install::steps(&v);
-                    // install says a password that does not log the account
+                    // install says a password that does not log the owner
                     // on as a warning, and goes on without it.
                     if let Some(no) = warnings
                         .iter()
-                        .find(|w| w.starts_with("no account for commands"))
+                        .find(|w| w.starts_with(nerve_node::account::NO_COMMANDS_AS_YOU))
                     {
                         c.with_prefs(|p| p.set_account_error(no.as_str().into()));
                     } else if warnings.is_empty() {

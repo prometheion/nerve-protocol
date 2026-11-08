@@ -3,9 +3,11 @@
 //! `nerve-node` runs `nerve-node run` as a local account of its own, `nerve`,
 //! which with SYSTEM and the administrators alone may open the node's config,
 //! keys and state (a DACL of their own, inherited by nothing above). The
-//! commands of a center run as the account that ran `install`
-//! ([`crate::win_user`]); its password is asked once and stored with DPAPI
-//! in the config folder ([`SECRET_FILE`]).
+//! commands of a center run as the command account `nerve-run`
+//! ([`crate::account::RUN_USER`]), which `install` makes with a random
+//! password stored with DPAPI ([`RUN_SECRET_FILE`]); those that run as the
+//! owner, the account that ran `install`, with the owner's password, asked
+//! once and stored the same way ([`SECRET_FILE`]) ([`crate::win_user`]).
 //!
 //! What these commands do to the machine beyond the node's files (accounts,
 //! the service control manager, DPAPI, a logon) goes through [`WinSystem`],
@@ -15,10 +17,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nerve_policy::audit::AuditLog;
 use nerve_policy::config::SecretStorage;
-use nerve_policy::settings::SettingsStore;
 
+use crate::account::{RUN_MARK, RUN_USER};
 use crate::paths::NodePaths;
 use crate::service::{
     Account, Layout, ServiceAction, ServiceState, Steps, USER, USER_MARK, asset_name, audit,
@@ -31,11 +32,32 @@ pub const SERVICE_NAME: &str = "nerve-node";
 /// installed: the app is the only way to the node on Windows.
 pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve-node-desktop file";
 /// What puts back what the install made: the install again, which the app
-/// runs when the password of the account commands run as is saved.
-pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save the password under Settings › General › Account for commands, which installs the node again";
-/// The file in the config folder that holds the password of the account
-/// the commands run as, encrypted with DPAPI.
+/// runs when the owner's password is saved.
+pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save your password under Settings › General › Account for commands, which installs the node again";
+/// The file in the config folder that holds the owner's password, for the
+/// commands that run as the owner, encrypted with DPAPI.
 pub const SECRET_FILE: &str = "command-account.dpapi";
+/// The file in the config folder that holds the password of the command
+/// account [`crate::account::RUN_USER`], encrypted with DPAPI.
+pub const RUN_SECRET_FILE: &str = "run-account.dpapi";
+/// The service that keeps the command account's profile loaded. Windows
+/// starts a command in an AppContainer only where the account's registry is
+/// loaded, which a service that is no administrator cannot do; the service
+/// manager loads it for a service of that account. It runs the node's
+/// program, does nothing, and the node's service depends on it.
+pub const PROFILE_SERVICE: &str = "nerve-run-profile";
+
+/// The two local accounts `install` makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `nerve`, the service's: it may log on as a service, and start a
+    /// process with another account's token; no other logon.
+    Node,
+    /// `nerve-run`, the commands': it may log on as a batch job (the
+    /// commands) and as a service ([`PROFILE_SERVICE`]); no other logon.
+    /// Not an administrator.
+    Commands,
+}
 
 /// What `install`, `update` and `uninstall` do to a Windows machine besides
 /// writing the node's files.
@@ -43,12 +65,36 @@ pub trait WinSystem {
     /// Whether this process runs as an administrator, elevated.
     fn is_admin(&self) -> bool;
     fn account(&self, name: &str) -> Result<Option<Account>, String>;
-    /// Makes the node's local account with `password` and the comment
-    /// [`USER_MARK`]: it may log on as a service and start a process with
-    /// another account's token, and may not log on any other way.
-    fn add_account(&self, name: &str, password: &str) -> Result<(), String>;
-    /// Gives the node's account a new password, and its rights again.
-    fn reset_account(&self, name: &str, password: &str) -> Result<(), String>;
+    /// Makes one of the node's local accounts with `password`, the comment
+    /// of its `kind` ([`USER_MARK`], [`crate::account::RUN_MARK`]) and the
+    /// rights [`Kind`] names.
+    fn add_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String>;
+    /// Gives one of the node's accounts a new password, and its rights again.
+    fn reset_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String>;
+    /// Makes the profile of `name` (a logon with `password` that loads it),
+    /// where it has none; its folder.
+    fn make_profile(&self, name: &str, password: &str) -> Result<PathBuf, String>;
+    /// Registers [`PROFILE_SERVICE`] as `name` with `password`, or changes
+    /// it, and starts it.
+    fn put_profile_service(
+        &self,
+        layout: &Layout,
+        name: &str,
+        password: &str,
+    ) -> Result<(), String>;
+    /// Stops and removes [`PROFILE_SERVICE`]; `false` when it was not there.
+    fn delete_profile_service(&self) -> Result<bool, String>;
+    /// Logs `name` on with `password` as a batch job, as its commands start;
+    /// then the first of what it must not open that it can: the node's
+    /// folders `own` or what is below, and the registry of the owner `owner`
+    /// (a SID) while it is loaded.
+    fn run_reach(
+        &self,
+        name: &str,
+        password: &str,
+        own: &[PathBuf],
+        owner: Option<&str>,
+    ) -> Result<Option<String>, String>;
     /// Removes the account, its rights and its profile; what Windows
     /// keeps of the profile until it restarts, said.
     fn remove_account(&self, name: &str) -> Result<Option<String>, String>;
@@ -114,44 +160,47 @@ pub trait WinSystem {
         paths: &crate::paths::NodePaths,
         node_ids: &[String],
     ) -> crate::grants::Synced;
-    /// The account that installs, as an owner of the node (crate::owner):
+    /// The account that installs, the owner of the node (crate::owner):
     /// its SID and its name. The desktop app's user when its broker names
     /// one, else the account this runs as.
     fn owner_sid(&self) -> Option<(String, String)>;
-    /// The owners' SIDs the service's registry key lists.
-    fn owners(&self) -> Result<Vec<String>, String>;
-    /// Writes `sids` as the owners, and gives them the right to start,
-    /// stop and ask the service ([`service_dacl`]).
-    fn put_owners(&self, sids: &[String]) -> Result<(), String>;
+    /// The owner the service's registry key names: its SID and its name.
+    fn owner(&self) -> Result<Option<(String, String)>, String>;
+    /// Writes `sid` as the owner, and gives it the right to start, stop and
+    /// ask the service ([`service_dacl`]).
+    fn put_owner(&self, sid: &str) -> Result<(), String>;
 }
 
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
 /// the administrators, read for the interactive and service users), and to
-/// each owner the right to start, stop and ask it, nothing more.
-pub fn service_dacl(owners: &[String]) -> String {
+/// the owner the right to start, stop and ask it, nothing more.
+pub fn service_dacl(owner: Option<&str>) -> String {
     let mut s = String::from(
         "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)",
     );
-    for o in owners {
+    if let Some(o) = owner {
         s.push_str(&format!("(A;;CCLCSWRPWPLOCRRC;;;{o})"));
     }
     s
 }
 
-/// The owners (crate::owner): the account that installs joins them.
-fn put_owners(sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
-    let mut owners = sys.owners()?;
+/// The owner (crate::owner): the account that installs. One that installs
+/// over another's node takes its place, as `install --owner` does on Linux.
+fn put_owner(sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
     let Some((sid, name)) = sys.owner_sid() else {
         steps.did("no owner besides the administrators");
         return Ok(());
     };
-    if !owners.contains(&sid) {
-        owners.push(sid);
+    let before = sys.owner()?;
+    sys.put_owner(&sid)?;
+    match before {
+        Some((old, was)) if old != sid => steps.did(format!(
+            "{name} is the owner of the node now, in place of {was}: the app changes its settings, and starts and stops its service, without administrator rights"
+        )),
+        _ => steps.did(format!(
+            "{name} is the owner of the node: the app changes its settings, and starts and stops its service, without administrator rights"
+        )),
     }
-    sys.put_owners(&owners)?;
-    steps.did(format!(
-        "{name} is an owner of the node: the app changes its settings, and starts and stops its service, without administrator rights"
-    ));
     Ok(())
 }
 
@@ -284,11 +333,10 @@ pub(crate) fn needs_admin(what: &str) -> String {
     format!("{what} needs an administrator: in the app, {place} asks Windows for the rights")
 }
 
-/// `install`: the account, the folders, the account of the commands and its
-/// password, the program, the service, in that order. `invoker` is the
-/// account that ran install; it becomes the account of the commands unless
-/// one is chosen already. Running it again puts back what is missing and
-/// restarts the service.
+/// `install`: the node's account, the folders, the command account, the
+/// owner's password, the program, the services, in that order. `invoker` is
+/// the account that ran install, the owner. Running it again puts back what
+/// is missing and restarts the service.
 pub fn install(
     layout: &Layout,
     sys: &dyn WinSystem,
@@ -338,7 +386,7 @@ fn install_steps(
     let password = new_password();
     match sys.account(USER)? {
         Some(a) if a.comment == USER_MARK => {
-            sys.reset_account(USER, &password)?;
+            sys.reset_account(USER, &password, Kind::Node)?;
             steps.did(format!(
                 "the user {USER} is there already; it has a new password"
             ));
@@ -349,7 +397,7 @@ fn install_steps(
             ));
         }
         None => {
-            sys.add_account(USER, &password)?;
+            sys.add_account(USER, &password, Kind::Node)?;
             sys.account(USER)?
                 .ok_or_else(|| format!("Windows made no user {USER}"))?;
             steps.did(format!(
@@ -369,7 +417,8 @@ fn install_steps(
         layout.paths.config_dir.display(),
         layout.paths.state_dir.display()
     ));
-    command_account(layout, sys, invoker, steps);
+    let run_password = run_account(layout, sys, steps)?;
+    owner_account(layout, sys, invoker, steps);
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -404,6 +453,10 @@ fn install_steps(
             }
         }
     }
+    sys.put_profile_service(layout, RUN_USER, &run_password)?;
+    steps.did(format!(
+        "registered and started the service {PROFILE_SERVICE}, which runs as {RUN_USER} and keeps its profile loaded, where the commands' AppContainers keep theirs"
+    ));
     sys.put_service(layout, &password)?;
     steps.did(format!(
         "registered the service {SERVICE_NAME}, which runs as {USER} and starts with the machine"
@@ -414,27 +467,69 @@ fn install_steps(
         crate::eventlog::SOURCE,
         layout.paths.log_file().display()
     ));
-    put_owners(sys, steps)?;
+    put_owner(sys, steps)?;
     sys.start()?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
     Ok(())
 }
 
-/// The account of the commands at install: the one chosen before, else
-/// `invoker`, with its password. A stored password that still logs it on is
-/// kept; else it is asked for. What fails here is said, and the node then
-/// runs no command until install runs again.
-fn command_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mut Steps) {
+/// The command account `nerve-run` at install: made, or given a new
+/// password when the install made it before, with that password stored with
+/// DPAPI ([`RUN_SECRET_FILE`]) and its profile made. One of that name that
+/// the install did not make, or that can open the node's folders or the
+/// owner's registry, is refused. Its password, for [`PROFILE_SERVICE`].
+fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<String, String> {
+    let password = new_password();
+    match sys.account(RUN_USER)? {
+        Some(a) if a.comment == RUN_MARK => {
+            sys.reset_account(RUN_USER, &password, Kind::Commands)?;
+            steps.did(format!(
+                "the user {RUN_USER} is there already; it has a new password"
+            ));
+        }
+        Some(_) => {
+            return Err(format!(
+                "a user {RUN_USER} exists already, and Nerve's install did not make it; the commands need a user of their own"
+            ));
+        }
+        None => {
+            sys.add_account(RUN_USER, &password, Kind::Commands)?;
+            sys.account(RUN_USER)?
+                .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
+            steps.did(format!(
+                "made the user {RUN_USER}, which commands from centers run as: no administrator, and it may log on only as a batch job and as a service"
+            ));
+        }
+    }
+    let file = layout.paths.config_dir.join(RUN_SECRET_FILE);
+    write_file(&file, &sys.protect(&secret(RUN_USER, &password))?, 0o600)?;
+    let profile = sys.make_profile(RUN_USER, &password)?;
+    steps.did(format!(
+        "{RUN_USER}'s password is stored with DPAPI, and its profile is at {}",
+        profile.display()
+    ));
+    let owner = sys.owner_sid().map(|(sid, _)| sid);
+    if let Some(at) = sys.run_reach(RUN_USER, &password, &layout.paths.own(), owner.as_deref())? {
+        return Err(format!(
+            "{RUN_USER} could open {at}, which no command may: check the permissions there, then install again"
+        ));
+    }
+    steps.did(format!(
+        "{RUN_USER} cannot open the node's folders nor your registry"
+    ));
+    Ok(password)
+}
+
+/// The owner's password at install, for the commands that run as the owner
+/// (user mode, allowlist mode as the owner, sudo): the account that ran
+/// `install`, `invoker`. A stored password that still logs it on is kept;
+/// else it is asked for. What fails here is said, and those commands then
+/// do not run until install runs again.
+fn owner_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mut Steps) {
     let p = &layout.paths;
     let r = (|| {
-        let mut store = SettingsStore::open(
-            p.config_file(),
-            p.config_key(),
-            AuditLog::new(p.audit_log()),
-        )?;
-        let chosen = store.config().machine.user.clone();
-        let a = usable_account(sys, chosen.as_deref().unwrap_or(invoker))?;
+        let a = usable_account(sys, invoker)?;
         let own = p.own();
         let file = p.config_dir.join(SECRET_FILE);
         let stored = std::fs::read(&file)
@@ -447,10 +542,7 @@ fn command_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &
             Some(Ok(reach)) => (reach, None),
             _ => {
                 let pw = sys.read_password(
-                    &format!(
-                        "Password of {}, the account commands from centers run as: ",
-                        a.name
-                    ),
+                    &format!("Password of {}, for the commands that run as you: ", a.name),
                     steps.out,
                 )?;
                 let reach = sys.check_logon(&a.name, &pw, &own)?;
@@ -459,7 +551,7 @@ fn command_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &
         };
         if let Some(at) = reach {
             return Err(format!(
-                "{} could open {}, where the node keeps its keys; choose another account",
+                "{} could open {}, where the node keeps its keys",
                 a.name,
                 at.display()
             ));
@@ -467,41 +559,32 @@ fn command_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &
         if let Some(pw) = &asked {
             write_file(&file, &sys.protect(&secret(&a.name, pw))?, 0o600)?;
         }
-        if chosen.is_none() {
-            store
-                .update(|c| {
-                    c.machine.user = Some(a.name.clone());
-                    Ok(())
-                })
-                .map_err(|e| e.to_string())?;
-        }
         let groups = sys.admin_groups(&a);
         if !groups.is_empty() {
             let _ = writeln!(steps.out, "{}", admin_warning(&a.name, &groups));
         }
-        let who = if chosen.is_some() {
-            "as chosen before"
-        } else {
-            "who ran install"
-        };
         let password = if asked.is_some() {
-            "its password is stored with DPAPI"
+            "your password is stored with DPAPI"
         } else {
-            "its stored password still works"
+            "your stored password still works"
         };
-        Ok::<_, String>(format!("commands run as {}, {who}; {password}", a.name))
+        Ok::<_, String>(format!(
+            "user mode, allowlist mode as you and sudo run commands as {}, who ran install; {password}",
+            a.name
+        ))
     })();
     match r {
         Ok(step) => steps.did(step),
         Err(e) => steps.did(format!(
-            "no account for commands: {e}; {}",
+            "{}: {e}; {}",
+            crate::account::NO_COMMANDS_AS_YOU,
             crate::account::NO_ACCOUNT_INSTALL
         )),
     }
 }
 
-/// `name` as the account of the commands, or why not: it must be a local
-/// account of this machine and not the node's own.
+/// `name` as the owner whose commands run as it, or why not: it must be a
+/// local account of this machine and none of the node's own.
 fn usable_account(sys: &dyn WinSystem, name: &str) -> Result<Account, String> {
     if !nerve_policy::config::valid_account_name(name) {
         return Err(format!("{name:?} is not an account name"));
@@ -511,17 +594,22 @@ fn usable_account(sys: &dyn WinSystem, name: &str) -> Result<Account, String> {
         .ok_or_else(|| format!("there is no local account {name}"))?;
     if a.name.eq_ignore_ascii_case(USER) || a.comment == USER_MARK {
         return Err(format!(
-            "{name} is the node's own user, which owns its keys; choose another account"
+            "{name} is the node's own user, which owns its keys; install as yourself"
+        ));
+    }
+    if a.name.eq_ignore_ascii_case(RUN_USER) || a.comment == RUN_MARK {
+        return Err(format!(
+            "{name} is the commands' own user; install as yourself"
         ));
     }
     Ok(a)
 }
 
-/// The warning for an account of the commands in a group that can read
-/// every file.
+/// The warning for an owner in a group that can read every file: what runs
+/// as the owner can take that group's rights.
 pub fn admin_warning(name: &str, groups: &[String]) -> String {
     format!(
-        "Warning: {name} is in the group {}. Its commands run without the group's rights (UAC), but UAC is no security boundary: a command from a center can get them back and read the node's keys. Choose an account outside it, or you are responsible for what commands do.",
+        "Warning: {name} is in the group {}. Commands that run as you (user mode, allowlist mode as you) run without the group's rights (UAC), but UAC is no security boundary: such a command from a center can get them back and read the node's keys. Keep centers in folder mode or allowlist mode, or you are responsible for what commands do.",
         groups.join(", ")
     )
 }
@@ -567,6 +655,9 @@ fn uninstall_steps(
         sys.stop()?;
         sys.delete_service()?;
         steps.did(format!("stopped and removed the service {SERVICE_NAME}"));
+    }
+    if sys.delete_profile_service()? {
+        steps.did(format!("stopped and removed the service {PROFILE_SERVICE}"));
     }
     // Folder mode put grants for the commands' AppContainers on the
     // owner's folders (crate::grants); none stays behind the node. Their
@@ -616,21 +707,30 @@ fn uninstall_steps(
             layout.paths.state_dir.display()
         ));
     }
-    match sys.account(USER)? {
-        Some(a) if a.comment == USER_MARK => match sys.remove_account(USER)? {
-            None => steps.did(format!("removed the user {USER} and its profile")),
-            Some(left) => {
-                steps.did(format!("removed the user {USER}"));
-                steps.did(left);
+    for (name, mark, with) in [
+        (USER, USER_MARK, "its profile"),
+        (
+            RUN_USER,
+            RUN_MARK,
+            "its profile, with those of the commands' AppContainers",
+        ),
+    ] {
+        match sys.account(name)? {
+            Some(a) if a.comment == mark => match sys.remove_account(name)? {
+                None => steps.did(format!("removed the user {name} and {with}")),
+                Some(left) => {
+                    steps.did(format!("removed the user {name}"));
+                    steps.did(left);
+                }
+            },
+            Some(_) => {
+                let _ = writeln!(
+                    steps.out,
+                    "left the user {name} as it is: Nerve's install did not make it"
+                );
             }
-        },
-        Some(_) => {
-            let _ = writeln!(
-                steps.out,
-                "left the user {USER} as it is: Nerve's install did not make it"
-            );
+            None => {}
         }
-        None => {}
     }
     uninstall_parts(layout, steps)?;
     for left in [staged(&layout.bin), previous(&layout.bin)] {
@@ -821,6 +921,8 @@ pub fn control(
 pub(crate) mod tests {
     use super::*;
     use crate::paths::NodePaths;
+    use nerve_policy::audit::AuditLog;
+    use nerve_policy::settings::SettingsStore;
     use std::cell::{Cell, RefCell};
 
     /// A Windows machine in a temporary folder: accounts, the service, the
@@ -862,8 +964,12 @@ pub(crate) mod tests {
         running: RefCell<Vec<PathBuf>>,
         /// The account that installs, by SID and name.
         pub(crate) installer: RefCell<Option<(String, String)>>,
-        /// The owners the service's key lists.
-        pub(crate) owner_list: RefCell<Vec<String>>,
+        /// The owner's SID the service's key names.
+        pub(crate) owner_of: RefCell<Option<String>>,
+        /// Whether the profile service is registered, and runs.
+        pub(crate) profile_service: Cell<Option<bool>>,
+        /// Whether the command account can read the owner's registry.
+        pub(crate) hive_open: Cell<bool>,
     }
 
     impl Fake {
@@ -891,7 +997,9 @@ pub(crate) mod tests {
                 held: RefCell::new(Vec::new()),
                 running: RefCell::new(Vec::new()),
                 installer: RefCell::new(Some(("S-1-5-21-1-2-3-1001".into(), "alice".into()))),
-                owner_list: RefCell::new(Vec::new()),
+                owner_of: RefCell::new(None),
+                profile_service: Cell::new(None),
+                hive_open: Cell::new(false),
             }
         }
 
@@ -905,6 +1013,26 @@ pub(crate) mod tests {
 
         pub(crate) fn types(&self, password: &str) {
             self.typed.borrow_mut().push(password.into());
+        }
+
+        /// `name` logs on with `password` from now on.
+        fn knows(&self, name: &str, password: &str) {
+            let mut p = self.passwords.borrow_mut();
+            p.retain(|(n, _)| n != name);
+            p.push((name.into(), password.into()));
+        }
+
+        fn logs_on(&self, name: &str, password: &str) -> Result<(), String> {
+            if self
+                .passwords
+                .borrow()
+                .iter()
+                .any(|(n, p)| n == name && p == password)
+            {
+                Ok(())
+            } else {
+                Err(format!("the password of {name} is wrong"))
+            }
         }
     }
 
@@ -931,17 +1059,57 @@ pub(crate) mod tests {
                 .find(|a| a.name.eq_ignore_ascii_case(name))
                 .cloned())
         }
-        fn add_account(&self, name: &str, password: &str) -> Result<(), String> {
+        fn add_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String> {
             assert!(password.len() >= 16);
             self.call(format!("add {name}"));
-            self.accounts
-                .borrow_mut()
-                .push(account(name, 1010, USER_MARK));
+            let (uid, mark) = match kind {
+                Kind::Node => (1010, USER_MARK),
+                Kind::Commands => (1011, RUN_MARK),
+            };
+            self.accounts.borrow_mut().push(account(name, uid, mark));
+            self.knows(name, password);
             Ok(())
         }
-        fn reset_account(&self, name: &str, _: &str) -> Result<(), String> {
+        fn reset_account(&self, name: &str, password: &str, _: Kind) -> Result<(), String> {
             self.call(format!("reset {name}"));
+            self.knows(name, password);
             Ok(())
+        }
+        fn make_profile(&self, name: &str, password: &str) -> Result<PathBuf, String> {
+            self.logs_on(name, password)?;
+            self.call(format!("profile {name}"));
+            Ok(format!("C:\\Users\\{name}").into())
+        }
+        fn put_profile_service(
+            &self,
+            layout: &Layout,
+            name: &str,
+            password: &str,
+        ) -> Result<(), String> {
+            self.logs_on(name, password)?;
+            self.call(format!("profile service {}", layout.bin.display()));
+            self.profile_service.set(Some(true));
+            Ok(())
+        }
+        fn delete_profile_service(&self) -> Result<bool, String> {
+            self.call("no profile service");
+            Ok(self.profile_service.take().is_some())
+        }
+        fn run_reach(
+            &self,
+            name: &str,
+            password: &str,
+            own: &[PathBuf],
+            owner: Option<&str>,
+        ) -> Result<Option<String>, String> {
+            self.logs_on(name, password)?;
+            self.call(format!("reach {name}"));
+            if self.reaching.borrow().contains(&name.to_string()) {
+                return Ok(Some(own[0].display().to_string()));
+            }
+            Ok(owner
+                .filter(|_| self.hive_open.get())
+                .map(|o| format!("HKEY_USERS\\{o}")))
         }
         fn remove_account(&self, name: &str) -> Result<Option<String>, String> {
             self.call(format!("remove {name}"));
@@ -993,7 +1161,7 @@ pub(crate) mod tests {
             self.call("delete");
             self.service.set(None);
             // The service's key and DACL go with it.
-            self.owner_list.borrow_mut().clear();
+            self.owner_of.borrow_mut().take();
             Ok(())
         }
         fn put_event_source(&self, layout: &Layout) -> Result<(), String> {
@@ -1091,17 +1259,26 @@ pub(crate) mod tests {
             self.installer.borrow().clone()
         }
 
-        fn owners(&self) -> Result<Vec<String>, String> {
-            // They go with the service.
+        /// The SIDs here end in the account's number.
+        fn owner(&self) -> Result<Option<(String, String)>, String> {
+            // It goes with the service.
             if self.service.get().is_none() {
-                return Ok(Vec::new());
+                return Ok(None);
             }
-            Ok(self.owner_list.borrow().clone())
+            Ok(self.owner_of.borrow().clone().map(|sid| {
+                let name = self
+                    .accounts
+                    .borrow()
+                    .iter()
+                    .find(|a| sid.ends_with(&format!("-{}", a.uid)))
+                    .map_or_else(|| sid.clone(), |a| a.name.clone());
+                (sid, name)
+            }))
         }
 
-        fn put_owners(&self, sids: &[String]) -> Result<(), String> {
-            self.call(format!("owners {}", sids.join(",")));
-            *self.owner_list.borrow_mut() = sids.to_vec();
+        fn put_owner(&self, sid: &str) -> Result<(), String> {
+            self.call(format!("owner {sid}"));
+            *self.owner_of.borrow_mut() = Some(sid.into());
             Ok(())
         }
 
@@ -1190,11 +1367,10 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn user(l: &Layout) -> Option<String> {
-        SettingsStore::peek(&l.paths.config_file(), &l.paths.config_key())
-            .unwrap()
-            .machine
-            .user
+    /// The name and password `file` in the config folder holds.
+    fn stored(sys: &Fake, l: &Layout, file: &str) -> Option<(String, String)> {
+        let blob = std::fs::read(l.paths.config_dir.join(file)).ok()?;
+        parse_secret(&sys.unprotect(&blob).ok()?)
     }
 
     /// The node's Event Log entries come from a source of the service's
@@ -1272,12 +1448,26 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("made the user nerve"), "{out}");
+        assert!(out.contains("made the user nerve,"), "{out}");
         assert!(out.contains("Password of alice"), "{out}");
         assert!(
             out.contains(
-                "commands run as alice, who ran install; its password is stored with DPAPI"
+                "user mode, allowlist mode as you and sudo run commands as alice, who ran install; your password is stored with DPAPI"
             ),
+            "{out}"
+        );
+        // The command account: made, its password stored, its profile
+        // made and kept loaded by a service of its own, and checked.
+        assert!(
+            out.contains("made the user nerve-run, which commands from centers run as"),
+            "{out}"
+        );
+        assert!(
+            out.contains("nerve-run cannot open the node's folders nor your registry"),
+            "{out}"
+        );
+        assert!(
+            out.contains("registered and started the service nerve-run-profile"),
             "{out}"
         );
         assert!(!out.contains("Warning"), "{out}");
@@ -1285,21 +1475,39 @@ pub(crate) mod tests {
             out.contains("Next: open Nerve; its first-run steps"),
             "{out}"
         );
-        assert_eq!(user(&l).as_deref(), Some("alice"));
         assert_eq!(
             sys.calls(),
             [
                 "add nerve".to_string(),
+                "add nerve-run".into(),
+                "profile nerve-run".into(),
+                "reach nerve-run".into(),
                 "logon alice".into(),
+                format!("profile service {}", l.bin.display()),
                 format!("put {}", l.bin.display()),
                 "event source".into(),
-                "owners S-1-5-21-1-2-3-1001".into(),
+                "owner S-1-5-21-1-2-3-1001".into(),
                 "start".into(),
             ]
         );
-        // The one who installed is an owner: the service lets that SID
+        let run = sys.account(RUN_USER).unwrap().unwrap();
+        assert_eq!(run.comment, RUN_MARK);
+        let (name, run_password) = stored(&sys, &l, RUN_SECRET_FILE).unwrap();
+        assert_eq!(name, RUN_USER);
+        assert!(run_password.len() >= 32);
+        let blob = std::fs::read(l.paths.config_dir.join(RUN_SECRET_FILE)).unwrap();
+        assert!(
+            !blob
+                .windows(run_password.len())
+                .any(|w| w == run_password.as_bytes())
+        );
+        // The one who installed is the owner: the service lets that SID
         // start and stop it.
-        assert!(out.contains("alice is an owner of the node"), "{out}");
+        assert!(out.contains("alice is the owner of the node:"), "{out}");
+        assert_eq!(
+            sys.owner().unwrap(),
+            Some(("S-1-5-21-1-2-3-1001".into(), "alice".into()))
+        );
         // The Event Log takes the text of the node's entries from the
         // installed program.
         assert_eq!(*sys.event_source.borrow(), Some(l.bin.clone()));
@@ -1327,16 +1535,16 @@ pub(crate) mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0]["event"], "install");
         assert!(a[0].get("error").is_none());
-        assert_eq!(a[0]["steps"].as_array().unwrap().len(), 8, "{}", a[0]);
-        // Again, as another administrator: the account is reset, the
-        // service stopped and started, the account of the commands and its
-        // stored password kept without a question.
+        assert_eq!(a[0]["steps"].as_array().unwrap().len(), 12, "{}", a[0]);
+        // Again: the accounts get new passwords, the service is stopped and
+        // started, and the owner's stored password is kept without a
+        // question.
         std::fs::write(&exe, "nerve-node 1.0.1\n").unwrap();
         // What an uninstall that ran from the program moved aside goes.
         let aside = l.bin.with_file_name("nerve-node.x1y2.del");
         std::fs::write(&aside, "old").unwrap();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "bob", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", &mut out).unwrap();
         assert!(!aside.exists());
         // The old program is removed, or moved aside where the Event Log
         // holds it, before the new one takes its place: written over, a
@@ -1349,15 +1557,39 @@ pub(crate) mod tests {
         assert!(out.contains("stopped the service nerve-node"), "{out}");
         assert!(out.contains("the user nerve is there already"), "{out}");
         assert!(
-            out.contains(
-                "commands run as alice, as chosen before; its stored password still works"
-            ),
+            out.contains("the user nerve-run is there already; it has a new password"),
             "{out}"
         );
+        assert!(out.contains("your stored password still works"), "{out}");
         assert!(!out.contains("Password of"), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 1.0.1\n");
         assert!(sys.calls().contains(&"reset nerve".to_string()));
+        assert!(sys.calls().contains(&"reset nerve-run".to_string()));
+        let (_, again) = stored(&sys, &l, RUN_SECRET_FILE).unwrap();
+        assert_ne!(again, run_password);
         assert_eq!(audit_events(&l).len(), 2);
+        // Another account that installs over it is the owner from then on:
+        // one owner, as on Linux.
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()));
+        sys.passwords
+            .borrow_mut()
+            .push(("bob".into(), "bob's".into()));
+        sys.types("bob's");
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, "bob", &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("bob is the owner of the node now, in place of alice"),
+            "{out}"
+        );
+        assert_eq!(
+            sys.owner().unwrap(),
+            Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()))
+        );
+        assert_eq!(
+            stored(&sys, &l, SECRET_FILE),
+            Some(("bob".into(), "bob's".into()))
+        );
     }
 
     #[test]
@@ -1394,6 +1626,7 @@ pub(crate) mod tests {
             ("bob", "wrong", "the password of bob is wrong"),
             ("ghost", "", "there is no local account ghost"),
             ("nerve", "", "node's own user"),
+            ("nerve-run", "", "the commands' own user"),
             ("carol", "carol's", "carol could open"),
             ("a:b", "", "not an account name"),
         ] {
@@ -1404,10 +1637,11 @@ pub(crate) mod tests {
             let mut out = Vec::new();
             install(&l, &sys, &exe, who, &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
-            assert!(out.contains("no account for commands"), "{who}: {out}");
+            assert!(out.contains("no commands as you"), "{who}: {out}");
             assert!(out.contains(why), "{who}: {out}");
-            assert_eq!(user(&l), None, "{who}");
             assert!(!l.paths.config_dir.join(SECRET_FILE).exists(), "{who}");
+            // The command account is there all the same.
+            assert!(l.paths.config_dir.join(RUN_SECRET_FILE).exists(), "{who}");
         }
         // An administrator is taken, with a warning.
         let l = layout(&d.path().join("admin"));
@@ -1420,7 +1654,54 @@ pub(crate) mod tests {
                 && out.contains("UAC is no security boundary"),
             "{out}"
         );
-        assert_eq!(user(&l).as_deref(), Some("bob"));
+        assert_eq!(
+            stored(&sys, &l, SECRET_FILE),
+            Some(("bob".into(), "bob's".into()))
+        );
+    }
+
+    /// The command account is the install's own: one of that name it did
+    /// not make is refused, and so is one that can open the node's folders
+    /// or the owner's registry. Then no service is registered.
+    #[test]
+    fn install_refuses_a_command_account_that_is_not_its_own_or_reaches_too_far() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        let foreign = Fake::new();
+        foreign
+            .accounts
+            .borrow_mut()
+            .push(account(RUN_USER, 1011, "someone"));
+        let reaching = Fake::new();
+        reaching.reaching.borrow_mut().push(RUN_USER.into());
+        let hive = Fake::new();
+        hive.hive_open.set(true);
+        for (sys, why) in [
+            (
+                &foreign,
+                "a user nerve-run exists already, and Nerve's install did not make it",
+            ),
+            (&reaching, "nerve-run could open"),
+            (
+                &hive,
+                "nerve-run could open HKEY_USERS\\S-1-5-21-1-2-3-1001",
+            ),
+        ] {
+            let l = layout(&d.path().join(why.len().to_string()));
+            sys.types("alice's");
+            let e = install(&l, sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+            assert!(e.contains(why), "{e}");
+            assert!(!sys.calls().iter().any(|c| c.starts_with("put ")), "{e}");
+            assert_eq!(sys.profile_service.get(), None, "{e}");
+            assert_eq!(sys.owner().unwrap(), None, "{e}");
+        }
+        // The foreign account is left as it was.
+        assert_eq!(
+            foreign.account(RUN_USER).unwrap().unwrap().comment,
+            "someone"
+        );
     }
 
     #[test]
@@ -1479,9 +1760,11 @@ pub(crate) mod tests {
             sys.calls().ends_with(&[
                 "stop".into(),
                 "delete".into(),
+                "no profile service".into(),
                 format!("remove grants  of {}", l.paths.state_dir.display()),
                 "no event source".into(),
-                "remove nerve".into()
+                "remove nerve".into(),
+                "remove nerve-run".into(),
             ]),
             "{:?}",
             sys.calls()
@@ -1514,6 +1797,18 @@ pub(crate) mod tests {
         );
         assert!(out.contains("removed the program"), "{out}");
         assert!(out.contains("removed the stored sudo password"), "{out}");
+        // The command account goes with its profile service and its
+        // profile, which holds those of the commands' AppContainers.
+        assert!(sys.account(RUN_USER).unwrap().is_none());
+        assert_eq!(sys.profile_service.get(), None);
+        assert!(
+            out.contains("stopped and removed the service nerve-run-profile"),
+            "{out}"
+        );
+        assert!(
+            out.contains("removed the user nerve-run and its profile, with those of the commands' AppContainers"),
+            "{out}"
+        );
     }
 
     /// Folder mode's grants come off at uninstall, those of every center,
@@ -1824,8 +2119,20 @@ pub(crate) mod tests {
     }
 
     /// What update must not touch: the config, a key, the stored password
-    /// and the audit log so far.
+    /// and the audit log so far. The config is made here, as the service
+    /// makes it at its first start.
     fn kept(l: &Layout) -> Vec<(PathBuf, Vec<u8>)> {
+        SettingsStore::open(
+            l.paths.config_file(),
+            l.paths.config_key(),
+            AuditLog::new(l.paths.audit_log()),
+        )
+        .unwrap()
+        .update(|c| {
+            c.node.name = Some("lab".into());
+            Ok(())
+        })
+        .unwrap();
         [
             l.paths.config_file(),
             l.paths.key_file("lab"),
@@ -1888,7 +2195,7 @@ pub(crate) mod tests {
     /// keeps what Windows gives everyone else.
     #[test]
     fn the_service_lets_its_owners_start_and_stop_it() {
-        let d = service_dacl(&["S-1-5-21-1-2-3-1001".into()]);
+        let d = service_dacl(Some("S-1-5-21-1-2-3-1001"));
         assert!(
             d.starts_with("D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"),
             "{d}"
@@ -1905,7 +2212,7 @@ pub(crate) mod tests {
                 "{right}"
             );
         }
-        assert_eq!(service_dacl(&[]).matches("(A;").count(), 4);
+        assert_eq!(service_dacl(None).matches("(A;").count(), 4);
     }
 
     #[tokio::test]

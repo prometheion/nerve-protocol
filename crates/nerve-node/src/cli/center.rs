@@ -260,9 +260,9 @@ pub(super) async fn settings(
         w(out, settings_off_text(&name));
         return Ok(());
     }
-    let root = crate::owner::is_root(crate::service::owner_of(&paths).as_deref());
-    let (cfg, _) = read_config(&paths).await?;
-    let admin = crate::owner::admin_owner(&cfg);
+    let owner = crate::service::owner_of(&paths);
+    let root = crate::owner::is_root(owner.as_deref());
+    let admin = crate::owner::admin_owner(owner.as_deref());
     if let Some(warning) = settings_grant_warning(&name, g, root, admin.as_deref()) {
         w(out, warning);
     }

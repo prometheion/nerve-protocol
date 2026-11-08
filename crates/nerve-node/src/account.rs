@@ -222,16 +222,20 @@ pub fn shared_folder(path: &str) -> bool {
 /// while the node has none.
 #[cfg(not(windows))]
 pub const NO_OWNER: &str = "this node has no owner, as `install` ran as root and not through sudo: commands of user mode, and of allowlist mode as the owner, run as the owner, so none runs; run `sudo nerve-node install` again from the owner's own account, or `nerve-node install` as root with a yes to its question (or `--owner=root --accept-root-owner`) to make root the owner";
-/// What a command of the installed node gets while it has no owner: on
-/// Windows the app's Settings take the account, with its password.
+/// What a command of the installed node gets that would run as the owner
+/// while the node has none: on Windows the owner is who installed it.
 #[cfg(windows)]
-pub const NO_OWNER: &str = "this node runs commands as its owner's account, and has none: choose it under Settings › General › Account for commands in the app (machine.user)";
+pub const NO_OWNER: &str = "this node has no owner, as whom user mode and allowlist mode as the owner run commands: install Nerve again as yourself, with its installer";
 
-/// How `install` ends the line saying that it set no account for the
-/// commands on Windows, and what a command says while its password is not
-/// stored: where the app takes it.
+/// How `install` starts the line saying that it has no password of the
+/// owner on Windows, so no command runs as the owner.
+pub const NO_COMMANDS_AS_YOU: &str = "no commands as you";
+
+/// How `install` ends that line, and what a command that would run as the
+/// owner says while the owner's password is not stored: where the app takes
+/// it.
 pub const NO_ACCOUNT_INSTALL: &str =
-    "enter its password under Settings › General › Account for commands in the app";
+    "enter your password under Settings › General › Account for commands in the app";
 
 /// The mode of `home` when other accounts may list or enter it (`o+r` or
 /// `o+x`): `nerve-run` is another account, and reads there what anyone may.
@@ -593,7 +597,7 @@ pub fn name_of(uid: u32) -> Option<String> {
 /// The account a pairing's command runs as on the node: `as_owner` for one
 /// that runs as the owner (crate::daemon::Shared::command_account), with
 /// `owner` the node's owner (on Linux the account the service unit names,
-/// on Windows `machine.user`). `None` runs it as the node's own
+/// on Windows the one its service's key names). `None` runs it as the node's own
 /// user, as a node that a person runs does with every command. The
 /// installed service (`service`: its folders or its user, however it was
 /// started) runs none as itself, since it owns the keys, and none at all
@@ -629,7 +633,9 @@ pub fn for_commands(
     let a = lookup(name)?.ok_or_else(|| {
         if as_owner {
             if cfg!(windows) {
-                format!("the owner's account {name} (machine.user) does not exist on this machine")
+                format!(
+                    "the owner's account {name}, which installed the node, does not exist on this machine; install Nerve again as yourself"
+                )
             } else {
                 format!(
                     "the owner's account {name}, which the service unit names (NERVE_NODE_OWNER), does not exist on this machine; run `sudo nerve-node install` again from the owner's own account"

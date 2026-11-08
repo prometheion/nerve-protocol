@@ -2,9 +2,9 @@
 //! conformance fake center pairs with it, turns sudo on with the password of
 //! the account the commands run as, and runs commands with and without
 //! sudo. It needs a Windows test machine: Nerve installed as a service (the
-//! app's `install`, as CI's `windows-installed` job runs it) whose account
-//! for commands (`machine.user`) is an administrator, an elevated terminal,
-//! and that account and its password in `NERVE_WIN_SUDO_ACCOUNT` and
+//! app's `install`, as CI's `windows-installed` job runs it) whose owner, the
+//! account that installed it, is an administrator, an elevated terminal, and
+//! that account and its password in `NERVE_WIN_SUDO_ACCOUNT` and
 //! `NERVE_WIN_SUDO_PASSWORD`:
 //!
 //! ```text
@@ -160,21 +160,19 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     nerve_node::pair::pair(&paths, &center.link(), Some(CENTER))
         .await
         .expect("pair");
+    assert!(
+        nerve_node::service::owner_of(&paths).is_some_and(|o| o.eq_ignore_ascii_case(&account)),
+        "the owner is not {account}"
+    );
     nerve_node::cli::edit(&paths, |cfg| {
-        assert!(
-            cfg.machine
-                .user
-                .as_deref()
-                .is_some_and(|u| u.eq_ignore_ascii_case(&account)),
-            "machine.user is not {account}"
-        );
         let e = cfg.center_mut(CENTER).expect("paired");
         e.settings = SettingsGrant::Write;
         // A new pairing starts in folder mode, whose commands run in its
         // AppContainer and only in a folder with `x`, and where allow rules
-        // do not count: this command runs by its allow rule, with the
-        // account's own token.
+        // do not count: this command runs by its allow rule as the owner,
+        // with the owner's own token, outside a container.
         e.policy.mode = nerve_policy::Mode::Allowlist;
+        e.policy.as_owner = true;
         e.policy.allow = vec![rules::rule_for(
             "exec",
             "run",
