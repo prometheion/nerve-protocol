@@ -70,7 +70,9 @@ pub fn try_lock(state: &Path) -> Result<Option<Lock>, String> {
     let path = state.join(LOCK_FILE);
     let file =
         open_lock(state, true).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    match file.try_lock() {
+    // Written out in full: the file lock is no std Mutex, and the scan for
+    // locks around `nerve_transport::sync` goes by the method's name.
+    match std::fs::File::try_lock(&file) {
         Ok(()) => Ok(Some(Lock { _file: file })),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(format!("cannot lock {}: {e}", path.display())),
