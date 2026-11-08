@@ -265,14 +265,23 @@ const SHARE_ALL: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
 /// nobody can rename or delete it (share mode without delete) while the
 /// returned handle lives, so a path below it keeps meaning this folder. A
 /// link, or a folder that is not SYSTEM's, the administrators' or this
-/// account's, is refused.
+/// account's, is refused. The list `sddl` is set again through the held
+/// handle, so the folder that is held is private whichever folder it is: one
+/// swapped in by an account that may rename entries of the folder above, in
+/// the moment between the two opens, gets no file made in it before that
+/// (round 5, security 1).
 #[cfg(windows)]
-pub fn hold_folder(dir: &Path) -> Result<std::fs::File, String> {
+pub fn hold_folder(dir: &Path, sddl: &str) -> Result<std::fs::File, String> {
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
     };
     let at = |e: String| format!("{}: {e}", dir.display());
-    let Some(f) = open_folder(dir, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE)? else {
+    let Some(f) = open_folder(
+        dir,
+        READ_CONTROL | WRITE_DAC,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )?
+    else {
         return Err(at("it is not there".into()));
     };
     if foreign_owner(&f, true)
@@ -281,6 +290,7 @@ pub fn hold_folder(dir: &Path) -> Result<std::fs::File, String> {
     {
         return Err(at("another account owns it".into()));
     }
+    set_on(&f, sddl).map_err(at)?;
     Ok(f)
 }
 
@@ -555,5 +565,38 @@ mod tests {
         );
         assert!(owner.contains("Administrators"), "{owner}");
         assert!(admins_folder(&d.path().join("none")).is_err());
+    }
+
+    /// The folder that is held gets the private list through the held
+    /// handle, whatever list it came with (a folder swapped in under the
+    /// name), and cannot be renamed while held (round 5, security 1).
+    #[cfg(windows)]
+    #[test]
+    fn a_held_folder_is_made_private_and_stays_where_it_is() {
+        use crate::win::sid::sid_text;
+        let d = tempfile::tempdir().unwrap();
+        let run = |program: &str, args: &[&str]| {
+            let o = std::process::Command::new(program)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{program} {args:?}: {o:?}");
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        let dir = d.path().join("held");
+        std::fs::create_dir(&dir).unwrap();
+        let shown = dir.display().to_string();
+        run("icacls", &[&shown, "/grant", "*S-1-1-0:(OI)(CI)F"]);
+        assert!(run("icacls", &[&shown]).contains("Everyone"));
+        let me = sid_text(&crate::win::process::user_of(None).unwrap()).unwrap();
+        let held = hold_folder(&dir, &dacl_of(&[&me, "SY", "BA"], &[])).unwrap();
+        let listed = run("icacls", &[&shown]);
+        assert!(!listed.contains("Everyone"), "{listed}");
+        assert!(
+            std::fs::rename(&dir, d.path().join("moved")).is_err(),
+            "a held folder was renamed"
+        );
+        drop(held);
+        std::fs::rename(&dir, d.path().join("moved")).unwrap();
     }
 }

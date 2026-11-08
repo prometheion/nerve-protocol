@@ -120,7 +120,8 @@ fn token_where_here(state: &std::path::Path) -> &'static str {
 /// `owner-token` alone goes to the installed center's folder, else to
 /// `default` (crate::config::Args::owner_state_dir): any other folder is
 /// named with `--state-dir`, which `local` shows (else a placeholder),
-/// quoted for a POSIX shell, or for PowerShell and cmd on `windows`.
+/// quoted for a POSIX shell, or for PowerShell and cmd on `windows` (a
+/// folder whose name PowerShell or cmd would expand stays a placeholder).
 pub(crate) fn token_command_of(
     state: &std::path::Path,
     installed: Option<&std::path::Path>,
@@ -147,7 +148,13 @@ pub(crate) fn token_command_of(
     match (plain, windows) {
         (true, _) => format!("nerve-center owner-token --state-dir {dir}"),
         // A Windows path holds no double quote.
-        (false, true) => format!("nerve-center owner-token --state-dir \"{dir}\""),
+        (false, true) if !dir.contains(['$', '`', '%']) => {
+            format!("nerve-center owner-token --state-dir \"{dir}\"")
+        }
+        // PowerShell expands `$` and the backtick inside double quotes and
+        // cmd expands `%name%`, and no quoting suits both: the folder is
+        // not named, so the copied command never names another one.
+        (false, true) => "nerve-center owner-token --state-dir <this center's folder>".into(),
         (false, false) => format!(
             "nerve-center owner-token --state-dir '{}'",
             dir.replace('\'', "'\\''")
@@ -2448,6 +2455,14 @@ mod tests {
             token_command_of(Path::new(r"C:\my centers\a"), None, default, true, true),
             r#"nerve-center owner-token --state-dir "C:\my centers\a""#
         );
+        // A name PowerShell or cmd would expand in double quotes is not put
+        // in a command (round 5, security, outside the lens).
+        for odd in [r"C:\a$b", r"C:\a`b", r"C:\100%\x"] {
+            assert_eq!(
+                token_command_of(Path::new(odd), None, default, true, true),
+                "nerve-center owner-token --state-dir <this center's folder>"
+            );
+        }
         // Beyond loopback the page and the answer reach anyone: they name
         // no folder (round 2, security 2).
         let open = locked(d.path());

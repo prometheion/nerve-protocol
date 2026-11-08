@@ -90,6 +90,13 @@ pub fn keeps_installed_dacl(is_the_folder: bool, registered: bool, is_the_servic
     is_the_folder && (registered || is_the_service)
 }
 
+/// Whether a center that is not elevated is refused the state folder: it is
+/// the installed center's path and no service holds it, so the folder is the
+/// administrators' alone (see [`private_state`]).
+pub fn installed_folder_needs_admin(is_the_folder: bool, keep: bool, elevated: bool) -> bool {
+    is_the_folder && !keep && !elevated
+}
+
 /// Makes the state folder `state` private, as 0700 is on Unix: on Windows a
 /// DACL of its own for this account, SYSTEM and the administrators, which
 /// what is in it (the owner token, the TLS key, the state) inherits; a
@@ -100,8 +107,8 @@ pub fn keeps_installed_dacl(is_the_folder: bool, registered: bool, is_the_servic
 /// this account: an administrator's elevated run and the same person's
 /// unelevated programs (an agent's shell command among them) are one
 /// account, and `install` takes the folder as it finds it (round 4,
-/// security 2). An unelevated center is refused there and told to run
-/// `install`.
+/// security 2). An unelevated center is refused there and told to run as
+/// administrator or to run `install`.
 pub fn private_state(state: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -114,6 +121,16 @@ pub fn private_state(state: &std::path::Path) -> Result<(), String> {
             is_the_folder && layout.installed(),
             nerve_service::win::dispatch::is_service(),
         );
+        if installed_folder_needs_admin(is_the_folder, keep, nerve_service::win::sid::is_admin()) {
+            // Before anything is made: the folder above would be left
+            // owned by this account, and `private_folder` could only fail
+            // with an OS error about the owner (round 5, correctness 2).
+            return Err(format!(
+                "{}: the installed center's folder is the administrators'; run this as administrator, or install the center with {}",
+                state.display(),
+                crate::service::admin_command("install")
+            ));
+        }
         if !keep {
             return nerve_service::win::dacl::private_folder(
                 state,
@@ -168,14 +185,18 @@ pub fn write_backup_file(
             ".{name}.{}.tmp",
             nerve_transport::keys::random_token(8)
         ));
-        nerve_service::win::dacl::private_folder(&hold, &own_dacl()?)?;
+        let own = own_dacl()?;
+        nerve_service::win::dacl::private_folder(&hold, &own)?;
         // Held until the file is in place: nobody can rename the folder and
-        // put a link of their own under its name (round 4, security 3).
-        let held = nerve_service::win::dacl::hold_folder(&hold);
-        let held = match held {
+        // put a link of their own under its name (round 4, security 3), and
+        // whichever folder is held gets the private list before the file is
+        // made in it (round 5, security 1).
+        let held = match nerve_service::win::dacl::hold_folder(&hold, &own) {
             Ok(h) => h,
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&hold);
+                // Not by `remove_dir_all`: the name may be a folder of
+                // another's by now, and only an empty one goes.
+                let _ = std::fs::remove_dir(&hold);
                 return Err(e);
             }
         };
@@ -194,8 +215,12 @@ pub fn write_backup_file(
                 std::fs::rename(&made, file)
                     .map_err(|e| format!("cannot write {}: {e}", file.display()))
             });
+        // Cleaned up while the folder is held (the file is gone already
+        // after the move), and then only the empty folder: no recursion
+        // through a name someone may have put another folder under.
+        let _ = std::fs::remove_file(&made);
         drop(held);
-        let _ = std::fs::remove_dir_all(&hold);
+        let _ = std::fs::remove_dir(&hold);
         done
     }
     // The file's mode makes it private here.
@@ -347,6 +372,17 @@ mod tests {
         assert!(keeps_installed_dacl(true, false, true));
         assert!(!keeps_installed_dacl(true, false, false));
         assert!(!keeps_installed_dacl(false, true, true));
+    }
+
+    /// An unelevated center is refused the installed path while no service
+    /// holds it, with a word about administrators, not an OS error about an
+    /// owner (round 5, correctness 2).
+    #[test]
+    fn only_an_unelevated_center_on_the_bare_installed_path_needs_admin() {
+        assert!(installed_folder_needs_admin(true, false, false));
+        assert!(!installed_folder_needs_admin(true, false, true));
+        assert!(!installed_folder_needs_admin(true, true, false));
+        assert!(!installed_folder_needs_admin(false, false, false));
     }
 
     #[test]

@@ -409,10 +409,12 @@ The state folder of a center a harness starts gets an access list of its
 own on Windows: your account, SYSTEM and the administrators, which the owner
 token, the TLS key and the state take. A backup file gets the same from its
 first moment: it is written in a private folder beside it, which is held
-open (nobody can rename it) until the file is moved into place. Where the
+open (nobody can rename it) until the file is moved into place, and given
+its private list through that hold. Where the
 installed center's path has no service registered (before the first install,
 after `uninstall` without `--purge`) it is open to the administrators only,
-so run a center or a restore there as an administrator. On loopback the center counts the process Windows names for the
+so run a center or a restore there as an administrator (one that is
+not elevated says so, and names `install`). On loopback the center counts the process Windows names for the
 connection: by its account where the center may open the process (a center
 a harness starts runs as your account and opens yours), else by its session.
 The installed service is no administrator, so it cannot open another

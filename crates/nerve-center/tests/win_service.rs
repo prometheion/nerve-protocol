@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+#[path = "log_lines.rs"]
+mod log_lines;
+
 /// The node port of the installed center: not the default, so the
 /// firewall rule shows it is the one the settings name.
 const PORT: u16 = 7943;
@@ -820,15 +823,21 @@ if ($wait.Wait(40000)) {{
         let _ = system("icacls.exe", &[&folder, "/setowner", "*S-1-5-32-545"]);
         let _ = system("sc.exe", &["start", "nerve-center"]);
         let until = Instant::now() + Duration::from_secs(60);
-        while !std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("another account")
+        // The log is JSON lines, so the path is looked for in the message,
+        // not in the raw text (round 5, correctness 1).
+        while log_lines::message_with(
+            &std::fs::read_to_string(&log).unwrap_or_default(),
+            &["another account", &folder],
+        )
+        .is_none()
         {
-            assert!(Instant::now() < until, "the log names no foreign owner");
+            assert!(
+                Instant::now() < until,
+                "the log names no foreign owner: {}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
             std::thread::sleep(Duration::from_millis(250));
         }
-        let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.contains(&folder), "{text}");
         let _ = system("icacls.exe", &[&folder, "/setowner", "*S-1-5-32-544"]);
         let until = Instant::now() + Duration::from_secs(120);
         loop {
