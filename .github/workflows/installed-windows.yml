@@ -16,7 +16,8 @@
 #   in its AppContainer: folders, a closed folder, another pairing's folders,
 #   home and processes (by a command and by the node's file calls), nerve-run's
 #   profile and the node's pipes from a container, allowlist mode and
-#   --as-owner, a folder outside the owner's profile, what nerve-run opens, the
+#   --as-owner, a folder in the owner's profile split around a protected
+#   entry, a folder outside the owner's profile, what nerve-run opens, the
 #   network switch, a pairing's home and container profile
 #   (crates/nerve-node/tests/win_account.rs). The install makes nerve-run and
 #   its profile itself, by a logon that loads it, as nobody signs in on a

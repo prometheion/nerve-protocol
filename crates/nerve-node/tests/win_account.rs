@@ -7,6 +7,8 @@
 //!   processes, nor `nerve-run`'s own profile, nor the node's pipes, by a
 //!   command or by the node's file calls (read as its container, Q4);
 //! - a folder without flags inside a `w` folder is closed;
+//! - a folder in the owner's profile that holds a protected entry gives
+//!   its other entries, and the entry stays closed;
 //! - allowlist mode runs as `nerve-run` in its container, and `--as-owner`
 //!   as the owner;
 //! - a folder outside the owner's profile whose files `nerve-run` made
@@ -169,6 +171,20 @@ fn open_folder(p: &Path, owner_sid: &str) {
     assert!(ok, "icacls /setowner {p:?}");
 }
 
+/// The profile folder of the account `sid`, as Windows has it.
+fn owner_profile(sid: &str) -> PathBuf {
+    let said = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "(Get-CimInstance Win32_UserProfile | Where-Object SID -eq '{sid}').LocalPath"
+        ))
+        .output()
+        .unwrap();
+    let path = String::from_utf8_lossy(&said.stdout).trim().to_string();
+    assert!(!path.is_empty(), "no profile of {sid}");
+    PathBuf::from(path)
+}
+
 /// The command account's password, as the install stored it.
 fn run_password(config: &Path) -> String {
     use windows_sys::Win32::Foundation::LocalFree;
@@ -320,7 +336,10 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
     let base = PathBuf::from(drive.clone() + "\\nerve-w2-test");
     let open = PathBuf::from(drive + "\\nerve-w2-open");
-    for d in [&base, &open] {
+    // In the owner's profile, with the rights it inherits there: only
+    // SYSTEM, the administrators and the owner may list it.
+    let mine = owner_profile(&owner_sid).join("nerve-w2-mine");
+    for d in [&base, &open, &mine] {
         let _ = std::fs::remove_dir_all(d);
     }
     owners_folder(&base, &owner_sid);
@@ -538,6 +557,43 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         .await
         .expect("a's command once the link is gone");
     assert_eq!(r["exit_code"], 0, "{r}");
+
+    // A folder in the owner's profile that holds a protected entry: the
+    // service's account may not list it, so the node splits it around the
+    // entry as the owner. A command reads a file beside the entry and is
+    // refused at the entry.
+    let keep = mine.join("keep");
+    std::fs::create_dir_all(&keep).unwrap();
+    std::fs::write(mine.join("beside.txt"), "beside").unwrap();
+    std::fs::write(keep.join("key.txt"), "kept").unwrap();
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.push(folder(&mine, "r"));
+        ea.policy.protected.extra = vec![keep.display().to_string()];
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_in(
+        &mut conn_a,
+        &a,
+        &format!("Get-Content '{}'", mine.join("beside.txt").display()),
+    )
+    .await
+    .expect("a's read beside the protected entry");
+    assert!(out(&r).contains("beside"), "{r}");
+    let r = run_in(
+        &mut conn_a,
+        &a,
+        &format!(
+            "Get-Content '{}'; exit [int](-not $?)",
+            keep.join("key.txt").display()
+        ),
+    )
+    .await
+    .expect("a's read of the protected entry");
+    assert_ne!(r["exit_code"], 0, "{r}");
+    assert!(!out(&r).contains("kept"), "{r}");
 
     // Nor the node's pipes from a container.
     let pipe_names: Vec<String> = std::fs::read_dir(r"\\.\pipe\")
@@ -792,7 +848,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     assert!(packages.join(&container_a).is_dir());
 
     forget(&paths).await;
-    for d in [&base, &open] {
+    for d in [&base, &open, &mine] {
         let _ = std::fs::remove_dir_all(d);
     }
 }

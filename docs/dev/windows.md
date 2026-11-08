@@ -429,7 +429,9 @@ runs in the container as well, unless the pairing runs as you.
   no entry, and the pairing's commands do not run until the link is gone.
   A granted folder that holds a protected entry (your home holds `.ssh`) is
   given as its other entries, each with its flags; a closed folder among
-  them gets none, nor does anything in it. A folder both granted (by
+  them gets none, nor does anything in it. The service lists such a folder
+  as you, since its own account may not open your home; a folder it cannot
+  list gives nothing, and the node's log says so. A folder both granted (by
   another spelling, through a link of yours) and closed is closed.
 - A link to another machine (a symbolic link to `\\server\share`) is never
   followed by the node: its walks, the paths of a call and the changes of

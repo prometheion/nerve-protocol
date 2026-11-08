@@ -1305,32 +1305,50 @@ pub fn apply(
     #[cfg(windows)]
     {
         let run = run_sid(paths);
+        let owner = owner.filter(|_| run.is_some());
         let want = || {
             let (cfg, home) = current();
-            let grants = wanted_on(
-                run.as_deref(),
-                &cfg,
-                paths,
-                &home,
-                &crate::paths::platform(),
+            // The folders are resolved, walked and split as the owner sees
+            // them: the service's account may not list the owner's home, and
+            // a granted folder there that holds a protected entry (the home,
+            // Documents) is given by its entries.
+            let grants = looked_as(
+                || act_as(owner),
+                || {
+                    wanted_on(
+                        run.as_deref(),
+                        &cfg,
+                        paths,
+                        &home,
+                        &crate::paths::platform(),
+                    )
+                },
             );
             (grants, pairings(paths, &cfg))
         };
-        apply_in(
-            paths,
-            want,
-            &mut Acls {
-                report,
-                owner: owner.filter(|_| run.is_some()),
-            },
-            &mut WinProfiles,
-        )
+        apply_in(paths, want, &mut Acls { report, owner }, &mut WinProfiles)
     }
     #[cfg(not(windows))]
     {
         let _ = (paths, owner, current, report);
         Synced::default()
     }
+}
+
+/// What `look` gives, looked at as `act` acts on this thread while its
+/// result lives ([`apply`]: as the owner, whom `Acls` acts as too). Where it
+/// cannot act so, `look` runs as the node, and the log says why: a folder
+/// it may not list then gives nothing, and no change of a folder's entry
+/// can be made either.
+#[cfg(any(windows, test))]
+fn looked_as<G>(
+    act: impl FnOnce() -> io::Result<G>,
+    look: impl FnOnce() -> Vec<Grant>,
+) -> Vec<Grant> {
+    let _as = act()
+        .inspect_err(|e| tracing::warn!("folder grants: {e}"))
+        .ok();
+    look()
 }
 
 /// [`apply`] by the CLI (`report` as there): the profile of a container left without grants
@@ -1835,17 +1853,24 @@ impl Acls<'_> {
     /// the owner on with the password the install stored: where that fails,
     /// no folder's entry changes, and the error says where it is saved.
     fn act(&self) -> io::Result<Option<crate::win_user::FsAs>> {
-        self.owner
-            .map(|o| {
-                crate::win_user::FsAs::new(o).map_err(|e| {
-                    io::Error::other(format!(
-                        "the node changes the permissions of your folders as {}, and cannot log on as {0} ({e}); save your Windows password again under Settings, General, Account for commands",
-                        o.name
-                    ))
-                })
-            })
-            .transpose()
+        act_as(self.owner)
     }
+}
+
+/// Acts as `owner`, where there is one, on this thread while the result
+/// lives ([`Acls::act`]).
+#[cfg(windows)]
+fn act_as(owner: Option<&crate::service::Account>) -> io::Result<Option<crate::win_user::FsAs>> {
+    owner
+        .map(|o| {
+            crate::win_user::FsAs::new(o).map_err(|e| {
+                io::Error::other(format!(
+                    "the node changes the permissions of your folders as {}, and cannot log on as {0} ({e}); save your Windows password again under Settings, General, Account for commands",
+                    o.name
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// Refuses `path` where its links lead to another machine
@@ -4522,6 +4547,33 @@ mod tests {
             .collect();
         assert_eq!(both.len(), 1, "{on:?}");
         assert_eq!(both[0].access, Access::parse("rw").unwrap());
+    }
+
+    /// The grants a sync wants are looked at while the sync acts as whom
+    /// it changes the folders as (on the service the owner, whose home the
+    /// service's account may not list, so a split there would give
+    /// nothing), and as the node where it cannot act so.
+    #[test]
+    fn the_wanted_grants_are_looked_at_as_the_sync_acts() {
+        struct Acting<'a>(&'a std::cell::Cell<bool>);
+        impl Drop for Acting<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let acting = std::cell::Cell::new(false);
+        let look = || vec![grant("c", "/x", if acting.get() { "r" } else { "" })];
+        let seen = looked_as(
+            || {
+                acting.set(true);
+                Ok(Acting(&acting))
+            },
+            look,
+        );
+        assert_eq!(seen, vec![grant("c", "/x", "r")]);
+        assert!(!acting.get());
+        let seen = looked_as(|| Err::<(), _>(io::Error::other("no logon")), look);
+        assert_eq!(seen, vec![grant("c", "/x", "")]);
     }
 
     /// A granted folder that holds a protected entry is split into its

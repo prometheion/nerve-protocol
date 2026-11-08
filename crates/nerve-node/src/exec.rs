@@ -814,9 +814,7 @@ pub fn container_grants(
         .filter(|f| f.access == Access::NONE)
         .filter_map(|f| {
             let spelled = expand(home, &f.path)?;
-            let (path, placed) = closed_place(policy, &f.path, &spelled, &bounds, real, |p| {
-                nerve_policy::paths::remote_link(p).is_some()
-            })?;
+            let (path, placed) = closed_place(policy, &f.path, &spelled, &bounds, real, far)?;
             Some((path, spelled, placed))
         })
         .collect();
@@ -876,8 +874,8 @@ pub fn container_grants(
 /// Where the closed folder `spelled` (configured as `given`, `~` expanded)
 /// gets its denying entry, and whether that is the place the walk found;
 /// `None` where it gets none. `real` resolves the folder that holds a link
-/// for the walk, `remote` tells a path with a link to another machine on
-/// its way; the tests replace both.
+/// for the walk, `remote` tells a link's target on another machine
+/// ([`far`]); the tests replace both.
 ///
 /// A closed folder lies inside a granted one, so commands may have put a
 /// link at its path or above it, as for the granted folders ([`led_away`],
@@ -890,9 +888,11 @@ pub fn container_grants(
 /// until the link is gone; whatever that link's target, also one on another
 /// machine. Otherwise the owner's links are followed, also where the folder
 /// itself is gone (renamed), so it stays the place the granted folder
-/// around it resolves to. A path with an owner's link to another machine
-/// gets none: no container reaches a share (#149's probe), and the sync
-/// would follow it to put the entry on.
+/// around it resolves to. Only where the walk itself stops at an owner's
+/// link to another machine, outside every `w` folder, does it get none: no
+/// container reaches a share (#149's probe), and the sync would follow it
+/// to put the entry on. No look before or after the walk decides that: a
+/// command could change the path between two looks.
 fn closed_place(
     policy: &CenterPolicy,
     given: &str,
@@ -901,20 +901,12 @@ fn closed_place(
     real: impl Fn(&Path) -> PathBuf,
     remote: impl Fn(&Path) -> bool,
 ) -> Option<(PathBuf, bool)> {
-    let far = remote(spelled);
-    // Short names are written out as `folder add` stores them, but not
-    // through a link to another machine, which that would follow.
-    let long = if far {
-        spelled.to_path_buf()
-    } else {
-        long_names(spelled)
-    };
-    match walk_to(&long, bounds, &real) {
-        Err((why, Some(at))) => {
+    match walk_to(spelled, bounds, &real, &remote) {
+        Err((why, Stop::At(at))) => {
             tracing::warn!("folder {given} is closed at its path as given: {why}");
             Some((at, true))
         }
-        _ if far => None,
+        Err((_, Stop::Remote)) => None,
         Ok(walked) => match replaced(policy, given, &walked) {
             Some(why) => {
                 tracing::warn!("folder {given} is closed at its path as given: {why}");
@@ -922,7 +914,7 @@ fn closed_place(
             }
             None => Some((walked, true)),
         },
-        Err((why, None)) => {
+        Err((why, Stop::Unsure)) => {
             tracing::warn!("folder {given} is closed at its path as given: {why}");
             Some((spelled.to_path_buf(), false))
         }
@@ -1106,17 +1098,34 @@ fn walk_by(
     writable: &[PathBuf],
     real: impl Fn(&Path) -> PathBuf,
 ) -> Result<PathBuf, String> {
-    walk_to(path, writable, real).map_err(|(why, _)| why)
+    walk_to(path, writable, real, far).map_err(|(why, _)| why)
 }
 
-/// [`walk_by`], and where it refuses a link inside a `w` folder, the path
-/// as spelled from that link on: the place up to it, with the owner's own
-/// links above it followed, and the names after it.
+/// Where [`walk_to`] stopped before the end of the path.
+#[derive(Debug, PartialEq)]
+enum Stop {
+    /// Nothing tells where the path leads.
+    Unsure,
+    /// At a link inside a `w` folder: the path as spelled from that link on,
+    /// the place up to it, with the owner's own links above it followed, and
+    /// the names after it.
+    At(PathBuf),
+    /// At a link of the owner's whose target is on another machine
+    /// (`remote`): it is not followed, nor is a name of the target looked at.
+    Remote,
+}
+
+/// [`walk_by`], and why it stopped ([`Stop`]). `remote` tells a link's
+/// target, as the link holds it, on another machine ([`far`]; the tests
+/// replace it). Short names (`PROGRA~1`) are written out as the walk goes,
+/// a name at a time, so the walk looks at nothing through a link it has
+/// not judged.
 fn walk_to(
     path: &Path,
     writable: &[PathBuf],
     real: impl Fn(&Path) -> PathBuf,
-) -> Result<PathBuf, (String, Option<PathBuf>)> {
+    remote: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, (String, Stop)> {
     // The most links one resolution may cross, as the kernel's limit.
     const LINKS: usize = 40;
     let inside = |p: &Path| writable.iter().any(|w| within(p, w));
@@ -1140,7 +1149,17 @@ fn walk_to(
                                     "it cannot be resolved through the drive {}",
                                     top.display()
                                 ),
-                                None,
+                                Stop::Unsure,
+                            ));
+                        }
+                        if remote(&mapped) {
+                            return Err((
+                                format!(
+                                    "the drive {} names {}, which is not on this machine",
+                                    top.display(),
+                                    mapped.display()
+                                ),
+                                Stop::Remote,
                             ));
                         }
                         // `subst` keeps the folder as it was typed, short
@@ -1161,7 +1180,7 @@ fn walk_to(
                                 "it passes through a link to {}, which is not a path on a drive",
                                 top.display()
                             ),
-                            None,
+                            Stop::Unsure,
                         ));
                     }
                 }
@@ -1180,15 +1199,23 @@ fn walk_to(
                             "it passes through the name {}, which is not a folder name",
                             name.to_string_lossy()
                         ),
-                        None,
+                        Stop::Unsure,
                     ));
                 }
                 let at = here.join(&name);
                 // A name that cannot be looked at (missing, or behind a
                 // folder that cannot be searched) is no link; `real_folder`
                 // has judged whether the path resolves at all.
-                let link = std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_symlink());
+                let look = std::fs::symlink_metadata(&at);
+                let link = look.as_ref().is_ok_and(|m| m.is_symlink());
                 if !link {
+                    // `here` holds no link, so writing out a short name
+                    // looks at nothing the walk has not judged.
+                    #[cfg(windows)]
+                    if look.is_ok() && name.to_string_lossy().contains('~') {
+                        here = nerve_sandbox::appcontainer::long_path(&at);
+                        continue;
+                    }
                     here = at;
                     continue;
                 }
@@ -1209,7 +1236,7 @@ fn walk_to(
                             "it passes through the link {} inside a folder where commands may write",
                             at.display()
                         ),
-                        Some(spelled),
+                        Stop::At(spelled),
                     ));
                 }
                 if !(within(&holder, &here) && within(&here, &holder)) {
@@ -1220,17 +1247,28 @@ fn walk_to(
                             here.display(),
                             holder.display()
                         ),
-                        None,
+                        Stop::Unsure,
                     ));
                 }
                 crossed += 1;
                 let target = std::fs::read_link(&at).ok().filter(|_| crossed <= LINKS);
                 match target {
+                    // Neither followed nor looked at: a look at a share
+                    // connects to it as whoever looks.
+                    Some(t) if remote(&t) => {
+                        return Err((
+                            format!(
+                                "it passes through the link {} to another machine, which is not followed",
+                                at.display()
+                            ),
+                            Stop::Remote,
+                        ));
+                    }
                     Some(t) => todo.extend(steps(&long_names(&t))),
                     None => {
                         return Err((
                             format!("it cannot be resolved through the link {}", at.display()),
-                            None,
+                            Stop::Unsure,
                         ));
                     }
                 }
@@ -1238,6 +1276,13 @@ fn walk_to(
         }
     }
     Ok(here)
+}
+
+/// Whether a link's target `t`, as the link holds it, may be on another
+/// machine (nerve_policy::paths::remote_target): the walk stops there.
+/// Windows only; elsewhere a network mount is a path.
+fn far(t: &Path) -> bool {
+    cfg!(windows) && nerve_policy::paths::remote_target(&t.to_string_lossy())
 }
 
 /// What the root `top` of a path is, for the walk (Windows).
@@ -1484,8 +1529,17 @@ fn split(
     closed: &[PathBuf],
     out: &mut Vec<PathBuf>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // Nothing of it is given then, which no command can tell from a
+        // folder that holds nothing.
+        Err(e) => {
+            tracing::warn!(
+                "{} cannot be listed ({e}): none of its entries gets the flags of the folder around it",
+                dir.display()
+            );
+            return;
+        }
     };
     for e in entries.flatten() {
         let path = e.path();
@@ -4478,10 +4532,13 @@ mod tests {
 
     /// A closed folder's place is the walk's, its only look at the path: a
     /// link inside a `w` folder keeps the entry at the link's path whatever
-    /// that link's target, also one the remote check calls another
-    /// machine's; a resolution that leads elsewhere than the walk (a link
-    /// put at the path between two looks, played here) does not move it;
-    /// and only an owner's link to another machine leaves it out.
+    /// that link's target, also one on another machine; a resolution that
+    /// leads elsewhere than the walk (a link put at the path between two
+    /// looks, played here) does not move it; and only an owner's link to
+    /// another machine that the walk itself stops at leaves it out, not a
+    /// look that saw one where the walk finds none (a command's link put
+    /// there and taken away again, played by a `remote` that says yes to
+    /// everything).
     #[test]
     fn a_closed_folder_is_closed_where_the_walk_finds_it() {
         let d = tempfile::tempdir().unwrap();
@@ -4513,11 +4570,28 @@ mod tests {
             closed_place(&policy, &given, &secret, &w, elsewhere, never),
             Some((secret.clone(), true))
         );
-        // An owner's link to another machine: none.
+        // No link on the way: the walk's place, whatever `remote` says.
         assert_eq!(
             closed_place(&policy, &given, &secret, &w, real, always),
+            Some((secret.clone(), true))
+        );
+        // An owner's link to another machine above it, outside the `w`
+        // folder: none, and the walk stops at the link without going
+        // through it.
+        let share = |t: &Path| nerve_policy::paths::remote_target(&t.to_string_lossy());
+        let nas = root.join("nas");
+        std::os::unix::fs::symlink(r"\\host\share", &nas).unwrap();
+        let keys = nas.join("app").join("keys");
+        let far_given = keys.display().to_string();
+        assert_eq!(
+            closed_place(&policy, &far_given, &keys, &w, real, share),
             None
         );
+        assert!(matches!(
+            walk_to(&keys, &w, real, share),
+            Err((_, Stop::Remote))
+        ));
+        assert!(walk_to(&keys, &w, real, never).is_ok());
         // A command's link at the path, inside the `w` folder: kept at the
         // link, also where its target counts as another machine's.
         std::fs::rename(&secret, work.join("renamed")).unwrap();
