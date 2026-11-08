@@ -177,6 +177,8 @@ export global Perm {
     // node runs none of them.
     in-out property <bool> no-network;
     in-out property <bool> network-rules: true;
+    // Windows, where the containers hold the network switch.
+    in-out property <bool> windows;
     // The node's verdict (its `network_off`): the commands run as the owner
     // now, which nothing keeps off the network.
     in-out property <bool> runs-as-owner;

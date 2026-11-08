@@ -3654,9 +3654,9 @@ impl Link {
         .map_err(|e| as_given(e, &named))?;
         // A missing account stops the call once it is decided and audited.
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-        // Only the installed Linux node has `nerve-run`, and only it offers
-        // what runs as that account (crate::config_cap::offered); a test's
-        // node by hand stands for it with its own user
+        // Only the installed node has `nerve-run`, and only it offers what
+        // runs as that account (crate::config_cap::offered); a test's node
+        // by hand stands for it with its own user
         // (crate::daemon::NodeOptions::config_caps_by_hand).
         if account.is_none() && !self.shared.config_caps {
             return Err(RpcError::new(
@@ -3726,10 +3726,17 @@ impl Link {
             return Err(RpcError::forbidden(why));
         }
         self.shared.held_at(HoldAt::AfterLastLook).await;
+        // On Windows it runs in the pairing's container, as the pairing's
+        // commands of `nerve-run` do, with its home there (#149).
+        let container = if cfg!(windows) && account.is_some() {
+            Some(self.container(&entry, no_network, Some(cfg)).await?)
+        } else {
+            None
+        };
         let opts = RunOptions {
             shell: None,
             landlock,
-            container: None,
+            container,
             exe: self.shared.exe.clone().unwrap_or_default(),
             output_cap: (cfg.limits.output_cap_bytes as usize).min(exec::OUTPUT_HARD_CAP),
             timeouts,

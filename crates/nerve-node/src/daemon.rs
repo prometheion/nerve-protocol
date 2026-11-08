@@ -616,6 +616,19 @@ fn net_filter_here() -> bool {
     false
 }
 
+/// Whether an AppContainer without network capabilities keeps a command
+/// off the network here: the node starts commands in one (`appcontainer`),
+/// and the Windows Firewall service, whose filters isolate them, runs. The
+/// container fails closed: without that service the node runs none of the
+/// pairing's commands.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn container_holds_network(
+    appcontainer: bool,
+    firewall_runs: impl FnOnce() -> bool,
+) -> bool {
+    appcontainer && firewall_runs()
+}
+
 /// How this node confines the commands of folder mode. A node run by hand
 /// takes a Landlock below the floor as none and so refuses folder mode's
 /// commands (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it,
@@ -697,7 +710,9 @@ pub(crate) struct Shared {
     pub confinement: Confinement,
     /// Whether the node can keep a command off the network with its filter
     /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
-    /// aarch64.
+    /// aarch64. Windows holds the switch with its containers instead
+    /// ([`Shared::network_held`]).
+    #[cfg_attr(windows, allow(dead_code))]
     pub net_filter: bool,
     /// Whether a command held apart from the owner (folder mode, or as
     /// `nerve-run`) gets a PID namespace with a `/proc` of its own, where it
@@ -1447,7 +1462,17 @@ impl Shared {
     /// well as TCP), and what it leaves open (a unix socket to a program
     /// that reaches the network, a socket another process hands over) is
     /// open with the rules as well.
+    ///
+    /// On Windows a command apart from the owner runs in its container,
+    /// which off the network has none of its network capabilities; the
+    /// Windows Firewall service enforces that, so it holds only while that
+    /// service runs (#149, [`container_holds_network`]).
     pub fn network_held(&self) -> bool {
+        #[cfg(windows)]
+        return container_holds_network(self.confinement.appcontainer, || {
+            crate::win_host::firewall_runs()
+        });
+        #[cfg(not(windows))]
         self.net_filter
     }
 
@@ -1833,8 +1858,13 @@ impl Shared {
                     // run by hand, which runs them as itself.
                     "account": self.command_account(&cfg, &c.policy).ok().flatten().map(|a| a.name),
                     // Whether Landlock holds its commands now; `nerve-run`
-                    // runs without it where the kernel has none.
-                    "landlock": self.landlock_for(&c.policy),
+                    // runs without it where the kernel has none. On
+                    // Windows: its AppContainer, which `nerve-run` always
+                    // runs in.
+                    "landlock": self.landlock_for(&c.policy)
+                        || cfg!(windows)
+                            && self.confinement.appcontainer
+                            && self.separate(&c.policy),
                     "settings": c.settings,
                     "paused": c.paused,
                     "revoked": c.revoked,
@@ -1932,10 +1962,10 @@ pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this mach
 /// that ([`Shared::network_refusal`]).
 #[cfg(not(windows))]
 pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: that needs the kernel's seccomp filters on x86_64 or aarch64, which this node cannot use here, so it runs none of its commands; the owner turns the network back on with `nerve-node network on`";
-/// [`NETWORK_NOT_HELD`] on Windows, where nothing holds a command to no
-/// network.
+/// [`NETWORK_NOT_HELD`] on Windows, where the Windows Firewall service keeps
+/// a container off the network ([`container_holds_network`]).
 #[cfg(windows)]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: Windows has no rule here that does, so the node runs none of its commands; the owner turns the network back on with `nerve-node network on`";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: the Windows Firewall service, which keeps their AppContainer off the network, does not run, so the node runs none of its commands; the owner starts that service, or turns the network back on with `nerve-node network on`";
 
 /// Why a pairing's commands may not run where its owner turned their
 /// network off and they run as the owner in the mode it is in
@@ -6216,9 +6246,19 @@ mod confinement_tests {
         );
     }
 
-    /// The installed Windows service runs commands as another account, for
-    /// which the AppContainer is not wired: folder mode is not confined there
-    /// and runs no command. Landlock and a node run by hand keep theirs.
+    /// A container off the network holds only where commands run in one
+    /// and the Windows Firewall service runs; the service is not asked
+    /// without a container.
+    #[test]
+    fn a_container_holds_the_network_switch_while_the_firewall_runs() {
+        assert!(container_holds_network(true, || true));
+        assert!(!container_holds_network(true, || false));
+        assert!(!container_holds_network(false, || panic!("asked")));
+    }
+
+    /// The installed Windows service runs commands as `nerve-run` in their
+    /// AppContainers (#149), and Landlock and a node run by hand keep
+    /// theirs.
     #[test]
     fn the_installed_service_runs_commands_in_an_appcontainer() {
         let windows = Confinement {

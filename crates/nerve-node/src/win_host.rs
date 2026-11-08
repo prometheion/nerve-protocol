@@ -111,6 +111,18 @@ pub fn service_registered() -> bool {
         .is_ok_and(|s| s.is_some())
 }
 
+/// Whether the Windows Firewall service (MpsSvc) runs, whose filters keep an
+/// AppContainer without network capabilities off the network (#149); not
+/// known counts as not.
+pub fn firewall_runs() -> bool {
+    Scm::open(SC_MANAGER_CONNECT)
+        .and_then(|m| m.service("MpsSvc", SERVICE_QUERY_STATUS))
+        .ok()
+        .flatten()
+        .and_then(|s| s.status().ok())
+        .is_some_and(|st| st.dwCurrentState == SERVICE_RUNNING)
+}
+
 /// The node's service with every right; an error when it is not there.
 fn the_service() -> Result<Scm, String> {
     the_service_for(SERVICE_ALL_ACCESS)
