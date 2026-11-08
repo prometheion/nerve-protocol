@@ -415,12 +415,19 @@ runs in the container as well, unless the pairing runs as you.
   with `w`, and one inside it it has with none) is closed to that pairing's
   container: the node gives it a denying entry, which counts before what it
   inherits from the folder around it. Without it, it would inherit the
-  entry of the folder around.
+  entry of the folder around. Where the node cannot close it, that
+  pairing's commands do not run: also where a file below it has a second
+  name elsewhere (a hard link, as in pnpm's `node_modules` or a local `git
+  clone`), which the change would reach as well (see hard links below).
+  A command may rename a closed folder through the rights of the folder
+  around it: it stays closed where it went. Where it went to a place the
+  same pairing is granted, that place gets no entry, and the pairing's
+  commands do not run until the folder is moved back or you open it.
 - A link to another machine (a symbolic link to `\\server\share`) is never
   followed by the node: its walks, the paths of a call and the changes of
   the folders' entries stop there, refused, and a folder closed there gets
   no entry. A link whose target is not on a drive of this machine (a device
-  path too) counts as such a link. Following it would connect to that machine as the account the
+  path too, and a path from a root without a drive) counts as such a link. Following it would connect to that machine as the account the
   node acts as, and send that account's NTLM answer there. A command in a
   container that opens such a link gets "network access denied", and no
   connection leaves the machine (checked).
@@ -544,8 +551,8 @@ runs in the container as well, unless the pairing runs as you.
   remove each with `icacls <folder> /remove *<SID> /T`: every `S-1-15-2-…`
   and `S-1-15-3-…` entry, and `ALL APPLICATION PACKAGES` as `*S-1-15-2-1`.
 - A hard link is one file under two names, and both share one access list.
-  When the node grants, changes or moves a folder that commands may write
-  in, or a folder that holds one, the change passes to the files below it
+  When the node grants, closes, changes or moves a folder that commands may
+  write in, or a folder that holds one, the change passes to the files below it
   whose permissions it changes, and that would include hard links. Before
   such a change the node checks those files and refuses if one has more
   than one name, and it checks each file again right before it changes it,

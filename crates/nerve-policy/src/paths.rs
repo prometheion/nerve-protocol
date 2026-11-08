@@ -367,9 +367,11 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
 /// (`C:\…`, `\\?\C:\…`, `\??\Volume{…}\…`) or one relative to the link.
 /// So a share (`\\host\share`, `\\?\UNC\…`, `\??\UNC\…`) is, and so is
 /// every device path, which may name one (`\\?\GLOBALROOT\Device\Mup\…`,
-/// `\Device\Mup\…`). Windows connects to a share as whoever follows the
-/// link, and sends that account's NTLM answer to whatever host it names
-/// (#149's probe).
+/// `\Device\Mup\…`), and every other path from a root (`\…`): Windows may
+/// read that from the root of all its object names, which hold more ways
+/// to a share. Windows connects to a share as whoever follows the link,
+/// and sends that account's NTLM answer to whatever host it names (#149's
+/// probe).
 pub fn remote_target(target: &str) -> bool {
     let lower = target.replace('/', "\\").to_ascii_lowercase();
     let rest = match ["\\\\?\\", "\\\\.\\", "\\??\\"]
@@ -377,14 +379,9 @@ pub fn remote_target(target: &str) -> bool {
         .find_map(|p| lower.strip_prefix(p))
     {
         Some(r) => r,
-        // `\\host\…` and the object manager's own paths; a path from the
-        // root of the link's drive (`\x`), or relative to the link, or on
-        // a drive, is this machine's.
-        None => {
-            return lower.starts_with("\\\\")
-                || lower.starts_with("\\device\\")
-                || lower.starts_with("\\globalroot");
-        }
+        // Only a path relative to the link, or on a drive, is this
+        // machine's; one from a root (`\\host\…`, `\x`) may not be.
+        None => return lower.starts_with('\\'),
     };
     let b = rest.as_bytes();
     let drive = b.len() >= 2
@@ -678,6 +675,11 @@ mod remote_tests {
             r"\??\GLOBALROOT\Device\Mup\host\share",
             r"\Device\Mup\host\share",
             r"\GLOBALROOT\Device\Mup\host\share",
+            // Another root of Windows' object names that leads to shares.
+            r"\GLOBAL??\UNC\host\share",
+            // From a root: the node cannot tell where Windows reads it from.
+            r"\x\y",
+            "/home/x",
             // Only drives and volumes count as this machine's.
             r"\\.\pipe\x",
             r"\\?\Device\HarddiskVolume1\x",
@@ -691,10 +693,9 @@ mod remote_tests {
             r"\\.\C:\x",
             r"\??\C:\x",
             r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\x",
-            r"\x\y",
             r"..\x",
             "x",
-            "/home/x",
+            "C:x",
         ] {
             assert!(!remote_target(t), "{t}");
         }
