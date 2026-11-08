@@ -53,7 +53,7 @@ pub fn backup(
 ) -> Result<BackupReport, String> {
     pass.check_new()?;
     let read = |name: &str| {
-        std::fs::read_to_string(state.join(name)).map_err(|e| {
+        nerve_transport::files::read_plain_string(&state.join(name)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "{} is not there: no center has run in {}",
@@ -71,7 +71,7 @@ pub fn backup(
     // second try.
     let mut files = BTreeMap::new();
     for _ in 0..3 {
-        let next = std::fs::read_to_string(state.join(NEXT_IDENTITY_FILE)).ok();
+        let next = nerve_transport::files::read_plain_string(&state.join(NEXT_IDENTITY_FILE)).ok();
         let identity = read(IDENTITY_FILE)?;
         let state_text = read(store::FILE)?;
         let rotating = Store::parse(state_text.as_bytes())
@@ -256,9 +256,9 @@ pub fn restore(state: &Path, b: &Parsed, replace: bool) -> Result<RestoreReport,
     }
 
     // What is here now: put back when a write fails.
-    let old = std::fs::read_to_string(&id_path).ok();
+    let old = nerve_transport::files::read_plain_string(&id_path).ok();
     let next_path = state.join(NEXT_IDENTITY_FILE);
-    let old_next = std::fs::read_to_string(&next_path).ok();
+    let old_next = nerve_transport::files::read_plain_string(&next_path).ok();
 
     // What goes in: the backup's, unless the center here is further along.
     // Its key rotated since the backup was made: its nodes were told the new

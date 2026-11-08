@@ -33,16 +33,26 @@ pub fn pipe_name(state: &Path) -> String {
     nerve_service::win::pipe::name_for("nerve-center", &dir.to_string_lossy())
 }
 
+/// Whether the account `sid` (as `S-1-5-…`) may attach to the center of
+/// `own`: that one, or SYSTEM. An administrator's other account may open
+/// the pipe (its access list names the administrators) and still does not
+/// attach.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn may_attach_sid(sid: &str, own: &str) -> bool {
+    sid == own || sid == "S-1-5-18"
+}
+
 /// The held center lock; dropping it releases the lock.
 pub struct Lock {
     _file: File,
 }
 
-/// Opens the lock file of `state`, made when `create`. On Unix not through
-/// a link: the folder may be another user's (the installed center's, under
-/// root's restore), and its link could make this create or open any file
-/// the caller may write; nor does it wait on what is not a plain file (a
-/// FIFO the folder's user put there for root's `status` or restore).
+/// Opens the lock file of `state`, made when `create`. Not through a link:
+/// the folder may be another account's (the installed center's, under an
+/// administrator's or root's restore), and its link could make this create
+/// or open any file the caller may write; nor does it wait on what is not a
+/// plain file (a FIFO the folder's user put there for root's `status` or
+/// restore).
 fn open_lock(state: &Path, create: bool) -> std::io::Result<File> {
     let mut o = std::fs::OpenOptions::new();
     if create {
@@ -53,11 +63,10 @@ fn open_lock(state: &Path, create: bool) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        o.mode(0o600);
     }
-    let file = o.open(state.join(LOCK_FILE))?;
-    if !file.metadata()?.is_file() {
+    let file = nerve_transport::files::no_follow(&mut o).open(state.join(LOCK_FILE))?;
+    if !nerve_transport::files::is_plain(&file)? {
         return Err(std::io::Error::other("it is not a file"));
     }
     Ok(file)
@@ -249,9 +258,12 @@ mod windows {
         })
     }
 
-    /// Whether the account `sid` may attach: the center's own, or SYSTEM's.
+    /// Whether the account `sid` may attach ([`super::may_attach_sid`]).
     fn may_attach(sid: &[u8], own: &[u8]) -> bool {
-        sid == own || sid_text(sid).is_ok_and(|s| s == "S-1-5-18")
+        match (sid_text(sid), sid_text(own)) {
+            (Ok(sid), Ok(own)) => super::may_attach_sid(&sid, &own),
+            _ => false,
+        }
     }
 
     /// Serves attached harnesses until the task is dropped. A new instance
@@ -366,21 +378,60 @@ mod lock_tests {
             String::from_utf8_lossy(&o.stdout).into_owned()
         };
         let entries = |acl: &str| acl.lines().filter(|l| l.contains(":(")).count();
+        // The three entries are this account's, SYSTEM's and the
+        // administrators': an access list that names anyone else, or
+        // another account where this one belongs, has three entries too.
+        let me = std::process::Command::new("whoami").output().unwrap();
+        let me = String::from_utf8_lossy(&me.stdout).trim().to_lowercase();
+        let named = |acl: &str| {
+            let acl = acl.to_lowercase();
+            [
+                me.as_str(),
+                "nt authority\\system",
+                "builtin\\administrators",
+            ]
+            .iter()
+            .all(|who| acl.contains(&format!("{who}:(")))
+        };
         let d = tempfile::tempdir().unwrap();
         let state = d.path().join("state");
         let _lock = try_lock(&state).unwrap().unwrap();
         let acl = icacls(&state);
         assert_eq!(entries(&acl), 3, "{acl}");
+        assert!(named(&acl), "{acl}");
         assert!(!acl.contains("(I)"), "{acl}");
         std::fs::write(state.join("owner-token"), "x").unwrap();
         let acl = icacls(&state.join("owner-token"));
         assert_eq!(entries(&acl), 3, "{acl}");
+        assert!(named(&acl), "{acl}");
         let backup = d.path().join("c.bak");
         std::fs::write(&backup, "x").unwrap();
         crate::util::private_file(&backup).unwrap();
         let acl = icacls(&backup);
         assert_eq!(entries(&acl), 3, "{acl}");
+        assert!(named(&acl), "{acl}");
         assert!(!acl.contains("(I)"), "{acl}");
+    }
+
+    /// Only the center's own account and SYSTEM attach (round 1,
+    /// correctness 5): the pipe's access list also names the
+    /// administrators, so this is the line that keeps another account of
+    /// theirs, and everyone else, out.
+    #[test]
+    fn only_the_centers_account_and_system_attach() {
+        let own = "S-1-5-21-1-2-3-1001";
+        assert!(may_attach_sid(own, own));
+        assert!(may_attach_sid("S-1-5-18", own));
+        for other in [
+            "S-1-5-21-1-2-3-1002",
+            "S-1-5-32-544",
+            "S-1-1-0",
+            "S-1-5-19",
+            "S-1-5-80-1-2-3-4-5",
+            "",
+        ] {
+            assert!(!may_attach_sid(other, own), "{other}");
+        }
     }
 
     /// Every instance on a folder finds the same pipe, also by another

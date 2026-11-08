@@ -116,6 +116,18 @@ pub fn node_port(file: &str) -> u16 {
         .map_or(NODE_PORT, |a| a.port())
 }
 
+/// The text of the settings file `path` as `read` found it. A file that is
+/// not there holds no setting, as systemd's `EnvironmentFile=-` takes the
+/// Linux unit: an administrator who removed it to start over gets the
+/// defaults. Any other failure is an error.
+pub fn settings_text(read: std::io::Result<String>, path: &Path) -> Result<String, String> {
+    match read {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 /// The variables the service's settings file `text` sets, as systemd
 /// reads such a file: a `NAME=value` line each, blank lines and `#`
 /// comments aside, the value without the blanks around it. Only `NERVE_`
@@ -937,6 +949,20 @@ mod tests {
 
     /// The service takes the settings the file sets, as systemd reads it,
     /// and nothing but the center's.
+    /// A settings file that is not there starts the service with its
+    /// defaults, as the Linux unit does; one that cannot be read does not
+    /// (round 1, correctness 3).
+    #[test]
+    fn a_missing_settings_file_holds_no_setting() {
+        let path = Path::new("center.env");
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(settings_text(Err(missing), path).unwrap(), "");
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let e = settings_text(Err(denied), path).unwrap_err();
+        assert!(e.starts_with("center.env: "), "{e}");
+        assert_eq!(settings_text(Ok("A=b".into()), path).unwrap(), "A=b");
+    }
+
     #[test]
     fn the_service_takes_its_settings_from_its_file() {
         let l = layout(Path::new("C:/"));

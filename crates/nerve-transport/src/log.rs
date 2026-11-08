@@ -280,12 +280,11 @@ impl Log {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            // No wait on a pipe, no link followed.
-            o.mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            o.mode(0o600);
         }
-        let mut f = o.open(path)?;
-        if !f.metadata()?.is_file() {
+        // No wait on a pipe, no link followed.
+        let mut f = crate::files::no_follow(&mut o).open(path)?;
+        if !crate::files::is_plain(&f)? {
             return Err(std::io::Error::other(format!(
                 "{} is not a regular file",
                 path.display()

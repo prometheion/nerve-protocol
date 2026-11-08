@@ -393,9 +393,11 @@ The state folder of a center a harness starts gets an access list of its
 own on Windows: your account, SYSTEM and the administrators, which the owner
 token, the TLS key and the state take. A backup file gets the same. On
 loopback the center counts each Windows account apart, by the process
-Windows names for the connection, or by its session where the center may
-not read that process: one local program cannot take the places of your
-browser or your harness.
+Windows names for the connection and the account the system's list of
+processes names for it (the installed service may not open another
+account's process, but the list names it): one local program cannot take
+the places of your browser or your harness. Programs of one account share
+their places, as on Linux.
 
 The action checker's local model runs in a job object of the center's, so
 it ends with the center also when the center is killed. The installed

@@ -159,7 +159,7 @@ fn netsh(args: &[String]) -> Result<String, String> {
 /// otherwise. Called first in `main`, while the process has one thread.
 pub fn take_settings(layout: &Layout) -> Result<(), String> {
     let path = layout.settings();
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = crate::winsvc::settings_text(std::fs::read_to_string(&path), &path)?;
     let set = crate::winsvc::settings_env(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     let inherited: Vec<_> = std::env::vars_os()
         .map(|(k, _)| k)

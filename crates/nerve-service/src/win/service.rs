@@ -42,6 +42,29 @@ pub struct State {
     pub automatic: Option<bool>,
 }
 
+/// What follows a failure of a service: the restarts, and that a stop with
+/// an error code is a failure too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    /// Restarts a day at most; the next failure leaves the service down.
+    pub restarts: usize,
+    /// Seconds from the failure to each restart.
+    pub delay_secs: u32,
+    /// Whether a service that reports itself stopped with an error code
+    /// (any start that failed: a port taken, an address not there yet) is
+    /// restarted, not only a process that ended without saying so. Without
+    /// it the manager treats the first as a stop that was asked for.
+    pub on_error_stop: bool,
+}
+
+/// What [`put`] asks of the manager: the Linux unit's `Restart=on-failure`
+/// with `RestartSec=5`, and no more than three a day.
+pub const FAILURE: Failure = Failure {
+    restarts: 3,
+    delay_secs: 5,
+    on_error_stop: true,
+};
+
 /// What [`put`] registers.
 pub struct Spec<'a> {
     /// The service's name, which is also its virtual account's.
@@ -72,15 +95,16 @@ mod sys {
         QUERY_SERVICE_CONFIGW, QueryServiceConfigW, SC_ACTION, SC_ACTION_NONE, SC_ACTION_RESTART,
         SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
         SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS,
-        SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_CONFIG_SERVICE_SID_INFO,
-        SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW,
+        SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+        SERVICE_CONFIG_SERVICE_SID_INFO, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
+        SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONSW,
         SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW,
         SERVICE_RUNNING, SERVICE_SID_INFO, SERVICE_SID_TYPE_UNRESTRICTED, SERVICE_START,
         SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED,
         SERVICE_WIN32_OWN_PROCESS, StartServiceW,
     };
 
-    use super::{Spec, State, virtual_account};
+    use super::{FAILURE, Spec, State, virtual_account};
     use crate::win::scm::Scm;
     use crate::win::sid::wide;
 
@@ -150,10 +174,11 @@ mod sys {
     }
 
     /// Registers the service of `spec`, or changes it: its command line,
-    /// its virtual account, started with the machine and again 5 seconds
-    /// after a failure, three times a day at most. A failure is also a
-    /// process that ends without saying it stopped, as one that found a
-    /// lock poisoned does (nerve_transport::sync).
+    /// its virtual account, started with the machine and again after a
+    /// failure ([`FAILURE`]). A failure is a process that ends without
+    /// saying it stopped, as one that found a lock poisoned does
+    /// (nerve_transport::sync), and a stop with an error code, as a center
+    /// that cannot bind its address yet does.
     pub fn put(spec: &Spec) -> Result<(), String> {
         let name = spec.name;
         let line = wide(spec.line);
@@ -216,23 +241,22 @@ mod sys {
         };
         let again = SC_ACTION {
             Type: SC_ACTION_RESTART,
-            Delay: 5000,
+            Delay: FAILURE.delay_secs * 1000,
         };
-        let mut actions = [
-            again,
-            again,
-            again,
-            SC_ACTION {
-                Type: SC_ACTION_NONE,
-                Delay: 0,
-            },
-        ];
+        let mut actions = vec![again; FAILURE.restarts];
+        actions.push(SC_ACTION {
+            Type: SC_ACTION_NONE,
+            Delay: 0,
+        });
         let failure = SERVICE_FAILURE_ACTIONSW {
             dwResetPeriod: 24 * 3600,
             lpRebootMsg: std::ptr::null_mut(),
             lpCommand: std::ptr::null_mut(),
             cActions: actions.len() as u32,
             lpsaActions: actions.as_mut_ptr(),
+        };
+        let on_error_stop = SERVICE_FAILURE_ACTIONS_FLAG {
+            fFailureActionsOnNonCrashFailures: i32::from(FAILURE.on_error_stop),
         };
         // A list of names, each ended by a NUL, and one NUL more.
         let mut privileges: Vec<u16> = spec
@@ -258,6 +282,11 @@ mod sys {
                 SERVICE_CONFIG_FAILURE_ACTIONS,
                 (&raw const failure).cast(),
                 "what follows a failure",
+            ),
+            (
+                SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+                (&raw const on_error_stop).cast(),
+                "what follows a stop with an error",
             ),
             (
                 SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
@@ -395,5 +424,16 @@ mod tests {
         );
         assert_ne!(service_sid("nerve-center"), service_sid("nerve-node"));
         assert_eq!(virtual_account("nerve-center"), "NT SERVICE\\nerve-center");
+    }
+
+    /// A center that stops at its start with an error (an address that is
+    /// not there yet at boot) is started again, as the Linux unit's
+    /// `Restart=on-failure` does (round 1, correctness 1): the manager
+    /// restarts such a stop only when it is asked to.
+    #[test]
+    fn a_stop_with_an_error_is_restarted() {
+        let f = std::hint::black_box(FAILURE);
+        assert!(f.on_error_stop);
+        assert_eq!((f.restarts, f.delay_secs), (3, 5));
     }
 }

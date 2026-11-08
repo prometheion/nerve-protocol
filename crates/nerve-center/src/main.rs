@@ -15,6 +15,13 @@ fn main() -> std::process::ExitCode {
         && let Err(e) = nerve_center::win_host::take_settings(&layout)
     {
         eprintln!("nerve-center: {e}");
+        // A service has no terminal: the log in its state folder is where
+        // `install` points.
+        let _ = nerve_transport::log::Log::append_entry(
+            &nerve_transport::log::file_in(&layout.state),
+            nerve_transport::log::Level::Error,
+            &format!("the service cannot start: {e}"),
+        );
         return std::process::ExitCode::FAILURE;
     }
     // A setting given by an old name would be dropped without a word.

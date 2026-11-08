@@ -95,6 +95,16 @@ impl Layout {
         self.unit.as_os_str().is_empty()
     }
 
+    /// Whether `state` is this layout's state folder: on Windows by any
+    /// spelling of its path (crate::util::same_folder), else as written.
+    pub fn is_state(&self, state: &Path) -> bool {
+        if self.windows() {
+            crate::util::same_folder(state, &self.state)
+        } else {
+            state == self.state
+        }
+    }
+
     /// Whether `install` put the center here: its unit, or on Windows its
     /// service.
     pub fn installed(&self) -> bool {
@@ -342,14 +352,14 @@ pub fn with_service_stopped(
     {
         use crate::winsvc::WinSystem;
         let sys = crate::win_host::WinHost;
-        let ours = state == layout.state && sys.is_admin() && sys.service()? == Some(true);
+        let ours = layout.is_state(state) && sys.is_admin() && sys.service()? == Some(true);
         if ours {
             return crate::winsvc::stopped_for(&sys, out, f);
         }
     }
     let ours = cfg!(target_os = "linux")
         && layout.installed()
-        && state == layout.state
+        && layout.is_state(state)
         && nerve_transport::net::euid() == 0
         && crate::attach::runs(state) == Some(true);
     if !ours {
@@ -412,7 +422,7 @@ pub fn status(
     mcp: &crate::config::McpMode,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let installed = layout.installed() && state == layout.state;
+    let installed = layout.installed() && layout.is_state(state);
     // Root's file: read as root, before anything else.
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
@@ -591,17 +601,12 @@ fn read_store(state: &Path) -> Result<Option<crate::store::Store>, String> {
     let path = state.join(crate::store::FILE);
     let mut open = std::fs::OpenOptions::new();
     open.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = match open.open(&path) {
+    let mut file = match nerve_transport::files::no_follow(&mut open).open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+    if !nerve_transport::files::is_plain(&file).map_err(|e| e.to_string())? {
         return Err(format!("{} is not a file", path.display()));
     }
     let mut text = Vec::new();

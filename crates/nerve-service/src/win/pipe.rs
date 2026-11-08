@@ -178,6 +178,37 @@ mod sys {
             .open(name)
     }
 
+    /// The folder `%ProgramData%` stands for, as Windows names it: the
+    /// caller's environment says what the caller wants, and a command the
+    /// node runs could set it to a folder with no node in it (round 1,
+    /// security 5). The variable is only the fallback.
+    pub(super) fn program_data() -> std::path::PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+
+        use windows_sys::Win32::System::Com::CoTaskMemFree;
+        use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+        let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+        // SAFETY: a known folder id and a place for the path, which the
+        // call allocates and is freed below.
+        let hr = unsafe {
+            SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut path)
+        };
+        let known = (hr >= 0 && !path.is_null()).then(|| {
+            // SAFETY: a NUL-terminated string the call made.
+            let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
+            // SAFETY: `len` characters before the NUL.
+            let wide = unsafe { std::slice::from_raw_parts(path, len) };
+            std::path::PathBuf::from(<std::ffi::OsString as OsStringExt>::from_wide(wide))
+        });
+        // SAFETY: the string from the call (or null), freed once.
+        unsafe { CoTaskMemFree(path.cast()) };
+        known.unwrap_or_else(|| {
+            std::env::var_os("ProgramData")
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| "C:\\ProgramData".into(), std::path::PathBuf::from)
+        })
+    }
+
     /// Asks the node Nerve's installer put on this machine, on its control
     /// pipe, whether the caller is a command it runs (`owner.check`):
     /// [`nerve_transport::ctl::NOT_RUNNING`] where no node made the pipe.
@@ -185,10 +216,7 @@ mod sys {
     /// did not make is not asked.
     pub async fn node_owner_check() -> Result<serde_json::Value, String> {
         use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
-        let data = std::env::var_os("ProgramData")
-            .filter(|v| !v.is_empty())
-            .map_or_else(|| "C:\\ProgramData".into(), std::path::PathBuf::from);
-        let state = data.join(crate::NODE_SERVICE_STATE);
+        let state = program_data().join(crate::NODE_SERVICE_STATE);
         // As the node names it: by the folder's real path.
         let dir = std::fs::canonicalize(&state)
             .or_else(|_| std::path::absolute(&state))
@@ -274,6 +302,20 @@ mod tests {
             name_for("nerve-node", r"C:\Users\Alice\AppData\Local\nerve-center")
         );
         assert_ne!(a, name_for("nerve-center", r"C:\other"));
+    }
+
+    /// The folder of the node's state comes from Windows, not from the
+    /// caller's variable: a command that sets `ProgramData` elsewhere asks
+    /// the same pipe.
+    #[cfg(windows)]
+    #[test]
+    fn the_program_data_folder_is_the_systems() {
+        let system = sys::program_data();
+        // SAFETY: this test is the only thread that reads the variable.
+        unsafe { std::env::set_var("ProgramData", r"C:\somewhere-else") };
+        assert_eq!(system, sys::program_data());
+        assert!(system.is_absolute());
+        assert!(!system.starts_with(r"C:\somewhere-else"));
     }
 
     /// The CLI talks to a pipe only when SYSTEM, the administrators or the

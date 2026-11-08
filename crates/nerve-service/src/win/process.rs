@@ -1,6 +1,6 @@
 //! Who runs a process: the account of its token, and its session. The
 //! center asks it of the process at the other end of its attach pipe and of
-//! a loopback connection.
+//! a loopback connection, also when that is another account's.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -9,7 +9,10 @@ use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFOW, WTSEnumerateProcessesW,
+    WTSFreeMemory,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -80,9 +83,57 @@ pub fn user_of(pid: Option<u32>) -> io::Result<Vec<u8>> {
 }
 
 /// The session of the process `pid`: each person signed in has one,
-/// services and what they start share session 0. Anyone may ask it.
+/// services and what they start share session 0. Another account's process
+/// may refuse to be asked, as for its token ([`listed`] does not).
 pub fn session_of(pid: u32) -> Option<u32> {
     let mut session = 0u32;
     // SAFETY: a plain call with a place for the answer.
     (unsafe { ProcessIdToSessionId(pid, &mut session) } != 0).then_some(session)
+}
+
+/// The account and the session of the process `pid` as the system's list of
+/// processes names them: the Terminal Services answer for every process,
+/// also another account's, which a service that runs as no administrator
+/// cannot open. The account is `None` where the list names none.
+pub fn listed(pid: u32) -> Option<(Option<Vec<u8>>, u32)> {
+    let mut list: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: the local server, the version of the structure asked for
+    // (1), and places for the list and its length; the list is freed
+    // below.
+    if unsafe { WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut list, &mut count) }
+        == 0
+    {
+        return None;
+    }
+    // SAFETY: `count` entries at `list`, read before the list is freed.
+    let found = unsafe { std::slice::from_raw_parts(list, count as usize) }
+        .iter()
+        .find(|p| p.ProcessId == pid)
+        .map(|p| {
+            let sid = (!p.pUserSid.is_null()).then(|| {
+                // SAFETY: a valid SID in the list, copied while it lives.
+                unsafe {
+                    let len = GetLengthSid(p.pUserSid) as usize;
+                    std::slice::from_raw_parts(p.pUserSid.cast::<u8>(), len).to_vec()
+                }
+            });
+            (sid, p.SessionId)
+        });
+    // SAFETY: the list the call made, freed once.
+    unsafe { WTSFreeMemory(list.cast()) };
+    found
+}
+
+/// The account and the session of the process `pid`, as far as they can be
+/// told: from its token where this process may open it, else from the
+/// system's list of processes ([`listed`]).
+pub fn identity_of(pid: u32) -> (Option<Vec<u8>>, Option<u32>) {
+    if let Ok(sid) = user_of(Some(pid)) {
+        return (Some(sid), session_of(pid));
+    }
+    match listed(pid) {
+        Some((sid, session)) => (sid, Some(session)),
+        None => (None, session_of(pid)),
+    }
 }

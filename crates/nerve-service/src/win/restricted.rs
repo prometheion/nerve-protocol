@@ -21,8 +21,11 @@ use windows_sys::Win32::Security::{
     TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateProcessAsUserW, GetExitCodeProcess, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateProcessAsUserW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::win::process::{token, token_info};
@@ -147,6 +150,63 @@ fn command_line(program: &Path, args: &[&str]) -> String {
         .join(" ")
 }
 
+/// An attribute list that names `handle` as the one handle a new process
+/// inherits, freed when dropped: `bInheritHandles` alone hands over every
+/// inheritable handle of the caller, among them those of the terminal that
+/// started it.
+struct OnlyHandle {
+    list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    // The list points at these; they live as long as it does.
+    _memory: Vec<u64>,
+    _handle: Box<HANDLE>,
+}
+
+impl OnlyHandle {
+    fn new(handle: HANDLE) -> io::Result<OnlyHandle> {
+        let mut size = 0usize;
+        // SAFETY: a query of the size only; it fails with the size set.
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+        // u64s, so the memory is aligned for the list.
+        let mut memory = vec![0u64; size.div_ceil(8).max(1)];
+        let list: LPPROC_THREAD_ATTRIBUTE_LIST = memory.as_mut_ptr().cast();
+        // SAFETY: memory of the size asked for.
+        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut size) } == 0 {
+            return Err(last());
+        }
+        let mut handle = Box::new(handle);
+        // SAFETY: the list just made, and one handle that outlives it.
+        if unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                (&raw mut *handle).cast(),
+                std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            let e = last();
+            // SAFETY: the list made above, deleted once.
+            unsafe { DeleteProcThreadAttributeList(list) };
+            return Err(e);
+        }
+        Ok(OnlyHandle {
+            list,
+            _memory: memory,
+            _handle: handle,
+        })
+    }
+}
+
+impl Drop for OnlyHandle {
+    fn drop(&mut self) {
+        // SAFETY: the list made in `new`, deleted once.
+        unsafe { DeleteProcThreadAttributeList(self.list) };
+    }
+}
+
 /// Runs `program` with `args` (plain words, a path at most) without the
 /// administrators' rights, no longer than `limit`: its exit code and the
 /// first 64 KiB of its output. Its error output goes nowhere.
@@ -159,19 +219,24 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
     if unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
         return Err(last());
     }
-    let si = STARTUPINFOW {
-        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-        dwFlags: STARTF_USESTDHANDLES,
-        hStdInput: std::ptr::null_mut(),
-        hStdOutput: w,
-        hStdError: std::ptr::null_mut(),
-        ..Default::default()
+    let only = OnlyHandle::new(w)?;
+    let si = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: std::ptr::null_mut(),
+            hStdOutput: w,
+            hStdError: std::ptr::null_mut(),
+            ..Default::default()
+        },
+        lpAttributeList: only.list,
     };
     let mut pi = PROCESS_INFORMATION::default();
     let mut line = wide(command_line(program, args));
-    // SAFETY: the restricted token, a writable command line, the startup
-    // information with the inheritable output handle; the handles the call
-    // returns are closed below.
+    // SAFETY: the restricted token, a writable command line, the extended
+    // startup information with the one inheritable output handle (its
+    // list lives until after the call); the handles the call returns are
+    // closed below.
     let ok = unsafe {
         CreateProcessAsUserW(
             t.as_raw_handle(),
@@ -180,14 +245,15 @@ pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
             std::ptr::null(),
             std::ptr::null(),
-            &si,
+            (&raw const si).cast::<STARTUPINFOW>(),
             &mut pi,
         )
     };
     // Only the program holds the pipe's end now, so reading ends with it.
+    drop(only);
     drop(writer);
     if ok == 0 {
         return Err(last());

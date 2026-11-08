@@ -119,7 +119,9 @@ impl Store {
     }
 
     pub fn load(dir: &Path) -> std::io::Result<Option<Store>> {
-        match std::fs::read(dir.join(FILE)) {
+        // Not through a link: an administrator's restore and `status` read
+        // the installed center's folder, where its account makes links.
+        match nerve_transport::files::read_plain(&dir.join(FILE)) {
             Ok(b) => Store::parse(&b)
                 .map(Some)
                 .map_err(|e| std::io::Error::other(format!("{} {e}", dir.join(FILE).display()))),

@@ -13,10 +13,12 @@
 //! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
 //! is, so another account's connections never take the owner's places. On
 //! Linux the kernel names the account ([`nerve_transport::peer`]); on
-//! Windows the table of connections names the process, whose account it is
-//! where the center may read it, else its session (each person signed in
-//! has one; services share one): [`Peer::of_windows`]. Where neither can be
-//! told, all loopback peers are one.
+//! Windows the table of connections names the process, and the system's
+//! list of processes its account, also where the center may not open the
+//! process; its session (each person signed in has one; services share
+//! one) is only what is left where that list names no account:
+//! [`Peer::of_windows`]. Where neither can be told, all loopback peers are
+//! one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -99,8 +101,8 @@ enum Peer {
     /// A loopback peer of this Windows account, by a hash of its SID.
     #[cfg_attr(not(windows), allow(dead_code))]
     Sid(u64),
-    /// A loopback peer of another Windows account than the center may read,
-    /// by its session.
+    /// A loopback peer on Windows whose account is not named, by its
+    /// session.
     #[cfg_attr(not(windows), allow(dead_code))]
     Session(u32),
     /// A loopback peer whose account is not known.
@@ -120,10 +122,10 @@ impl Peer {
                 .map_or(Peer::Local, Peer::Account),
             #[cfg(windows)]
             Accounts::Windows => {
-                use nerve_service::win::process::{session_of, user_of};
                 let pid = nerve_service::win::tcp::client_pid(peer, local);
-                let sid = pid.and_then(|p| user_of(Some(p)).ok());
-                Peer::of_windows(sid.as_deref(), pid.and_then(session_of))
+                let (sid, session) =
+                    pid.map_or((None, None), nerve_service::win::process::identity_of);
+                Peer::of_windows(sid.as_deref(), session)
             }
             #[cfg(test)]
             Accounts::ByAddress => Peer::Addr(ip),
@@ -134,11 +136,11 @@ impl Peer {
         }
     }
 
-    /// A loopback peer on Windows: by the account `sid` of its process
-    /// where that could be read, else by its `session`. The center may read
-    /// only its own account's processes (and an administrator's all), so
-    /// another account is its session: a command a local node runs for a
-    /// center runs in the services' session, never in the owner's.
+    /// A loopback peer on Windows: by the account `sid` of its process,
+    /// else by its `session`. The system's list of processes names every
+    /// process's account, also where the center may not open the process
+    /// (nerve_service::win::process::identity_of), so the session is only
+    /// what is left when that list does not name one.
     #[cfg_attr(not(windows), allow(dead_code))]
     fn of_windows(sid: Option<&[u8]>, session: Option<u32>) -> Peer {
         use std::hash::{Hash, Hasher};
