@@ -371,8 +371,6 @@ pub fn works(exe: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     /// Root makes no namespace, so that it keeps its rights over the files
     /// of other accounts; any other account does (round 1, correctness 1).
     #[test]
@@ -381,12 +379,13 @@ mod tests {
         assert!(super::wants_namespace(1000));
     }
 
-    /// Only the node's own profile is left at exec, in any of its modes.
     /// The init sees that the shim is gone before it starts the command: a
     /// pipe with no reader says so, one with a reader does not, and an init
     /// whose shim is gone ends before it mounts or forks.
     #[test]
     fn the_init_ends_where_the_shim_is_gone() {
+        use std::io::{Read, Seek};
+        use std::os::fd::AsRawFd;
         let mut ends = [0; 2];
         // SAFETY: a pipe into an array of two descriptors.
         assert_eq!(
@@ -395,41 +394,40 @@ mod tests {
         );
         let [read, write] = ends;
         assert!(!super::shim_gone(write), "a reader holds the pipe");
-        // The test process closes the read end before the fork, so the
-        // child has no reader; its stderr goes to a pipe of its own.
-        let mut said = [0; 2];
-        // SAFETY: as above.
-        assert_eq!(
-            unsafe { libc::pipe2(said.as_mut_ptr(), libc::O_CLOEXEC) },
-            0
-        );
-        // SAFETY: the child does plain system calls and the init's own
-        // code, which is made to run in a forked process, and then ends.
+        // SAFETY: both ends are this test's.
+        unsafe {
+            libc::close(read);
+            libc::close(write);
+        }
+        // What the child says goes to a file, read once it ended: a pipe
+        // would wait for every copy of its write end.
+        let mut said = tempfile::tempfile().unwrap();
+        // SAFETY: the child makes plain system calls and runs the init's
+        // own code, which is made to run in a forked process, and then
+        // ends.
         match unsafe { libc::fork() } {
             0 => unsafe {
-                libc::close(read);
-                libc::dup2(said[1], 2);
-                let _ = super::init(write);
+                libc::dup2(said.as_raw_fd(), 2);
+                // Nothing else of the test process stays here, and the pipe
+                // is made here, where no other test forks: one that forked
+                // while the pipe was this process's would hold a copy of its
+                // read end, a reader the init would see.
+                libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0);
+                let mut ends = [0; 2];
+                if libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) != 0 {
+                    libc::_exit(1);
+                }
+                libc::close(ends[0]);
+                let _ = super::init(ends[1]);
                 libc::_exit(0);
             },
             pid => {
-                // SAFETY: closes this process's ends it does not use.
-                unsafe {
-                    libc::close(read);
-                    libc::close(write);
-                    libc::close(said[1]);
-                }
-                let mut text = Vec::new();
-                let mut file = {
-                    use std::os::fd::FromRawFd;
-                    // SAFETY: the read end is this process's alone.
-                    unsafe { std::fs::File::from_raw_fd(said[0]) }
-                };
-                std::io::Read::read_to_end(&mut file, &mut text).unwrap();
                 let mut status = 0;
                 // SAFETY: waits for the child above.
                 unsafe { libc::waitpid(pid, &mut status, 0) };
-                let text = String::from_utf8_lossy(&text);
+                let mut text = String::new();
+                said.rewind().unwrap();
+                said.read_to_string(&mut text).unwrap();
                 assert!(text.contains("the shim is gone"), "{text}");
                 assert!(libc::WIFEXITED(status));
                 assert_eq!(libc::WEXITSTATUS(status), crate::SHIM_FAILED);
@@ -437,6 +435,7 @@ mod tests {
         }
     }
 
+    /// Only the node's own profile is left at exec, in any of its modes.
     #[test]
     fn the_node_leaves_its_own_profile_and_no_other() {
         for label in [
@@ -465,10 +464,23 @@ mod tests {
     #[test]
     fn the_probe_takes_only_a_command_right_after_the_init() {
         let d = tempfile::tempdir().unwrap();
+        // Each written by a shell of its own, so this process never holds it
+        // open for writing: a command another test forks meanwhile would
+        // hold it so until its exec, and Linux runs no file that is open
+        // for writing.
         let shim = |name: &str, body: &str| {
             let p = d.path().join(name);
-            std::fs::write(&p, format!("#!/bin/sh\ncat > /dev/null\n{body}\n")).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut sh = std::process::Command::new("/bin/sh")
+                .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+                .arg(&p)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let text = format!("#!/bin/sh\ncat > /dev/null\n{body}\n");
+            let mut input = sh.stdin.take().unwrap();
+            std::io::Write::write_all(&mut input, text.as_bytes()).unwrap();
+            drop(input);
+            assert!(sh.wait().unwrap().success());
             p
         };
         assert!(!super::works(&shim("plain", "cat /proc/self/stat")));

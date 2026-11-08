@@ -1342,6 +1342,10 @@ fn hold(paths: &NodePaths) -> Result<Option<crate::secrets::KeysLock>, String> {
 #[cfg(any(windows, test))]
 fn drop_profiles(paths: &NodePaths, names: &[String], store: &mut impl ProfileStore) -> Profiles {
     let mut p = Profiles::default();
+    // Nothing to remove takes no lock.
+    if names.is_empty() {
+        return p;
+    }
     let there: Vec<String> = names.iter().filter(|n| store.exists(n)).cloned().collect();
     let _held = match hold(paths) {
         Ok(h) => h,
@@ -2974,7 +2978,7 @@ mod tests {
             ..Default::default()
         };
         std::fs::create_dir_all(&paths.state_dir).unwrap();
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let held = crate::secrets::HeldByANode::take(&paths);
         let p = forget_in(&paths, &node("lab"), &mut store);
         assert_eq!(p.kept, std::slice::from_ref(&name));
         assert!(p.why.unwrap().contains("runs"));
@@ -3015,7 +3019,10 @@ mod tests {
         let both = [a.clone(), b.clone()];
         let s = sync_outside_in(&paths, &both, &mut f, &mut store);
         assert_eq!(s.profiles, Profiles::default());
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        // No container emptied, so no profile to remove: the keys' lock is
+        // not taken, and its file not made.
+        assert!(!paths.keys_lock().exists());
+        let held = crate::secrets::HeldByANode::take(&paths);
         let s = sync_outside_in(&paths, std::slice::from_ref(&b), &mut f, &mut store);
         assert_eq!(s.removed, 1);
         assert_eq!(s.profiles.kept, std::slice::from_ref(&lab));
@@ -3192,7 +3199,7 @@ mod tests {
         f.make("/w/a");
         sync(&record_file(&paths), &[grant(&lab, "/w/a", "r")], &mut f);
         let ids = [node("lab"), node("home")];
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        let held = crate::secrets::HeldByANode::take(&paths);
         let mut store = FakeProfiles {
             there: vec![lab.clone(), home.clone()],
             ..Default::default()

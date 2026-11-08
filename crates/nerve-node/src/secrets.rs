@@ -1205,6 +1205,104 @@ impl KeysLock {
     }
 }
 
+/// For tests: the keys' lock held as a running node holds it, until this is
+/// dropped. On Linux another process holds it, which opens and locks the
+/// file itself and keeps nothing else of the test process; dropped, it ends,
+/// and the lock is free. A lock taken in the test process could stay held
+/// after it is dropped: a command another test forks meanwhile holds a copy
+/// of every descriptor until its exec.
+#[cfg(test)]
+pub(crate) struct HeldByANode {
+    #[cfg(target_os = "linux")]
+    pid: libc::pid_t,
+    #[cfg(not(target_os = "linux"))]
+    _lock: KeysLock,
+}
+
+#[cfg(test)]
+impl HeldByANode {
+    pub(crate) fn take(paths: &NodePaths) -> HeldByANode {
+        nerve_transport::files::create_private_dir(&paths.state_dir).unwrap();
+        #[cfg(not(target_os = "linux"))]
+        return HeldByANode {
+            _lock: KeysLock::try_take(paths)
+                .unwrap()
+                .expect("the lock is free"),
+        };
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Read;
+            use std::os::fd::FromRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            let lock = std::ffi::CString::new(paths.keys_lock().as_os_str().as_bytes()).unwrap();
+            let mut fds = [0; 2];
+            // SAFETY: a pipe into an array of two descriptors.
+            assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            // SAFETY: the child makes plain system calls only and stays
+            // until it is killed.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                // SAFETY: as above.
+                unsafe {
+                    keep_only(fds[1]);
+                    let fd = libc::open(
+                        lock.as_ptr(),
+                        libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+                        0o600 as libc::c_uint,
+                    );
+                    // Waits while a forked copy of an earlier holder's
+                    // lock is still there.
+                    let ok = fd >= 0 && libc::flock(fd, libc::LOCK_EX) == 0;
+                    libc::write(fds[1], [u8::from(ok)].as_ptr().cast(), 1);
+                    loop {
+                        libc::pause();
+                    }
+                }
+            }
+            // SAFETY: the write end is the child's; the read end is ours.
+            let mut ready = unsafe {
+                libc::close(fds[1]);
+                std::fs::File::from(std::os::fd::OwnedFd::from_raw_fd(fds[0]))
+            };
+            let mut ok = [0u8];
+            ready.read_exact(&mut ok).unwrap();
+            assert_eq!(ok, [1], "the holder did not take the lock");
+            HeldByANode { pid }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for HeldByANode {
+    fn drop(&mut self) {
+        // SAFETY: ends and reaps the child `take` started; its descriptors,
+        // the lock among them, are closed once the wait returns.
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+            libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+/// For tests: closes every descriptor of a forked child but stdin, stdout,
+/// stderr and `fd`, so a child that stays holds no copy of what another test
+/// judges (a pipe's ends, a lock). Plain system calls only.
+///
+/// # Safety
+/// For a child between `fork` and its end, which uses no other descriptor.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) unsafe fn keep_only(fd: i32) {
+    let fd = fd as libc::c_uint;
+    // SAFETY: close_range on numbers only.
+    unsafe {
+        if fd > 3 {
+            libc::syscall(libc::SYS_close_range, 3, fd - 1, 0);
+        }
+        libc::syscall(libc::SYS_close_range, fd + 1, libc::c_uint::MAX, 0);
+    }
+}
+
 /// The system keyring: Keychain on macOS, Credential Manager on Windows, the
 /// Secret Service elsewhere.
 #[cfg(not(test))]
@@ -1353,7 +1451,7 @@ mod tests {
         std::fs::create_dir_all(&paths.state_dir).unwrap();
         assert!(!KeysLock::node_runs(&paths));
         assert!(!paths.keys_lock().exists(), "the question made the lock");
-        let held = KeysLock::try_take(&paths).unwrap().unwrap();
+        let held = HeldByANode::take(&paths);
         assert!(KeysLock::node_runs(&paths));
         drop(held);
         assert!(!KeysLock::node_runs(&paths));
