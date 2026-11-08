@@ -213,6 +213,47 @@ pub fn is_link(attributes: u32, tag: Option<u32>) -> bool {
     attributes & REPARSE_POINT != 0 && tag.is_none_or(|t| t & NAME_SURROGATE != 0)
 }
 
+/// Whether a volume with these file system flags keeps access lists (NTFS,
+/// ReFS). One that does not (FAT32 and exFAT, as USB sticks and SD cards
+/// come) answers every question with a list that lets everyone in and names
+/// Everyone the owner, and takes no list it is given: there is nothing to
+/// make private and no owner to check (round 6, correctness 1). Flags that
+/// could not be read (`None`) count as keeping them.
+pub fn keeps_lists(flags: Option<u32>) -> bool {
+    const FILE_PERSISTENT_ACLS: u32 = 0x8;
+    flags.is_none_or(|f| f & FILE_PERSISTENT_ACLS != 0)
+}
+
+/// Whether a buffer of `FILE_ID_BOTH_DIR_INFO` entries, as a folder's
+/// listing through its handle fills it, names anything but `.` and `..`.
+/// A buffer cut short counts as naming something.
+pub fn names_more_than_dots(buf: &[u8]) -> bool {
+    // Where the entry's next offset, its name's length in bytes and its
+    // name are.
+    const NAME_LEN: usize = 60;
+    const NAME: usize = 104;
+    let word = |at: usize| {
+        buf.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    let mut at = 0;
+    loop {
+        let (Some(next), Some(len)) = (word(at), word(at + NAME_LEN)) else {
+            return true;
+        };
+        let Some(name) = buf.get(at + NAME..at + NAME + len) else {
+            return true;
+        };
+        if name != b".\0" && name != b".\0.\0" {
+            return true;
+        }
+        if next == 0 {
+            return false;
+        }
+        at += next;
+    }
+}
+
 /// Makes `dir` a private folder with the DACL `sddl` (and the owner it
 /// names, if any): a new one with it from its first moment, so nobody puts
 /// anything in it first; one there already only when SYSTEM, the
@@ -229,6 +270,9 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
     use crate::win::sid::wide;
     let at = |e: String| format!("{}: {e}", dir.display());
     if let Some(f) = open_folder(dir, READ_CONTROL | WRITE_DAC, SHARE_ALL)? {
+        if !keeps_lists(volume_flags(&f)) {
+            return Ok(());
+        }
         if let Some(owner) = foreign_owner(&f, mine_may_own(sddl)).map_err(|e| at(e.to_string()))? {
             let who = crate::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
             let own = crate::win::process::user_of(None).is_ok_and(|me| me == owner);
@@ -269,29 +313,103 @@ const SHARE_ALL: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
 /// handle, so the folder that is held is private whichever folder it is: one
 /// swapped in by an account that may rename entries of the folder above, in
 /// the moment between the two opens, gets no file made in it before that
-/// (round 5, security 1).
+/// (round 5, security 1). A folder with anything in it is refused before
+/// its list is touched: the one just made is empty, and a folder swapped in
+/// keeps its list and what is in it (round 6, correctness 2). On a volume
+/// without access lists (a FAT32 stick) there is no owner to check and no
+/// list to set ([`keeps_lists`]).
 #[cfg(windows)]
 pub fn hold_folder(dir: &Path, sddl: &str) -> Result<std::fs::File, String> {
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        FILE_LIST_DIRECTORY, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
     };
     let at = |e: String| format!("{}: {e}", dir.display());
     let Some(f) = open_folder(
         dir,
-        READ_CONTROL | WRITE_DAC,
+        FILE_LIST_DIRECTORY | READ_CONTROL | WRITE_DAC,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
     )?
     else {
         return Err(at("it is not there".into()));
     };
-    if foreign_owner(&f, true)
-        .map_err(|e| at(e.to_string()))?
-        .is_some()
+    let lists = keeps_lists(volume_flags(&f));
+    if lists
+        && foreign_owner(&f, true)
+            .map_err(|e| at(e.to_string()))?
+            .is_some()
     {
         return Err(at("another account owns it".into()));
     }
-    set_on(&f, sddl).map_err(at)?;
+    if !is_empty(&f).map_err(|e| at(e.to_string()))? {
+        return Err(at(
+            "something is in it already, though it was made a moment ago".into(),
+        ));
+    }
+    if lists {
+        set_on(&f, sddl).map_err(at)?;
+    }
     Ok(f)
+}
+
+/// The file system flags of the volume the file or folder open as `f` is
+/// on; `None` when they cannot be read.
+#[cfg(windows)]
+fn volume_flags(f: &std::fs::File) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+    let mut flags = 0u32;
+    // SAFETY: an open handle; every buffer but the flags is left out.
+    let ok = unsafe {
+        GetVolumeInformationByHandleW(
+            f.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok != 0).then_some(flags)
+}
+
+/// Whether the folder open as `f` (with `FILE_LIST_DIRECTORY`) holds
+/// nothing, listed through the handle: whatever is under its name now is
+/// not what is asked.
+#[cfg(windows)]
+fn is_empty(f: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdBothDirectoryInfo, GetFileInformationByHandleEx,
+    };
+    // Eight-byte words: the entries are aligned so.
+    let mut buf = vec![0u64; 1024];
+    loop {
+        // SAFETY: an open folder handle and a buffer of the size given;
+        // each call goes on where the last one ended.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                f.as_raw_handle(),
+                FileIdBothDirectoryInfo,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+            )
+        };
+        if ok == 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(c) if c == ERROR_NO_MORE_FILES as i32 => Ok(true),
+                _ => Err(e),
+            };
+        }
+        // SAFETY: the buffer's own bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), buf.len() * 8) };
+        if names_more_than_dots(bytes) {
+            return Ok(false);
+        }
+    }
 }
 
 /// Refuses `dir` unless it is a folder, no link, that SYSTEM or the
@@ -462,6 +580,52 @@ mod tests {
         assert!(is_link(0x410, None));
     }
 
+    /// A FAT32 or exFAT volume keeps no lists (its flags lack
+    /// `FILE_PERSISTENT_ACLS`), so a backup there checks no owner; NTFS
+    /// does, and flags that cannot be read count as NTFS's (round 6,
+    /// correctness 1).
+    #[test]
+    fn a_volume_without_lists_has_no_owner_to_check() {
+        // Flags without `FILE_PERSISTENT_ACLS` (case-preserved names,
+        // Unicode on disk) and NTFS's.
+        assert!(!keeps_lists(Some(0x0000_0006)));
+        assert!(keeps_lists(Some(0x03E7_06FF)));
+        assert!(keeps_lists(Some(0x8)));
+        assert!(keeps_lists(None));
+    }
+
+    /// A folder's listing names something but `.` and `..` only where an
+    /// entry does; a listing cut short counts as one that does (round 6,
+    /// correctness 2).
+    #[test]
+    fn only_dots_are_an_empty_listing() {
+        // Entries of `FILE_ID_BOTH_DIR_INFO`: the next entry's offset at 0
+        // (0 for the last), the name's length in bytes at 60, the name in
+        // UTF-16 at 104; each padded to eight bytes.
+        let listing = |names: &[&str]| {
+            let mut buf = Vec::new();
+            for (i, n) in names.iter().enumerate() {
+                let name: Vec<u8> = n.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                let size = (104 + name.len()).div_ceil(8) * 8;
+                let mut e = vec![0u8; size];
+                let next = if i + 1 == names.len() { 0 } else { size as u32 };
+                e[..4].copy_from_slice(&next.to_le_bytes());
+                e[60..64].copy_from_slice(&(name.len() as u32).to_le_bytes());
+                e[104..104 + name.len()].copy_from_slice(&name);
+                buf.extend(e);
+            }
+            buf
+        };
+        assert!(!names_more_than_dots(&listing(&[".", ".."])));
+        assert!(!names_more_than_dots(&listing(&[".."])));
+        assert!(names_more_than_dots(&listing(&[".", "..", "backup"])));
+        assert!(names_more_than_dots(&listing(&["backup"])));
+        assert!(names_more_than_dots(&listing(&[".", "..."])));
+        let cut = listing(&[".", "..", "backup"]);
+        assert!(names_more_than_dots(&cut[..cut.len() - 20]));
+        assert!(names_more_than_dots(&[]));
+    }
+
     /// The refusal says a program of the person's own made the folder, not
     /// that an intruder did, where the owner is this account (round 4,
     /// correctness 2).
@@ -598,5 +762,94 @@ mod tests {
         );
         drop(held);
         std::fs::rename(&dir, d.path().join("moved")).unwrap();
+    }
+
+    /// A folder with something in it is not held, and keeps its list: the
+    /// folder just made is empty, and one swapped in under its name is not
+    /// made private, nor what is in it deleted (round 6, correctness 2).
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_with_something_in_it_is_not_held() {
+        use crate::win::sid::sid_text;
+        let d = tempfile::tempdir().unwrap();
+        let icacls = |args: &[&str]| {
+            let o = std::process::Command::new("icacls")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "icacls {args:?}: {o:?}");
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        let dir = d.path().join("held");
+        std::fs::create_dir(&dir).unwrap();
+        let shown = dir.display().to_string();
+        icacls(&[&shown, "/grant", "*S-1-1-0:(OI)(CI)F"]);
+        std::fs::write(dir.join("backup"), "the administrator's").unwrap();
+        let me = sid_text(&crate::win::process::user_of(None).unwrap()).unwrap();
+        let e = hold_folder(&dir, &dacl_of(&[&me, "SY", "BA"], &[])).unwrap_err();
+        assert!(e.contains("something is in it"), "{e}");
+        assert!(icacls(&[&shown]).contains("Everyone"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("backup")).unwrap(),
+            "the administrator's"
+        );
+        // Empty, the same folder is held.
+        std::fs::remove_file(dir.join("backup")).unwrap();
+        drop(hold_folder(&dir, &dacl_of(&[&me, "SY", "BA"], &[])).unwrap());
+    }
+
+    /// On a FAT32 volume (what a USB stick comes with), whose folders all
+    /// name Everyone their owner and take no list, the backup's folder is
+    /// made, taken again and held, and a file made in it (round 6,
+    /// correctness 1). Makes a virtual disk, so it needs an administrator.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs an administrator: mounts a virtual disk in a folder"]
+    fn a_folder_on_a_volume_without_lists_is_held() {
+        use crate::win::sid::sid_text;
+        let base = tempfile::tempdir().unwrap();
+        let (vhd, mnt) = (base.path().join("v.vhdx"), base.path().join("mnt"));
+        std::fs::create_dir(&mnt).unwrap();
+        let diskpart = |script: String| {
+            let file = base.path().join("diskpart.txt");
+            std::fs::write(&file, script).unwrap();
+            let o = std::process::Command::new("diskpart")
+                .arg("/s")
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+        };
+        let v = vhd.display();
+        diskpart(format!(
+            "create vdisk file=\"{v}\" maximum=64 type=expandable\nselect vdisk file=\"{v}\"\n\
+             attach vdisk\ncreate partition primary\nformat fs=fat32 quick\n\
+             assign mount=\"{}\"\n",
+            mnt.display()
+        ));
+        // Detaches the disk however the test ends, before its folder goes.
+        struct Detach(std::path::PathBuf);
+        impl Drop for Detach {
+            fn drop(&mut self) {
+                let file = self.0.with_extension("detach.txt");
+                let script = format!("select vdisk file=\"{}\"\ndetach vdisk\n", self.0.display());
+                if std::fs::write(&file, script).is_ok() {
+                    let _ = std::process::Command::new("diskpart")
+                        .arg("/s")
+                        .arg(&file)
+                        .output();
+                }
+            }
+        }
+        let _detach = Detach(vhd.clone());
+        let me = sid_text(&crate::win::process::user_of(None).unwrap()).unwrap();
+        let own = dacl_of(&[&me, "SY", "BA"], &[]);
+        let hold = mnt.join("hold");
+        private_folder(&hold, &own).unwrap();
+        private_folder(&hold, &own).unwrap();
+        let held = hold_folder(&hold, &own).unwrap();
+        assert!(!keeps_lists(volume_flags(&held)));
+        std::fs::write(hold.join("backup"), "a backup").unwrap();
+        drop(held);
     }
 }

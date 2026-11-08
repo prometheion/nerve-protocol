@@ -43,8 +43,14 @@ fn program() -> PathBuf {
 
 /// What `nerve-center <args>` said, and whether it ended well.
 fn center(args: &[&str]) -> (bool, String) {
+    center_with(args, &[])
+}
+
+/// [`center`] with the variables `vars` set for it.
+fn center_with(args: &[&str], vars: &[(&str, &Path)]) -> (bool, String) {
     let o = Command::new(program())
         .args(args)
+        .envs(vars.iter().copied())
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -322,6 +328,15 @@ fn the_center_runs_as_a_windows_service() {
             said.contains("in an administrator's terminal shows it"),
             "{said}"
         );
+        // The installed center's folders are the ones Windows keeps, not
+        // what `ProgramData` says: an elevated terminal takes it from the
+        // account's own variables, which its unelevated programs may set
+        // (round 6, security 1).
+        let decoy = tempfile::tempdir().unwrap();
+        let (ok, said) = center_with(&["status"], &[("ProgramData", decoy.path())]);
+        assert!(ok, "{said}");
+        assert!(said.contains("center: running"), "{said}");
+        assert!(!decoy.path().join("nerve-center").exists());
         // Its folders are its account's and the administrators', its
         // settings the administrators' (the service reads them).
         let state = Path::new(&data).join("nerve-center").join("state");

@@ -20,12 +20,10 @@ const PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// A program of Windows itself, by its whole path: a program of that name
 /// in the folder this one started from (the downloads, as an administrator)
-/// is never run.
+/// is never run, nor one in a folder the `SystemRoot` variable names, which
+/// the account's unelevated programs may set (round 6, security 1).
 pub fn system_program(name: &str) -> PathBuf {
-    let root = std::env::var_os("SystemRoot")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
-    root.join("System32").join(name)
+    nerve_service::win::folders::system32().join(name)
 }
 
 /// This machine.

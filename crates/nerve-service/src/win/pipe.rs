@@ -178,33 +178,12 @@ mod sys {
             .open(name)
     }
 
-    /// The folder `%ProgramData%` stands for, as Windows names it. The
-    /// caller's environment still reaches this (`SystemDrive` builds the
-    /// path), so a command the node runs could point it at a folder with no
-    /// node in it: the answer is never taken as proof that no node runs
-    /// ([`no_pipe`]; round 4, security 1). The `ProgramData` variable is
-    /// not read at all.
+    /// The folder `%ProgramData%` stands for, as Windows keeps it: no
+    /// variable of the caller's reaches it ([`crate::win::folders`]). The
+    /// answer is still never taken as proof that no node runs ([`no_pipe`];
+    /// round 4, security 1).
     pub(super) fn program_data() -> std::path::PathBuf {
-        use std::os::windows::ffi::OsStringExt;
-
-        use windows_sys::Win32::System::Com::CoTaskMemFree;
-        use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
-        let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
-        // SAFETY: a known folder id and a place for the path, which the
-        // call allocates and is freed below.
-        let hr = unsafe {
-            SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut path)
-        };
-        let known = (hr >= 0 && !path.is_null()).then(|| {
-            // SAFETY: a NUL-terminated string the call made.
-            let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
-            // SAFETY: `len` characters before the NUL.
-            let wide = unsafe { std::slice::from_raw_parts(path, len) };
-            std::path::PathBuf::from(<std::ffi::OsString as OsStringExt>::from_wide(wide))
-        });
-        // SAFETY: the string from the call (or null), freed once.
-        unsafe { CoTaskMemFree(path.cast()) };
-        known.unwrap_or_else(|| "C:\\ProgramData".into())
+        crate::win::folders::program_data()
     }
 
     /// Whether the node's service is registered and not stopped, as the

@@ -156,9 +156,13 @@ fn command_line(program: &Path, args: &[&str]) -> String {
 /// that runs `update` (tokens often are there), as the Linux service's
 /// check runs with an empty environment.
 fn bare_environment() -> (Vec<u16>, Vec<u16>) {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let env = format!("SystemRoot={root}\0\0").encode_utf16().collect();
-    (env, wide(format!("{root}\\System32")))
+    // From Windows, not from the variables, which the account's unelevated
+    // programs may set (round 6, security 1).
+    let root = crate::win::folders::windows_dir();
+    let env = format!("SystemRoot={}\0\0", root.display())
+        .encode_utf16()
+        .collect();
+    (env, wide(crate::win::folders::system32()))
 }
 
 /// An attribute list that names `handle` as the one handle a new process

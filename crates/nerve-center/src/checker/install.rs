@@ -917,7 +917,9 @@ mod tests {
         let t = tar();
         if cfg!(windows) {
             assert!(t.is_absolute(), "{t:?}");
-            assert!(t.ends_with("System32\\tar.exe"), "{t:?}");
+            // Windows spells the folder `system32` as often as not.
+            let lower = t.to_string_lossy().to_lowercase();
+            assert!(lower.ends_with("\\system32\\tar.exe"), "{t:?}");
         } else {
             assert_eq!(t, std::path::PathBuf::from("tar"));
         }

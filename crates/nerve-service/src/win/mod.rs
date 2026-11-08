@@ -6,14 +6,16 @@
 //! service also runs as a virtual account ([`service`]) under the manager's
 //! dispatcher ([`dispatch`]), asks who runs a process ([`process`]) and
 //! which process holds a loopback connection ([`tcp`]), and runs a program
-//! without the administrators' rights ([`restricted`]). What is plain logic
-//! is compiled and tested on every platform.
+//! without the administrators' rights ([`restricted`]). The machine's own
+//! folders come from Windows, not from the environment ([`folders`]). What
+//! is plain logic is compiled and tested on every platform.
 
 pub mod dacl;
 #[cfg(windows)]
 pub mod dispatch;
 #[cfg(windows)]
 pub mod event;
+pub mod folders;
 pub mod job;
 #[cfg(windows)]
 pub mod job_object;

@@ -397,6 +397,7 @@ jobs:
           cp "$(exe -p nerve-center --test win_service)" dist/tests/win_service.exe
           cp "$(exe -p nerve-node --lib)" dist/tests/nerve_node_lib.exe
           cp "$(exe -p nerve-sandbox --lib)" dist/tests/nerve_sandbox_lib.exe
+          cp "$(exe -p nerve-service --lib)" dist/tests/nerve_service_lib.exe
           ls -l dist dist/tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

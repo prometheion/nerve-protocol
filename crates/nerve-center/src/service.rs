@@ -71,31 +71,34 @@ impl Layout {
     /// `%ProgramFiles%\Nerve` and the folders to `%ProgramData%\nerve-center`
     /// (not below the node's `%ProgramData%\Nerve`, which its uninstall may
     /// delete); the service is registered with the service control manager,
-    /// so there is no unit file ([`crate::winsvc`]).
+    /// so there is no unit file ([`crate::winsvc`]). Both folders are the
+    /// ones Windows keeps, not what the variables say: an administrator's
+    /// elevated terminal takes `ProgramData` from the account's own
+    /// variables, which its unelevated programs may set, and the commands
+    /// that run there write the center's key into this folder (round 6,
+    /// security 1).
     pub fn system() -> Layout {
-        if cfg!(windows) {
-            let var = |k: &str, or: &str| {
-                std::env::var_os(k)
-                    .filter(|v| !v.is_empty())
-                    .map_or_else(|| PathBuf::from(or), PathBuf::from)
-            };
-            let data = var("ProgramData", "C:\\ProgramData").join("nerve-center");
-            return Layout {
+        #[cfg(windows)]
+        {
+            use nerve_service::win::folders::{program_data, program_files};
+            let data = program_data().join("nerve-center");
+            Layout {
                 unit: PathBuf::new(),
-                bin: var("ProgramFiles", "C:\\Program Files")
-                    .join("Nerve")
-                    .join("nerve-center.exe"),
+                bin: program_files().join("Nerve").join("nerve-center.exe"),
                 state: data.join("state"),
                 settings_dir: data.join("settings"),
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
-            };
+            }
         }
-        Layout {
-            unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
-            bin: "/usr/local/bin/nerve-center".into(),
-            state: "/var/lib/nerve-center".into(),
-            settings_dir: "/etc/nerve-center".into(),
-            release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+        #[cfg(not(windows))]
+        {
+            Layout {
+                unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
+                bin: "/usr/local/bin/nerve-center".into(),
+                state: "/var/lib/nerve-center".into(),
+                settings_dir: "/etc/nerve-center".into(),
+                release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+            }
         }
     }
 

@@ -108,7 +108,8 @@ pub fn installed_folder_needs_admin(is_the_folder: bool, keep: bool, elevated: b
 /// unelevated programs (an agent's shell command among them) are one
 /// account, and `install` takes the folder as it finds it (round 4,
 /// security 2). An unelevated center is refused there and told to run as
-/// administrator or to run `install`.
+/// administrator or to run `install`. While the service is registered, the
+/// folder must be there as `install` left it (`dacl::admins_folder`).
 pub fn private_state(state: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -137,9 +138,17 @@ pub fn private_state(state: &std::path::Path) -> Result<(), String> {
                 &state_dacl(is_the_folder, &own_sid()?),
             );
         }
+        // The installed folder is taken only as `install` left it: there, a
+        // plain folder of SYSTEM's or the administrators'. One that is
+        // missing or another's is refused rather than made or filled with
+        // what the folder above hands down (round 6, security 1).
+        nerve_service::win::dacl::admins_folder(state)
     }
-    nerve_transport::files::create_private_dir(state)
-        .map_err(|e| format!("cannot create {}: {e}", state.display()))
+    #[cfg(not(windows))]
+    {
+        nerve_transport::files::create_private_dir(state)
+            .map_err(|e| format!("cannot create {}: {e}", state.display()))
+    }
 }
 
 /// Makes the file `path` this account's, SYSTEM's and the administrators'
@@ -201,9 +210,11 @@ pub fn write_backup_file(
             }
         };
         let made = hold.join("backup");
-        let done = write_file(&made, bytes, false)
-            .and_then(|()| private_file(&made))
-            .and_then(|()| {
+        // `write_file` removes what it began itself; what it made is
+        // removed only once it is there, never a `backup` it found (round
+        // 6, correctness 2).
+        let done = write_file(&made, bytes, false).and_then(|()| {
+            let moved = private_file(&made).and_then(|()| {
                 // The rename would replace a file; the name is taken unless
                 // `--overwrite` says otherwise.
                 if !overwrite && std::fs::symlink_metadata(file).is_ok() {
@@ -215,10 +226,14 @@ pub fn write_backup_file(
                 std::fs::rename(&made, file)
                     .map_err(|e| format!("cannot write {}: {e}", file.display()))
             });
-        // Cleaned up while the folder is held (the file is gone already
-        // after the move), and then only the empty folder: no recursion
-        // through a name someone may have put another folder under.
-        let _ = std::fs::remove_file(&made);
+            // Cleaned up while the folder is held.
+            if moved.is_err() {
+                let _ = std::fs::remove_file(&made);
+            }
+            moved
+        });
+        // Then only the empty folder: no recursion through a name someone
+        // may have put another folder under.
         drop(held);
         let _ = std::fs::remove_dir(&hold);
         done

@@ -374,7 +374,13 @@ cannot start because the file cannot be read says why in its log. Change them as
 center runs, the service's state, where it is reached, where its owner
 token is (`nerve-center owner-token` shows it there) and its log,
 `C:\ProgramData\nerve-center\state\log.jsonl`. A restore into the
-installed center stops the service and starts it again after.
+installed center stops the service and starts it again after; its state
+folder must be there as the install left it.
+
+These commands take `C:\ProgramData`, `C:\Program Files` and the system
+folder from Windows, not from the variables `ProgramData`, `ProgramFiles`
+and `SystemRoot`: an administrator's terminal takes those from your
+account's own variables, which any program of yours may set.
 
 `nerve-center update` stops the service, moves the old program aside, puts
 the new one in place and starts the service; a new program that does not
@@ -892,8 +898,9 @@ job built:
   (`nerve-node-desktop/tests/real.rs`);
 - the node is installed again with that account for commands, then the
   sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
-  (`nerve-node/tests/win_limits.rs`), the account's batch logon and a folder
-  on a virtual disk mounted in a folder run on it;
+  (`nerve-node/tests/win_limits.rs`), the account's batch logon, a folder
+  on a virtual disk mounted in a folder and a backup's folder on a FAT32
+  virtual disk run on it;
 - the center is installed as a service, its `status`, its restart actions
   (and a restart after its process is killed), its web UI in Chrome
   (`.github/scripts/web-ui-smoke.mjs`), what the standard account cannot
