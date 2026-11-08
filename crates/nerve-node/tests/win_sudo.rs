@@ -170,6 +170,11 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
         );
         let e = cfg.center_mut(CENTER).expect("paired");
         e.settings = SettingsGrant::Write;
+        // A new pairing starts in folder mode, whose commands run in its
+        // AppContainer and only in a folder with `x`, and where allow rules
+        // do not count: this command runs by its allow rule, with the
+        // account's own token.
+        e.policy.mode = nerve_policy::Mode::Allowlist;
         e.policy.allow = vec![rules::rule_for(
             "exec",
             "run",

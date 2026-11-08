@@ -3637,22 +3637,39 @@ mod tests {
         (d, Daemon::start(opts).await.unwrap())
     }
 
-    /// Once `stop` returns, the stopped node's control endpoint takes no
-    /// connection. On Windows the control pipe lives as long as an instance
-    /// the endpoint's task holds, so a CLI started right after `stop` could
-    /// open it and be cut off without an answer, where it should have found
-    /// no node and written node.toml itself. Shown here on the socket,
-    /// reached by a second name that `stop` does not remove.
-    #[cfg(unix)]
+    /// Once `stop` returns, the stopped node holds no control endpoint. On
+    /// Windows the control pipe lives as long as an instance the endpoint's
+    /// task holds, so a CLI started right after `stop` could open it and be
+    /// cut off without an answer, where it should have found no node and
+    /// written node.toml itself. Shown here on the socket's listener, looked
+    /// for among this process's own descriptors: a process forked meanwhile
+    /// (another test's command, before its exec) holds a copy for a moment,
+    /// which a connect would reach.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn a_stopped_node_takes_no_connection() {
+    async fn a_stopped_node_holds_no_control_endpoint() {
         let (_d, daemon) = daemon().await;
         let socket = daemon.shared.paths.ctl_socket();
-        let other = socket.with_file_name("other.sock");
-        std::fs::hard_link(&socket, &other).unwrap();
+        // The listener's inode, from the kernel's list of Unix sockets:
+        // `Num RefCount Protocol Flags Type St Inode Path`, a listener
+        // flagged 00010000.
+        let unix = std::fs::read_to_string("/proc/net/unix").unwrap();
+        let inode = unix
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .find(|f| f.len() == 8 && f[3] == "00010000" && std::path::Path::new(f[7]) == socket)
+            .map(|f| f[6].to_string())
+            .expect("the listener in /proc/net/unix");
+        let held = || {
+            let listener = std::path::PathBuf::from(format!("socket:[{inode}]"));
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+                .any(|l| l == listener)
+        };
+        assert!(held());
         daemon.stop().await;
-        let e = std::os::unix::net::UnixStream::connect(&other).unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused, "{e}");
+        assert!(!held(), "the stopped node still holds its control socket");
     }
 
     /// Its Windows twin: right after `stop`, a call over the control pipe

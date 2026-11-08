@@ -95,6 +95,10 @@ async fn the_installed_service_holds_a_command_to_its_memory_limit() {
     nerve_node::cli::edit(&paths, |cfg| {
         cfg.limits.command.memory_mb = 400;
         let e = cfg.center_mut(CENTER).expect("paired");
+        // A new pairing starts in folder mode, whose commands run only in a
+        // folder with `x` and where allow rules do not count: this command
+        // runs by its allow rule.
+        e.policy.mode = nerve_policy::Mode::Allowlist;
         e.policy.allow = vec![rules::rule_for("exec", "run", BIG, false, None)?];
         Ok(())
     })
