@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
+use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
 use nerve_policy::rules;
 use nerve_proto::RpcError;
@@ -28,6 +29,12 @@ const WAIT: Duration = Duration::from_secs(60);
 const CENTER: &str = "winlimits";
 /// PowerShell asks for 1 GiB at once: past the limit set below.
 const BIG: &str = "$a = [byte[]]::new(1GB); 'took ' + $a.Length";
+/// The desktop app, whose program is the node's on Windows (#176): the
+/// install puts it where its `Layout` says.
+static APP: Edition = Edition {
+    program: DESKTOP_PROGRAM,
+    parts: None,
+};
 
 async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
     let paired = center.paired().expect("paired");
@@ -51,7 +58,7 @@ async fn run(conn: &mut Conn<TcpStream>, command: &str) -> Result<Value, RpcErro
         .unwrap()
 }
 
-/// What the installed program's `status` says.
+/// What the installed program's `status` says, as the app asks it.
 fn status(layout: &Layout) -> Value {
     let o = Command::new(&layout.bin)
         .args(["--json", "status"])
@@ -63,7 +70,7 @@ fn status(layout: &Layout) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the node installed as a service on a Windows test machine"]
 async fn the_installed_service_holds_a_command_to_its_memory_limit() {
-    let layout = Layout::system();
+    let layout = Layout::of(&APP);
     let paths = layout.paths.clone();
     let st = status(&layout);
     let limits = &st["command_limits"];

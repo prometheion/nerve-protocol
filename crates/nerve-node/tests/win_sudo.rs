@@ -1,17 +1,18 @@
 //! The sudo switch on Windows, end to end on the installed service: the
 //! conformance fake center pairs with it, turns sudo on with the password of
 //! the account the commands run as, and runs commands with and without
-//! sudo. It needs a Windows test machine: the node installed as a service
-//! (`nerve-node install`) whose account for commands (`machine.user`) is an
-//! administrator, an elevated terminal, and that account and its password
-//! in `NERVE_WIN_SUDO_ACCOUNT` and `NERVE_WIN_SUDO_PASSWORD`:
+//! sudo. It needs a Windows test machine: Nerve installed as a service (the
+//! app's `install`, as CI's `windows-installed` job runs it) whose account
+//! for commands (`machine.user`) is an administrator, an elevated terminal,
+//! and that account and its password in `NERVE_WIN_SUDO_ACCOUNT` and
+//! `NERVE_WIN_SUDO_PASSWORD`:
 //!
 //! ```text
 //! cargo test -p nerve-node --test win_sudo -- --ignored
 //! ```
 //!
-//! It pairs the service with a center named `winsudo`, changes its rules
-//! and restarts it.
+//! It pairs the service with a center named `winsudo` and changes its rules,
+//! which the running node takes at once, and restarts it.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
+use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
 use nerve_policy::config::{SettingsGrant, Sudo};
 use nerve_policy::rules;
@@ -35,6 +37,12 @@ const HIGH: &str = "S-1-16-12288";
 const MEDIUM: &str = "S-1-16-8192";
 /// A sudo command that runs for half a minute.
 const PING: &str = "sudo ping -n 30 127.0.0.1";
+/// The desktop app, whose program is the node's on Windows (#176): the
+/// install puts it where its `Layout` says.
+static APP: Edition = Edition {
+    program: DESKTOP_PROGRAM,
+    parts: None,
+};
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
@@ -49,13 +57,23 @@ fn restart_service() {
     assert!(ok, "Restart-Service nerve-node");
 }
 
+/// The first link of the node's that completes the handshake. A link the
+/// node opened before a restart may still wait here: the stop closed it
+/// before its hello, and the node started again dials anew.
 async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
     let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+    let until = tokio::time::Instant::now() + WAIT;
+    let mut ended = Vec::new();
+    while let Some(mut inc) = center
+        .next_link(until.saturating_duration_since(tokio::time::Instant::now()))
         .await
-        .expect("handshake");
-    inc.conn
+    {
+        match fake_center::handshake(&mut inc.conn, &center.center_id, &paired).await {
+            Ok(_) => return inc.conn,
+            Err(e) => ended.push(e),
+        }
+    }
+    panic!("no link of the node completed the handshake; those that ended: {ended:?}");
 }
 
 async fn call(conn: &mut Conn<TcpStream>, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -127,7 +145,7 @@ fn stdout(r: &Value) -> &str {
 async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     let account = env("NERVE_WIN_SUDO_ACCOUNT");
     let password = env("NERVE_WIN_SUDO_PASSWORD");
-    let layout = Layout::system();
+    let layout = Layout::of(&APP);
     let paths = layout.paths.clone();
     let kept = paths.config_dir.join("sudo.dpapi");
     let mut center = FakeCenter::start(false).await.unwrap();
@@ -168,7 +186,7 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     })
     .await
     .expect("the owner's edit");
-    restart_service();
+    // The running node took the pairing and the rules at once, and dialed.
     let mut conn = linked(&mut center).await;
 
     // Off: the sudo list names the command, yet it is refused.
@@ -245,8 +263,8 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
         .expect("sudo whoami");
     assert!(stdout(&r).contains(HIGH), "{r}");
 
-    // `nerve-node sudo off` removes it, and the running service drops the
-    // password.
+    // The installed program's `sudo off`, as the app runs it, removes it,
+    // and the running service drops the password.
     let o = Command::new(&layout.bin)
         .args(["sudo", "off"])
         .output()

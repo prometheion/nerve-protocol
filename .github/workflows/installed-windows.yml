@@ -141,8 +141,13 @@ jobs:
       - name: Uninstall
         if: success() || failure()
         run: |
+          # The app's program is a Windows program, not a console one:
+          # PowerShell waits for it to end only when its output is piped.
           $bin = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
-          if (Test-Path $bin) { & $bin uninstall --purge }
+          if (Test-Path $bin) {
+            & $bin uninstall --purge 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
       # A test that returns early says so with `skipped` at the start of a
       # line, or behind `test <name> ... ` with one test thread.
       - name: No test skipped
