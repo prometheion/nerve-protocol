@@ -409,7 +409,7 @@ export component InstallerView inherits Rectangle {
                                     shown: Install.windows && !Install.node-only;
                                     Field {
                                         label: "Your Windows password";
-                                        hint: "Commands from centers run as you, " + Install.account + ". The service needs your password to start them, and keeps it encrypted.";
+                                        hint: "User mode runs commands as you, " + Install.account + ", and folder mode changes your folders' permissions as you. The service needs your password for that, and keeps it encrypted.";
                                         TextField {
                                             text <=> Install.password;
                                             password: true;

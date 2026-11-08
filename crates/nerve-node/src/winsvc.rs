@@ -569,7 +569,7 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mu
             "your stored password still works"
         };
         Ok::<_, String>(format!(
-            "user mode, allowlist mode as you and sudo run commands as {}, who ran install; {password}",
+            "user mode, allowlist mode as you and sudo run commands as {}, who ran install, and the node changes the permissions of your folders for the other commands as {0}; {password}",
             a.name
         ))
     })();
@@ -1453,7 +1453,7 @@ pub(crate) mod tests {
         assert!(out.contains("Password of alice"), "{out}");
         assert!(
             out.contains(
-                "user mode, allowlist mode as you and sudo run commands as alice, who ran install; your password is stored with DPAPI"
+                "user mode, allowlist mode as you and sudo run commands as alice, who ran install, and the node changes the permissions of your folders for the other commands as alice; your password is stored with DPAPI"
             ),
             "{out}"
         );

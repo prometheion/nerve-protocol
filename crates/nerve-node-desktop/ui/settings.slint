@@ -185,7 +185,7 @@ export component SettingsPage inherits PageFrame {
                         Text {
                             text: "User mode, allowlist mode as you and sudo run commands as "
                                 + (Prefs.account != "" ? Prefs.account : Install.account)
-                                + ", with your Windows password, which the install stored.";
+                                + ", with your Windows password, which the install stored. Folder mode needs it too: the node changes your folders' permissions as you.";
                             color: Theme.text;
                             font-size: Type.small;
                             wrap: word-wrap;

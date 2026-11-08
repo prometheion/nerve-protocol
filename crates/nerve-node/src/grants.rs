@@ -1790,9 +1790,20 @@ struct Acls<'a> {
 
 #[cfg(windows)]
 impl Acls<'_> {
-    /// Acts as the owner on this thread while the result lives.
+    /// Acts as the owner on this thread while the result lives. It logs
+    /// the owner on with the password the install stored: where that fails,
+    /// no folder's entry changes, and the error says where it is saved.
     fn act(&self) -> io::Result<Option<crate::win_user::FsAs>> {
-        self.owner.map(crate::win_user::FsAs::new).transpose()
+        self.owner
+            .map(|o| {
+                crate::win_user::FsAs::new(o).map_err(|e| {
+                    io::Error::other(format!(
+                        "the node changes the permissions of your folders as {}, and cannot log on as {0} ({e}); save your Windows password again under Settings, General, Account for commands",
+                        o.name
+                    ))
+                })
+            })
+            .transpose()
     }
 }
 

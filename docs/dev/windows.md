@@ -195,8 +195,9 @@ The install does this, and the installer shows each step:
    can open the node's folders or your registry.
 4. Stores your password (**Your Windows password**) with DPAPI in the config
    folder, for the commands that run as you: `user` mode, `allowlist` mode
-   with `--as-owner`, and sudo. A stored password that still works is not
-   asked for again.
+   with `--as-owner`, and sudo; and for the permission entries of `folder`
+   and `allowlist` mode, which the node changes on your folders as you. A
+   stored password that still works is not asked for again.
 5. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
 6. Registers and starts the service `nerve-run-profile`, which runs as
    `nerve-run` and does nothing but keep its profile loaded: Windows starts a
@@ -312,9 +313,12 @@ the twin of root as the owner on Linux.
 [Sudo on Windows](#sudo-on-windows) needs you to be an administrator.
 
 If your password changes, commands that run as you fail until you save the
-new one under **Settings**, **General**, **Account for commands**. A
-Microsoft account works with its Microsoft password, which can change
-outside the machine.
+new one under **Settings**, **General**, **Account for commands**. So do
+the changes of your folders' entries for `folder` and `allowlist` mode: a
+folder you add gives the commands no access, and one you remove or close
+stops the pairing's commands, until the node can log on as you again (the
+log says so). A Microsoft account works with its Microsoft password, which
+can change outside the machine.
 
 To start a process as another account, the service keeps two privileges,
 `SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows
