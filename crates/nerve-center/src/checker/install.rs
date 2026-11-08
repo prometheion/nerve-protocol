@@ -733,10 +733,35 @@ pub async fn gpu_available(state: &Path) -> bool {
     }
 }
 
+/// Whether the local model runs on the CPU only, whatever the owner chose:
+/// in the installed Windows service, which runs in Windows' session of the
+/// services, where a GPU driver may or may not serve it. The installed Linux
+/// service sees no GPU device (`PrivateDevices=`) and falls back the same.
+pub fn cpu_only() -> bool {
+    #[cfg(windows)]
+    {
+        nerve_service::win::dispatch::is_service()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Whether the model runs on the GPU: the owner `wanted` it, and the center
+/// does not run it on the CPU only ([`cpu_only`]).
+pub fn on_gpu(wanted: bool, cpu_only: bool) -> bool {
+    wanted && !cpu_only
+}
+
 /// A cheap guess, before anything is downloaded, at whether the machine has a
 /// GPU the Vulkan build could use, so the UI can offer the GPU choice. A false
 /// positive is harmless: the GPU build then falls back, and the UI offers CPU.
+/// None where the model runs on the CPU only.
 pub fn gpu_hint() -> bool {
+    if cpu_only() {
+        return false;
+    }
     if cfg!(target_os = "windows") {
         return Path::new("C:/Windows/System32/vulkan-1.dll").exists();
     }
@@ -766,12 +791,25 @@ pub fn gpu_hint() -> bool {
     render && loader
 }
 
+/// The system's `tar`: on Windows by its whole path in System32, as a
+/// program found by name may be one in the folder the center started from.
+fn tar() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        crate::win_host::system_program("tar.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        "tar".into()
+    }
+}
+
 /// Lists an archive's entries and refuses any that is absolute or climbs out
 /// of the target with `..`, then extracts it with the system `tar` (GNU tar
 /// reads `.tar.gz`; the `tar` on Windows 10+ is a bsdtar that also reads
 /// `.zip`).
 fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
-    let list = std::process::Command::new("tar")
+    let list = std::process::Command::new(tar())
         .arg("-tf")
         .arg(archive)
         .output()
@@ -790,7 +828,7 @@ fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
             ));
         }
     }
-    let out = std::process::Command::new("tar")
+    let out = std::process::Command::new(tar())
         .arg("-xf")
         .arg(archive)
         .arg("-C")
@@ -861,6 +899,30 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    /// The model runs on the GPU only where the owner chose it and the
+    /// center does not run it on the CPU only, as the Windows service does.
+    #[test]
+    fn the_windows_service_runs_the_model_on_the_cpu() {
+        assert!(on_gpu(true, false));
+        assert!(!on_gpu(true, true));
+        assert!(!on_gpu(false, false));
+        assert!(!on_gpu(false, true));
+        // No test runs as a service.
+        assert!(!cpu_only());
+    }
+
+    /// Windows' tar is the one in System32, never one found by name.
+    #[test]
+    fn tar_is_the_system_s() {
+        let t = tar();
+        if cfg!(windows) {
+            assert!(t.is_absolute(), "{t:?}");
+            assert!(t.ends_with("System32\\tar.exe"), "{t:?}");
+        } else {
+            assert_eq!(t, std::path::PathBuf::from("tar"));
+        }
+    }
+
     use super::*;
 
     /// Runs an async test body with a hard upper bound, so a hang fails in

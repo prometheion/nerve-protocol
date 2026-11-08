@@ -196,7 +196,7 @@ pub enum Cmd {
     Status,
     /// Show the token that logs in to the web UI
     ///
-    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or as root for the installed center.
+    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or for the installed center as root (on Windows, in an administrator's terminal).
     OwnerToken {
         /// Make a new token in place of the old one, which stops at once
         ///
@@ -380,10 +380,13 @@ pub fn is_loopback(addr: &str) -> bool {
 
 /// What `nerve-center` says when it is started by hand at a terminal with
 /// MCP on stdin: it would seem to hang, waiting for a harness.
-pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<&'static str> {
-    (*mcp == McpMode::Stdio && stdin_is_terminal).then_some(
-        "nerve-center: waiting for MCP on stdin, as a harness starts it. `sudo nerve-center install` runs it as a service; `nerve-center --help` lists the commands.",
-    )
+pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<String> {
+    (*mcp == McpMode::Stdio && stdin_is_terminal).then(|| {
+        format!(
+            "nerve-center: waiting for MCP on stdin, as a harness starts it. {} runs it as a service; `nerve-center --help` lists the commands.",
+            crate::service::admin_command("install")
+        )
+    })
 }
 
 /// The URL a person or a harness reaches the address `a` at: http on
@@ -409,7 +412,10 @@ mod tests {
     fn a_center_at_a_terminal_says_it_waits_for_mcp() {
         let say = terminal_notice(&McpMode::Stdio, true).unwrap();
         assert!(say.contains("waiting for MCP on stdin"), "{say}");
-        assert!(say.contains("sudo nerve-center install"), "{say}");
+        assert!(
+            say.contains(&crate::service::admin_command("install")),
+            "{say}"
+        );
         assert_eq!(terminal_notice(&McpMode::Stdio, false), None);
         assert_eq!(terminal_notice(&McpMode::Off, true), None);
     }

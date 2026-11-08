@@ -76,10 +76,11 @@ fn center_help() -> Value {
 }
 
 /// The command that shows the owner token of the center in `state`: with
-/// `sudo` for the installed center, whose folder is its own user's, without
-/// it for a center you started, whose folder is yours. A UI beyond loopback
-/// shows its page to anyone who reaches it, so it does not name a folder
-/// (`local` is false): the person who runs the command knows it.
+/// `sudo` for the installed center, whose folder is its own user's (on
+/// Windows in an administrator's terminal, [`token_where`]), without it for
+/// a center you started, whose folder is yours. A UI beyond loopback shows
+/// its page to anyone who reaches it, so it does not name a folder (`local`
+/// is false): the person who runs the command knows it.
 fn token_command(state: &std::path::Path, local: bool) -> String {
     let installed = crate::service::Layout::system();
     token_command_of(
@@ -87,6 +88,30 @@ fn token_command(state: &std::path::Path, local: bool) -> String {
         installed.installed().then_some(installed.state.as_path()),
         &crate::config::default_state_dir(),
         local,
+        cfg!(windows),
+    )
+}
+
+/// Where [`token_command`] runs: in an administrator's terminal for the
+/// installed center on Windows, else anywhere (nothing to say).
+pub(crate) fn token_where(
+    state: &std::path::Path,
+    installed: Option<&std::path::Path>,
+    windows: bool,
+) -> &'static str {
+    match windows && installed == Some(state) {
+        true => " in an administrator's terminal",
+        false => "",
+    }
+}
+
+/// [`token_where`] for the center in `state` on this machine.
+fn token_where_here(state: &std::path::Path) -> &'static str {
+    let installed = crate::service::Layout::system();
+    token_where(
+        state,
+        installed.installed().then_some(installed.state.as_path()),
+        cfg!(windows),
     )
 }
 
@@ -94,15 +119,20 @@ fn token_command(state: &std::path::Path, local: bool) -> String {
 /// one is installed, and `default` the folder of a harness-started center.
 /// `owner-token` alone goes to the installed center's folder, else to
 /// `default` (crate::config::Args::owner_state_dir): any other folder is
-/// named with `--state-dir`, which `local` shows (else a placeholder).
+/// named with `--state-dir`, which `local` shows (else a placeholder),
+/// quoted for a POSIX shell, or for PowerShell and cmd on `windows`.
 pub(crate) fn token_command_of(
     state: &std::path::Path,
     installed: Option<&std::path::Path>,
     default: &std::path::Path,
     local: bool,
+    windows: bool,
 ) -> String {
     if installed == Some(state) {
-        return "sudo nerve-center owner-token".into();
+        return match windows {
+            true => "nerve-center owner-token".into(),
+            false => "sudo nerve-center owner-token".into(),
+        };
     }
     if installed.is_none() && state == default {
         return "nerve-center owner-token".into();
@@ -114,9 +144,11 @@ pub(crate) fn token_command_of(
     let plain = dir
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-~:\\".contains(c));
-    match plain {
-        true => format!("nerve-center owner-token --state-dir {dir}"),
-        false => format!(
+    match (plain, windows) {
+        (true, _) => format!("nerve-center owner-token --state-dir {dir}"),
+        // A Windows path holds no double quote.
+        (false, true) => format!("nerve-center owner-token --state-dir \"{dir}\""),
+        (false, false) => format!(
             "nerve-center owner-token --state-dir '{}'",
             dir.replace('\'', "'\\''")
         ),
@@ -302,8 +334,9 @@ impl Ui {
 
     fn login_page(&self) -> Response {
         let tagline = format!(
-            "One center for all your machines. <code>{}</code> shows its owner token.",
-            html_text(&token_command(self.center.dir(), self.loopback))
+            "One center for all your machines. <code>{}</code>{} shows its owner token.",
+            html_text(&token_command(self.center.dir(), self.loopback)),
+            token_where_here(self.center.dir())
         );
         webui::login_page("Owner token", &tagline)
     }
@@ -317,8 +350,9 @@ impl Ui {
         // A secret that also opens /mcp would give the agent's own token
         // the way into this UI (review round 7 of the center's sign-in).
         let wrong = format!(
-            "{WRONG_TOKEN} `{}` shows it.",
-            token_command(self.center.dir(), self.loopback)
+            "{WRONG_TOKEN} `{}`{} shows it.",
+            token_command(self.center.dir(), self.loopback),
+            token_where_here(self.center.dir())
         );
         let why = if given.is_empty() || !self.owner.ok(&given) {
             Some(("wrong owner token", wrong.as_str()))
@@ -381,7 +415,7 @@ impl Ui {
         let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/api/overview") => Ok(json!({
-                "center": {"id": c.id(), "name": c.name(), "url": c.public_url().to_string(), "pin": c.pin()},
+                "center": {"id": c.id(), "name": c.name(), "url": c.public_url().to_string(), "pin": c.pin(), "os": std::env::consts::OS},
                 "nodes": c.nodes_json(),
                 "alerts": c.alerts(),
                 "sessions": c.sessions_json(),
@@ -1025,6 +1059,9 @@ mod tests {
         let st = pair_status(&ui, &code).await;
         assert_eq!(st["open"], false);
         assert_eq!(st["node"]["name"], "box-1");
+        // Its platform names its next step (a Windows machine has no
+        // nerve-node).
+        assert_eq!(st["node"]["platform"], "linux");
     }
 
     #[tokio::test]
@@ -1664,6 +1701,53 @@ mod tests {
         );
     }
 
+    /// A Windows machine has no nerve-node: the page names the Nerve app's
+    /// places for it, and the center's own commands an administrator's
+    /// terminal where the center runs on Windows (#64). Runs the page's
+    /// function with `node` where it is there.
+    #[test]
+    fn a_windows_machine_gets_the_nerve_app_s_places() {
+        let from = APP_JS.find("function folderStep(").unwrap();
+        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
+        let script = format!(
+            "const FOLDER_STEP = \"nerve-node folder add ~/project rwx\";\n{func}\nconsole.log(JSON.stringify([folderStep({{platform: \"windows\"}}), folderStep({{platform: \"linux\"}}), folderStep(null)]));"
+        );
+        let out = match std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => {
+                eprintln!("skipped: no node here");
+                return;
+            }
+        };
+        let steps: Vec<Value> = serde_json::from_str(out.trim()).unwrap();
+        assert!(
+            steps[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Permissions › Folders")
+        );
+        assert_eq!(steps[0]["copy"], Value::Null);
+        assert_eq!(steps[1]["copy"], "nerve-node folder add ~/project rwx");
+        assert_eq!(steps[2], steps[1]);
+        // The other places a Windows machine is told the app's, and the
+        // page knows where the center runs.
+        for text in [
+            "Its owner lets it in the Nerve app on that machine: Centers, Settings grant.",
+            "in the Nerve app on that machine: Capabilities, ${e.name}.",
+            "Change them in the Nerve app on the machine.",
+            "password of the account commands run as",
+            "in an administrator's terminal for the installed center.",
+            "`nerve-center install` in an administrator's terminal keeps it out.",
+            "state.overview.center.os === \"windows\"",
+        ] {
+            assert!(APP_JS.contains(text), "{text}");
+        }
+    }
+
     /// The line the Audit page offers for a sudo command is the exact rule
     /// (a trailing ` *` stays the command's own, not a wildcard for root),
     /// and only for a word that reads the same in POSIX shells and in fish:
@@ -2177,12 +2261,12 @@ mod tests {
                 .status,
             401
         );
-        assert_eq!(
-            ui.request(req("GET", "/api/overview", &[h, (SESSION, &ck)], ""))
-                .await
-                .status,
-            200
-        );
+        let o = ui
+            .request(req("GET", "/api/overview", &[h, (SESSION, &ck)], ""))
+            .await;
+        assert_eq!(o.status, 200);
+        // The page words the center's own commands for its system.
+        assert_eq!(json(&o)["center"]["os"], std::env::consts::OS);
         // A change from another origin is refused.
         let r = ui
             .request(req(
@@ -2328,7 +2412,7 @@ mod tests {
             Path::new("/home/o/.local/state/nerve-center"),
         );
         let of = |state: &str, installed: Option<&Path>| {
-            token_command_of(Path::new(state), installed, default, true)
+            token_command_of(Path::new(state), installed, default, true, false)
         };
         assert_eq!(
             of("/var/lib/nerve-center", Some(installed)),
@@ -2346,6 +2430,23 @@ mod tests {
         assert_eq!(
             of("/home/o/my centers/a", None),
             "nerve-center owner-token --state-dir '/home/o/my centers/a'"
+        );
+        // On Windows: no sudo, an administrator's terminal for the installed
+        // center, and quotes PowerShell and cmd read alike.
+        let svc = Path::new(r"C:\ProgramData\nerve-center\state");
+        assert_eq!(
+            token_command_of(svc, Some(svc), default, true, true),
+            "nerve-center owner-token"
+        );
+        assert_eq!(
+            token_where(svc, Some(svc), true),
+            " in an administrator's terminal"
+        );
+        assert_eq!(token_where(svc, Some(svc), false), "");
+        assert_eq!(token_where(Path::new(r"C:\c"), Some(svc), true), "");
+        assert_eq!(
+            token_command_of(Path::new(r"C:\my centers\a"), None, default, true, true),
+            r#"nerve-center owner-token --state-dir "C:\my centers\a""#
         );
         // Beyond loopback the page and the answer reach anyone: they name
         // no folder (round 2, security 2).

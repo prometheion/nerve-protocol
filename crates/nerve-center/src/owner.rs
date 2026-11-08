@@ -107,14 +107,16 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     // token that opens nothing.
     if not_yours(state) {
         return Err(format!(
-            "{} is not yours to read: run it as the center's user, or `sudo nerve-center owner-token` for the installed center",
-            state.display()
+            "{} is not yours to read: run it as the center's user, or {} for the installed center",
+            state.display(),
+            crate::service::admin_command("owner-token")
         ));
     }
     if !state.join(crate::store::FILE).exists() && !path(state).exists() {
         return Err(format!(
-            "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first (`sudo nerve-center install`)",
-            state.display()
+            "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first ({})",
+            state.display(),
+            crate::service::admin_command("install")
         ));
     }
     let (token, made) = if new {

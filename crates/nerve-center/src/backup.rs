@@ -138,7 +138,7 @@ impl Parsed {
 pub fn parse(contents: Contents) -> Result<Parsed, String> {
     if contents.kind != Kind::Center {
         return Err(format!(
-            "this is the backup of a {}, not of a center: restore it with `nerve-node restore`",
+            "this is the backup of a {}, not of a center: restore it with `nerve-node restore`, or in the Nerve app",
             contents.kind.word()
         ));
     }
@@ -576,7 +576,7 @@ pub fn run(
             let kind = backup::kind_of(&bytes)?;
             if kind != Kind::Center {
                 return Err(format!(
-                    "this is the backup of a {}, not of a center: restore it with `nerve-node restore`",
+                    "this is the backup of a {}, not of a center: restore it with `nerve-node restore`, or in the Nerve app",
                     kind.word()
                 ));
             }

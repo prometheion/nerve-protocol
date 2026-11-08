@@ -498,14 +498,16 @@ fn status_lines(
         false => layout.installed().then_some(layout.state.as_path()),
     };
     lines.push(format!(
-        "owner token: in {}; `{}` shows it",
+        "owner token: in {}; `{}`{} shows it",
         crate::owner::path(state).display(),
         crate::ui::token_command_of(
             state,
             installed_dir,
             &crate::config::default_state_dir(),
-            true
-        )
+            true,
+            layout.windows()
+        ),
+        crate::ui::token_where(state, installed_dir, layout.windows())
     ));
     lines.push(match read_store(state) {
         Ok(Some(s)) if s.nodes.is_empty() => {
