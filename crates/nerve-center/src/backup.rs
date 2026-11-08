@@ -897,6 +897,32 @@ mod tests {
         }
     }
 
+    /// A restore reads what is in the folder to put it back when a write
+    /// fails, and reads no link for that (round 1, security 3): the account
+    /// whose folder an administrator restores into could point the
+    /// identity file at a file only administrators read, and have its text
+    /// written back into the folder as a file it reads.
+    #[test]
+    fn a_failed_restore_puts_back_no_file_a_link_named() {
+        let a = tempfile::tempdir().unwrap();
+        center(a.path(), "c1");
+        let (_f, parsed, _) = backup_of(a.path());
+        let b = tempfile::tempdir().unwrap();
+        let state = b.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let secret = b.path().join("secret");
+        std::fs::write(&secret, "ADMINISTRATORS-ONLY").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, state.join(IDENTITY_FILE)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, state.join(IDENTITY_FILE)).unwrap();
+        // The state cannot be written: a folder is where the file goes.
+        std::fs::create_dir(state.join(store::FILE)).unwrap();
+        assert!(restore(&state, &parsed, true).is_err());
+        let now = std::fs::read_to_string(state.join(IDENTITY_FILE)).unwrap_or_default();
+        assert!(!now.contains("ADMINISTRATORS-ONLY"), "{now}");
+    }
+
     #[test]
     fn the_backup_holds_no_key_in_the_clear() {
         let a = tempfile::tempdir().unwrap();

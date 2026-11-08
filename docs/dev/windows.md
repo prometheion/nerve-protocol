@@ -345,9 +345,10 @@ The install does this, and says each step:
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
    service: no password, no user to keep. It starts with the machine and
-   again 5 seconds after a failure, three times a day at most; a center that
-   finds a lock poisoned ends, and so starts again too. It keeps no
-   privilege but passing through folders.
+   again 5 seconds after a failure, three times a day at most: a center that
+   finds a lock poisoned ends and starts again, and so does one that stops
+   with an error at its start (an address that is not there yet at boot).
+   It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
    the node port (`--listen`, 7443 by default) of that program, and nothing
    else. The web UI and MCP stay on loopback.
@@ -356,7 +357,8 @@ The install does this, and says each step:
 
 The service reads its settings only from `center.env`, the same
 `NERVE_CENTER_*` lines as on Linux; MCP is over HTTP unless the file says
-otherwise. Change them as an administrator, then
+otherwise, and a file that is missing means the defaults. A center that
+cannot start because the file cannot be read says why in its log. Change them as an administrator, then
 `Restart-Service nerve-center`. After a change of `--listen` run
 `nerve-center install --listen …` again, so the firewall rule follows.
 
@@ -860,18 +862,24 @@ The tests that need a Windows machine of their own carry
 job built:
 
 - it checks the runner is Windows Server 2025 (`.github/scripts/windows-runner.ps1`);
-- it makes an administrator account with a random password, and its
-  profile by a logon that loads it, as nobody signs in on a runner;
+- it makes an administrator account and a standard account with random
+  passwords, and their profiles by a logon that loads them, as nobody signs
+  in on a runner;
 - the app installs, starts, stops, restarts, updates and uninstalls Nerve
   (`nerve-node-desktop/tests/real.rs`);
 - the node is installed again with that account for commands, then the
   sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
   (`nerve-node/tests/win_limits.rs`), the account's batch logon and a folder
   on a virtual disk mounted in a folder run on it;
-- the center is installed as a service, its `status`, its web UI in Chrome
-  (`.github/scripts/web-ui-smoke.mjs`), a second center that attaches to a
-  first, `update` and `uninstall --purge` run
-  (`nerve-center/tests/win_service.rs`).
+- the center is installed as a service, its `status`, its restart actions
+  (and a restart after its process is killed), its web UI in Chrome
+  (`.github/scripts/web-ui-smoke.mjs`), what the standard account cannot
+  read or take (the state, the owner's places on a port), what the
+  administrator's other account and a pipe the standard account made get
+  from a second center, a second center that attaches to a first, a backup
+  and a restore into the service (also with the folder spelled another
+  way), `update` (a program that is not the center, another build) and
+  `uninstall --purge` run (`nerve-center/tests/win_service.rs`).
 
 A test that skips fails the job. The `windows` job also keeps the debug
 `nerve-node-desktop.exe` and `nerve-center.exe` as the artifact

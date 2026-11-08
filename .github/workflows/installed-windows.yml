@@ -5,8 +5,9 @@
 # node"); it grows with each part of the Windows node that needs a machine of
 # its own.
 #
-# The job makes an administrator account of its own, with a random password
-# and its profile loaded (nobody signs in on a runner), then runs:
+# The job makes an administrator account and a standard account of its own,
+# with random passwords and their profiles loaded (nobody signs in on a
+# runner), then runs:
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
 # - with the node installed again, its commands run as that account: the
@@ -16,9 +17,11 @@
 #   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
 #   folder on a virtual disk mounted in a folder (nerve-sandbox's
 #   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again);
-# - the center as a Windows service: its install, `status`, its web UI in
-#   Chrome, a second center that attaches to a first, update and uninstall
-#   (crates/nerve-center/tests/win_service.rs).
+# - the center as a Windows service: its install, `status`, its restart
+#   actions, its web UI in Chrome, what a standard account and the
+#   administrator's other account can and cannot do to it and to its pipe, a
+#   second center that attaches to a first, backup and restore, update (also
+#   to another build) and uninstall (crates/nerve-center/tests/win_service.rs).
 # A test that skips fails the job. The account's password is masked in the
 # log and goes nowhere but the tests of this job.
 name: Installed on Windows
@@ -99,6 +102,23 @@ jobs:
           "NERVE_WIN_SUDO_ACCOUNT=$name" >> $env:GITHUB_ENV
           "NERVE_WIN_SUDO_PASSWORD=$pw" >> $env:GITHUB_ENV
           "NERVE_TEST_SID=$sid" >> $env:GITHUB_ENV
+      # A standard account, for what an account without the administrators'
+      # rights must not do: read the center's state, take the owner's
+      # places on its ports, or make a pipe a harness trusts.
+      - name: A standard account with its profile
+        run: |
+          $name = 'nervestd'
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $pw = [Convert]::ToBase64String($bytes) + 'a1!'
+          "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member $name -ErrorAction SilentlyContinue
+          $cred = New-Object System.Management.Automation.PSCredential(".\$name", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
+            -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
+          "NERVE_WIN_STD_ACCOUNT=$name" >> $env:GITHUB_ENV
+          "NERVE_WIN_STD_PASSWORD=$pw" >> $env:GITHUB_ENV
       - name: The app installs, controls, updates and uninstalls Nerve
         run: |
           $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path

@@ -949,6 +949,26 @@ mod tests {
 
     /// The service takes the settings the file sets, as systemd reads it,
     /// and nothing but the center's.
+    /// The installed folder is found whichever way an administrator names
+    /// it, so a restore stops the service for it and leaves its access
+    /// list alone (round 1, correctness 2).
+    #[test]
+    fn the_installed_state_folder_is_found_by_any_spelling() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.state).unwrap();
+        let root = d.path().display().to_string();
+        assert!(l.is_state(&l.state));
+        assert!(l.is_state(&PathBuf::from(format!(
+            "{root}/ProgramData/nerve-center/state/"
+        ))));
+        assert!(l.is_state(&PathBuf::from(format!(
+            "{root}/ProgramData/nerve-center/../nerve-center/state"
+        ))));
+        assert!(!l.is_state(&PathBuf::from(format!("{root}/ProgramData/nerve-center"))));
+        assert!(!l.is_state(&l.settings_dir));
+    }
+
     /// A settings file that is not there starts the service with its
     /// defaults, as the Linux unit does; one that cannot be read does not
     /// (round 1, correctness 3).

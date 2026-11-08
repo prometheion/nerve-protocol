@@ -467,4 +467,24 @@ mod tests {
         let s: Store = serde_json::from_str(old).unwrap();
         assert!(!s.nodes["a"].disabled);
     }
+
+    /// The state is not read through a link (round 1, security 3): an
+    /// administrator's restore and `status` read the installed center's
+    /// folder, where its account may put one.
+    #[test]
+    fn the_state_is_not_read_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, r#"{"center_id": "c", "center_name": "home"}"#).unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, state.join(FILE)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, state.join(FILE)).unwrap();
+        assert!(Store::load(&state).is_err(), "a link was followed");
+        std::fs::remove_file(state.join(FILE)).unwrap();
+        std::fs::copy(&secret, state.join(FILE)).unwrap();
+        assert_eq!(Store::load(&state).unwrap().unwrap().center_id, "c");
+    }
 }

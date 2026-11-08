@@ -137,3 +137,24 @@ pub fn identity_of(pid: u32) -> (Option<Vec<u8>>, Option<u32>) {
         None => (None, session_of(pid)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The system's list of processes names this process's account and
+    /// session as its token does, and `identity_of` finds both (the list
+    /// is what names another account's process the service cannot open;
+    /// round 1, security 1).
+    #[test]
+    fn the_process_list_names_a_process_as_its_token_does() {
+        let pid = std::process::id();
+        let mine = user_of(None).unwrap();
+        let (sid, session) = listed(pid).expect("this process is in the list");
+        assert_eq!(sid.as_deref(), Some(mine.as_slice()));
+        assert_eq!(Some(session), session_of(pid));
+        assert_eq!(identity_of(pid), (Some(mine), Some(session)));
+        // A process that is not there is not named.
+        assert_eq!(listed(u32::MAX - 3), None);
+    }
+}

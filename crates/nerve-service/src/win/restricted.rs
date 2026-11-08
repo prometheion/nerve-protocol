@@ -319,4 +319,34 @@ mod tests {
             "\"C:\\a b\\p.exe\" --version \"x y\""
         );
     }
+
+    /// The program gets its output handle and no other (round 1, security
+    /// 6): an inheritable handle of this process, as one from the terminal
+    /// that started an elevated `update` would be, does not reach it.
+    #[test]
+    fn only_the_output_handle_is_inherited() {
+        let (_reader, writer) = std::io::pipe().unwrap();
+        let h = writer.as_raw_handle();
+        // SAFETY: an open handle of this process.
+        assert_ne!(
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+            0
+        );
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let ps = std::path::PathBuf::from(root)
+            .join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let script = format!(
+            "try {{ $h = New-Object Microsoft.Win32.SafeHandles.SafeFileHandle([IntPtr]{}, $false); $s = New-Object System.IO.FileStream($h, [System.IO.FileAccess]::Write); 'inherited' }} catch {{ 'not inherited' }}",
+            h as usize
+        );
+        let (code, out) = output_of(
+            &ps,
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+            Duration::from_secs(120),
+        )
+        .unwrap();
+        let out = String::from_utf8_lossy(&out);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("not inherited"), "{out}");
+    }
 }

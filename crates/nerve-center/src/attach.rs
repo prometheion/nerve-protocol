@@ -452,20 +452,25 @@ mod lock_tests {
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+#[cfg(test)]
+mod link_tests {
     use super::*;
 
     /// A link in place of the lock, as the user of an installed center's
-    /// state folder could leave for root's restore, is not followed: the
-    /// file it names is neither made nor opened.
+    /// state folder could leave for root's or an administrator's restore,
+    /// is not followed: the file it names is neither made nor opened.
+    /// (Making a link takes a privilege on Windows; the `windows` job runs
+    /// as an administrator.)
     #[test]
     fn the_lock_is_not_taken_through_a_link() {
         let d = tempfile::tempdir().unwrap();
         let state = d.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
         let target = d.path().join("made-through-the-link");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, state.join(LOCK_FILE)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, state.join(LOCK_FILE)).unwrap();
         let e = try_lock(&state).err().expect("a lock through a link");
         assert!(e.contains(LOCK_FILE), "{e}");
         assert!(!target.exists());
@@ -473,6 +478,11 @@ mod tests {
         std::fs::remove_file(state.join(LOCK_FILE)).unwrap();
         assert!(try_lock(&state).unwrap().is_some());
     }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
 
     /// Whether a center runs is not told through a link, nor by waiting on
     /// a FIFO in place of the lock (round 1, correctness 6): root's
