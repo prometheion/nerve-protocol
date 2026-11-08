@@ -317,8 +317,10 @@ new one under **Settings**, **General**, **Account for commands**. So do
 the changes of your folders' entries for `folder` and `allowlist` mode: a
 folder you add gives the commands no access, and one you remove or close
 stops the pairing's commands, until the node can log on as you again (the
-log says so). A Microsoft account works with its Microsoft password, which
-can change outside the machine.
+log says so). The node tries a stored password that failed once only, until
+you save a new one (or the service restarts), so its calls cannot run up the
+wrong-password count that locks your account. A Microsoft account works with
+its Microsoft password, which can change outside the machine.
 
 To start a process as another account, the service keeps two privileges,
 `SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows

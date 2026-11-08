@@ -287,6 +287,48 @@ pub fn parse_secret(b: &[u8]) -> Option<(String, String)> {
     (!name.is_empty()).then(|| (name.to_string(), password.to_string()))
 }
 
+/// A stored password that did not work, remembered with the file it came
+/// from. Windows counts every wrong password toward a lockout of the
+/// account (ten in ten minutes by default), and the node logs the owner on
+/// for every look at the folders' entries, so a password that changed
+/// outside the node must be tried once, not on every sync.
+#[derive(Default)]
+pub struct StalePassword(Option<(Vec<u8>, String)>);
+
+impl StalePassword {
+    /// `default()`, for a `static`.
+    pub const fn default_const() -> Self {
+        Self(None)
+    }
+
+    /// Runs `logon` for the password in `blob`, unless that very file failed
+    /// before: then it answers with the same error and logs nobody on. A new
+    /// file (the owner saved the password again) is tried anew. Only a
+    /// failure `logon` calls the password's fault (the `bool`) is
+    /// remembered; any other (the machine is busy) may pass at the next try.
+    pub fn attempt<T>(
+        &mut self,
+        blob: &[u8],
+        logon: impl FnOnce() -> Result<T, (String, bool)>,
+    ) -> Result<T, String> {
+        if let Some((seen, why)) = &self.0
+            && seen == blob
+        {
+            return Err(why.clone());
+        }
+        match logon() {
+            Ok(t) => {
+                self.0 = None;
+                Ok(t)
+            }
+            Err((why, wrong)) => {
+                self.0 = wrong.then(|| (blob.to_vec(), why.clone()));
+                Err(why)
+            }
+        }
+    }
+}
+
 /// A new password for `nerve`, which nobody types: the service control
 /// manager keeps it. It has the four kinds of characters a complexity
 /// rule asks for.
@@ -924,6 +966,38 @@ pub(crate) mod tests {
     use nerve_policy::audit::AuditLog;
     use nerve_policy::settings::SettingsStore;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn a_stale_password_is_tried_once_per_file() {
+        let mut stale = StalePassword::default();
+        let tries = Cell::new(0);
+        let bad = |why: &str, wrong: bool| {
+            tries.set(tries.get() + 1);
+            Err::<(), _>((why.to_string(), wrong))
+        };
+        for _ in 0..5 {
+            assert_eq!(
+                stale.attempt(b"old", || bad("wrong password", true)),
+                Err("wrong password".to_string())
+            );
+        }
+        assert_eq!(tries.get(), 1, "one wrong password, not one per call");
+        // The owner saved a password: that file is tried, once.
+        for _ in 0..3 {
+            assert!(stale.attempt(b"new", || bad("wrong again", true)).is_err());
+        }
+        assert_eq!(tries.get(), 2);
+        // A failure that is not the password's is tried again.
+        let mut busy = StalePassword::default();
+        for _ in 0..3 {
+            assert!(busy.attempt(b"x", || bad("busy", false)).is_err());
+        }
+        assert_eq!(tries.get(), 5);
+        // A logon that works clears the memory.
+        assert!(stale.attempt(b"fixed", || Ok(())).is_ok());
+        assert!(stale.attempt(b"fixed", || bad("expired", true)).is_err());
+        assert_eq!(tries.get(), 6);
+    }
 
     /// A Windows machine in a temporary folder: accounts, the service, the
     /// logons and DPAPI are recorded or played (crate::winsudo's tests use

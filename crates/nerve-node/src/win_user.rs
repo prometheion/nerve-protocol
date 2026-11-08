@@ -460,7 +460,7 @@ pub(crate) fn enable(names: &[&str]) -> io::Result<()> {
 /// machine would be: an administrator gets the filtered token UAC gives
 /// such a logon, without the Administrators group.
 pub fn logon(name: &str, password: &str) -> Result<Token, String> {
-    logon_as(name, password, LOGON32_LOGON_INTERACTIVE)
+    logon_as(name, password, LOGON32_LOGON_INTERACTIVE).map_err(|(why, _)| why)
 }
 
 /// Logs `name` on with `password` as a batch job, as the task scheduler
@@ -468,10 +468,16 @@ pub fn logon(name: &str, password: &str) -> Result<Token, String> {
 /// logon, so an administrator gets its full token, with the Administrators
 /// group. What a sudo command starts with (crate::winsudo).
 pub fn batch_logon(name: &str, password: &str) -> Result<Token, String> {
-    logon_as(name, password, LOGON32_LOGON_BATCH)
+    logon_as(name, password, LOGON32_LOGON_BATCH).map_err(|(why, _)| why)
 }
 
-fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, String> {
+/// [`logon`], and whether a failure is the password's: the one Windows
+/// counts toward a lockout.
+fn logon_counted(name: &str, password: &str) -> Result<Token, (String, bool)> {
+    logon_as(name, password, LOGON32_LOGON_INTERACTIVE)
+}
+
+fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, (String, bool)> {
     let mut h: HANDLE = std::ptr::null_mut();
     // SAFETY: NUL-terminated strings ("." is this machine) and a place for
     // the token.
@@ -487,17 +493,23 @@ fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, St
     };
     if ok == 0 {
         let e = last();
-        return Err(match e.raw_os_error().map(|c| c as u32) {
-            Some(ERROR_LOGON_FAILURE) => {
-                format!("the password of {name} is wrong, or {name} cannot log on with a password")
-            }
-            // Administrators may log on as a batch job unless a policy
-            // took it from them.
-            Some(ERROR_LOGON_TYPE_NOT_GRANTED) if kind == LOGON32_LOGON_BATCH => format!(
-                "{name} may not log on as a batch job, which a sudo command needs; administrators have the right \"Log on as a batch job\" unless a policy takes it"
-            ),
-            _ => format!("cannot log {name} on: {e}"),
-        });
+        let wrong = e.raw_os_error().map(|c| c as u32) == Some(ERROR_LOGON_FAILURE);
+        return Err((
+            match e.raw_os_error().map(|c| c as u32) {
+                Some(ERROR_LOGON_FAILURE) => {
+                    format!(
+                        "the password of {name} is wrong, or {name} cannot log on with a password"
+                    )
+                }
+                // Administrators may log on as a batch job unless a policy
+                // took it from them.
+                Some(ERROR_LOGON_TYPE_NOT_GRANTED) if kind == LOGON32_LOGON_BATCH => format!(
+                    "{name} may not log on as a batch job, which a sudo command needs; administrators have the right \"Log on as a batch job\" unless a policy takes it"
+                ),
+                _ => format!("cannot log {name} on: {e}"),
+            },
+            wrong,
+        ));
     }
     // SAFETY: LogonUserW returned a token this code now owns.
     Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
@@ -734,6 +746,11 @@ static SECRET: OnceLock<PathBuf> = OnceLock::new();
 /// The last logon of the command account, and when it was made.
 static LOGON: Mutex<Option<(String, Instant, Arc<Token>)>> = Mutex::new(None);
 
+/// The stored password of the owner that did not work, so that it is tried
+/// once, not at every look at the folders' entries.
+static STALE: Mutex<crate::winsvc::StalePassword> =
+    Mutex::new(crate::winsvc::StalePassword::default_const());
+
 /// Tells the commands where the stored passwords are: the config folder.
 pub fn init(config_dir: &Path) {
     let _ = SECRET.set(config_dir.to_path_buf());
@@ -782,7 +799,13 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
             account.name
         ));
     }
-    let t = Arc::new(logon(&name, &password).map_err(|e| format!("{e}; {again}"))?);
+    // A password that failed stays failed until the owner saves another:
+    // Windows locks the account after a few wrong ones, and every sync of
+    // the folders' entries logs the owner on.
+    let t = nerve_transport::sync::lock(&STALE)
+        .attempt(&blob, || logon_counted(&name, &password))
+        .map_err(|e| format!("{e}; {again}"))?;
+    let t = Arc::new(t);
     *cached = Some((account.name.clone(), Instant::now(), t.clone()));
     Ok(t)
 }

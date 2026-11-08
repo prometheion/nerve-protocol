@@ -1163,8 +1163,8 @@ fn walk_to(
                             ));
                         }
                         // `subst` keeps the folder as it was typed, short
-                        // names too.
-                        todo.extend(steps(&long_names(&mapped)));
+                        // names too; the steps write them out as they go.
+                        todo.extend(steps(&mapped));
                         continue;
                     }
                     // A volume root is the place its mount point names, and
@@ -1264,7 +1264,9 @@ fn walk_to(
                             Stop::Remote,
                         ));
                     }
-                    Some(t) => todo.extend(steps(&long_names(&t))),
+                    // Its names are written out a step at a time, each after
+                    // the link before it was judged.
+                    Some(t) => todo.extend(steps(&t)),
                     None => {
                         return Err((
                             format!("it cannot be resolved through the link {}", at.display()),
