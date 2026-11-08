@@ -130,8 +130,21 @@ pub(super) async fn rm(
     }
     // So is the profile of its container on Windows (crate::grants):
     // with its last grant when the record names it, else found by
-    // the pairing. A node that runs still serves the center until it
-    // starts again, so there it stays.
+    // the pairing. A node that runs took the change, and takes the
+    // grants off and the profile of a container left without grants
+    // itself, in its own time: asked to do that now, it is done before
+    // the profiles are looked at here, so none it removes is said to
+    // stay. Any other profile stays while it runs, as a command of the
+    // pairing may still run in it.
+    #[cfg(windows)]
+    match node_call(&paths, "folder.grants", json!({})).await {
+        Ok(_) => {}
+        Err(e) if crate::cli::no_node(&paths, &e) => {}
+        Err(e) => w(
+            out,
+            format!("the running node has not taken the folder grants of {name} off yet: {e}"),
+        ),
+    }
     let mut p = saved.grants.profiles.clone();
     let mut ours = Vec::new();
     for id in nerve_transport::sync::into_inner(gone) {
@@ -429,9 +442,30 @@ mod tests {
         profile
     }
 
+    /// A node started at `paths` with its control pipe, for `f`, then
+    /// stopped.
+    #[cfg(windows)]
+    fn with_node(home: &Path, paths: &NodePaths, f: impl FnOnce(&crate::Daemon)) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut opts = crate::NodeOptions::new(paths.clone());
+        opts.home = home.to_path_buf();
+        // Not the rights of whoever runs the tests: an elevated run must pass.
+        opts.full_rights = Some(false);
+        let node = rt.block_on(crate::Daemon::start(opts)).unwrap();
+        f(&node);
+        rt.block_on(node.stop());
+    }
+
     /// On Windows: the profile of a pairing with folder entries goes with
-    /// their grants at `center rm`, which says so, and stays while the node
-    /// runs, which it says too.
+    /// their grants at `center rm`, which says so where no node runs. A
+    /// running node takes the change and that profile itself; a profile
+    /// without grants stays while it runs, which `center rm` says. A node
+    /// that runs without its pipe is no node to write behind: nothing
+    /// changes.
     #[cfg(windows)]
     #[test]
     fn center_rm_names_the_profile_that_goes_with_the_last_grant() {
@@ -444,14 +478,31 @@ mod tests {
         let profile = profile_of(&name);
         // A node that runs holds the lock.
         let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
-        let out = run(&paths, &["center", "rm"]).unwrap();
+        let e = run(&paths, &["center", "rm"]).unwrap_err();
         drop(held);
-        assert!(
-            out.contains(&format!(
-                "the AppContainer profile {name} of home stays, since the node at"
-            )),
-            "{out}"
-        );
+        assert!(e.contains(crate::pipe::NO_PIPE), "{e}");
+        assert!(load(&paths).center("home").is_some());
+        assert!(profile.exists(), "{}", profile.display());
+        with_node(d.path(), &paths, |node| {
+            let out = run(&paths, &["center", "rm"]).unwrap();
+            assert!(out.contains("unpaired home"), "{out}");
+            assert!(!out.contains("stays"), "{out}");
+            assert!(node.config().center("home").is_none());
+            assert!(!profile.exists(), "{}", profile.display());
+        });
+
+        let (d, paths) = setup(&["home"]);
+        let name = crate::grants::container(&paths, "n");
+        let profile = profile_of(&name);
+        with_node(d.path(), &paths, |_| {
+            let out = run(&paths, &["center", "rm"]).unwrap();
+            assert!(
+                out.contains(&format!(
+                    "the AppContainer profile {name} of home stays, since the node at"
+                )),
+                "{out}"
+            );
+        });
         assert!(profile.exists(), "{}", profile.display());
         nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
 

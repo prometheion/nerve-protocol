@@ -595,6 +595,9 @@ mod tests {
         );
     }
 
+    /// On Linux the cgroup holds the limits, and the status names it; the
+    /// node's data is a cgroup's, so its words are Linux's wherever this
+    /// runs.
     #[test]
     fn the_status_names_the_cgroup_and_what_it_holds() {
         let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
@@ -602,7 +605,7 @@ mod tests {
                        "cgroup": "/system.slice/nerve-node.service",
                        "enforced": ["memory", "processes"], "off": null});
         assert_eq!(
-            limits_lines(&v),
+            limits_lines_on(&v, false),
             [
                 "limits per command: memory 1 MiB, CPU 3 %, 5 processes; a call may ask for up to 2 MiB, 4 %, 6 processes",
                 "limits held by the cgroup /system.slice/nerve-node.service: memory, processes; not cpu (the cgroup has no controller for it)",
@@ -615,7 +618,7 @@ mod tests {
                        "cgroup": "/", "enforced": [], "lost": ["memory", "processes"],
                        "off": null});
         assert_eq!(
-            limits_lines(&v)[1..],
+            limits_lines_on(&v, false)[1..],
             [
                 "limits held by the cgroup /: none; not cpu (the cgroup has no controller for it)",
                 "NO COMMAND RUNS: memory, processes turned off in the cgroup since the node started; start the node again",
