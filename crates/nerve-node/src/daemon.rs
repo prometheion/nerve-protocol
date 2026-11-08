@@ -616,22 +616,17 @@ fn net_filter_here() -> bool {
     false
 }
 
-/// How this node confines the commands of folder mode. The installed
-/// Windows service runs every command as another account (crate::win_user),
-/// and the AppContainer is not wired for that account yet (its profile and
-/// window station are made for the user the shim runs as), so there folder
-/// mode has no confinement and runs no command. A node run by hand takes a
-/// Landlock below the floor as none and so refuses folder mode's commands
-/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
-/// commands would run as `nerve-run` without it, held by nothing else.
+/// How this node confines the commands of folder mode. A node run by hand
+/// takes a Landlock below the floor as none and so refuses folder mode's
+/// commands (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it,
+/// as its commands would run as `nerve-run` without it, held by nothing
+/// else. The installed Windows service starts the AppContainer as
+/// `nerve-run` (crate::exec::run_as).
 pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     if !service {
         return detected.by_hand();
     }
-    Confinement {
-        appcontainer: false,
-        ..detected
-    }
+    detected
 }
 
 /// The sync of [`Shared::walk_acls`]: what to grant, and where to store the
@@ -884,11 +879,14 @@ impl Shared {
     }
 
     /// Whether the commands of a pairing with `policy` run as `nerve-run`
-    /// now: on the installed Linux node, in folder mode and in allowlist
-    /// mode unless the pairing runs as the owner. They are confined then,
-    /// in every mode.
+    /// now: on the installed node, in folder mode and in allowlist mode
+    /// unless the pairing runs as the owner. They are confined then, in
+    /// every mode: by Landlock on Linux where the kernel has it, in the
+    /// pairing's AppContainer on Windows.
     pub fn separate(&self, policy: &nerve_policy::config::CenterPolicy) -> bool {
-        self.service && cfg!(target_os = "linux") && !policy.runs_as_owner(crate::now_ms())
+        self.service
+            && (cfg!(target_os = "linux") || cfg!(windows))
+            && !policy.runs_as_owner(crate::now_ms())
     }
 
     /// The built-in folders of a pairing whose commands run as `nerve-run`
@@ -905,7 +903,8 @@ impl Shared {
         if self.separate(&entry.policy)
             && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
         {
-            return crate::account::with_built_in(entry, &self.rules_home(cfg), &a);
+            let own = self.own_of(&a, &entry);
+            return crate::account::with_built_in(entry, &self.rules_home(cfg), &a, &own);
         }
         entry
     }
@@ -948,7 +947,33 @@ impl Shared {
             let file = crate::own_dirs::record_file(&self.paths);
             return crate::own_dirs::ready(run, &entry.name, &entry.node_id, &file);
         }
-        Ok(crate::account::Own::of(&run.home, &entry.name))
+        // The container's profile, with the home in it, is made as the
+        // account, which alone may write its profile: the node starts a
+        // helper as it, once per container while the node runs.
+        #[cfg(windows)]
+        if self.service {
+            let container = crate::grants::container(&self.paths, &entry.node_id);
+            let exe = self
+                .exe
+                .as_deref()
+                .ok_or("this node has no program to start")?;
+            crate::win_profile::ready_as(exe, &container)?;
+        }
+        Ok(self.own_of(run, entry))
+    }
+
+    /// The own folders of the pairing `entry` whose commands run as `run`
+    /// (crate::account::own_for).
+    pub fn own_of(
+        &self,
+        run: &crate::service::Account,
+        entry: &nerve_policy::CenterEntry,
+    ) -> crate::account::Own {
+        crate::account::own_for(
+            &run.home,
+            &entry.name,
+            &crate::grants::container(&self.paths, &entry.node_id),
+        )
     }
 
     /// Brings the folder grants of Windows folder mode in line with the
@@ -1002,9 +1027,7 @@ impl Shared {
             .separate(&entry.policy)
             .then(|| self.account_seen(cfg, &entry.policy))
             .flatten();
-        let own = seen
-            .as_ref()
-            .map(|a| crate::account::Own::of(&a.home, &entry.name));
+        let own = seen.as_ref().map(|a| self.own_of(a, entry));
         // The folders as the gate sees them: not those of the other
         // pairings' homes ([`crate::account::around_pairings`]).
         let cut;
@@ -1059,7 +1082,7 @@ impl Shared {
         if !self.service {
             return self.own_user.clone();
         }
-        if cfg!(windows) || policy.runs_as_owner(crate::now_ms()) {
+        if policy.runs_as_owner(crate::now_ms()) {
             self.owner_name(cfg)
         } else {
             Some(crate::account::RUN_USER.to_string())
@@ -1287,7 +1310,7 @@ impl Shared {
                     .as_ref()
                     .map_or_else(|| self.home.clone(), |a| a.home.clone());
                 let settled = {
-                    let _as = crate::link::act_as(account.as_ref()).map_err(|e| e.message)?;
+                    let _as = crate::link::act_as(account.as_ref(), None).map_err(|e| e.message)?;
                     crate::exec::settle(&cfg, &home, std::path::Path::new(&given))
                 };
                 match settled {
@@ -3330,10 +3353,8 @@ mod every_platform {
     use super::*;
 
     /// The installed node names the account each pairing's commands run as
-    /// without a lookup: on Windows always the owner (the service's key), whose
-    /// commands run in an AppContainer, never `nerve-run`, which does not
-    /// exist there; elsewhere `nerve-run` unless the pairing runs as the
-    /// owner. Runs on every platform, so each half is checked where it holds.
+    /// without a lookup: `nerve-run` unless the pairing runs as the owner,
+    /// on Windows as on Linux (#149).
     #[tokio::test]
     async fn the_installed_node_names_the_command_account_of_each_pairing() {
         use nerve_policy::config::{CenterPolicy, Mode};
@@ -3361,11 +3382,7 @@ mod every_platform {
                 },
             )
         };
-        let run = if cfg!(windows) {
-            "alice"
-        } else {
-            crate::account::RUN_USER
-        };
+        let run = crate::account::RUN_USER;
         for (mode, as_owner, want) in [
             (Mode::Folder, false, run),
             (Mode::Allowlist, false, run),
@@ -4701,7 +4718,12 @@ mod tests {
             .get(crate::account::RUN_USER)
             .and_then(|(_, a)| a.clone())
             .unwrap();
-        let gate = crate::account::with_built_in(entry.clone(), &root.join("alice"), &run);
+        let gate = crate::account::with_built_in(
+            entry.clone(),
+            &root.join("alice"),
+            &run,
+            &s.own_of(&run, &entry),
+        );
         let got = sorted(gate.policy.folders.iter().map(|f| f.path.clone()).collect());
         assert_eq!(got, sorted(wanted.clone()));
         // The descriptor tells the same, its own folders apart.
@@ -6198,15 +6220,15 @@ mod confinement_tests {
     /// which the AppContainer is not wired: folder mode is not confined there
     /// and runs no command. Landlock and a node run by hand keep theirs.
     #[test]
-    fn the_installed_service_runs_no_command_in_an_appcontainer() {
+    fn the_installed_service_runs_commands_in_an_appcontainer() {
         let windows = Confinement {
             landlock_abi: None,
             appcontainer: true,
         };
         assert!(confinement_for(windows, false).appcontainer);
         let installed = confinement_for(windows, true);
-        assert!(!installed.available(), "{installed:?}");
-        assert_eq!(installed.describe(), "none");
+        assert!(installed.available(), "{installed:?}");
+        assert_eq!(installed.describe(), "appcontainer");
         let linux = Confinement {
             landlock_abi: Some(4),
             appcontainer: false,

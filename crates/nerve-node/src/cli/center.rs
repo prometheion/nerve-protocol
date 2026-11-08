@@ -385,7 +385,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            &name,
+            &nerve_sandbox::ContainerSpec::new(name.clone()),
         );
         assert!(profile.exists(), "{}", profile.display());
         assert!(!crate::grants::record_file(&paths).exists());
@@ -418,7 +418,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            &name,
+            &nerve_sandbox::ContainerSpec::new(name.clone()),
         );
         assert!(profile.exists(), "{}", profile.display());
         let ls = run(&paths, &["center"]).unwrap();
@@ -435,7 +435,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            name,
+            &nerve_sandbox::ContainerSpec::new(name),
         );
         let profile = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
             .join("Packages")

@@ -20,8 +20,14 @@ use nerve_policy::paths::within;
 use crate::service::Account;
 
 /// The account the installed node runs commands as that do not run as the
-/// owner (Linux).
+/// owner.
 pub const RUN_USER: &str = "nerve-run";
+
+/// What makes [`RUN_USER`] again.
+#[cfg(not(windows))]
+const REINSTALL: &str = "`sudo nerve-node install` makes it again";
+#[cfg(windows)]
+const REINSTALL: &str = "Nerve's installer makes it again";
 
 /// The comment `install` gives [`RUN_USER`]. An account of that name without
 /// it was not made by `install`: no command runs as it, and `uninstall`
@@ -63,6 +69,24 @@ impl Own {
             temp: root.join("tmp"),
         }
     }
+
+    /// The folders of a pairing on Windows, in its AppContainer's own folder
+    /// (`AC`) in the profile of [`RUN_USER`] at `run_home`, which the
+    /// shim makes for the container (nerve_sandbox::appcontainer::ready):
+    /// its home, and the folder Windows points `LOCALAPPDATA` and the
+    /// temporary files at. Only that pairing's container reaches them.
+    pub fn in_container(run_home: &Path, container: &str) -> Own {
+        let ac = run_home
+            .join("AppData")
+            .join("Local")
+            .join("Packages")
+            .join(container)
+            .join("AC");
+        Own {
+            home: ac.join("home"),
+            temp: ac,
+        }
+    }
 }
 
 /// The folders a command of [`RUN_USER`] has besides those of its pairing,
@@ -77,18 +101,22 @@ pub fn built_in(own: &Own) -> Vec<Folder> {
         write: true,
         execute: true,
     };
-    [
-        Path::new("/tmp"),
-        Path::new("/var/tmp"),
-        own.home.as_path(),
-        own.temp.as_path(),
-    ]
-    .iter()
-    .map(|p| Folder {
-        path: p.display().to_string(),
-        access: all,
-    })
-    .collect()
+    // Windows: the container's own folder holds both, and no folder of
+    // temporary files is shared (nerve_sandbox::appcontainer).
+    let shared: &[&Path] = if cfg!(windows) {
+        &[]
+    } else {
+        &[Path::new("/tmp"), Path::new("/var/tmp")]
+    };
+    shared
+        .iter()
+        .copied()
+        .chain([own.home.as_path(), own.temp.as_path()])
+        .map(|p| Folder {
+            path: p.display().to_string(),
+            access: all,
+        })
+        .collect()
 }
 
 /// The folders the owner granted, cut around `run_home`, the home of
@@ -120,21 +148,40 @@ pub fn around_pairings(folders: &[Folder], home: &Path, run_home: &Path) -> Vec<
     out
 }
 
+/// The folders of the pairing `center` (Linux, [`Own::of`]) whose
+/// AppContainer is `container` (Windows, [`Own::in_container`]), below
+/// `run_home`.
+pub fn own_for(run_home: &Path, center: &str, container: &str) -> Own {
+    if cfg!(windows) {
+        Own::in_container(run_home, container)
+    } else {
+        Own::of(run_home, center)
+    }
+}
+
 /// The home of the command account as the paths of a call are compared
-/// (resolved), and the pairing `center`'s own folders in it.
-pub fn pairing_view(run_home: &Path, center: &str) -> (PathBuf, Own) {
+/// (resolved), and the own folders in it of the pairing `center` with the
+/// AppContainer `container` ([`own_for`]).
+pub fn pairing_view(run_home: &Path, center: &str, container: &str) -> (PathBuf, Own) {
+    // A profile folder on Windows is a real path already; resolved, it
+    // would take a `\\?\` the paths compared with do not have.
+    #[cfg(unix)]
     let home = std::fs::canonicalize(run_home).unwrap_or_else(|_| run_home.to_path_buf());
-    let own = Own::of(&home, center);
+    #[cfg(not(unix))]
+    let home = run_home.to_path_buf();
+    let own = own_for(&home, center, container);
     (home, own)
 }
 
-/// The command account's home and the pairing `center`'s own folders in it
-/// ([`pairing_view`]), to which the gate holds a call that acts as that
-/// account ([`other_pairings`]). `None` for another account: a sudo command
-/// of the pairing runs as root and is looked at as the owner, whose home
-/// holds no pairing's folders, and the sudo allow list names what it does.
-pub fn fence(account: &Account, center: &str) -> Option<(PathBuf, Own)> {
-    (account.name == RUN_USER).then(|| pairing_view(&account.home, center))
+/// The command account's home and the own folders of the pairing `center`
+/// (with the AppContainer `container`) in it ([`pairing_view`]), to which
+/// the gate holds a call that acts as that account ([`other_pairings`]).
+/// `None` for another account: a sudo command of the pairing runs as root
+/// (Linux) or as the owner (Windows) and is looked at as the owner, whose
+/// home holds no pairing's folders, and the sudo allow list names what it
+/// does.
+pub fn fence(account: &Account, center: &str, container: &str) -> Option<(PathBuf, Own)> {
+    (account.name == RUN_USER).then(|| pairing_view(&account.home, center, container))
 }
 
 /// Why a program may not be handed the folder `handed` with `link` below
@@ -205,10 +252,9 @@ pub fn other_pairings(
 /// `run` (`nerve-run`): the owner's folders cut around the account's home
 /// ([`around_pairings`]), then the pairing's built-in ones ([`built_in`]).
 /// `home` is the `~` of the folders.
-pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account) -> CenterEntry {
-    let own = Own::of(&run.home, &entry.name);
+pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account, own: &Own) -> CenterEntry {
     entry.policy.folders = around_pairings(&entry.policy.folders, home, &run.home);
-    entry.policy.folders.extend(built_in(&own));
+    entry.policy.folders.extend(built_in(own));
     entry
 }
 
@@ -597,12 +643,11 @@ pub fn name_of(uid: u32) -> Option<String> {
 /// The account a pairing's command runs as on the node: `as_owner` for one
 /// that runs as the owner (crate::daemon::Shared::command_account), with
 /// `owner` the node's owner (on Linux the account the service unit names,
-/// on Windows the one its service's key names). `None` runs it as the node's own
-/// user, as a node that a person runs does with every command. The
-/// installed service (`service`: its folders or its user, however it was
-/// started) runs none as itself, since it owns the keys, and none at all
-/// while it cannot switch accounts. On Windows every command runs as the
-/// owner (the separate account is Linux's so far).
+/// on Windows the one its service's key names), else [`RUN_USER`]. `None`
+/// runs it as the node's own user, as a node that a person runs does with
+/// every command. The installed service (`service`: its folders or its
+/// user, however it was started) runs none as itself, since it owns the
+/// keys, and none at all while it cannot switch accounts.
 pub fn for_commands(
     as_owner: bool,
     owner: Option<&str>,
@@ -624,7 +669,6 @@ pub fn for_commands(
             )
         });
     }
-    let as_owner = as_owner || cfg!(windows);
     let name = match (as_owner, owner) {
         (true, Some(o)) => o,
         (true, None) => return Err(NO_OWNER.into()),
@@ -643,7 +687,8 @@ pub fn for_commands(
             }
         } else {
             format!(
-                "the account {name} that commands run as does not exist on this machine; `sudo nerve-node install` makes it again"
+                "the account {name} that commands run as does not exist on this machine; {}",
+                REINSTALL
             )
         }
     })?;
@@ -658,7 +703,7 @@ pub fn for_commands(
     }
     if !as_owner && a.comment != RUN_MARK {
         return Err(format!(
-            "the account {name} here was not made by `install`, so no command runs as it; `sudo nerve-node install` makes it if it is gone"
+            "the account {name} here was not made by `install`, so no command runs as it; {REINSTALL}"
         ));
     }
     Ok(Some(a))
@@ -1068,15 +1113,17 @@ mod tests {
         assert!(e.contains("install` makes it again"), "{e}");
     }
 
-    /// Windows keeps every command under the owner's account.
-    #[cfg(windows)]
+    /// Windows runs folder and allowlist mode as `nerve-run` too (#149),
+    /// and only what runs as the owner as the owner.
     #[test]
-    fn every_command_runs_as_the_owner_on_windows() {
-        for as_owner in [false, true] {
-            let a = for_commands(as_owner, Some("alice"), 990, true, true, db).unwrap();
-            assert_eq!(a.unwrap().name, "alice");
-            let e = for_commands(as_owner, None, 990, true, true, db).unwrap_err();
-            assert_eq!(e, NO_OWNER);
+    fn what_does_not_run_as_the_owner_runs_as_the_command_account() {
+        let a = for_commands(true, Some("alice"), 990, true, true, db).unwrap();
+        assert_eq!(a.unwrap().name, "alice");
+        let e = for_commands(true, None, 990, true, true, db).unwrap_err();
+        assert_eq!(e, NO_OWNER);
+        for owner in [Some("alice"), None] {
+            let a = for_commands(false, owner, 990, true, true, db).unwrap();
+            assert_eq!(a.unwrap().name, RUN_USER);
         }
     }
 
@@ -1225,8 +1272,9 @@ mod tests {
             holds,
             arg: None,
         };
-        assert!(fence(&account("alice", "/home/alice"), "lab").is_none());
-        let (run_home, mine) = fence(&account(RUN_USER, "/srv/nerve-run"), "lab").unwrap();
+        assert!(fence(&account("alice", "/home/alice"), "lab", "nerve.lab").is_none());
+        let (run_home, mine) =
+            fence(&account(RUN_USER, "/srv/nerve-run"), "lab", "nerve.lab").unwrap();
         assert_eq!(mine.home, Path::new("/srv/nerve-run/lab/home"));
         let refused = |to: &str, holds: bool| {
             let link = Link {
@@ -1321,8 +1369,8 @@ mod tests {
             policy: Default::default(),
             capabilities: Vec::new(),
         };
-        let got = with_built_in(entry, &base.join("alice"), &run);
         let own = Own::of(&base.join("disk/run"), "lab");
+        let got = with_built_in(entry, &base.join("alice"), &run, &Own::of(&run.home, "lab"));
         let paths: Vec<&str> = got.policy.folders.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&own.home.to_str().unwrap()), "{paths:?}");
         assert!(paths.contains(&own.temp.to_str().unwrap()), "{paths:?}");

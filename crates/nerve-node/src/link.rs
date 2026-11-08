@@ -2430,6 +2430,7 @@ impl Link {
         // account stops the call once it is decided and audited.
         let account = self.shared.command_account(&cfg, &entry.policy);
         let known = account.as_ref().ok().cloned().flatten();
+        let boxed = self.boxed();
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) {
             self.acls_ready(&cfg).await?;
@@ -2448,7 +2449,7 @@ impl Link {
         // A path that does not resolve is in the audit once the
         // switch is over, as for a provider's.
         let parsed = {
-            let _as = act_as(known.as_ref())?;
+            let _as = act_as(known.as_ref(), boxed.as_deref())?;
             FsCall::parse(a, &inv.args)
         };
         let call = parsed.inspect_err(|e| {
@@ -2496,12 +2497,13 @@ impl Link {
         // The account's home, where every pairing's own folders lie,
         // is walked only as far as this pairing's own.
         let name = entry.name.clone();
+        let container = crate::grants::container(&self.shared.paths, &entry.node_id);
         let run_home = known
             .clone()
             .filter(|_| self.shared.separate(&entry.policy))
             .map(|a| a.home);
         tokio::task::spawn_blocking(move || {
-            let _as = act_as(known.as_ref())?;
+            let _as = act_as(known.as_ref(), boxed.as_deref())?;
             // An entry the direct read would refuse stays out of the
             // walk, so a folder without `r` inside one with `r` is
             // sealed to grep, find and list too. A walk still passes
@@ -2530,7 +2532,7 @@ impl Link {
             };
             let pairings = run_home
                 .as_ref()
-                .map(|h| crate::account::pairing_view(h, &name));
+                .map(|h| crate::account::pairing_view(h, &name, &container));
             let skip = |p: &std::path::Path, through: bool| {
                 pairings
                     .as_ref()
@@ -2583,7 +2585,7 @@ impl Link {
         // as any refusal, with the path given. The entry is written once
         // the switch is over: the account may not write the node's log.
         let resolved = {
-            let _as = act_as(known)?;
+            let _as = act_as(known, self.boxed().as_deref())?;
             marked.iter().try_for_each(|(field, mark)| {
                 // Left out (or null, which its schema may allow): no path.
                 let Some(Value::String(given)) = inv.args.get(field) else {
@@ -2676,6 +2678,14 @@ impl Link {
         self.shared.rules_home(&self.shared.config())
     }
 
+    /// The AppContainer of this link's pairing (crate::grants::container),
+    /// in which the node acts as the command account on Windows. Not called
+    /// while the store is locked: it reads the config.
+    fn boxed(&self) -> Option<String> {
+        self.entry()
+            .map(|(_, e)| crate::grants::container(&self.shared.paths, &e.node_id))
+    }
+
     /// The owner's account, whose view of the files the protected list
     /// is made with, when there is one to use. Not called while the store
     /// is locked: it reads the config.
@@ -2713,7 +2723,7 @@ impl Link {
         let home = account.map_or(&self.shared.home, |a| &a.home);
         // Without the switch the entries are still there as written; only
         // the places they lead to through links are not found.
-        let _as = act_as(account).ok().flatten();
+        let _as = act_as(account, None).ok().flatten();
         Protected::new(&self.shared.platform, home, own, opts)
     }
 
@@ -2788,8 +2798,9 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again.
+        let boxed = self.boxed();
         let (decision, fence) = {
-            let _as = act_as(account)?;
+            let _as = act_as(account, boxed.as_deref())?;
             let decision = judged.with(|env| nerve_policy::decide(&entry.policy, env, &call));
             // Whatever the mode and the rules say, a call of a pairing whose
             // commands run as `nerve-run`, made as that account, gets no
@@ -2797,7 +2808,10 @@ impl Link {
             // account, which owns them all.
             let fence = account
                 .filter(|_| self.shared.separate(&entry.policy))
-                .and_then(|run| crate::account::fence(run, &entry.name));
+                .and_then(|run| {
+                    let c = crate::grants::container(&self.shared.paths, &entry.node_id);
+                    crate::account::fence(run, &entry.name, &c)
+                });
             let decision = match (decision, &fence) {
                 (Decision::Allow, Some((run_home, mine))) => {
                     crate::account::other_pairings(targets, run_home, mine, program.is_some())
@@ -2841,7 +2855,7 @@ impl Link {
                         now_ms,
                         args: Some(&args),
                     };
-                    let _as = act_as(account.as_ref())?;
+                    let _as = act_as(account.as_ref(), boxed.as_deref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
                         let check = nerve_policy::LinkCheck::new(&policy, env, &call);
                         // The policy does not know the other pairings'
@@ -3298,9 +3312,13 @@ impl Link {
         };
         let pairing = match &ready {
             Ok(own) => own.clone(),
-            Err(_) => known
-                .as_ref()
-                .map(|a| crate::account::Own::of(&a.home, &entry.name)),
+            Err(_) => known.as_ref().map(|a| {
+                crate::account::own_for(
+                    &a.home,
+                    &entry.name,
+                    &crate::grants::container(&self.shared.paths, &entry.node_id),
+                )
+            }),
         };
         let start_in = match &pairing {
             Some(o) => o.home.clone(),
@@ -3333,7 +3351,7 @@ impl Link {
         }
         // The paths are looked at as the account (crate::account::FsAs).
         let rc = {
-            let _as = act_as(looks_as.as_ref())?;
+            let _as = act_as(looks_as.as_ref(), self.boxed().as_deref())?;
             RunCall::parse(&inv.args, &start_in)?
         };
         // A call may ask for less than the owner's most, never for more.
@@ -3414,13 +3432,26 @@ impl Link {
         }
         // Folder mode confines: Landlock on Linux, the pairing's AppContainer
         // on Windows, by the answer the gate went by; `nerve-run` is
-        // confined in allowlist mode too, where Landlock is there.
+        // confined in allowlist mode too: by Landlock where it is there, and
+        // always in the pairing's container on Windows, as the account's
+        // entries on the folders are every pairing's (#149).
         let folder = sudo.is_none() && !as_root && by_folders && unconfined.is_none();
-        let container = if folder && self.shared.confinement.appcontainer {
-            Some(self.container(entry).await?)
-        } else {
-            None
-        };
+        let container =
+            if (folder || cfg!(windows) && separate) && self.shared.confinement.appcontainer {
+                Some(
+                    self.container(entry, entry.policy.no_network, separate.then_some(cfg))
+                        .await?,
+                )
+            } else {
+                None
+            };
+        // No command runs as `nerve-run` on Windows outside its container.
+        if cfg!(windows) && separate && container.is_none() {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                crate::daemon::NOT_CONFINED,
+            ));
+        }
         // Its pairing's folders are there before it starts.
         let pairing = ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let separate = pairing.filter(|_| separate);
@@ -3431,7 +3462,9 @@ impl Link {
         let confine = folder || separate.is_some() && self.shared.exe.is_some();
         let landlock = (confine && self.shared.confinement.landlock_abi.is_some()).then(|| {
             // The folders' entries are listed as the account.
-            let _as = act_as(known.as_ref()).ok().flatten();
+            let _as = act_as(known.as_ref(), self.boxed().as_deref())
+                .ok()
+                .flatten();
             // The folders a command of any center may write: a link it puts
             // in place of a folder inside one leads nowhere the next
             // command gets rules for.
@@ -3654,7 +3687,9 @@ impl Link {
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
             // The folders' entries are listed as the account.
-            let _as = act_as(account.as_ref()).ok().flatten();
+            let _as = act_as(account.as_ref(), self.boxed().as_deref())
+                .ok()
+                .flatten();
             let writable = exec::write_folders(cfg, &home);
             exec::config_spec(
                 &entry.policy,
@@ -3784,10 +3819,15 @@ impl Link {
     /// where it changed since the gate let the command through. A grant of
     /// this pairing's container that its folders no longer give and that
     /// could not be taken off stops the command, and so does a record of the
-    /// grants that cannot be read (`Synced::refusal`).
+    /// grants that cannot be read (`Synced::refusal`). `no_network`: the
+    /// owner's switch is off for the pairing. `separate`: the command runs as
+    /// `nerve-run`, with its home in the container and the variables the
+    /// owner passes on (`machine.command_env`).
     async fn container(
         &self,
         entry: &CenterEntry,
+        no_network: bool,
+        separate: Option<&NodeConfig>,
     ) -> Result<nerve_sandbox::ContainerSpec, RpcError> {
         let s = self.shared.clone();
         // A change that takes long holds the command; the log says how far
@@ -3802,7 +3842,21 @@ impl Link {
         if let Some(why) = synced.refusal(&name) {
             return Err(RpcError::new(ErrorCode::Unavailable, why));
         }
-        Ok(nerve_sandbox::ContainerSpec { name })
+        let env = separate
+            .map(|cfg| {
+                cfg.machine
+                    .command_env
+                    .iter()
+                    .filter_map(|k| Some((k.clone(), std::env::var(k).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(nerve_sandbox::ContainerSpec {
+            no_network,
+            home: separate.is_some(),
+            env,
+            ..nerve_sandbox::ContainerSpec::new(name)
+        })
     }
 }
 
@@ -3987,11 +4041,15 @@ impl Judged {
 }
 
 /// The node's file access as `account` on this thread while the result
-/// lives ([`crate::account::FsAs`]); nothing for the node's own user.
+/// lives ([`crate::account::FsAs`]); nothing for the node's own user. On
+/// Windows the command account acts in the pairing's container
+/// (`container`), as its commands do.
 #[cfg(target_os = "linux")]
 pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
+    container: Option<&str>,
 ) -> Result<Option<crate::account::FsAs>, RpcError> {
+    let _ = container;
     account
         .map(|a| {
             crate::account::FsAs::new(a).map_err(|e| {
@@ -4005,14 +4063,25 @@ pub(crate) fn act_as(
 }
 
 /// [`act_as`] on Windows: the thread impersonates the account, logged on
-/// with its stored password ([`crate::win_user::FsAs`]).
+/// with its stored password ([`crate::win_user::FsAs`]). The command
+/// account acts only in the pairing's `container`, never as itself: its
+/// own rights reach every pairing's folders (#149).
 #[cfg(windows)]
 pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
+    container: Option<&str>,
 ) -> Result<Option<crate::win_user::FsAs>, RpcError> {
     account
         .map(|a| {
-            crate::win_user::FsAs::new(a).map_err(|e| {
+            let run = a.name.eq_ignore_ascii_case(crate::account::RUN_USER);
+            match (run, container) {
+                (true, Some(c)) => crate::win_user::FsAs::in_container(a, c),
+                (true, None) => Err(std::io::Error::other(
+                    "the command account acts only in a pairing's AppContainer",
+                )),
+                (false, _) => crate::win_user::FsAs::new(a),
+            }
+            .map_err(|e| {
                 RpcError::new(
                     ErrorCode::Unavailable,
                     format!("cannot act as {}: {e}", a.name),
@@ -4023,7 +4092,10 @@ pub(crate) fn act_as(
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn act_as(account: Option<&crate::service::Account>) -> Result<Option<()>, RpcError> {
+pub(crate) fn act_as(
+    account: Option<&crate::service::Account>,
+    _container: Option<&str>,
+) -> Result<Option<()>, RpcError> {
     match account {
         Some(a) => Err(RpcError::new(
             ErrorCode::Unavailable,

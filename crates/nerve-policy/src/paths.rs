@@ -362,9 +362,78 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
     Ok(out)
 }
 
+/// Whether a link's `target`, as the link holds it, is a place on another
+/// machine: a share (`\\host\share`, `\\?\UNC\…`, `\??\UNC\…`). Windows
+/// connects to it as whoever follows the link, and sends that account's
+/// NTLM answer to whatever host it names (#149's probe).
+pub fn remote_target(target: &str) -> bool {
+    let t = target.replace('/', "\\");
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("\\\\?\\unc\\") || lower.starts_with("\\??\\unc\\") {
+        return true;
+    }
+    // `\\?\C:\…` and `\\.\…` are this machine's.
+    t.starts_with("\\\\") && !lower.starts_with("\\\\?\\") && !lower.starts_with("\\\\.\\")
+}
+
+/// The first link on the way of `p` (absolute), and on the way of where each
+/// link leads, that leads to another machine ([`remote_target`]), found
+/// without following any: a symbolic link to a share is followed by a
+/// connection to it. Windows only; elsewhere a network mount is a path.
+pub fn remote_link(p: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        remote_link_in(p, 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+#[cfg(windows)]
+fn remote_link_in(p: &Path, depth: usize) -> Option<PathBuf> {
+    // Windows follows no more than 63 links on a path.
+    if depth > 63 {
+        return None;
+    }
+    let mut at = PathBuf::new();
+    for c in p.components() {
+        at.push(c.as_os_str());
+        let Ok(m) = fs::symlink_metadata(&at) else {
+            return None;
+        };
+        if !m.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(target) = fs::read_link(&at) else {
+            continue;
+        };
+        if remote_target(&target.to_string_lossy()) {
+            return Some(at);
+        }
+        let next = match at.parent() {
+            Some(dir) if target.is_relative() => dir.join(&target),
+            _ => target,
+        };
+        if remote_link_in(&next, depth + 1).is_some() {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// `realpath`, on Windows without the `\\?\` prefix so resolved paths compare with
-/// configured ones.
+/// configured ones. A path whose links lead to another machine is refused
+/// before anything follows them ([`remote_link`]).
 fn canonical(p: &Path) -> io::Result<PathBuf> {
+    if let Some(link) = remote_link(p) {
+        return Err(io::Error::other(format!(
+            "{} is a link to another machine, which is not followed",
+            link.display()
+        )));
+    }
     let c = fs::canonicalize(p)?;
     #[cfg(windows)]
     {
@@ -570,5 +639,63 @@ mod unix_tests {
             resolve(&root.join("granted/dangling/y")),
             Err(PathError::DanglingSymlink(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn a_link_to_another_machine_is_told_by_its_target() {
+        for t in [
+            r"\\host\share",
+            r"\\host\share\sub",
+            "//host/share",
+            r"\\?\UNC\host\share",
+            r"\??\UNC\host\share",
+            r"\\?\unc\host\share",
+        ] {
+            assert!(remote_target(t), "{t}");
+        }
+        for t in [
+            r"C:\Users\x",
+            r"\\?\C:\Users\x",
+            r"\??\C:\x",
+            r"\\.\pipe\x",
+            r"..\x",
+            "x",
+            "/home/x",
+        ] {
+            assert!(!remote_target(t), "{t}");
+        }
+    }
+
+    /// A symbolic link to a share is refused by its target, before
+    /// anything follows it: following it would connect to the share as the
+    /// account the node acts as (#149's probe). An address of TEST-NET
+    /// would hold a connection for half a minute. Needs the right to make
+    /// symbolic links (an administrator, as CI).
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_another_machine_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("w");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("share");
+        if let Err(e) = std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", &link) {
+            panic!("cannot make a symbolic link (an administrator makes one): {e}");
+        }
+        // And one that leads to it through another, local, link.
+        let hop = d.path().join("hop");
+        std::os::windows::fs::symlink_dir(&dir, &hop).unwrap();
+        let t = std::time::Instant::now();
+        for p in [link.join("x"), hop.join("share").join("x")] {
+            assert!(remote_link(&p).is_some(), "{p:?}");
+            let e = resolve(&p).unwrap_err().to_string();
+            assert!(e.contains("link to another machine"), "{e}");
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(remote_link(&dir.join("x")), None);
     }
 }

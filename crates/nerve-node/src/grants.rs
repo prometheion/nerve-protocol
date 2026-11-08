@@ -140,8 +140,10 @@ fn container_at(state: &str, node_id: &str) -> String {
 }
 
 /// The grants the config asks for: every center's folders, each with the
-/// flags of its sets (`exec::container_grants`). `home` is the `~` of the
-/// rules, the home of the account commands run as. A folder whose
+/// flags of its sets (`exec::container_grants`), and a grant of no flag,
+/// which closes it, on a folder without one inside a granted folder.
+/// `home` is the `~` of the rules, the home of the account commands run as.
+/// A folder whose
 /// resolution crosses a link or junction at or inside a place where any
 /// center's commands may write gets no grant, wherever that link leads
 /// (`exec::led_away`): a command may have put it there.
@@ -160,7 +162,6 @@ pub fn wanted(cfg: &NodeConfig, paths: &NodePaths, home: &Path, platform: &Platf
             let name = container(paths, &c.node_id);
             crate::exec::container_grants(&c.policy, home, &own, platform, &writable)
                 .into_iter()
-                .filter(|(_, a)| *a != Access::NONE)
                 .map(move |(path, access)| Grant {
                     container: name.clone(),
                     path,
@@ -173,20 +174,51 @@ pub fn wanted(cfg: &NodeConfig, paths: &NodePaths, home: &Path, platform: &Platf
         .collect()
 }
 
-/// The grants a node wants on this machine: [`wanted`], or none on the
-/// installed service (`installed`), whose commands run as another account
-/// and never in a container (crate::daemon), so their grants come off.
+/// The grants a node wants on this machine: [`wanted`], and on the
+/// installed service, whose commands run as the command account in their
+/// containers, grants for that account too (`run`, its SID): a process of
+/// a container opens only what both its container and its account may
+/// (#149). The account's are the union of every pairing's, one per folder
+/// with every flag a pairing has there; only the containers keep the
+/// pairings apart. A folder closed to a container gets none.
 pub fn wanted_on(
-    installed: bool,
+    run: Option<&str>,
     cfg: &NodeConfig,
     paths: &NodePaths,
     home: &Path,
     platform: &Platform,
 ) -> Vec<Grant> {
-    if installed {
-        return Vec::new();
+    let mut want = wanted(cfg, paths, home, platform);
+    let Some(sid) = run.filter(|s| !s.is_empty()) else {
+        return want;
+    };
+    let mut union: Vec<Grant> = Vec::new();
+    for g in want.iter().filter(|g| g.access != Access::NONE) {
+        match union.iter_mut().find(|u| same_path(&u.path, &g.path)) {
+            Some(u) => {
+                u.access.read |= g.access.read;
+                u.access.write |= g.access.write;
+                u.access.execute |= g.access.execute;
+            }
+            None => union.push(Grant {
+                container: sid.to_string(),
+                ..g.clone()
+            }),
+        }
     }
-    wanted(cfg, paths, home, platform)
+    want.extend(union);
+    want
+}
+
+/// Whether the grant's `container` is an account's SID ([`wanted_on`]).
+#[cfg(any(windows, test))]
+fn is_account(container: &str) -> bool {
+    container.starts_with("S-1-")
+}
+
+/// Whether `a` and `b` name one folder, as the grants compare them.
+fn same_path(a: &Path, b: &Path) -> bool {
+    within(a, b) && within(b, a)
 }
 
 /// What [`sync`] left.
@@ -1103,6 +1135,21 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
     out
 }
 
+/// The SID of the command account, for the installed service's grants
+/// ([`wanted_on`]); `None` for a node run by hand, whose commands run as
+/// itself. A service without that account gets the containers' grants only:
+/// it runs no command then.
+#[cfg(windows)]
+fn run_sid(paths: &NodePaths) -> Option<String> {
+    if !crate::service::is_service_node(paths) {
+        return None;
+    }
+    let sid = crate::win_host::sid_of(crate::account::RUN_USER)
+        .and_then(|s| crate::win_host::sid_text(&s))
+        .unwrap_or_default();
+    Some(sid)
+}
+
 /// Brings the grants on this machine in line with the config `current`
 /// gives, with the `~` of its rules ([`wanted`], [`sync`]), and removes the
 /// profile of a container left without grants. `current` is asked once this
@@ -1118,10 +1165,16 @@ pub fn apply(
 ) -> Synced {
     #[cfg(windows)]
     {
-        let installed = crate::service::is_service_node(paths);
+        let run = run_sid(paths);
         let want = || {
             let (cfg, home) = current();
-            wanted_on(installed, &cfg, paths, &home, &crate::paths::platform())
+            wanted_on(
+                run.as_deref(),
+                &cfg,
+                paths,
+                &home,
+                &crate::paths::platform(),
+            )
         };
         apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
     }
@@ -1143,8 +1196,13 @@ pub fn apply_outside(
 ) -> Synced {
     #[cfg(windows)]
     {
-        let installed = crate::service::is_service_node(paths);
-        let want = wanted_on(installed, cfg, paths, home, &crate::paths::platform());
+        let want = wanted_on(
+            run_sid(paths).as_deref(),
+            cfg,
+            paths,
+            home,
+            &crate::paths::platform(),
+        );
         sync_outside_in(paths, &want, &mut Acls { report }, &mut WinProfiles)
     }
     #[cfg(not(windows))]
@@ -1274,19 +1332,28 @@ pub trait ProfileStore {
     fn remove(&mut self, name: &str) -> io::Result<()>;
 }
 
-/// The profiles of this account on Windows.
+/// The profiles of the account the containers run as on Windows: this
+/// process's, or on the installed service `nerve-run`'s, which the node
+/// changes through a helper it starts as that account
+/// (crate::win_profile::remove_as).
 #[cfg(windows)]
 pub struct WinProfiles;
 
 #[cfg(windows)]
 impl ProfileStore for WinProfiles {
     // Windows answers the removal of a missing profile as done, so whether
-    // one was there is its folder's.
+    // one was there is its folder's. The service may not look into
+    // `nerve-run`'s profile: there each one counts.
     fn exists(&mut self, name: &str) -> bool {
-        std::env::var_os("LOCALAPPDATA")
-            .is_some_and(|d| Path::new(&d).join("Packages").join(name).is_dir())
+        crate::win_service::is_service()
+            || std::env::var_os("LOCALAPPDATA")
+                .is_some_and(|d| Path::new(&d).join("Packages").join(name).is_dir())
     }
     fn remove(&mut self, name: &str) -> io::Result<()> {
+        if crate::win_service::is_service() {
+            let exe = std::env::current_exe()?;
+            return crate::win_profile::remove_as(&exe, name).map_err(io::Error::other);
+        }
         nerve_sandbox::appcontainer::remove_profile(name)
     }
 }
@@ -1342,6 +1409,9 @@ fn hold(paths: &NodePaths) -> Result<Option<crate::secrets::KeysLock>, String> {
 #[cfg(any(windows, test))]
 fn drop_profiles(paths: &NodePaths, names: &[String], store: &mut impl ProfileStore) -> Profiles {
     let mut p = Profiles::default();
+    // The command account's grants are an account's, with no profile.
+    let names: Vec<String> = names.iter().filter(|n| !is_account(n)).cloned().collect();
+    let names = names.as_slice();
     // Nothing to remove takes no lock.
     if names.is_empty() {
         return p;
@@ -1554,6 +1624,18 @@ fn paced<T>(
     r.map(|(t, _)| t)
 }
 
+/// The rights of a grant with `access`: a grant without a flag closes its
+/// folder, inside a granted one ([`wanted`]).
+#[cfg(windows)]
+fn masks_of(access: Access) -> nerve_sandbox::acl::Masks {
+    use nerve_sandbox::acl;
+    if access == Access::NONE {
+        acl::closed()
+    } else {
+        acl::masks(access.read, access.write, access.execute)
+    }
+}
+
 /// The folders' access lists on Windows; `report` is told how far a change
 /// is once it takes long ([`paced`]).
 #[cfg(windows)]
@@ -1564,8 +1646,8 @@ struct Acls<'a> {
 #[cfg(windows)]
 impl Folders for Acls<'_> {
     fn look(&mut self, path: &Path, container: &str, access: Access) -> io::Result<Option<Look>> {
-        use nerve_sandbox::{acl, appcontainer};
-        let masks = acl::masks(access.read, access.write, access.execute);
+        use nerve_sandbox::appcontainer;
+        let masks = masks_of(access);
         match appcontainer::look(path, container, masks) {
             Ok((id, granted)) => Ok(Some(Look {
                 id: id.map(|i| i.to_string()),
@@ -1592,7 +1674,7 @@ impl Folders for Acls<'_> {
         expect: Option<&str>,
     ) -> io::Result<Option<String>> {
         use nerve_sandbox::{acl, appcontainer};
-        let masks = access.map(|a| acl::masks(a.read, a.write, a.execute));
+        let masks = access.map(masks_of);
         let expect = expect
             .map(|e| e.parse::<acl::FileId>().map_err(io::Error::other))
             .transpose()?;
@@ -1631,8 +1713,8 @@ impl Folders for Acls<'_> {
         whole: bool,
         grants: Option<&[PathBuf]>,
     ) -> io::Result<Option<(PathBuf, u64)>> {
-        use nerve_sandbox::{acl, appcontainer};
-        let masks = access.map(|a| acl::masks(a.read, a.write, a.execute));
+        use nerve_sandbox::appcontainer;
+        let masks = access.map(masks_of);
         let judge = Judge::new(dir, grants);
         let mut links = |p: &Path, n: u32, all: &[PathBuf]| Ok(judge.holds(p, n.into(), all));
         let found = paced(self.report, Doing::Check, dir, &Instant::now, |progress| {
@@ -1676,7 +1758,7 @@ fn apply_in(
     let _one = nerve_transport::sync::turn(&SYNC);
     let want = want();
     let mut s = sync_in_turn(&record_file(paths), &want, folders);
-    for c in &s.emptied {
+    for c in s.emptied.iter().filter(|c| !is_account(c)) {
         if let Err(e) = store.remove(c) {
             s.errors.push(e.to_string());
         }
@@ -3945,16 +4027,89 @@ mod tests {
                 toward: Vec::new(),
             }]
         );
-        // The installed service runs no command in a container, so it
-        // wants none of these, and those it has come off.
-        assert_eq!(wanted_on(false, &cfg, &paths, &home, &Platform::Unix), want);
-        assert!(wanted_on(true, &cfg, &paths, &home, &Platform::Unix).is_empty());
+        // A node run by hand wants these; the installed service, whose
+        // commands run as the command account in their containers, wants
+        // them and one grant for that account per folder, with every flag
+        // any pairing has there (#149).
+        assert_eq!(wanted_on(None, &cfg, &paths, &home, &Platform::Unix), want);
+        assert_eq!(
+            wanted_on(Some(""), &cfg, &paths, &home, &Platform::Unix),
+            want
+        );
+        let run = "S-1-5-21-1-2-3-1011";
+        let on = wanted_on(Some(run), &cfg, &paths, &home, &Platform::Unix);
+        assert_eq!(on[..want.len()], want[..]);
+        let union = &on[want.len()..];
+        assert!(!union.is_empty());
+        for w in &want {
+            let theirs: Vec<_> = union
+                .iter()
+                .filter(|g| same_path(&g.path, &w.path))
+                .collect();
+            assert_eq!(theirs.len(), 1, "{w:?}");
+            let all =
+                want.iter()
+                    .filter(|o| same_path(&o.path, &w.path))
+                    .fold(Access::NONE, |a, o| Access {
+                        read: a.read || o.access.read,
+                        write: a.write || o.access.write,
+                        execute: a.execute || o.access.execute,
+                    });
+            assert_eq!(theirs[0].access, all, "{w:?}");
+            assert_eq!(theirs[0].container, run);
+        }
+        assert!(is_account(run) && !is_account(&lab));
     }
 
     /// A center named `name` with these folders.
     /// The node id of the test pairing with the center `name`.
     fn node(name: &str) -> String {
         format!("node-{name}")
+    }
+
+    /// A folder without a flag inside a `w` folder is closed to that
+    /// pairing's container: a grant of no flag, which denies it every
+    /// right, whatever it inherits from the folder around (#149). One
+    /// inside no granted folder needs none, and the command account gets no
+    /// grant for a closed folder.
+    #[test]
+    fn a_folder_without_flags_inside_a_granted_one_is_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (work, secret, apart) = (
+            root.join("work"),
+            root.join("work/secret"),
+            root.join("apart"),
+        );
+        for p in [&secret, &apart] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let paths = NodePaths::new(root.join("cfg"), root.join("state"));
+        let mut cfg = NodeConfig::default();
+        cfg.centers
+            .push(center("lab", &[(&work, "w"), (&secret, ""), (&apart, "")]));
+        cfg.centers.push(center("home", &[(&work, "r")]));
+        let lab = container(&paths, &node("lab"));
+        let want = wanted(&cfg, &paths, &root, &Platform::Unix);
+        let closed: Vec<_> = want.iter().filter(|g| g.access == Access::NONE).collect();
+        assert_eq!(closed.len(), 1, "{want:?}");
+        assert_eq!(closed[0].path, secret);
+        assert_eq!(closed[0].container, lab);
+        let run = "S-1-5-21-1-2-3-1011";
+        let on = wanted_on(Some(run), &cfg, &paths, &root, &Platform::Unix);
+        assert!(
+            !on.iter()
+                .any(|g| g.container == run && same_path(&g.path, &secret)),
+            "{on:?}"
+        );
+        // The account's grant on the folder both pairings have holds what
+        // each has: `w` and `r`.
+        let both: Vec<_> = on
+            .iter()
+            .filter(|g| g.container == run && same_path(&g.path, &work))
+            .collect();
+        assert_eq!(both.len(), 1, "{on:?}");
+        assert_eq!(both[0].access, Access::parse("rw").unwrap());
     }
 
     fn center(name: &str, folders: &[(&Path, &str)]) -> nerve_policy::CenterEntry {

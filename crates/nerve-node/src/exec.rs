@@ -807,6 +807,24 @@ pub fn container_grants(
             }
         }
     }
+    // A folder without a flag inside a granted one is closed to the
+    // container, whatever it inherits from the folder around (#149): it
+    // gets an entry of no flag, which denies every right.
+    for f in policy.folders.iter().filter(|f| f.access == Access::NONE) {
+        let Some(path) = expand(home, &f.path) else {
+            continue;
+        };
+        let path = real(&path);
+        let inside = out
+            .iter()
+            .any(|(q, a)| *a != Access::NONE && within(&path, q) && !within(q, &path));
+        let listed = out
+            .iter()
+            .any(|(q, _)| within(q, &path) && within(&path, q));
+        if inside && !listed {
+            out.push((path, Access::NONE));
+        }
+    }
     out
 }
 
@@ -816,8 +834,15 @@ fn real(p: &Path) -> PathBuf {
     real_checked(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// [`real`] with the reason it could not resolve.
+/// [`real`] with the reason it could not resolve. A path whose links lead
+/// to another machine is not followed (nerve_policy::paths::remote_link).
 fn real_checked(p: &Path) -> std::io::Result<PathBuf> {
+    if let Some(link) = nerve_policy::paths::remote_link(p) {
+        return Err(std::io::Error::other(format!(
+            "{} is a link to another machine, which is not followed",
+            link.display()
+        )));
+    }
     let c = std::fs::canonicalize(p)?;
     #[cfg(windows)]
     {
@@ -1913,10 +1938,11 @@ pub async fn run(
     opts: &RunOptions,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
-    // Only Linux has the filter that keeps a command off the network; a
-    // command the switch holds runs nowhere else.
+    // Only Linux has the filter that keeps a command off the network, and
+    // Windows a container without network capabilities; a command the
+    // switch holds runs nowhere else.
     #[cfg(not(target_os = "linux"))]
-    if opts.no_network {
+    if opts.no_network && !opts.container.as_ref().is_some_and(|c| c.no_network) {
         return Err(RpcError::new(ErrorCode::Unavailable, NO_FILTER));
     }
     // Root's command runs in /bin/sh, whatever shell the others use.
@@ -1956,24 +1982,13 @@ pub async fn run(
             container: opts.container.clone(),
             own_proc,
         });
-    // The shim makes the container's profile and window station for the
-    // user it runs as, which is not wired for another account yet; such a
-    // command would run without its container (crate::daemon, which gives
-    // the installed Windows node none).
-    if opts.container.is_some()
-        && let Some(a) = &opts.account
-    {
-        return Err(RpcError::new(
-            ErrorCode::Unavailable,
-            format!(
-                "the command was not run: folder mode cannot run a command in its AppContainer as {}",
-                a.name
-            ),
-        ));
-    }
+    // The shim of another account makes the container's profile in that
+    // account's profile, which its service keeps loaded
+    // (crate::winsvc::PROFILE_SERVICE), and its desktop on that account's
+    // own window station.
     #[cfg(windows)]
     if let Some(a) = &opts.account {
-        return run_as(call, opts, a, &program, &args, started).await;
+        return run_as(call, opts, a, &program, &args, shim.as_ref(), started).await;
     }
     // Only the installed node can start a command with the administrator
     // token of the account commands run as (crate::winsudo).
@@ -2321,7 +2336,8 @@ fn memory_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u64> 
     job.filter(|j| j.out_of_memory()).map(|_| granted.memory_mb)
 }
 
-/// [`run`] as another account on Windows (crate::win_user): the shell
+/// [`run`] as another account on Windows (crate::win_user): the shell, or
+/// the shim with the command's container (`shim`, its spec on its stdin),
 /// starts suspended with the account's token in the call's folder, is put
 /// in a job of its own and runs only then. It does not start when its
 /// account can open the node's own folders, nor without a job: the node
@@ -2335,6 +2351,7 @@ async fn run_as(
     account: &crate::service::Account,
     program: &str,
     args: &[String],
+    shim: Option<&ShimSpec>,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
     let unavailable = |m: String| RpcError::new(ErrorCode::Unavailable, m);
@@ -2376,14 +2393,23 @@ async fn run_as(
         ))
     })?;
     if let Some((_, granted)) = &opts.limits {
-        hold_to_limits(Some(&job), granted, false)?;
+        hold_to_limits(Some(&job), granted, shim.is_some())?;
     }
-    let line = windows_command_line(program, args);
+    let (line, input) = match shim {
+        Some(spec) => (
+            windows_command_line(&opts.exe.display().to_string(), &[SHIM_ARG.to_string()]),
+            Some(
+                serde_json::to_vec(spec)
+                    .map_err(|e| RpcError::internal(format!("the shim's spec: {e}")))?,
+            ),
+        ),
+        None => (windows_command_line(program, args), None),
+    };
     // The command's own token also starts the helper that asks it to end
     // (crate::win_stop).
     let token = elevated.unwrap_or(token);
     crate::win_stop::hear_ctrl_c();
-    let child = crate::win_user::spawn(&token, &line, Some(&call.cwd), Some(&account.home))
+    let child = crate::win_user::spawn(&token, &line, Some(&call.cwd), Some(&account.home), input)
         .map_err(|e| {
             unavailable(format!(
                 "cannot start as {} in {}: {e}",
@@ -3059,37 +3085,6 @@ mod tests {
             ),
         );
         sudo.display().to_string()
-    }
-
-    /// A folder-mode command of another account is not started at all
-    /// while the AppContainer is not wired for that account: it would run
-    /// without its container.
-    #[tokio::test]
-    async fn a_container_command_of_another_account_does_not_run() {
-        let d = tempfile::tempdir().unwrap();
-        let mark = d.path().join("ran");
-        let mut o = opts(1024);
-        o.container = Some(ContainerSpec {
-            name: "nerve.test".into(),
-        });
-        o.account = Some(crate::service::Account {
-            name: "chosen".into(),
-            uid: 4242,
-            gid: 4242,
-            comment: String::new(),
-            home: d.path().to_path_buf(),
-            groups: vec![4242],
-        });
-        let e = run(&call(&format!("touch '{}'", mark.display())), &o, |_| {})
-            .await
-            .unwrap_err();
-        assert_eq!(e.kind(), ErrorCode::Unavailable, "{e:?}");
-        assert!(
-            e.message
-                .contains("cannot run a command in its AppContainer as chosen"),
-            "{e:?}"
-        );
-        assert!(!mark.exists());
     }
 
     /// `sudo on` checks the password of the account the commands run as:

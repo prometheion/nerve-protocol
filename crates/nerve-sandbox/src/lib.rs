@@ -209,6 +209,32 @@ pub const POWERSHELL_START: &str = concat!(
 #[serde(deny_unknown_fields)]
 pub struct ContainerSpec {
     pub name: String,
+    /// The owner's network switch: the container gets none of its network
+    /// capabilities, and Windows keeps it off every network.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
+    /// The command's home and its programs' settings are the container's
+    /// own ([`acl::container_home`]): each pairing has its own, and none is
+    /// the account's, which every pairing's commands share.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
+    /// Variables the command gets besides its account's own
+    /// (`machine.command_env`): names and the values of the node's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+}
+
+impl ContainerSpec {
+    /// The container `name`, with the network, the account's home and
+    /// nothing added.
+    pub fn new(name: impl Into<String>) -> ContainerSpec {
+        ContainerSpec {
+            name: name.into(),
+            no_network: false,
+            home: false,
+            env: Vec::new(),
+        }
+    }
 }
 
 /// The largest spec the shim reads.
@@ -604,7 +630,7 @@ mod imp {
         // holds this process and what it starts, the container's processes
         // too.
         if let Some(c) = &spec.container {
-            return match super::appcontainer::run(&spec.program, &spec.args, &c.name) {
+            return match super::appcontainer::run(&spec.program, &spec.args, c) {
                 Ok(code) => code as i32,
                 Err(e) => {
                     eprintln!(
@@ -853,6 +879,24 @@ pub mod acl {
         pub dir: u32,
         /// Every file below it (or the path itself, when it is a file).
         pub file: u32,
+        /// Denied, not allowed: a folder closed inside one the container
+        /// is granted ([`closed`]).
+        pub deny: bool,
+    }
+
+    /// Every right a file or folder has (FILE_ALL_ACCESS).
+    const ALL: u32 = 0x1F_01FF;
+
+    /// The masks of a folder without a flag inside a folder the container
+    /// is granted: every right denied to it there and below, whatever it
+    /// inherits from the folder around, which Windows passes into every
+    /// folder below (nerve-node's grants). Denied entries come first.
+    pub fn closed() -> Masks {
+        Masks {
+            dir: ALL,
+            file: ALL,
+            deny: true,
+        }
     }
 
     /// The masks for a folder with these flags; both 0 without a flag.
@@ -888,6 +932,14 @@ pub mod acl {
     /// `DELETE`, so a command deletes, renames or moves it only through the
     /// folder above it; what is below it has `DELETE` by the flags.
     pub fn entries(is_dir: bool, m: Masks) -> Vec<(u32, u32)> {
+        if m.deny {
+            let inherit = if is_dir {
+                CONTAINER_INHERIT | OBJECT_INHERIT
+            } else {
+                0
+            };
+            return vec![(inherit, m.dir)];
+        }
         let all = if !is_dir {
             vec![(0, m.file & !DELETE)]
         } else if m.dir & DELETE == 0 {
@@ -1087,6 +1139,57 @@ pub mod acl {
         out.push(("PSModulePath".into(), modules.into()));
         out
     }
+
+    /// The variables that make `ac`, the container's own folder (`AC` of
+    /// its profile), the command's home: `USERPROFILE`, `HOME`,
+    /// `HOMEDRIVE` and `HOMEPATH` name `ac\home`, `APPDATA` the
+    /// `AppData\Roaming` there. So programs that keep settings below the
+    /// home (git, ssh, npm, pip, PowerShell's `~`) keep the pairing's own,
+    /// and what one pairing leaves there steers no other: every pairing's
+    /// commands run as one account. `LOCALAPPDATA`, `TEMP` and `TMP`
+    /// Windows points at `ac` itself. Programs that ask Windows for the
+    /// profile folder (the known-folder API, OpenSSH's `known_hosts`) still
+    /// get the account's, which the container cannot write.
+    ///
+    /// git trusts the repositories the command reaches, as on Linux: they
+    /// are the owner's, given to it, and git refuses another account's
+    /// otherwise ("dubious ownership").
+    pub fn container_home(ac: &std::path::Path) -> Vec<(String, String)> {
+        // Windows paths, also where the tests run elsewhere.
+        let text = format!("{}\\home", ac.display());
+        // `C:` and the rest, as Windows splits a home on a drive.
+        let (drive, path) = match text.get(..2) {
+            Some(d) if d.ends_with(':') => (d.to_string(), text[2..].to_string()),
+            _ => (String::new(), text.clone()),
+        };
+        vec![
+            ("USERPROFILE".into(), text.clone()),
+            ("HOME".into(), text.clone()),
+            ("HOMEDRIVE".into(), drive),
+            ("HOMEPATH".into(), path),
+            ("APPDATA".into(), format!("{text}\\AppData\\Roaming")),
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "*".into()),
+        ]
+    }
+
+    /// `vars` with each of `set` in place of a variable of its name
+    /// (Windows' names know no case).
+    pub fn with_vars(
+        vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        set: &[(String, String)],
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut out: Vec<_> = vars
+            .into_iter()
+            .filter(|(k, _)| {
+                let k = k.to_string_lossy();
+                !set.iter().any(|(s, _)| s.eq_ignore_ascii_case(&k))
+            })
+            .collect();
+        out.extend(set.iter().map(|(k, v)| (k.into(), v.into())));
+        out
+    }
 }
 
 #[cfg(windows)]
@@ -1128,7 +1231,8 @@ pub mod appcontainer {
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+        ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_WINDOW_OBJECT,
+        SetSecurityInfo,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -1136,14 +1240,15 @@ pub mod appcontainer {
     };
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION_DS, ACL_SIZE_INFORMATION,
-        AclSizeInformation, AddAccessAllowedAceEx, AddAce, CONTAINER_INHERIT_ACE,
-        ConvertToAutoInheritPrivateObjectSecurity, CreatePrivateObjectSecurityEx,
-        CreateWellKnownSid, DACL_SECURITY_INFORMATION, DestroyPrivateObjectSecurity, EqualSid,
-        FreeSid, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, GetAce, GetAclInformation,
-        GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorControl,
-        GetSecurityDescriptorDacl, GetSecurityDescriptorGroup, GetSecurityDescriptorLength,
-        GetSecurityDescriptorOwner, GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE,
-        InitializeAcl, InitializeSecurityDescriptor, MakeSelfRelativeSD, OBJECT_INHERIT_ACE,
+        AclSizeInformation, AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce,
+        CONTAINER_INHERIT_ACE, ConvertToAutoInheritPrivateObjectSecurity,
+        CreatePrivateObjectSecurityEx, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        DestroyPrivateObjectSecurity, EqualSid, FreeSid, GENERIC_MAPPING,
+        GROUP_SECURITY_INFORMATION, GetAce, GetAclInformation, GetKernelObjectSecurity,
+        GetLengthSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorGroup, GetSecurityDescriptorLength, GetSecurityDescriptorOwner,
+        GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE, InitializeAcl,
+        InitializeSecurityDescriptor, MakeSelfRelativeSD, OBJECT_INHERIT_ACE,
         OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_AUTO_INHERIT_REQ,
         SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
         SECURITY_DESCRIPTOR, SEF_AVOID_OWNER_CHECK, SEF_AVOID_PRIVILEGE_CHECK,
@@ -1201,11 +1306,27 @@ pub mod appcontainer {
         }
     }
 
-    /// The SID of the container `name`.
-    pub struct Sid(PSID);
+    /// The SID of the container `name`, or of the account whose SID `name`
+    /// is in text (`S-1-5-…`): the command account gets entries on the
+    /// folders as well as each container (nerve-node's grants). Whether
+    /// Windows allocated it with LocalAlloc.
+    pub struct Sid(PSID, bool);
 
     impl Sid {
+        /// The SID, for a call that takes one; it lives as long as `self`.
+        pub fn as_ptr(&self) -> PSID {
+            self.0
+        }
+
         pub fn derive(name: &str) -> io::Result<Sid> {
+            if name.starts_with("S-1-") {
+                let mut sid: PSID = null_mut();
+                // SAFETY: a NUL-terminated string; the SID the call
+                // allocates is freed with LocalFree.
+                check(unsafe { ConvertStringSidToSidW(wide(OsStr::new(name)).as_ptr(), &mut sid) })
+                    .map_err(|e| io::Error::new(e.kind(), format!("the SID {name}: {e}")))?;
+                return Ok(Sid(sid, true));
+            }
             let n = wide(OsStr::new(name));
             let mut sid: PSID = null_mut();
             // SAFETY: a NUL-terminated name; the call sets `sid` to a SID it
@@ -1216,14 +1337,21 @@ pub mod appcontainer {
                     "cannot derive the AppContainer SID of {name} ({hr:#x})"
                 )));
             }
-            Ok(Sid(sid))
+            Ok(Sid(sid, false))
         }
     }
 
     impl Drop for Sid {
         fn drop(&mut self) {
-            // SAFETY: the SID came from DeriveAppContainerSidFromAppContainerName.
-            unsafe { FreeSid(self.0) };
+            // SAFETY: the SID came from ConvertStringSidToSidW or from
+            // DeriveAppContainerSidFromAppContainerName.
+            unsafe {
+                if self.1 {
+                    LocalFree(self.0);
+                } else {
+                    FreeSid(self.0);
+                }
+            }
         }
     }
 
@@ -1474,9 +1602,14 @@ pub mod appcontainer {
                 }
             }
         }
+        let kind = if masks.deny {
+            ACCESS_DENIED_ACE_TYPE
+        } else {
+            ACCESS_ALLOWED_ACE_TYPE
+        };
         let mut want: Vec<_> = entries(is_dir, masks)
             .into_iter()
-            .map(|(flags, mask)| (ACCESS_ALLOWED_ACE_TYPE, flags, mask))
+            .map(|(flags, mask)| (kind, flags, mask))
             .collect();
         have.sort_unstable();
         want.sort_unstable();
@@ -2401,6 +2534,15 @@ pub mod appcontainer {
                 )
             })
         };
+        // A denial comes before every entry: Windows decides by the first
+        // entry that names the asker.
+        let deny = masks.is_some_and(|m| m.deny);
+        if deny {
+            for (flags, mask) in &add {
+                // SAFETY: the list has room for each of these ACEs.
+                check(unsafe { AddAccessDeniedAceEx(new, ACL_REVISION_DS, *flags, *mask, sid.0) })?;
+            }
+        }
         // Its own entries but the container's, then the container's new
         // ones, then the inherited entries, as Windows keeps a list's own
         // entries before those it inherited.
@@ -2420,7 +2562,7 @@ pub mod appcontainer {
                 copy(ace)?;
             }
         }
-        for (flags, mask) in add {
+        for (flags, mask) in add.into_iter().filter(|_| !deny) {
             // SAFETY: the list has room for each of these ACEs.
             check(unsafe { AddAccessAllowedAceEx(new, ACL_REVISION_DS, flags, mask, sid.0) })?;
         }
@@ -2671,6 +2813,45 @@ pub mod appcontainer {
         Ok(())
     }
 
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(p: *const c_void);
+    }
+
+    /// The container `name` made ready for a command of the user this
+    /// process runs as: its profile ([`ensure_profile`]) and the folders of
+    /// its home in it ([`acl::container_home`]). Its own folder, `AC`.
+    pub fn ready(name: &str) -> io::Result<PathBuf> {
+        ensure_profile(name)?;
+        let sid = Sid::derive(name)?;
+        let text = wide(OsStr::new(&sid_text(sid.0)?));
+        let mut at: *mut u16 = null_mut();
+        // SAFETY: a NUL-terminated SID string; the call allocates the path,
+        // freed below with CoTaskMemFree.
+        let hr = unsafe {
+            windows_sys::Win32::Security::Isolation::GetAppContainerFolderPath(
+                text.as_ptr(),
+                &mut at,
+            )
+        };
+        if hr < 0 || at.is_null() {
+            return Err(io::Error::other(format!(
+                "cannot find the folder of the AppContainer {name} ({hr:#x})"
+            )));
+        }
+        // SAFETY: a NUL-terminated string from the call, freed once.
+        let ac = unsafe {
+            let len = (0..).take_while(|&i| *at.add(i) != 0).count();
+            let p = PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+                at, len,
+            )));
+            CoTaskMemFree(at.cast());
+            p
+        };
+        std::fs::create_dir_all(ac.join("home").join("AppData").join("Roaming"))?;
+        Ok(ac)
+    }
+
     /// Takes the profile of the container `name` away from the user this
     /// process runs as; one that is not there is fine.
     pub fn remove_profile(name: &str) -> io::Result<()> {
@@ -2738,6 +2919,13 @@ pub mod appcontainer {
         ) -> HANDLE;
         fn CloseDesktop(desktop: HANDLE) -> i32;
         fn CloseWindowStation(station: HANDLE) -> i32;
+        fn GetUserObjectInformationW(
+            obj: HANDLE,
+            index: i32,
+            info: *mut c_void,
+            len: u32,
+            need: *mut u32,
+        ) -> i32;
     }
 
     /// The SID as text (`S-1-...`).
@@ -2800,7 +2988,8 @@ pub mod appcontainer {
     /// does not reach the user's windows or clipboard either. They go when
     /// the shim does.
     struct Desktop {
-        station: HANDLE,
+        /// A station of its own; `None` on the logon's own station.
+        station: Option<HANDLE>,
         desktop: HANDLE,
         /// `station\desktop`, for the startup info.
         name: Vec<u16>,
@@ -2808,12 +2997,131 @@ pub mod appcontainer {
 
     impl Drop for Desktop {
         fn drop(&mut self) {
-            // SAFETY: made in `desktop`, closed once.
+            // SAFETY: made in `desktop`, closed once; the logon's own
+            // station stays.
             unsafe {
                 CloseDesktop(self.desktop);
-                CloseWindowStation(self.station);
+                if let Some(s) = self.station {
+                    CloseWindowStation(s);
+                }
             }
         }
+    }
+
+    /// The name of the window object `h` (a station).
+    fn object_name(h: HANDLE) -> io::Result<String> {
+        let mut buf = [0u16; 256];
+        let mut need = 0u32;
+        // SAFETY: a buffer of its size in bytes; UOI_NAME is 2.
+        check(unsafe { GetUserObjectInformationW(h, 2, buf.as_mut_ptr().cast(), 512, &mut need) })?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Ok(String::from_utf16_lossy(&buf[..len]))
+    }
+
+    /// [`desktop`] where this account may make no window station: a
+    /// command account the installed node starts in session 0 of the
+    /// services may not. Its process has the station of its own logon
+    /// (Windows makes one for each, open to that logon only), and each
+    /// command logs on anew (nerve-node's `win_user`), so no two pairings
+    /// share one. The container gets an entry on it and a desktop of its
+    /// own there.
+    fn logon_desktop(container: &Sid, sa: &SECURITY_ATTRIBUTES) -> io::Result<Desktop> {
+        // SAFETY: plain getter; the handle is this process's, not closed.
+        let station = unsafe { GetProcessWindowStation() };
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: the station's handle and places for the parts; the
+        // descriptor is freed with LocalFree.
+        let r = unsafe {
+            GetSecurityInfo(
+                station,
+                SE_WINDOW_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut dacl,
+                null_mut(),
+                &mut sd,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::from_raw_os_error(r as i32));
+        }
+        let _sd = Local(sd);
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: a valid descriptor; the string is freed with LocalFree.
+        check(unsafe {
+            windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                null_mut(),
+            )
+        })?;
+        let _text = Local(text.cast());
+        // SAFETY: a NUL-terminated string from the call.
+        let old = unsafe {
+            let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+            String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+        };
+        // What a process needs of its station, for the container too.
+        let entry = format!("(A;;0x37f;;;{})", sid_text(container.0)?);
+        if !old.contains(&entry) {
+            let mut new: PSECURITY_DESCRIPTOR = null_mut();
+            // SAFETY: a NUL-terminated SDDL string; freed with LocalFree.
+            check(unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(OsStr::new(&format!("{old}{entry}"))).as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut new,
+                    null_mut(),
+                )
+            })?;
+            let _new = Local(new);
+            let (mut present, mut defaulted) = (0, 0);
+            let mut list: *mut ACL = null_mut();
+            // SAFETY: the descriptor made above and places for its parts.
+            check(unsafe {
+                GetSecurityDescriptorDacl(new, &mut present, &mut list, &mut defaulted)
+            })?;
+            // SAFETY: the station's handle and a valid list.
+            let r = unsafe {
+                SetSecurityInfo(
+                    station,
+                    SE_WINDOW_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    list,
+                    null(),
+                )
+            };
+            if r != 0 {
+                return Err(io::Error::from_raw_os_error(r as i32));
+            }
+        }
+        let name = format!("nerve-{}", std::process::id());
+        // SAFETY: a NUL-terminated name and security attributes that live
+        // for the call; the desktop goes on this process's station.
+        let desktop = unsafe {
+            CreateDesktopW(
+                wide(OsStr::new(&name)).as_ptr(),
+                null(),
+                null(),
+                0,
+                GENERIC_ALL,
+                sa,
+            )
+        };
+        if desktop.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Desktop {
+            station: None,
+            desktop,
+            name: wide(OsStr::new(&format!("{}\\{name}", object_name(station)?))),
+        })
     }
 
     fn desktop(container: &Sid) -> io::Result<Desktop> {
@@ -2846,7 +3154,11 @@ pub mod appcontainer {
             let station =
                 CreateWindowStationW(wide(OsStr::new(&name)).as_ptr(), 0, GENERIC_ALL, &sa);
             if station.is_null() {
-                return Err(io::Error::last_os_error());
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    return logon_desktop(container, &sa);
+                }
+                return Err(e);
             }
             // CreateDesktopW makes the desktop in this process's window
             // station, so this process stands in the new one meanwhile.
@@ -2871,7 +3183,7 @@ pub mod appcontainer {
                 return Err(made);
             }
             Ok(Desktop {
-                station,
+                station: Some(station),
                 desktop,
                 name: wide(OsStr::new(&format!("{name}\\Default"))),
             })
@@ -2899,20 +3211,29 @@ pub mod appcontainer {
         block
     }
 
-    /// Runs `program` with `args` in the container `name`, with this
+    /// Runs `program` with `args` in the container `spec` names, with this
     /// process's environment as [`acl::container_env`] makes it (Windows
-    /// PowerShell's own module path), working folder, stdout and stderr, and
-    /// the null device as its stdin; no other handle goes to it. Waits for it
-    /// and returns its exit code.
-    pub fn run(program: &Path, args: &[String], name: &str) -> io::Result<u32> {
-        ensure_profile(name)?;
+    /// PowerShell's own module path), the container's home where `spec`
+    /// says so ([`acl::container_home`]) and `spec`'s variables, this
+    /// process's working folder, stdout and stderr, and the null device as
+    /// its stdin; no other handle goes to it. Off the network it gets none
+    /// of the container's network capabilities. Waits for it and returns
+    /// its exit code.
+    pub fn run(program: &Path, args: &[String], spec: &super::ContainerSpec) -> io::Result<u32> {
+        let name = spec.name.as_str();
+        let ac = ready(name)?;
         let sid = Sid::derive(name)?;
-        let mut caps_buf = [
-            WinCapabilityInternetClientSid,
-            WinCapabilityInternetClientServerSid,
-            WinCapabilityPrivateNetworkClientServerSid,
-        ]
-        .map(capability);
+        let wanted: &[i32] = if spec.no_network {
+            &[]
+        } else {
+            &[
+                WinCapabilityInternetClientSid,
+                WinCapabilityInternetClientServerSid,
+                WinCapabilityPrivateNetworkClientServerSid,
+            ]
+        };
+        let mut caps_buf: Vec<io::Result<Vec<u8>>> =
+            wanted.iter().map(|k| capability(*k)).collect();
         let mut caps = Vec::new();
         for c in caps_buf.iter_mut() {
             let c = c
@@ -2925,7 +3246,11 @@ pub mod appcontainer {
         }
         let sc = SECURITY_CAPABILITIES {
             AppContainerSid: sid.0,
-            Capabilities: caps.as_mut_ptr(),
+            Capabilities: if caps.is_empty() {
+                null_mut()
+            } else {
+                caps.as_mut_ptr()
+            },
             CapabilityCount: caps.len() as u32,
             Reserved: 0,
         };
@@ -2994,7 +3319,16 @@ pub mod appcontainer {
         let exe = find(program)?;
         let app = wide(exe.as_os_str());
         let mut line = wide(OsStr::new(&command_line(&exe.to_string_lossy(), args)));
-        let env = env_block(acl::container_env(std::env::vars_os()));
+        let mut set = if spec.home {
+            acl::container_home(&ac)
+        } else {
+            Vec::new()
+        };
+        set.extend(spec.env.iter().cloned());
+        let env = env_block(acl::with_vars(
+            acl::container_env(std::env::vars_os()),
+            &set,
+        ));
         let mut pi = PROCESS_INFORMATION::default();
         let started = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", exe.display()));
         // SAFETY: NUL-terminated strings, a writable command line, and the
@@ -3108,7 +3442,10 @@ mod tests {
             parent: 1,
             landlock: Some(LandlockSpec::default()),
             container: Some(ContainerSpec {
-                name: "nerve.x".into(),
+                no_network: true,
+                home: true,
+                env: vec![("HTTPS_PROXY".into(), "http://p:3128".into())],
+                ..ContainerSpec::new("nerve.x")
             }),
             own_proc: true,
         };
@@ -3134,6 +3471,23 @@ mod tests {
     /// Each flag gives its own rights and nothing of another's: `w` reads
     /// and lists nothing, `x` runs and reads files but lists nothing, and
     /// no flag may change the access list or the owner.
+    /// A folder without a flag inside a granted one is closed to the
+    /// container: one denied entry, every right, for it and all below it,
+    /// a file just itself.
+    #[test]
+    fn a_closed_folder_denies_every_right_to_it_and_below() {
+        use acl::*;
+        let c = closed();
+        assert!(c.deny && !masks(true, true, true).deny);
+        let all = READ_DATA | WRITE_DATA | APPEND_DATA | EXECUTE | DELETE | WRITE_DAC;
+        assert_eq!(c.dir & all, all);
+        assert_eq!(
+            entries(true, c),
+            [(OBJECT_INHERIT | CONTAINER_INHERIT, c.dir)]
+        );
+        assert_eq!(entries(false, c), [(0, c.file)]);
+    }
+
     #[test]
     fn each_flag_gives_its_own_windows_rights() {
         use acl::*;
@@ -3303,6 +3657,59 @@ mod tests {
         );
     }
 
+    /// A pairing's command has its home in its container's own folder: the
+    /// variables that name a home and the settings below it name `AC\home`,
+    /// in place of the account's, whatever case they came in, and git
+    /// trusts the repositories it reaches. `LOCALAPPDATA`, `TEMP` and the
+    /// rest stay for Windows to point at the container.
+    #[test]
+    fn a_containers_home_is_its_own_folder() {
+        let ac = std::path::Path::new(r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC");
+        let set = acl::container_home(ac);
+        let got = acl::with_vars(
+            vec![
+                ("userprofile".into(), r"C:\Users\nerve-run".into()),
+                (
+                    "APPDATA".into(),
+                    r"C:\Users\nerve-run\AppData\Roaming".into(),
+                ),
+                (
+                    "LOCALAPPDATA".into(),
+                    r"C:\Users\nerve-run\AppData\Local".into(),
+                ),
+                (
+                    "TEMP".into(),
+                    r"C:\Users\nerve-run\AppData\Local\Temp".into(),
+                ),
+            ],
+            &set,
+        );
+        let get = |name: &str| -> Vec<String> {
+            got.iter()
+                .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+                .collect()
+        };
+        let home = r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC\home";
+        assert_eq!(get("USERPROFILE"), [home]);
+        assert_eq!(get("HOME"), [home]);
+        assert_eq!(get("HOMEDRIVE"), ["C:"]);
+        assert_eq!(get("HOMEPATH"), [&home[2..]]);
+        assert_eq!(get("APPDATA"), [format!(r"{home}\AppData\Roaming")]);
+        assert_eq!(get("LOCALAPPDATA"), [r"C:\Users\nerve-run\AppData\Local"]);
+        assert_eq!(get("TEMP"), [r"C:\Users\nerve-run\AppData\Local\Temp"]);
+        assert_eq!(get("GIT_CONFIG_KEY_0"), ["safe.directory"]);
+        assert_eq!(get("GIT_CONFIG_VALUE_0"), ["*"]);
+        // The node's own variables the owner passes on come last and win.
+        let more = acl::with_vars(got.clone(), &[("Home".into(), "x".into())]);
+        assert_eq!(
+            more.iter()
+                .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("HOME"))
+                .count(),
+            1
+        );
+    }
+
     /// The command line reads back as the arguments given, by the rules of
     /// `CommandLineToArgvW`.
     #[test]
@@ -3388,7 +3795,11 @@ mod tests {
         match appcontainer::run(
             std::path::Path::new(&program),
             &args,
-            &var("NERVE_TEST_CONTAINER"),
+            &ContainerSpec {
+                no_network: std::env::var_os("NERVE_TEST_NO_NETWORK").is_some(),
+                home: std::env::var_os("NERVE_TEST_HOME").is_some(),
+                ..ContainerSpec::new(var("NERVE_TEST_CONTAINER"))
+            },
         ) {
             Ok(code) => println!("exit code: {code}"),
             Err(e) => println!("exit code: {}\n{e}", u32::MAX),

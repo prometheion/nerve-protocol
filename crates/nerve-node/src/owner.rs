@@ -2875,7 +2875,7 @@ mod tests {
         match nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &args,
-            &var("NERVE_TEST_CONTAINER"),
+            &nerve_sandbox::ContainerSpec::new(var("NERVE_TEST_CONTAINER")),
         ) {
             Ok(code) => println!("exit code: {code}"),
             Err(e) => println!("exit code: {}\n{e}", u32::MAX),

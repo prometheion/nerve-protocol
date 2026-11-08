@@ -154,8 +154,11 @@ pub fn readable(path: &Path) -> Result<(), Unreadable> {
     reopen(&held).map(drop).map_err(|_| Unreadable::Closed)
 }
 
-/// [`readable`] where no command account reads (crate::fs::open_to_all
-/// says no to all there): the type is asked first, then the path opened.
+/// [`readable`] elsewhere: the type is asked first, then the path opened.
+/// On Windows the thread acts as the pairing's container
+/// (crate::win_user::FsAs::in_container), whose token decides; a folder
+/// is opened as a folder (`FILE_FLAG_BACKUP_SEMANTICS`, which grants no
+/// right of its own to a thread that holds no backup privilege).
 #[cfg(not(target_os = "linux"))]
 pub fn readable(path: &Path) -> Result<(), Unreadable> {
     match std::fs::metadata(path) {
@@ -164,9 +167,14 @@ pub fn readable(path: &Path) -> Result<(), Unreadable> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(Unreadable::Closed),
     }
-    std::fs::File::open(path)
-        .map(drop)
-        .map_err(|_| Unreadable::Closed)
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        o.custom_flags(0x0200_0000);
+    }
+    o.open(path).map(drop).map_err(|_| Unreadable::Closed)
 }
 
 /// Opens for reading the file or folder `held` holds, opened without
@@ -232,17 +240,32 @@ pub fn accounts_own(path: &Path, account: &crate::service::Account) -> bool {
     path.starts_with(&account.home) || std::fs::metadata(path).is_ok_and(|m| m.uid() == account.uid)
 }
 
-/// No platform but Unix has a command account of its own
-/// (nerve_policy::decide::Reads::Account is Linux only).
-#[cfg(not(unix))]
+/// [`accounts_own`] on Windows: below the command account's profile, where
+/// every pairing's container keeps its own folder. What another pairing's
+/// command made elsewhere carries that pairing's container, which the
+/// container this call acts in does not pass ([`open_to_all`]).
+#[cfg(windows)]
+pub fn accounts_own(path: &Path, account: &crate::service::Account) -> bool {
+    nerve_policy::paths::within(path, &account.home)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn accounts_own(_: &Path, _: &crate::service::Account) -> bool {
     false
 }
 
-/// No platform but Unix has a command account of its own
-/// (nerve_policy::decide::Reads::Account is Linux only), so nothing counts
-/// as open to it.
-#[cfg(not(unix))]
+/// [`open_to_all`] on Windows: the call acts in the pairing's container
+/// (crate::win_user::FsAs::in_container), and what that container may open
+/// it may read, which [`readable`] asks: Windows opens to it its own
+/// folders, Program Files and what is open to every AppContainer, its own
+/// folders, and not what only the account may open, every pairing's folders
+/// among them (#149, Q4).
+#[cfg(windows)]
+pub fn open_to_all(_: &Path) -> bool {
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn open_to_all(_: &Path) -> bool {
     false
 }

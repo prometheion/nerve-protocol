@@ -727,20 +727,25 @@ fn crypt(data: &[u8], seal: bool) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Where the daemon finds the stored password: set once at its start.
+/// The config folder, where the daemon finds the stored passwords: set
+/// once at its start.
 static SECRET: OnceLock<PathBuf> = OnceLock::new();
 
 /// The last logon of the command account, and when it was made.
 static LOGON: Mutex<Option<(String, Instant, Arc<Token>)>> = Mutex::new(None);
 
-/// Tells the commands where the stored password is: the config folder.
+/// Tells the commands where the stored passwords are: the config folder.
 pub fn init(config_dir: &Path) {
-    let _ = SECRET.set(config_dir.join(crate::winsvc::SECRET_FILE));
+    let _ = SECRET.set(config_dir.to_path_buf());
 }
 
-/// A logon of `account`, with the password `install` stored; one is kept
-/// for [`FRESH`].
+/// A logon of `account`, with the password `install` stored; one of the
+/// owner's is kept for [`FRESH`]. The command account `nerve-run` logs on
+/// as a batch job ([`run_logon`]), anew each time.
 pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
+    if account.name.eq_ignore_ascii_case(crate::account::RUN_USER) {
+        return run_logon().map(Arc::new);
+    }
     let mut cached = nerve_transport::sync::lock(&LOGON);
     if let Some((n, at, t)) = cached.as_ref()
         && *n == account.name
@@ -751,8 +756,9 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     let again = crate::account::NO_ACCOUNT_INSTALL;
     let file = SECRET
         .get()
+        .map(|d| d.join(crate::winsvc::SECRET_FILE))
         .ok_or_else(|| format!("no password of {} is stored; {again}", account.name))?;
-    let blob = match std::fs::read(file) {
+    let blob = match std::fs::read(&file) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(format!(
@@ -781,6 +787,92 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     Ok(t)
 }
 
+/// A logon of the command account `nerve-run` as a batch job, the logon its
+/// commands start with, with the password `install` made and stored
+/// ([`crate::winsvc::RUN_SECRET_FILE`]). Made anew for each command: each
+/// gets the window station of a logon of its own, which no other pairing's
+/// command shares (nerve_sandbox::appcontainer).
+pub fn run_logon() -> Result<Token, String> {
+    let name = crate::account::RUN_USER;
+    let again = "install Nerve again with its installer, which makes it again";
+    let file = SECRET
+        .get()
+        .map(|d| d.join(crate::winsvc::RUN_SECRET_FILE))
+        .ok_or_else(|| format!("no password of {name} is stored; {again}"))?;
+    let blob = std::fs::read(&file).map_err(|e| format!("{}: {e}; {again}", file.display()))?;
+    let plain = unprotect(&blob)
+        .map_err(|e| format!("the stored password of {name} cannot be decrypted ({e}); {again}"))?;
+    let (stored, password) = crate::winsvc::parse_secret(&plain)
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("the stored password of {name} cannot be read; {again}"))?;
+    batch_logon(&stored, &password).map_err(|e| format!("{e}; {again}"))
+}
+
+#[repr(C)]
+struct ObjectAttributes {
+    len: u32,
+    root: HANDLE,
+    name: *mut std::ffi::c_void,
+    attributes: u32,
+    descriptor: *mut std::ffi::c_void,
+    quality: *mut std::ffi::c_void,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateLowBoxToken(
+        token: *mut HANDLE,
+        existing: HANDLE,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        package: PSID,
+        capability_count: u32,
+        capabilities: *mut SID_AND_ATTRIBUTES,
+        handle_count: u32,
+        handles: *mut HANDLE,
+    ) -> i32;
+}
+
+/// `t` as a process of the container `name` holds it: what that container
+/// may open, the folders granted to it and what Windows opens to every
+/// AppContainer, and only where `t`'s account may open it too. Without
+/// capabilities: it opens files, nothing of the network. Needs no profile.
+pub fn lowbox(t: &Token, name: &str) -> io::Result<Token> {
+    use windows_sys::Win32::Security::TOKEN_ALL_ACCESS;
+    let sid = nerve_sandbox::appcontainer::Sid::derive(name)?;
+    let attributes = ObjectAttributes {
+        len: std::mem::size_of::<ObjectAttributes>() as u32,
+        root: std::ptr::null_mut(),
+        name: std::ptr::null_mut(),
+        attributes: 0,
+        descriptor: std::ptr::null_mut(),
+        quality: std::ptr::null_mut(),
+    };
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: an open token, empty object attributes, the container's SID
+    // and no capabilities or handles; the new token is owned below.
+    let st = unsafe {
+        NtCreateLowBoxToken(
+            &mut h,
+            t.raw(),
+            TOKEN_ALL_ACCESS,
+            &attributes,
+            sid.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if st < 0 {
+        return Err(io::Error::other(format!(
+            "cannot make the token of the AppContainer {name} ({st:#x})"
+        )));
+    }
+    // SAFETY: the call made a token this code now owns.
+    Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
+}
+
 /// The node's own file access as `account`, on this thread only, while it
 /// lives: the `fs` actions of a center and the path checks of its calls
 /// see what the account sees, and files they make belong to it. It is not
@@ -795,6 +887,17 @@ impl FsAs {
         let t = token_for(account).map_err(io::Error::other)?;
         Ok(FsAs {
             _as: Impersonation::new(&t)?,
+        })
+    }
+
+    /// As `account` in the pairing's container `name` ([`lowbox`]): what
+    /// its commands may open, and not what the account may besides, which
+    /// is every pairing's folders (#149, Q4).
+    pub fn in_container(account: &Account, name: &str) -> io::Result<FsAs> {
+        let t = token_for(account).map_err(io::Error::other)?;
+        let boxed = lowbox(&t, name)?;
+        Ok(FsAs {
+            _as: Impersonation::new(&boxed)?,
         })
     }
 }
@@ -898,21 +1001,30 @@ fn nul() -> io::Result<OwnedHandle> {
 
 /// Starts `line` (a command line, [`crate::exec::windows_command_line`])
 /// suspended with token `t`, in `cwd`, with the account's own environment
-/// and no window. It gets the NUL device as stdin and a pipe each for
-/// stdout and stderr, and no other handle of the node. A token that is not
-/// a restricted copy of this process's own needs [`SWITCH`].
+/// and no window. It gets `input` on its stdin, a pipe that a thread of the
+/// node fills and closes (the shim's spec, which a full pipe would hold
+/// while the process waits to be resumed), else the NUL device; a pipe each
+/// for stdout and stderr, and no other handle of the node. A token that is
+/// not a restricted copy of this process's own needs [`SWITCH`].
 pub fn spawn(
     t: &Token,
     line: &str,
     cwd: Option<&Path>,
     home: Option<&Path>,
+    input: Option<Vec<u8>>,
 ) -> io::Result<Spawned> {
     // Held by the service; another caller starts only restricted copies of
     // its own token, which need neither.
     let _ = enable(&SWITCH);
     let (out_r, out_w) = pipe()?;
     let (err_r, err_w) = pipe()?;
-    let input = nul()?;
+    let (input, feed) = match input {
+        Some(bytes) => {
+            let (r, w) = pipe()?;
+            (r, Some((w, bytes)))
+        }
+        None => (nul()?, None),
+    };
     let given = [
         input.as_raw_handle() as HANDLE,
         out_w.as_raw_handle() as HANDLE,
@@ -940,6 +1052,13 @@ pub fn spawn(
         )
     };
     drop((input, out_w, err_w));
+    if let Some((w, bytes)) = feed {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut w = std::fs::File::from(w);
+            let _ = w.write_all(&bytes);
+        });
+    }
     Ok(Spawned {
         pid: pi.dwProcessId,
         process,
@@ -1195,7 +1314,7 @@ pub fn run_capture(
     job: Option<&crate::win::Job>,
 ) -> io::Result<(u32, Vec<u8>)> {
     use std::io::Read;
-    let child = spawn(t, line, None, None)?;
+    let child = spawn(t, line, None, None, None)?;
     if let Some(job) = job
         && let Err(e) = job.assign(child.process())
     {

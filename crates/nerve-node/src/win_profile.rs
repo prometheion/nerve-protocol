@@ -107,3 +107,71 @@ unsafe extern "system" fn control(
     }
     NO_ERROR
 }
+
+/// The argument of the helper that makes or removes an AppContainer's
+/// profile as the account it runs as: `__container-profile ready <name>`
+/// or `__container-profile remove <name>`. Hidden from `--help`.
+pub const CONTAINER_ARG: &str = "__container-profile";
+
+/// The helper of [`CONTAINER_ARG`]; its exit code.
+pub fn helper_main() -> i32 {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let r = match args.as_slice() {
+        [what, name] if what == "ready" => nerve_sandbox::appcontainer::ready(name).map(drop),
+        [what, name] if what == "remove" => nerve_sandbox::appcontainer::remove_profile(name),
+        _ => Err(std::io::Error::other(format!(
+            "usage: {CONTAINER_ARG} ready|remove <name>"
+        ))),
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("nerve-node: {e}");
+            1
+        }
+    }
+}
+
+/// The containers whose profile this node made as `nerve-run` since it
+/// started ([`ready_as`]).
+static MADE: Mutex<std::collections::BTreeSet<String>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// Runs the helper of [`CONTAINER_ARG`] with `what` for the container
+/// `name` as `nerve-run`, which alone may write its profile, with `exe`,
+/// the node's program.
+fn as_run(exe: &std::path::Path, what: &str, name: &str) -> Result<(), String> {
+    let t = crate::win_user::run_logon()?;
+    let line = crate::exec::windows_command_line(
+        &exe.display().to_string(),
+        &[CONTAINER_ARG.to_string(), what.into(), name.into()],
+    );
+    let (code, out) =
+        crate::win_user::run_capture(&t, &line, std::time::Duration::from_secs(60), None)
+            .map_err(|e| format!("the AppContainer {name} as nerve-run: {e}"))?;
+    if code != 0 {
+        return Err(format!(
+            "the AppContainer {name} as nerve-run: {}",
+            String::from_utf8_lossy(&out).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Makes the profile of the container `name` in `nerve-run`'s profile, with
+/// its home (nerve_sandbox::appcontainer::ready), once while the node runs:
+/// a command's shim makes it again where it went meanwhile.
+pub fn ready_as(exe: &std::path::Path, name: &str) -> Result<(), String> {
+    if nerve_transport::sync::lock(&MADE).contains(name) {
+        return Ok(());
+    }
+    as_run(exe, "ready", name)?;
+    nerve_transport::sync::lock(&MADE).insert(name.to_string());
+    Ok(())
+}
+
+/// Removes the profile of the container `name` from `nerve-run`'s profile.
+pub fn remove_as(exe: &std::path::Path, name: &str) -> Result<(), String> {
+    nerve_transport::sync::lock(&MADE).remove(name);
+    as_run(exe, "remove", name)
+}

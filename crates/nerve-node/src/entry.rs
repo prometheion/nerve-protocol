@@ -30,6 +30,14 @@ pub fn main() -> i32 {
     {
         return crate::win_profile::main();
     }
+    // So is the helper that makes or removes an AppContainer's profile as
+    // the command account (crate::win_profile::CONTAINER_ARG).
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(crate::win_profile::CONTAINER_ARG))
+    {
+        return crate::win_profile::helper_main();
+    }
     // So is the keyring probe that setup and install start
     // (docs/dev/settings-and-config.md): it answers whether the system keyring of the
     // user it runs as works.
