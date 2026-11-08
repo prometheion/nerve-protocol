@@ -3430,6 +3430,12 @@ impl Link {
             rc.command = exec::sudo_line(&self.shared.sudo_path(), args, &prompt);
             sudo = Some(exec::SudoInput { password, prompt });
         }
+        // The account and `separate` come from two readings of the clock: a
+        // timed mode that ended between them would run `nerve-run` without
+        // its confinement, or the owner as a pairing of its own.
+        if mode_turned(separate, known.as_ref()) {
+            return Err(RpcError::new(ErrorCode::Unavailable, MODE_TURNED));
+        }
         // Folder mode confines: Landlock on Linux, the pairing's AppContainer
         // on Windows, by the answer the gate went by; `nerve-run` is
         // confined in allowlist mode too: by Landlock where it is there, and
@@ -3714,6 +3720,15 @@ impl Link {
             start_in,
             decl.timeout_secs.map(Duration::from_secs),
         );
+        // On Windows it runs in the pairing's container, as the pairing's
+        // commands of `nerve-run` do, with its home there (#149). It is made
+        // before the last look, as `exec_run` makes it: the grants' sync
+        // that makes it may take long.
+        let container = if cfg!(windows) && account.is_some() {
+            Some(self.container(&entry, no_network, Some(cfg)).await?)
+        } else {
+            None
+        };
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         let timeouts = exec::Timeouts::from_limits(&cfg.limits);
         // The owner's switch may be on since the call was decided
@@ -3726,13 +3741,6 @@ impl Link {
             return Err(RpcError::forbidden(why));
         }
         self.shared.held_at(HoldAt::AfterLastLook).await;
-        // On Windows it runs in the pairing's container, as the pairing's
-        // commands of `nerve-run` do, with its home there (#149).
-        let container = if cfg!(windows) && account.is_some() {
-            Some(self.container(&entry, no_network, Some(cfg)).await?)
-        } else {
-            None
-        };
         let opts = RunOptions {
             shell: None,
             landlock,
@@ -3777,6 +3785,18 @@ impl Link {
         })?;
         crate::config_cap::result(&decl, &run)
     }
+}
+
+/// Why a command did not run whose pairing's mode changed between the
+/// readings of it ([`mode_turned`]).
+const MODE_TURNED: &str =
+    "the command was not run: its pairing's mode changed while it started; run it again";
+
+/// Whether the account a command runs as (`account`) and whether it runs
+/// apart from the owner (`separate`) disagree: one says `nerve-run`, the
+/// other not.
+fn mode_turned(separate: bool, account: Option<&crate::service::Account>) -> bool {
+    account.is_some_and(|a| (a.name == crate::account::RUN_USER) != separate)
 }
 
 /// The account an allowed sudo command of `nerve-run` runs as
@@ -4365,6 +4385,29 @@ fn shell_of(configured: Option<&str>, command: Option<&str>) -> Shell {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// A command whose account says `nerve-run` and whose pairing does not
+    /// run apart, or the other way round, does not run: a timed mode ended
+    /// between the two readings. Where both agree, or no account is known
+    /// (a node by hand), it runs.
+    #[test]
+    fn a_command_whose_mode_turned_while_it_started_does_not_run() {
+        let account = |name: &str| crate::service::Account {
+            name: name.into(),
+            uid: 1,
+            gid: 1,
+            comment: String::new(),
+            home: "/h".into(),
+            groups: Vec::new(),
+        };
+        let run = account(crate::account::RUN_USER);
+        let owner = account("alice");
+        assert!(super::mode_turned(false, Some(&run)));
+        assert!(super::mode_turned(true, Some(&owner)));
+        assert!(!super::mode_turned(true, Some(&run)));
+        assert!(!super::mode_turned(false, Some(&owner)));
+        assert!(!super::mode_turned(false, None));
+    }
 
     /// Dropped when its flag says so.
     struct Held(std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>);
