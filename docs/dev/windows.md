@@ -433,9 +433,9 @@ runs in the container as well, unless the pairing runs as you.
   `%LOCALAPPDATA%\Packages\nerve.…` and a registry key. The node makes and
   removes it through a helper it starts as `nerve-run`, which alone may write
   that profile. The
-  profile goes with the container's last folder entry: the running node
-  removes it when the pairing's last granted folder is removed, deleted or
-  moved away, when the pairing is removed, and at uninstall. The name comes
+  profile holds the pairing's home, so it goes with the pairing, not with
+  its folders: the running node removes it when the pairing is removed
+  (also one that never had a folder), and uninstall does. The name comes
   from the path of the state folder and the pairing in `node.toml`, so the
   node finds the profile as long as the config folder is there.
 - If the config folder is gone, the node cannot tell which profiles
@@ -644,11 +644,9 @@ container and `nerve-run` may open.
   `C:\ProgramData` and `C:\Windows\Temp`. A command also writes the
   container's own folder, `%LOCALAPPDATA%\Packages\<container>\AC` (it
   holds `Temp`), without any grant. It stays between the commands of the
-  pairing, and Windows deletes it with the container's profile. The node
-  removes that profile with the container's last grant, a running node
-  too when the pairing's folders are gone at its sync, also after the last
-  one is removed or closed; removing the pairing and uninstalling remove it
-  too (see above) (checked, code).
+  pairing, also when its last folder is removed, and Windows deletes it
+  with the container's profile, which goes with the pairing (see above)
+  (checked, code).
 - **The registry.** Checked: a command reads the machine part (`HKLM`, for
   example the Windows version), lists the keys of your `HKCU` and reads
   `HKCU\Environment`, which holds the environment variables you set for

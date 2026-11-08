@@ -1266,13 +1266,14 @@ pub fn apply(
         let run = run_sid(paths);
         let want = || {
             let (cfg, home) = current();
-            wanted_on(
+            let grants = wanted_on(
                 run.as_deref(),
                 &cfg,
                 paths,
                 &home,
                 &crate::paths::platform(),
-            )
+            );
+            (grants, pairings(paths, &cfg))
         };
         apply_in(
             paths,
@@ -1312,6 +1313,7 @@ pub fn apply_outside(
         sync_outside_in(
             paths,
             &want,
+            &pairings(paths, cfg),
             &mut Acls {
                 report,
                 owner: None,
@@ -1327,15 +1329,24 @@ pub fn apply_outside(
 }
 
 /// [`apply_outside`] for `want`, on `folders` and the profiles in `store`.
+/// The profile of a container of `live` (the config's pairings,
+/// [`pairings`]) stays, also without grants: it holds its pairing's home.
 #[cfg(any(windows, test))]
 fn sync_outside_in(
     paths: &NodePaths,
     want: &[Grant],
+    live: &[String],
     folders: &mut impl Folders,
     store: &mut impl ProfileStore,
 ) -> Synced {
     let mut s = sync(&record_file(paths), want, folders);
-    let p = drop_profiles(paths, &s.emptied, store);
+    let emptied: Vec<String> = s
+        .emptied
+        .iter()
+        .filter(|c| !live.contains(c))
+        .cloned()
+        .collect();
+    let p = drop_profiles(paths, &emptied, store);
     s.errors.extend(p.errors.iter().cloned());
     s.profiles = p;
     s
@@ -1607,6 +1618,12 @@ fn remove_all_in(
     let mut s = sync(&record_file(paths), &[], folders);
     let mut names = s.emptied.clone();
     names.extend(node_ids.iter().flat_map(|n| containers(paths, n)));
+    // And those of pairings the node served that the config no longer
+    // names.
+    match read_profiles(&profiles_file(paths)) {
+        Ok(had) => names.extend(had),
+        Err(e) => s.errors.push(e),
+    }
     names.sort();
     names.dedup();
     let p = drop_profiles(paths, &names, store);
@@ -1873,7 +1890,7 @@ impl Folders for Acls<'_> {
 fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str)) -> Synced {
     apply_in(
         paths,
-        || want.to_vec(),
+        || (want.to_vec(), Vec::new()),
         &mut Acls {
             report,
             owner: None,
@@ -1882,8 +1899,60 @@ fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str))
     )
 }
 
+/// The containers of the pairings in `cfg`, whose profiles stay while
+/// their pairings do ([`apply_in`]).
+pub fn pairings(paths: &NodePaths, cfg: &NodeConfig) -> Vec<String> {
+    cfg.centers
+        .iter()
+        .map(|c| container(paths, &c.node_id))
+        .collect()
+}
+
+/// The containers whose profiles the node may have made (`profiles.json`
+/// in its state folder): those of its pairings at its last sync, and those
+/// whose removal failed. A container's profile holds its pairing's home on
+/// the installed service (crate::account::Own), so it goes with the
+/// pairing, not with its last grant: also one that never had a grant.
+fn profiles_file(paths: &NodePaths) -> PathBuf {
+    paths.state_dir.join("profiles.json")
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfilesFile<C> {
+    #[serde(default)]
+    format: Format,
+    #[serde(default)]
+    containers: C,
+}
+
+fn read_profiles(file: &Path) -> Result<Vec<String>, String> {
+    match std::fs::read(file) {
+        Ok(b) => Format::of_json(&b)
+            .check()
+            .and_then(|()| {
+                serde_json::from_slice::<ProfilesFile<Vec<String>>>(&b).map_err(|e| e.to_string())
+            })
+            .map(|r| r.containers)
+            .map_err(|e| format!("{}: {e}", file.display())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", file.display())),
+    }
+}
+
+fn write_profiles(file: &Path, containers: &[String]) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(&ProfilesFile {
+        format: Format::CURRENT,
+        containers,
+    })
+    .expect("containers serialise");
+    nerve_transport::files::write_private(file, &json)
+        .map_err(|e| format!("cannot write {}: {e}", file.display()))
+}
+
 /// [`apply`] for the grants `want` gives, on `folders` and the profiles in
-/// `store`. `want` is asked once this sync's turn has come: the node starts a
+/// `store`. `want` gives the grants and the containers of the config's
+/// pairings ([`pairings`]), and is asked once this sync's turn has come: the node starts a
 /// sync for each change, and one that waited for a sync of a newer config
 /// would otherwise put back a grant the owner took away since. The profile
 /// of each container the sync left without grants goes in the same turn as
@@ -1894,17 +1963,39 @@ fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str))
 #[cfg(any(windows, test))]
 fn apply_in(
     paths: &NodePaths,
-    want: impl FnOnce() -> Vec<Grant>,
+    want: impl FnOnce() -> (Vec<Grant>, Vec<String>),
     folders: &mut impl Folders,
     store: &mut impl ProfileStore,
 ) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
-    let want = want();
+    let (want, live) = want();
     let mut s = sync_in_turn(&record_file(paths), &want, folders);
-    for c in s.emptied.iter().filter(|c| !is_account(c)) {
+    // A profile goes with its pairing: those of containers the sync left
+    // without grants and of pairings the node had, unless the pairing is
+    // still there.
+    let file = profiles_file(paths);
+    let had = read_profiles(&file).unwrap_or_else(|e| {
+        s.errors.push(e);
+        Vec::new()
+    });
+    let mut gone: Vec<String> = s.emptied.iter().chain(&had).cloned().collect();
+    gone.sort();
+    gone.dedup();
+    let mut now = live.clone();
+    for c in gone.iter().filter(|c| !is_account(c) && !live.contains(c)) {
         if let Err(e) = store.remove(c) {
             s.errors.push(e.to_string());
+            now.push(c.clone());
         }
+    }
+    now.sort();
+    now.dedup();
+    let mut was = had;
+    was.sort();
+    if now != was
+        && let Err(e) = write_profiles(&file, &now)
+    {
+        s.errors.push(e);
     }
     s
 }
@@ -3244,21 +3335,21 @@ mod tests {
             ..Default::default()
         };
         let both = [a.clone(), b.clone()];
-        let s = sync_outside_in(&paths, &both, &mut f, &mut store);
+        let s = sync_outside_in(&paths, &both, &[], &mut f, &mut store);
         assert_eq!(s.profiles, Profiles::default());
         // No container emptied, so no profile to remove: the keys' lock is
         // not taken, and its file not made.
         assert!(!paths.keys_lock().exists());
         let held = crate::secrets::HeldByANode::take(&paths);
-        let s = sync_outside_in(&paths, std::slice::from_ref(&b), &mut f, &mut store);
+        let s = sync_outside_in(&paths, std::slice::from_ref(&b), &[], &mut f, &mut store);
         assert_eq!(s.removed, 1);
         assert_eq!(s.profiles.kept, std::slice::from_ref(&lab));
         assert!(s.profiles.why.unwrap().contains("runs"));
         assert!(store.removed.is_empty());
         drop(held);
         // With the node stopped, the profile goes with the last grant.
-        sync_outside_in(&paths, &both, &mut f, &mut store);
-        let s = sync_outside_in(&paths, std::slice::from_ref(&b), &mut f, &mut store);
+        sync_outside_in(&paths, &both, &[], &mut f, &mut store);
+        let s = sync_outside_in(&paths, std::slice::from_ref(&b), &[], &mut f, &mut store);
         assert_eq!(s.profiles.removed, std::slice::from_ref(&lab));
         assert_eq!(store.there, std::slice::from_ref(&home));
         assert!(s.errors.is_empty(), "{s:?}");
@@ -3309,7 +3400,7 @@ mod tests {
                     go: go_rx,
                     gone,
                 };
-                apply_in(&paths, Vec::new, &mut f, &mut store)
+                apply_in(&paths, Default::default, &mut f, &mut store)
             })
         };
         let wait = std::time::Duration::from_secs(20);
@@ -3321,7 +3412,7 @@ mod tests {
             let (paths, gone) = (paths.clone(), gone.clone());
             std::thread::spawn(move || {
                 let mut store = FakeProfiles::default();
-                let s = apply_in(&paths, Vec::new, &mut Fake::default(), &mut store);
+                let s = apply_in(&paths, Default::default, &mut Fake::default(), &mut store);
                 done.send(gone.load(Ordering::SeqCst)).unwrap();
                 s
             })
@@ -3338,6 +3429,82 @@ mod tests {
         assert!(s.errors.is_empty(), "{s:?}");
         let s = asked.join().unwrap();
         assert!(s.emptied.is_empty() && s.errors.is_empty(), "{s:?}");
+    }
+
+    /// The profile of a pairing's container holds its home on the
+    /// installed service: it stays while the pairing does, also once its
+    /// last folder is gone, and goes with the pairing, also when it never
+    /// had a grant; the CLI's sync keeps it the same way. A removal that
+    /// fails is tried again.
+    #[test]
+    fn a_pairings_profile_goes_with_the_pairing_not_its_last_grant() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let lab = container(&paths, &node("lab"));
+        let home = container(&paths, &node("home"));
+        let mut f = Fake::default();
+        f.make("/w/a");
+        let a = grant(&lab, "/w/a", "rw");
+        let mut store = FakeProfiles {
+            there: vec![lab.clone(), home.clone()],
+            ..Default::default()
+        };
+        let both = || vec![lab.clone(), home.clone()];
+        apply_in(&paths, || (vec![a.clone()], both()), &mut f, &mut store);
+        // The last folder goes: the profile stays.
+        let s = apply_in(&paths, || (Vec::new(), both()), &mut f, &mut store);
+        assert_eq!(s.emptied, std::slice::from_ref(&lab));
+        assert!(store.removed.is_empty(), "{:?}", store.removed);
+        // The pairings go: both profiles go, `home` without a grant ever.
+        let s = apply_in(&paths, Default::default, &mut f, &mut store);
+        assert!(s.errors.is_empty(), "{s:?}");
+        store.removed.sort();
+        let mut gone = both();
+        gone.sort();
+        assert_eq!(store.removed, gone);
+        assert!(store.there.is_empty());
+        // A removal that fails is kept to try again.
+        struct Failing(usize);
+        impl ProfileStore for Failing {
+            fn exists(&mut self, _: &str) -> bool {
+                true
+            }
+            fn remove(&mut self, _: &str) -> io::Result<()> {
+                self.0 += 1;
+                Err(io::Error::other("in use"))
+            }
+        }
+        apply_in(
+            &paths,
+            || (Vec::new(), vec![lab.clone()]),
+            &mut f,
+            &mut store,
+        );
+        let mut failing = Failing(0);
+        let s = apply_in(&paths, Default::default, &mut f, &mut failing);
+        assert_eq!(failing.0, 1, "{s:?}");
+        apply_in(&paths, Default::default, &mut f, &mut failing);
+        assert_eq!(failing.0, 2);
+        apply_in(&paths, Default::default, &mut f, &mut store);
+        assert_eq!(store.removed.last(), Some(&lab));
+        // The CLI's sync keeps a pairing's profile too.
+        f.make("/w/b");
+        let b = grant(&lab, "/w/b", "r");
+        store.there.push(lab.clone());
+        sync_outside_in(
+            &paths,
+            std::slice::from_ref(&b),
+            &[lab.clone()],
+            &mut f,
+            &mut store,
+        );
+        let s = sync_outside_in(&paths, &[], &[lab.clone()], &mut f, &mut store);
+        assert_eq!(s.emptied, std::slice::from_ref(&lab));
+        assert!(
+            s.profiles.removed.is_empty() && store.there.contains(&lab),
+            "{s:?}"
+        );
     }
 
     /// A sync that waited for its turn applies the config as it is once
@@ -3359,7 +3526,7 @@ mod tests {
         let mut store = FakeProfiles::default();
         apply_in(
             &paths,
-            || current.lock().unwrap().clone(),
+            || (current.lock().unwrap().clone(), Vec::new()),
             &mut f,
             &mut store,
         );
@@ -3374,7 +3541,7 @@ mod tests {
                 f.make("/w/a");
                 let want = || {
                     let _ = read.send(());
-                    current.lock().unwrap().clone()
+                    (current.lock().unwrap().clone(), Vec::new())
                 };
                 let s = apply_in(&paths, want, &mut f, &mut FakeProfiles::default());
                 (s, f.all())
@@ -4286,7 +4453,10 @@ mod tests {
         f.locked.push("/w/a/closed".into());
         let s = sync(&file, &want, &mut f);
         let why = s.refusal("c1").expect("c1's commands stop");
-        assert!(why.contains("/w/a/closed") && why.contains("could not close"), "{why}");
+        assert!(
+            why.contains("/w/a/closed") && why.contains("could not close"),
+            "{why}"
+        );
         assert!(s.refusal("c2").is_none(), "{s:?}");
 
         // Nor where a command put something else in its place.
