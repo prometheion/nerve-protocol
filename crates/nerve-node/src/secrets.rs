@@ -1162,7 +1162,9 @@ impl KeysLock {
     /// writes behind a node).
     #[cfg(any(windows, test))]
     pub fn node_runs(paths: &NodePaths) -> bool {
-        if !paths.keys_lock().is_file() {
+        // Only a file known to be missing is "no node": an entry that cannot
+        // be looked at goes on to the lock, whose error counts as held.
+        if matches!(paths.keys_lock().try_exists(), Ok(false)) {
             return false;
         }
         !matches!(KeysLock::try_take(paths), Ok(Some(_)))
@@ -1355,6 +1357,26 @@ mod tests {
         assert!(KeysLock::node_runs(&paths));
         drop(held);
         assert!(!KeysLock::node_runs(&paths));
+    }
+
+    /// A state folder that cannot be looked into is not proof that no node
+    /// runs: the answer is the safe one, held.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_that_cannot_be_looked_at_counts_as_held() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = node();
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let set =
+            |m| std::fs::set_permissions(&paths.state_dir, std::fs::Permissions::from_mode(m));
+        set(0o000).unwrap();
+        let looked = paths.keys_lock().try_exists().is_ok();
+        let runs = KeysLock::node_runs(&paths);
+        set(0o700).unwrap();
+        // A superuser can look anyway; then there is nothing to prove.
+        if !looked {
+            assert!(runs, "a lock that cannot be looked at counted as no node");
+        }
     }
 
     /// The refusal at the node's start puts the install before the pairing:
