@@ -600,9 +600,9 @@ In short: `folder` mode keeps the command's own files and the owners' pipe
 closed, but it is not shown to hold against every program of yours that
 runs things on request. One that opens itself to all AppContainers runs
 what the command asks as you, outside the container, and then a command
-can do all you can, Nerve's settings too. On Windows commands run as you, so
-that is yours to answer for; an account of their own, as on Linux, is
-planned.
+can do all you can, Nerve's settings too. The command itself runs as
+`nerve-run`, so what it reaches by its own rights is what both its
+container and `nerve-run` may open.
 
 - **The network.** The container has the capabilities `internetClient`,
   `internetClientServer` and `privateNetworkClientServer` (code). Checked: a

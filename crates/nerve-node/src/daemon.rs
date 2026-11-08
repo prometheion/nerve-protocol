@@ -996,13 +996,20 @@ impl Shared {
     /// turn has come, not one read before it waited, which a sync of a newer
     /// one may have overtaken. Blocks; the log says how far a change that
     /// takes long is.
+    ///
+    /// On the installed service the folders are the owner's: their entries
+    /// are read and changed as the owner (crate::grants::apply).
     pub fn sync_grants(&self) -> crate::grants::Synced {
         let current = || {
             let cfg = self.config();
             let home = self.rules_home(&cfg);
             (cfg, home)
         };
-        crate::grants::apply(&self.paths, current, &mut |m| {
+        let owner = self
+            .service
+            .then(|| self.owner_account(&self.config()).ok().flatten())
+            .flatten();
+        crate::grants::apply(&self.paths, owner.as_ref(), current, &mut |m| {
             tracing::info!("folder grants: {m}")
         })
     }

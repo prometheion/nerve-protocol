@@ -1157,9 +1157,11 @@ fn run_sid(paths: &NodePaths) -> Option<String> {
 /// confined by grants (Linux). `report` is told how far a change is once it
 /// takes long (`Pace`): it passes down to every file and folder below the
 /// folder that it changes. For the node itself, which holds the lock that
-/// [`apply_outside`] looks at.
+/// [`apply_outside`] looks at. `owner`: the installed service's owner, as
+/// whom the folders' entries are read and changed (`Acls`).
 pub fn apply(
     paths: &NodePaths,
+    owner: Option<&crate::service::Account>,
     current: impl FnOnce() -> (Arc<NodeConfig>, PathBuf),
     report: &mut dyn FnMut(&str),
 ) -> Synced {
@@ -1176,11 +1178,19 @@ pub fn apply(
                 &crate::paths::platform(),
             )
         };
-        apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
+        apply_in(
+            paths,
+            want,
+            &mut Acls {
+                report,
+                owner: owner.filter(|_| run.is_some()),
+            },
+            &mut WinProfiles,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (paths, current, report);
+        let _ = (paths, owner, current, report);
         Synced::default()
     }
 }
@@ -1203,7 +1213,15 @@ pub fn apply_outside(
             home,
             &crate::paths::platform(),
         );
-        sync_outside_in(paths, &want, &mut Acls { report }, &mut WinProfiles)
+        sync_outside_in(
+            paths,
+            &want,
+            &mut Acls {
+                report,
+                owner: None,
+            },
+            &mut WinProfiles,
+        )
     }
     #[cfg(not(windows))]
     {
@@ -1465,7 +1483,15 @@ fn forget_in(paths: &NodePaths, node_id: &str, store: &mut impl ProfileStore) ->
 pub fn remove_all(paths: &NodePaths, node_ids: &[String], report: &mut dyn FnMut(&str)) -> Synced {
     #[cfg(windows)]
     {
-        remove_all_in(paths, node_ids, &mut Acls { report }, &mut WinProfiles)
+        remove_all_in(
+            paths,
+            node_ids,
+            &mut Acls {
+                report,
+                owner: None,
+            },
+            &mut WinProfiles,
+        )
     }
     #[cfg(not(windows))]
     {
@@ -1637,16 +1663,31 @@ fn masks_of(access: Access) -> nerve_sandbox::acl::Masks {
 }
 
 /// The folders' access lists on Windows; `report` is told how far a change
-/// is once it takes long ([`paced`]).
+/// is once it takes long ([`paced`]). On the installed service the folders
+/// are the owner's, which the service's own account may neither read nor
+/// change: each look and change acts as the `owner`
+/// (crate::win_user::FsAs), as Linux's ACL sync does. Only the folders'
+/// work does: the record stays in the node's state folder, which the owner
+/// may not open.
 #[cfg(windows)]
 struct Acls<'a> {
     report: &'a mut dyn FnMut(&str),
+    owner: Option<&'a crate::service::Account>,
+}
+
+#[cfg(windows)]
+impl Acls<'_> {
+    /// Acts as the owner on this thread while the result lives.
+    fn act(&self) -> io::Result<Option<crate::win_user::FsAs>> {
+        self.owner.map(crate::win_user::FsAs::new).transpose()
+    }
 }
 
 #[cfg(windows)]
 impl Folders for Acls<'_> {
     fn look(&mut self, path: &Path, container: &str, access: Access) -> io::Result<Option<Look>> {
         use nerve_sandbox::appcontainer;
+        let _as = self.act()?;
         let masks = masks_of(access);
         match appcontainer::look(path, container, masks) {
             Ok((id, granted)) => Ok(Some(Look {
@@ -1659,6 +1700,7 @@ impl Folders for Acls<'_> {
     }
 
     fn locate(&mut self, id: &str, near: &Path) -> io::Result<Found> {
+        let _as = self.act()?;
         let id = id.parse().map_err(io::Error::other)?;
         nerve_sandbox::appcontainer::locate(&id, near)
     }
@@ -1674,6 +1716,7 @@ impl Folders for Acls<'_> {
         expect: Option<&str>,
     ) -> io::Result<Option<String>> {
         use nerve_sandbox::{acl, appcontainer};
+        let _as = self.act()?;
         let masks = access.map(masks_of);
         let expect = expect
             .map(|e| e.parse::<acl::FileId>().map_err(io::Error::other))
@@ -1714,6 +1757,7 @@ impl Folders for Acls<'_> {
         grants: Option<&[PathBuf]>,
     ) -> io::Result<Option<(PathBuf, u64)>> {
         use nerve_sandbox::appcontainer;
+        let _as = self.act()?;
         let masks = access.map(masks_of);
         let judge = Judge::new(dir, grants);
         let mut links = |p: &Path, n: u32, all: &[PathBuf]| Ok(judge.holds(p, n.into(), all));
@@ -1734,7 +1778,10 @@ fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str))
     apply_in(
         paths,
         || want.to_vec(),
-        &mut Acls { report },
+        &mut Acls {
+            report,
+            owner: None,
+        },
         &mut WinProfiles,
     )
 }
