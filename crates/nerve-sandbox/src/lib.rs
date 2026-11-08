@@ -3025,7 +3025,11 @@ pub mod appcontainer {
     /// command logs on anew (nerve-node's `win_user`), so no two pairings
     /// share one. The container gets an entry on it and a desktop of its
     /// own there.
-    fn logon_desktop(container: &Sid, sa: &SECURITY_ATTRIBUTES) -> io::Result<Desktop> {
+    ///
+    /// The desktop gets the list `sddl` and a low label, so the container's
+    /// process, of low integrity, may write to it: the way it was tried on a
+    /// Windows 11 machine (#149's probe).
+    fn logon_desktop(container: &Sid, sddl: &str) -> io::Result<Desktop> {
         // SAFETY: plain getter; the handle is this process's, not closed.
         let station = unsafe { GetProcessWindowStation() };
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
@@ -3066,7 +3070,7 @@ pub mod appcontainer {
             String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
         };
         // What a process needs of its station, for the container too.
-        let entry = format!("(A;;0x37f;;;{})", sid_text(container.0)?);
+        let entry = format!("(A;;GA;;;{})", sid_text(container.0)?);
         if !old.contains(&entry) {
             let mut new: PSECURITY_DESCRIPTOR = null_mut();
             // SAFETY: a NUL-terminated SDDL string; freed with LocalFree.
@@ -3101,6 +3105,22 @@ pub mod appcontainer {
                 return Err(io::Error::from_raw_os_error(r as i32));
             }
         }
+        let mut labelled: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: a NUL-terminated SDDL string; freed with LocalFree.
+        check(unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(OsStr::new(&format!("{sddl}S:(ML;;NW;;;LW)"))).as_ptr(),
+                SDDL_REVISION_1,
+                &mut labelled,
+                null_mut(),
+            )
+        })?;
+        let _labelled = Local(labelled);
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: labelled,
+            bInheritHandle: 0,
+        };
         let name = format!("nerve-{}", std::process::id());
         // SAFETY: a NUL-terminated name and security attributes that live
         // for the call; the desktop goes on this process's station.
@@ -3111,7 +3131,7 @@ pub mod appcontainer {
                 null(),
                 0,
                 GENERIC_ALL,
-                sa,
+                &sa,
             )
         };
         if desktop.is_null() {
@@ -3156,7 +3176,7 @@ pub mod appcontainer {
             if station.is_null() {
                 let e = io::Error::last_os_error();
                 if e.kind() == io::ErrorKind::PermissionDenied {
-                    return logon_desktop(container, &sa);
+                    return logon_desktop(container, &sddl);
                 }
                 return Err(e);
             }
