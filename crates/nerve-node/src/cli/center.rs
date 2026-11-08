@@ -134,8 +134,10 @@ pub(super) async fn rm(
     // grants off and the profile of a container left without grants
     // itself, in its own time: asked to do that now, it is done before
     // the profiles are looked at here, so none it removes is said to
-    // stay. Any other profile stays while it runs, as a command of the
-    // pairing may still run in it.
+    // stay. Its own sync of the change may have taken the grants off
+    // first: the sync asked for here waits until that one removed the
+    // profile too (crate::grants::apply). Any other profile stays while
+    // it runs, as a command of the pairing may still run in it.
     #[cfg(windows)]
     match node_call(&paths, "folder.grants", json!({})).await {
         Ok(_) => {}
@@ -460,6 +462,20 @@ mod tests {
         rt.block_on(node.stop());
     }
 
+    /// A pairing `home` with a folder entry, whose grant names the
+    /// pairing's container, and the profile of that container.
+    #[cfg(windows)]
+    fn granted_home() -> (tempfile::TempDir, NodePaths, String, PathBuf) {
+        let (d, paths) = setup(&["home"]);
+        let work = d.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
+        assert!(crate::grants::record_file(&paths).exists());
+        let name = crate::grants::container(&paths, "n");
+        let profile = profile_of(&name);
+        (d, paths, name, profile)
+    }
+
     /// On Windows: the profile of a pairing with folder entries goes with
     /// their grants at `center rm`, which says so where no node runs. A
     /// running node takes the change and that profile itself; a profile
@@ -469,13 +485,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn center_rm_names_the_profile_that_goes_with_the_last_grant() {
-        let (d, paths) = setup(&["home"]);
-        let work = d.path().join("work");
-        std::fs::create_dir(&work).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
-        assert!(crate::grants::record_file(&paths).exists());
-        let name = crate::grants::container(&paths, "n");
-        let profile = profile_of(&name);
+        let (d, paths, _, profile) = granted_home();
         // A node that runs holds the lock.
         let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
         let e = run(&paths, &["center", "rm"]).unwrap_err();
@@ -483,13 +493,22 @@ mod tests {
         assert!(e.contains(crate::pipe::NO_PIPE), "{e}");
         assert!(load(&paths).center("home").is_some());
         assert!(profile.exists(), "{}", profile.display());
-        with_node(d.path(), &paths, |node| {
-            let out = run(&paths, &["center", "rm"]).unwrap();
-            assert!(out.contains("unpaired home"), "{out}");
-            assert!(!out.contains("stays"), "{out}");
-            assert!(node.config().center("home").is_none());
-            assert!(!profile.exists(), "{}", profile.display());
-        });
+        let rm_with_node = |d: &tempfile::TempDir, paths: &NodePaths, profile: &Path| {
+            with_node(d.path(), paths, |node| {
+                let out = run(paths, &["center", "rm"]).unwrap();
+                assert!(out.contains("unpaired home"), "{out}");
+                assert!(!out.contains("stays"), "{out}");
+                assert!(node.config().center("home").is_none());
+                assert!(!profile.exists(), "{}", profile.display());
+            });
+        };
+        rm_with_node(&d, &paths, &profile);
+        // The node's own sync of the change or the one `center rm` asks
+        // for takes the grant off, whichever comes first: a few rounds.
+        for _ in 0..3 {
+            let (d, paths, _, profile) = granted_home();
+            rm_with_node(&d, &paths, &profile);
+        }
 
         let (d, paths) = setup(&["home"]);
         let name = crate::grants::container(&paths, "n");
@@ -506,12 +525,7 @@ mod tests {
         assert!(profile.exists(), "{}", profile.display());
         nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
 
-        let (d, paths) = setup(&["home"]);
-        let work = d.path().join("work");
-        std::fs::create_dir(&work).unwrap();
-        run(&paths, &["folder", "add", work.to_str().unwrap(), "rw"]).unwrap();
-        let name = crate::grants::container(&paths, "n");
-        let profile = profile_of(&name);
+        let (_d, paths, name, profile) = granted_home();
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(
             out.contains(&format!("removed the AppContainer profile {name} of home")),

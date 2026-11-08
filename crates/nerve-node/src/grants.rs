@@ -714,6 +714,12 @@ impl RecordLock {
 /// not be found again.
 pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
+    sync_in_turn(file, want, folders)
+}
+
+/// [`sync`] by a caller that holds the turn ([`SYNC`]) already: the node,
+/// which removes profiles in the same turn ([`apply_in`]).
+fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     let out = Synced::default();
     // Without a state folder nothing is recorded, and with nothing wanted
     // there is nothing to do: no folder and no lock file are made for it
@@ -1635,9 +1641,26 @@ impl Folders for Acls<'_> {
 
 #[cfg(windows)]
 fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str)) -> Synced {
-    let mut s = sync(&record_file(paths), want, &mut Acls { report });
+    apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
+}
+
+/// [`apply`] for `want`, on `folders` and the profiles in `store`. The
+/// profile of each container the sync left without grants goes in the same
+/// turn as the grants, so a sync that waited for this one returns only once
+/// it is gone. `center rm` asks the node for one (`folder.grants`) while the
+/// node's own sync of the change may hold the turn, and then looks at the
+/// profiles itself: one still on its way out would be said to stay.
+#[cfg(any(windows, test))]
+fn apply_in(
+    paths: &NodePaths,
+    want: &[Grant],
+    folders: &mut impl Folders,
+    store: &mut impl ProfileStore,
+) -> Synced {
+    let _one = nerve_transport::sync::turn(&SYNC);
+    let mut s = sync_in_turn(&record_file(paths), want, folders);
     for c in &s.emptied {
-        if let Err(e) = nerve_sandbox::appcontainer::remove_profile(c) {
+        if let Err(e) = store.remove(c) {
             s.errors.push(e.to_string());
         }
     }
@@ -2992,6 +3015,82 @@ mod tests {
         assert_eq!(s.profiles.removed, std::slice::from_ref(&lab));
         assert_eq!(store.there, std::slice::from_ref(&home));
         assert!(s.errors.is_empty(), "{s:?}");
+    }
+
+    /// The node removes the profile of a container its sync left without
+    /// grants in the same turn: another sync, as the `folder.grants` that
+    /// `center rm` asks for while the node's own sync of the change runs,
+    /// returns only once the profile is gone. `center rm` looks at the
+    /// profiles right after it and says one it finds stays.
+    #[test]
+    fn a_sync_after_the_nodes_own_finds_the_emptied_profile_gone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+        /// A profile whose removal waits for the test's word.
+        struct Slow {
+            removing: mpsc::Sender<()>,
+            go: mpsc::Receiver<()>,
+            gone: Arc<AtomicBool>,
+        }
+        impl ProfileStore for Slow {
+            fn exists(&mut self, _: &str) -> bool {
+                !self.gone.load(Ordering::SeqCst)
+            }
+            fn remove(&mut self, _: &str) -> io::Result<()> {
+                self.removing.send(()).unwrap();
+                self.go.recv().unwrap();
+                self.gone.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let lab = container(&paths, &node("lab"));
+        let mut f = Fake::default();
+        f.make("/w/a");
+        sync(&record_file(&paths), &[grant(&lab, "/w/a", "r")], &mut f);
+        let gone = Arc::new(AtomicBool::new(false));
+        let (removing, removing_rx) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        // The node's own sync of the change: the grant goes, then the
+        // profile, which waits.
+        let own = {
+            let (paths, gone) = (paths.clone(), gone.clone());
+            std::thread::spawn(move || {
+                let mut store = Slow {
+                    removing,
+                    go: go_rx,
+                    gone,
+                };
+                apply_in(&paths, &[], &mut f, &mut store)
+            })
+        };
+        let wait = std::time::Duration::from_secs(20);
+        removing_rx.recv_timeout(wait).unwrap();
+        // The one `center rm` asks for: it finds nothing left to take off,
+        // and says whether the profile was gone when it returned.
+        let (done, done_rx) = mpsc::channel();
+        let asked = {
+            let (paths, gone) = (paths.clone(), gone.clone());
+            std::thread::spawn(move || {
+                let mut store = FakeProfiles::default();
+                let s = apply_in(&paths, &[], &mut Fake::default(), &mut store);
+                done.send(gone.load(Ordering::SeqCst)).unwrap();
+                s
+            })
+        };
+        let short = std::time::Duration::from_millis(300);
+        assert!(
+            done_rx.recv_timeout(short).is_err(),
+            "the sync returned while the profile was still there"
+        );
+        go.send(()).unwrap();
+        assert!(done_rx.recv_timeout(wait).unwrap());
+        let s = own.join().unwrap();
+        assert_eq!(s.emptied, [lab]);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let s = asked.join().unwrap();
+        assert!(s.emptied.is_empty() && s.errors.is_empty(), "{s:?}");
     }
 
     /// What two cleanups did, each profile once.
