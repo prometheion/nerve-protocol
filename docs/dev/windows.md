@@ -911,8 +911,8 @@ job built:
 - the node is installed again with that account for commands, then the
   sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
   (`nerve-node/tests/win_limits.rs`), the account's batch logon, a folder
-  on a virtual disk mounted in a folder and a backup's folder on a FAT32
-  virtual disk run on it;
+  on a virtual disk mounted in a folder, a backup's folder on a FAT32
+  virtual disk and a folder reached over the machine's own share run on it;
 - the center is installed as a service, its `status`, its restart actions
   (and a restart after its process is killed), its web UI in Chrome
   (`.github/scripts/web-ui-smoke.mjs`), what the standard account cannot

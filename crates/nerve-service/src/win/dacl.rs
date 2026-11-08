@@ -948,6 +948,42 @@ mod tests {
         drop(hold_folder(&dir, &dacl_of(&[&me, "SY", "BA"], &[])).unwrap());
     }
 
+    /// A folder that is reached over a share is on one, and a local one is
+    /// not: the administrative share of the system drive on this machine
+    /// (`\\localhost\C$\...`), and a link in a local folder that leads to
+    /// it. Both directions matter: a center that took every folder for a
+    /// share would write its backup without the private list, and one that
+    /// took none would shut a share's account out of the folder it made
+    /// (round 8, spec 1). Needs an administrator for the share and the link.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs an administrator: reaches a folder over the machine's own share"]
+    fn a_folder_over_a_share_is_remote() {
+        let drive =
+            crate::win::folders::drive_of(&crate::win::folders::windows_dir().to_string_lossy());
+        let name = format!("nrv-share-{}", std::process::id());
+        let local = std::path::PathBuf::from(format!("{drive}\\{name}"));
+        let _ = std::fs::remove_dir_all(&local);
+        std::fs::create_dir(&local).unwrap();
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _gone = Gone(local.clone());
+        let share = std::path::PathBuf::from(format!("\\\\localhost\\{}$\\{name}", &drive[..1]));
+        assert!(local.is_dir() && share.is_dir(), "{share:?} is not reached");
+        assert!(!is_remote(&local));
+        assert!(is_remote(&share));
+        // A local folder that is a link to the share is on the share.
+        let base = tempfile::tempdir().unwrap();
+        let link = base.path().join("link");
+        std::os::windows::fs::symlink_dir(&share, &link).unwrap();
+        assert!(is_remote(&link));
+        assert!(!is_remote(base.path()));
+    }
+
     /// On a FAT32 volume (what a USB stick comes with), whose folders all
     /// name Everyone their owner and take no list, the backup's folder is
     /// made, taken again and held, and a file made in it (round 6,

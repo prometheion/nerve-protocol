@@ -148,7 +148,8 @@ jobs:
             @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
             @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
-            @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held')
+            @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),
+            @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_over_a_share_is_remote')
           )
           $failed = 0
           foreach ($r in $runs) {

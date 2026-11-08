@@ -762,6 +762,16 @@ if ($wait.Wait(40000)) {{
         );
         let (ok, said) = center(&["backup", &backup, "--passphrase-file", &pass]);
         assert!(ok, "{said}");
+        // A backup to a folder over a share (this machine's own, on the
+        // drive the test folder is on) is written as any file there (round
+        // 8, spec 1).
+        let local = work.path().join("shared");
+        std::fs::create_dir(&local).unwrap();
+        let shown = local.display().to_string();
+        let share = format!("\\\\localhost\\{}$\\{}\\c.bak", &shown[..1], &shown[3..]);
+        let (ok, said) = center(&["backup", &share, "--passphrase-file", &pass]);
+        assert!(ok, "{said}");
+        assert!(local.join("c.bak").is_file(), "{said}");
         for spelled in [
             None,
             Some(format!(

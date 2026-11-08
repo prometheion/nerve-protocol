@@ -338,14 +338,49 @@ fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("error, warn, info or debug"));
 }
 
-/// `nerve-center backup` or `restore` as the owner runs them.
+/// `nerve-center backup` or `restore` as the owner runs them. The state
+/// folder is given by `--state-dir`: an administrator's command refuses it
+/// from the variable (and the Windows CI runner is one), which the test
+/// `an_administrators_command_does_not_take_the_state_variable` checks.
 fn owner(args: &[&str], state: Option<&std::path::Path>) -> std::process::Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
     bare(&mut c).args(args).stdin(Stdio::null());
     if let Some(s) = state {
-        c.env("NERVE_CENTER_STATE_DIR", s);
+        c.arg("--state-dir").arg(s);
     }
     c.output().unwrap()
+}
+
+/// On Windows, an elevated `backup` (the hosted runners run the tests so)
+/// refuses a state folder that came from `NERVE_CENTER_STATE_DIR` and writes
+/// nothing; the same command from a terminal that is not elevated takes it
+/// (round 8, correctness 1).
+#[cfg(windows)]
+#[test]
+fn an_administrators_command_does_not_take_the_state_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let pass = dir.path().join("pass");
+    nerve_transport::files::write_private(&pass, b"correct horse battery\n").unwrap();
+    let file = dir.path().join("v.bak");
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    bare(&mut c)
+        .args(["backup"])
+        .arg(&file)
+        .arg("--passphrase-file")
+        .arg(&pass)
+        .env("NERVE_CENTER_STATE_DIR", dir.path().join("state"))
+        .stdin(Stdio::null());
+    let out = c.output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    if nerve_service::win::sid::is_admin() {
+        assert!(!out.status.success(), "{out:?}");
+        assert!(said.contains("NERVE_CENTER_STATE_DIR"), "{said}");
+    } else {
+        // Taken: it fails for want of a center in that folder, not for the
+        // variable.
+        assert!(!said.contains("administrator's terminal"), "{said}");
+    }
+    assert!(!file.exists());
 }
 
 #[test]
@@ -433,6 +468,6 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     assert_eq!(id(&old), id(&new));
 
     // A harness still starts it without a subcommand, and nothing else is one.
-    let bad = owner(&["pair"], Some(&new));
+    let bad = owner(&["pair"], None);
     assert!(!bad.status.success());
 }
