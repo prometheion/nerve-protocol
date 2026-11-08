@@ -1156,6 +1156,18 @@ impl KeysLock {
         }
     }
 
+    /// Whether a node holds the lock, asked without making anything: no
+    /// state folder or no lock file is a node that never ran, and a lock
+    /// that cannot be tried counts as held (the safe answer for a caller that
+    /// writes behind a node).
+    #[cfg(any(windows, test))]
+    pub fn node_runs(paths: &NodePaths) -> bool {
+        if !paths.keys_lock().is_file() {
+            return false;
+        }
+        !matches!(KeysLock::try_take(paths), Ok(Some(_)))
+    }
+
     /// The lock, trying again for a moment when someone holds it. A process
     /// that released it a moment ago may have forked a command meanwhile: the
     /// child holds a copy of the descriptor, and so the lock, until it execs.
@@ -1327,6 +1339,22 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
         (d, paths)
+    }
+
+    /// Asking whether a node runs makes no state folder and no lock file
+    /// where none ever ran, and sees a node that holds the lock.
+    #[test]
+    fn asking_whether_a_node_runs_makes_nothing() {
+        let (_d, paths) = node();
+        assert!(!KeysLock::node_runs(&paths));
+        assert!(!paths.state_dir.exists(), "the question made the folder");
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        assert!(!KeysLock::node_runs(&paths));
+        assert!(!paths.keys_lock().exists(), "the question made the lock");
+        let held = KeysLock::try_take(&paths).unwrap().unwrap();
+        assert!(KeysLock::node_runs(&paths));
+        drop(held);
+        assert!(!KeysLock::node_runs(&paths));
     }
 
     /// The refusal at the node's start puts the install before the pairing:

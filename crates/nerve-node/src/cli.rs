@@ -841,7 +841,7 @@ pub(crate) async fn node_call(
 /// (crate::pipe::file_instead); a node that runs holds the keys' lock.
 pub(crate) fn no_node(paths: &NodePaths, e: &str) -> bool {
     #[cfg(windows)]
-    let runs = || !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)));
+    let runs = || crate::secrets::KeysLock::node_runs(paths);
     // Only Windows' pipe can be another account's.
     #[cfg(not(windows))]
     let runs = || {

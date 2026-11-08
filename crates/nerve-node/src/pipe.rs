@@ -259,7 +259,7 @@ mod sys {
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     // A node that runs holds the keys' lock.
                     return Err(super::missing_pipe(|| {
-                        !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)))
+                        crate::secrets::KeysLock::node_runs(paths)
                     }));
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {

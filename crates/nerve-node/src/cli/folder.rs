@@ -434,10 +434,7 @@ async fn change_folder(
                 .map_err(|e| format!("the node's answer is not understood: {e}"));
         }
         // A node that runs holds the keys' lock.
-        Err(e)
-            if crate::pipe::file_instead(&e, || {
-                !matches!(crate::secrets::KeysLock::try_take(paths), Ok(Some(_)))
-            }) => {}
+        Err(e) if crate::pipe::file_instead(&e, || crate::secrets::KeysLock::node_runs(paths)) => {}
         // The change is not undone by a late answer: the node goes on.
         Err(e) => return Err(walk_goes_on(&e).unwrap_or(e)),
     }

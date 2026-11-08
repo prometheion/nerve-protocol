@@ -874,7 +874,11 @@ impl SettingsStore {
         }
         new.version = self.config.version;
         new.validate().map_err(SetError::Invalid)?;
-        if new == *self.config {
+        // A panic that changes nothing still saves over a change waiting in
+        // the file: a lock the owner asked for must not lose to an `unlock`
+        // that the next start would take.
+        let clears_file = over_newer && self.file_ahead();
+        if new == *self.config && !clears_file {
             return Ok(self.config.version);
         }
         new.version = self.next_version();
@@ -882,7 +886,9 @@ impl SettingsStore {
         let changes = diff(&to_json(&self.config), &to_json(&new));
         let version = new.version;
         self.config = Arc::new(new);
-        self.changed(&by.label(), version, &changes);
+        if !changes.is_empty() {
+            self.changed(&by.label(), version, &changes);
+        }
         Ok(version)
     }
 
@@ -3145,37 +3151,17 @@ mod tests {
         assert!(!node.file_ahead());
     }
 
-    /// A panic that finds no change waiting says nothing of one: neither
-    /// does a lock that changes nothing over a file ahead.
+    /// A panic that finds no change waiting says nothing of one, and saves
+    /// nothing when the config does not change.
     #[test]
     fn a_panic_with_nothing_waiting_replaces_nothing() {
         let d = tempfile::tempdir().unwrap();
         let mut node = store(d.path(), SettingsGrant::Write);
-        assert!(!node.file_ahead());
         let mut locked = node.config().clone();
         locked.locked = true;
-        node.set_local_panic(locked, Some(node.version())).unwrap();
-        // Locked already: the same lock again saves nothing, and leaves a
-        // change waiting in the file where it is.
-        let mut other = SettingsStore::open(
-            d.path().join("node.toml"),
-            d.path().join("config.key"),
-            AuditLog::new(d.path().join("audit.jsonl")),
-        )
-        .unwrap();
-        other
-            .update(|c| {
-                c.limits.max_running += 1;
-                Ok(())
-            })
-            .unwrap();
-        assert!(node.file_ahead());
+        let v = node.set_local_panic(locked, Some(node.version())).unwrap();
         let again = node.config().clone();
-        node.set_local_panic(again, Some(node.version())).unwrap();
-        assert!(
-            node.file_ahead(),
-            "a lock that changed nothing wrote the file"
-        );
+        assert_eq!(node.set_local_panic(again, Some(v)).unwrap(), v);
         let said: Vec<_> = node
             .audit()
             .read()
@@ -3184,6 +3170,47 @@ mod tests {
             .filter(|e| e["event"] == "replaced")
             .collect();
         assert!(said.is_empty(), "{said:?}");
+    }
+
+    /// A node that is locked already and a change waiting in the file (an
+    /// `unlock`, say): the panic saves over it, or the next start would run
+    /// unlocked.
+    #[test]
+    fn a_panic_on_a_locked_node_saves_over_a_waiting_unlock() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = store(d.path(), SettingsGrant::Write);
+        let mut locked = node.config().clone();
+        locked.locked = true;
+        node.set_local_panic(locked, Some(node.version())).unwrap();
+        let mut other = SettingsStore::open(
+            d.path().join("node.toml"),
+            d.path().join("config.key"),
+            AuditLog::new(d.path().join("audit.jsonl")),
+        )
+        .unwrap();
+        other
+            .update(|c| {
+                c.locked = false;
+                Ok(())
+            })
+            .unwrap();
+        assert!(node.file_ahead());
+        let before = node.version();
+        let again = node.config().clone();
+        let v = node.set_local_panic(again, Some(before)).unwrap();
+        assert!(v > before);
+        assert!(!node.file_ahead());
+        let saved =
+            SettingsStore::peek(&d.path().join("node.toml"), &d.path().join("config.key")).unwrap();
+        assert!(saved.locked, "the waiting unlock came back");
+        let said: Vec<_> = node
+            .audit()
+            .read()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e["event"] == "replaced")
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
     }
 
     /// A file the node did not sign names a version, and it holds no change of
