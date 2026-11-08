@@ -334,9 +334,6 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - name: The machine
-        shell: pwsh
-        run: ./.github/scripts/windows-runner.ps1
       # The Windows image sets core.autocrlf=true, so a checkout would write CRLF
       # line endings: include_str! would embed a CRLF page and a test that looks
       # for "\n" in it would fail. The repository is LF everywhere.
@@ -347,6 +344,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # After the checkout: the check is a script of the repository.
+      - name: The machine
+        shell: pwsh
+        run: ./.github/scripts/windows-runner.ps1
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
