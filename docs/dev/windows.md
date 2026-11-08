@@ -413,8 +413,10 @@ runs in the container as well, unless the pairing runs as you.
   inherits from the folder around it. Without it, it would inherit the
   entry of the folder around.
 - A link to another machine (a symbolic link to `\\server\share`) is never
-  followed by the node: its walks and the paths of a call stop there,
-  refused. Following it would connect to that machine as the account the
+  followed by the node: its walks, the paths of a call and the changes of
+  the folders' entries stop there, refused, and a folder closed there gets
+  no entry. A link whose target is not on a drive of this machine (a device
+  path too) counts as such a link. Following it would connect to that machine as the account the
   node acts as, and send that account's NTLM answer there. A command in a
   container that opens such a link gets "network access denied", and no
   connection leaves the machine (checked).

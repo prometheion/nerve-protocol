@@ -362,18 +362,36 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
     Ok(out)
 }
 
-/// Whether a link's `target`, as the link holds it, is a place on another
-/// machine: a share (`\\host\share`, `\\?\UNC\…`, `\??\UNC\…`). Windows
-/// connects to it as whoever follows the link, and sends that account's
-/// NTLM answer to whatever host it names (#149's probe).
+/// Whether a link's `target`, as the link holds it, may be a place on
+/// another machine: anything but a path on a drive or volume of this one
+/// (`C:\…`, `\\?\C:\…`, `\??\Volume{…}\…`) or one relative to the link.
+/// So a share (`\\host\share`, `\\?\UNC\…`, `\??\UNC\…`) is, and so is
+/// every device path, which may name one (`\\?\GLOBALROOT\Device\Mup\…`,
+/// `\Device\Mup\…`). Windows connects to a share as whoever follows the
+/// link, and sends that account's NTLM answer to whatever host it names
+/// (#149's probe).
 pub fn remote_target(target: &str) -> bool {
-    let t = target.replace('/', "\\");
-    let lower = t.to_ascii_lowercase();
-    if lower.starts_with("\\\\?\\unc\\") || lower.starts_with("\\??\\unc\\") {
-        return true;
-    }
-    // `\\?\C:\…` and `\\.\…` are this machine's.
-    t.starts_with("\\\\") && !lower.starts_with("\\\\?\\") && !lower.starts_with("\\\\.\\")
+    let lower = target.replace('/', "\\").to_ascii_lowercase();
+    let rest = match ["\\\\?\\", "\\\\.\\", "\\??\\"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+    {
+        Some(r) => r,
+        // `\\host\…` and the object manager's own paths; a path from the
+        // root of the link's drive (`\x`), or relative to the link, or on
+        // a drive, is this machine's.
+        None => {
+            return lower.starts_with("\\\\")
+                || lower.starts_with("\\device\\")
+                || lower.starts_with("\\globalroot");
+        }
+    };
+    let b = rest.as_bytes();
+    let drive = b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b.get(2).is_none_or(|c| *c == b'\\');
+    !(drive || rest.starts_with("volume{"))
 }
 
 /// The first link on the way of `p` (absolute), and on the way of where each
@@ -655,14 +673,25 @@ mod remote_tests {
             r"\\?\UNC\host\share",
             r"\??\UNC\host\share",
             r"\\?\unc\host\share",
+            r"\\.\UNC\host\share",
+            r"\\?\GLOBALROOT\Device\Mup\host\share",
+            r"\??\GLOBALROOT\Device\Mup\host\share",
+            r"\Device\Mup\host\share",
+            r"\GLOBALROOT\Device\Mup\host\share",
+            // Only drives and volumes count as this machine's.
+            r"\\.\pipe\x",
+            r"\\?\Device\HarddiskVolume1\x",
         ] {
             assert!(remote_target(t), "{t}");
         }
         for t in [
             r"C:\Users\x",
+            "C:",
             r"\\?\C:\Users\x",
+            r"\\.\C:\x",
             r"\??\C:\x",
-            r"\\.\pipe\x",
+            r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\x",
+            r"\x\y",
             r"..\x",
             "x",
             "/home/x",

@@ -1796,10 +1796,36 @@ impl Acls<'_> {
     }
 }
 
+/// Refuses `path` where its links lead to another machine
+/// (nerve_policy::paths::remote_link): opening it would connect there as
+/// whoever the sync acts as, and send that account's NTLM answer (#149's
+/// probe). Refused before anything changed.
+#[cfg(windows)]
+fn not_remote(path: &Path) -> io::Result<()> {
+    match nerve_policy::paths::remote_link(path) {
+        None => Ok(()),
+        Some(link) => Err(nerve_sandbox::acl::untouched(
+            Untouched::Refused,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a link to another machine, which the node does not follow",
+                    link.display()
+                ),
+            ),
+        )),
+    }
+}
+
 #[cfg(windows)]
 impl Folders for Acls<'_> {
     fn look(&mut self, path: &Path, container: &str, access: Access) -> io::Result<Option<Look>> {
         use nerve_sandbox::appcontainer;
+        // Nothing the node may look at: a recorded grant is looked for by
+        // its object then (`locate`).
+        if not_remote(path).is_err() {
+            return Ok(None);
+        }
         let _as = self.act()?;
         let masks = masks_of(access);
         match appcontainer::look(path, container, masks) {
@@ -1813,6 +1839,13 @@ impl Folders for Acls<'_> {
     }
 
     fn locate(&mut self, id: &str, near: &Path) -> io::Result<Found> {
+        // The folders on the way are opened to find the volume: not
+        // through a link to another machine.
+        let near = if not_remote(near).is_ok() {
+            near
+        } else {
+            Path::new("")
+        };
         let _as = self.act()?;
         let id = id.parse().map_err(io::Error::other)?;
         nerve_sandbox::appcontainer::locate(&id, near)
@@ -1829,6 +1862,7 @@ impl Folders for Acls<'_> {
         expect: Option<&str>,
     ) -> io::Result<Option<String>> {
         use nerve_sandbox::{acl, appcontainer};
+        not_remote(path)?;
         let _as = self.act()?;
         let masks = access.map(masks_of);
         let expect = expect
@@ -1870,6 +1904,7 @@ impl Folders for Acls<'_> {
         grants: Option<&[PathBuf]>,
     ) -> io::Result<Option<(PathBuf, u64)>> {
         use nerve_sandbox::appcontainer;
+        not_remote(dir)?;
         let _as = self.act()?;
         let masks = access.map(masks_of);
         let judge = Judge::new(dir, grants);

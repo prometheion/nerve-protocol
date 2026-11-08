@@ -814,6 +814,11 @@ pub fn container_grants(
         let Some(path) = expand(home, &f.path) else {
             continue;
         };
+        // A link to another machine: no container reaches a share (#149's
+        // probe), and the sync would follow it to put the entry on.
+        if nerve_policy::paths::remote_link(&path).is_some() {
+            continue;
+        }
         let path = real(&path);
         let inside = out
             .iter()
