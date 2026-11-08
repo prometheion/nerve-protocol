@@ -92,6 +92,7 @@ fn system(program: &str, args: &[&str]) -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     let o = Command::new(Path::new(&root).join("System32").join(program))
         .args(args)
+        .env_remove("PSModulePath")
         .output()
         .unwrap();
     String::from_utf8_lossy(&o.stdout).into_owned()
@@ -192,6 +193,10 @@ exit $p.ExitCode
         Command::new(Path::new(&root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe"))
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
+            // The job's steps run in PowerShell 7, whose module path Windows
+            // PowerShell 5.1 cannot load its own modules from
+            // (ConvertTo-SecureString is in Microsoft.PowerShell.Security).
+            .env_remove("PSModulePath")
             .env("NERVE_T_USER", &who.0)
             .env("NERVE_T_PASSWORD", &who.1)
             .env("NERVE_T_PROGRAM", program)
@@ -561,6 +566,7 @@ Start-Sleep -Seconds 8
             // and then nothing but the 16 is asserted.
             let mine =
                 std::process::Command::new(system32("WindowsPowerShell\\v1.0\\powershell.exe"))
+                    .env_remove("PSModulePath")
                     .args([
                         "-NoProfile",
                         "-Command",
