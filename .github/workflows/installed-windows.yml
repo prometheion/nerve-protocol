@@ -15,7 +15,10 @@
 # - the administrator's batch logon (nerve-node's
 #   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
 #   folder on a virtual disk mounted in a folder (nerve-sandbox's
-#   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again).
+#   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again);
+# - the center as a Windows service: its install, `status`, its web UI in
+#   Chrome, a second center that attaches to a first, update and uninstall
+#   (crates/nerve-center/tests/win_service.rs).
 # A test that skips fails the job. The account's password is masked in the
 # log and goes nowhere but the tests of this job.
 name: Installed on Windows
@@ -28,7 +31,7 @@ on:
         type: string
         required: true
       tests:
-        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, nerve_node_lib.exe and nerve_sandbox_lib.exe"
+        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_service.exe, nerve_node_lib.exe and nerve_sandbox_lib.exe"
         type: string
         required: true
       ref:
@@ -138,6 +141,24 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # Chrome and a Node.js with WebSocket come with the image; the web UI
+      # smoke test drives the one with the other.
+      - name: The center as a Windows service
+        run: |
+          $chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $chrome)) { throw "no Chrome at $chrome" }
+          $node = (Get-Command node).Source
+          & $node -e 'if (typeof WebSocket !== "function") { console.error("this Node.js " + process.version + " has no WebSocket"); process.exit(1); }'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:NERVE_CENTER_PROGRAM = (Resolve-Path dist/nerve-center.exe).Path
+          $env:NERVE_UI_SMOKE_CHROME = $chrome
+          $env:NERVE_UI_SMOKE_NODE = $node
+          $env:NERVE_UI_SMOKE_SCRIPT = (Resolve-Path .github/scripts/web-ui-smoke.mjs).Path
+          $said = & dist/tests/win_service.exe --ignored --exact --nocapture --test-threads=1 the_center_runs_as_a_windows_service 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/center.log" | Out-String
+          Write-Host $said
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the center service test did not run' }
       - name: Uninstall
         if: success() || failure()
         run: |
@@ -153,6 +174,6 @@ jobs:
       - name: No test skipped
         if: success() || failure()
         run: |
-          $logs = Get-ChildItem "$env:RUNNER_TEMP" -Filter *.log | Where-Object Name -in 'real.log', 'installed.log'
+          $logs = Get-ChildItem "$env:RUNNER_TEMP" -Filter *.log | Where-Object Name -in 'real.log', 'installed.log', 'center.log'
           $skipped = $logs | Select-String -Pattern '(^|\.\.\. )skipped'
           if ($skipped) { $skipped; throw 'a test skipped' }

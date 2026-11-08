@@ -46,11 +46,14 @@ works (`--mcp 0.0.0.0:7481`), always with the bearer token.
 The first `nerve-center` on a state folder takes `<state>/center.lock` and owns
 the center. A second one with `--mcp stdio` finds the lock held and attaches:
 it relays its stdio over `<state>/run/harness.sock` (mode 0600 in a 0700
-folder; the owner also checks the peer's uid) and each harness gets its own
-session. When the owner's own harness goes, the owner keeps running until the
-attached harnesses have ended too. A second instance with `--mcp http` or
-`off` refuses to start. Windows has no attach: the second instance
-fails when it cannot bind the node port.
+folder; the owner also checks the peer's uid), on Windows over the named pipe
+`\\.\pipe\nerve-center-<hash of the folder>` (only its account, SYSTEM and
+the administrators may open it, no other machine; the owner checks the
+client's account, and the client that the pipe's owner is its own account
+before it sends anything), and each harness gets its own session. When the
+owner's own harness goes, the owner keeps running until the attached
+harnesses have ended too. A second instance with `--mcp http` or `off`
+refuses to start.
 
 ## 3. MCP
 
