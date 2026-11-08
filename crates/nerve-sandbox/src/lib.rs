@@ -3983,6 +3983,288 @@ mod tests {
         appcontainer::remove_profile(&name).unwrap();
     }
 
+    /// What [`diagnose_powershell_in_the_container`] runs in the container:
+    /// Windows PowerShell's own state (its providers, FileSystem drives and
+    /// location, its module folders as it resolves them), whether the
+    /// command reads each key, folder and file Windows PowerShell 5.1 reads
+    /// at its start (`yes`, or `NO` with the error), what the failing tests
+    /// run, the cmdlets it finds before and after an import by name, and
+    /// every error record. Only .NET and the language until the import, as
+    /// the container's PowerShell may have no cmdlet but its core ones. No
+    /// line break, at which the helper splits its arguments, and no `"`,
+    /// which the command line would escape.
+    #[cfg(windows)]
+    const DIAGNOSE_INSIDE: &str = concat!(
+        r"$start = @($Error); $Error.Clear(); ",
+        r"function global:Line([string]$t) { [Console]::Out.WriteLine($t); [Console]::Out.Flush() }; ",
+        r"function global:Inner($e) { while ($e.InnerException) { $e = $e.InnerException }; $e }; ",
+        r"function global:Probe([string]$what, [scriptblock]$probe) { try { $r = & $probe; ",
+        r"Line ('yes ' + $what + ': ' + $r) } catch { $e = Inner $_.Exception; ",
+        r"Line ('NO  ' + $what + ': ' + $e.GetType().FullName + ': ' + $e.Message) } }; ",
+        r"function global:List([string]$p) { '' + ([IO.Directory]::GetFileSystemEntries($p)).Count + ' entries' }; ",
+        r"function global:ReadAll([string]$p) { '' + ([IO.File]::ReadAllBytes($p)).Length + ' bytes' }; ",
+        r"function global:Key([string]$k, [string[]]$values) { ",
+        r"$o = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k); if (-not $o) { throw 'no such key' }; ",
+        r"$s = @(); foreach ($v in $values) { $s += ($v + '=' + $o.GetValue($v)) }; ",
+        r"$s += ('subkeys ' + ($o.GetSubKeyNames() -join ',')); $s -join ' ' }; ",
+        r"function global:Dump($records) { foreach ($r in $records) { ",
+        r"$e = if ($r -is [Exception]) { $r } else { $r.Exception }; ",
+        r"Line ('-- ' + $r.FullyQualifiedErrorId + ' | ' + $r.CategoryInfo + ' | target: ' + $r.TargetObject); ",
+        r"if ($r.InvocationInfo) { Line ('   at: ' + $r.InvocationInfo.PositionMessage) }; ",
+        r"while ($e) { Line ('   ' + $e.GetType().FullName + ': ' + $e.Message); ",
+        r"if ($e.FileName) { Line ('   file: ' + $e.FileName) }; if ($e.FusionLog) { Line ('   fusion log: ' + $e.FusionLog) }; ",
+        r"if ($e.ItemName) { Line ('   item: ' + $e.ItemName) }; $e = $e.InnerException }; ",
+        r"try { Line (($r | Format-List * -Force | Out-String -Width 160).Trim()) } ",
+        r"catch { Line ('   (Format-List: ' + (Inner $_.Exception).Message + ')') } } }; ",
+        r"$win = [Environment]::GetEnvironmentVariable('SystemRoot'); $ps = $win + '\System32\WindowsPowerShell\v1.0'; ",
+        r"$net = $win + '\Microsoft.NET'; $gac = $net + '\assembly\GAC_MSIL\'; ",
+        r"$native = $win + '\assembly\NativeImages_v4.0.30319_64'; ",
+        r"Line '==== in the container: Windows PowerShell at its start'; ",
+        r"Line ('PSVersion ' + $PSVersionTable.PSVersion + ', CLR ' + $PSVersionTable.CLRVersion + ', PSHOME ' + $PSHOME); ",
+        r"foreach ($n in 'TEMP', 'TMP', 'LOCALAPPDATA', 'USERPROFILE', 'PSModulePath', 'PSModuleAnalysisCachePath') { ",
+        r"Line ($n + '=' + [Environment]::GetEnvironmentVariable($n)) }; ",
+        r"Line ('the LocalApplicationData folder: ' + [Environment]::GetFolderPath('LocalApplicationData')); ",
+        r"Probe 'the providers' { $n = @(); foreach ($p in $ExecutionContext.SessionState.Provider.GetAll()) { $n += $p.Name }; $n -join ', ' }; ",
+        r"Probe 'the FileSystem drives' { $n = @(); ",
+        r"foreach ($d in $ExecutionContext.SessionState.Drive.GetAllForProvider('FileSystem')) { $n += ($d.Name + '=' + $d.Root) }; ",
+        r"if (-not $n) { throw 'none' }; $n -join ', ' }; ",
+        r"Probe 'the current FileSystem location' { $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath }; ",
+        r"Probe 'the current location' { $ExecutionContext.SessionState.Path.CurrentLocation.Path }; ",
+        r"foreach ($m in [Environment]::GetEnvironmentVariable('PSModulePath').Split(';')) { if ($m) { ",
+        r"Probe ('the module folder ' + $m + ' as PowerShell resolves it') { $x = $null; ",
+        r"$ExecutionContext.SessionState.Path.GetResolvedProviderPathFromPSPath($m, [ref]$x) -join ', ' } } }; ",
+        r"Line ('---- the drives, as the FileSystem provider looks at them at its start'); ",
+        r"try { $drives = [IO.DriveInfo]::GetDrives() } catch { $drives = @(); Line ('NO  the drives: ' + (Inner $_.Exception).Message) }; ",
+        r"foreach ($v in $drives) { Probe ('drive ' + $v.Name) { '' + $v.DriveType + ', RootDirectory.Exists ' + $v.RootDirectory.Exists }; ",
+        r"Probe ('list ' + $v.Name) { List $v.Name } }; ",
+        r"$w = [Environment]::CurrentDirectory; while ($w) { Line ('Directory.Exists ' + $w + ': ' + [IO.Directory]::Exists($w)); ",
+        r"$w = [IO.Path]::GetDirectoryName($w) }; ",
+        r"Line '---- the keys, folders and files it reads'; ",
+        r"foreach ($k in 'SOFTWARE\Microsoft\PowerShell\1\PowerShellEngine', 'SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine') { ",
+        r"Probe ('HKLM\' + $k) { Key $k 'ApplicationBase', 'RuntimeVersion', 'PowerShellVersion' } }; ",
+        r"foreach ($k in 'SOFTWARE\Microsoft\PowerShell\1\PowerShellSnapIns', 'SOFTWARE\Microsoft\PowerShell\3\PowerShellSnapIns', ",
+        r"'SOFTWARE\Microsoft\.NETFramework', 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full') { ",
+        r"Probe ('HKLM\' + $k) { Key $k 'InstallRoot', 'Release' } }; ",
+        r"foreach ($p in $ps, ($ps + '\Modules'), ($ps + '\Modules\Microsoft.PowerShell.Management'), ",
+        r"($ps + '\Modules\Microsoft.PowerShell.Utility'), ([Environment]::GetEnvironmentVariable('ProgramFiles') + '\WindowsPowerShell\Modules'), ",
+        r"($gac + 'System.Management.Automation'), ($gac + 'Microsoft.PowerShell.Commands.Management'), ",
+        r"($gac + 'Microsoft.PowerShell.Commands.Utility'), ($gac + 'Microsoft.PowerShell.ConsoleHost'), ",
+        r"($win + '\assembly'), $native) { Probe ('list ' + $p) { List $p } }; ",
+        r"foreach ($p in ($ps + '\powershell.exe'), ($ps + '\types.ps1xml'), ($ps + '\DotNetTypes.format.ps1xml'), ",
+        r"($ps + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1'), ",
+        r"($ps + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'), ",
+        r"($net + '\Framework64\v4.0.30319\Config\machine.config')) { Probe ('read ' + $p) { ReadAll $p } }; ",
+        r"foreach ($a in 'System.Management.Automation', 'Microsoft.PowerShell.Commands.Management', 'Microsoft.PowerShell.Commands.Utility') { ",
+        r"Probe ('read ' + $a + '.dll in GAC_MSIL') { $d = [IO.Directory]::GetDirectories($gac + $a)[0]; ReadAll ($d + '\' + $a + '.dll') }; ",
+        r"Probe ('read the native image of ' + $a) { $f = @(); ",
+        r"foreach ($d in [IO.Directory]::GetDirectories($native, $a.Substring(0, 8) + '*')) { ",
+        r"$f += [IO.Directory]::GetFiles($d, $a + '.ni.dll', 'AllDirectories') }; ",
+        r"if (-not $f) { throw 'none found' }; $f[0] + ', ' + (ReadAll $f[0]) } }; ",
+        r"Line '---- what the failing tests run, and the errors it leaves'; $Error.Clear(); ",
+        r"$null = New-PSDrive -Name Work -PSProvider FileSystem -Root ([Environment]::CurrentDirectory) -Scope Global; ",
+        r"& ($win + '\System32\cmd.exe') /c echo a native program started by its whole path; ",
+        r"cmd.exe /c echo a native program started by its name; ",
+        r"Get-Content -LiteralPath ([Environment]::CurrentDirectory + '\in.txt'); 'x' > out.txt; ",
+        r"$tried = @($Error); ",
+        r"Line '---- the cmdlets'; ",
+        r"Probe 'the snap-ins' { $n = @(); foreach ($s in Get-PSSnapin) { $n += $s.Name }; $n -join ', ' }; ",
+        r"Probe 'the modules found (Get-Module -ListAvailable)' { $n = @(); ",
+        r"foreach ($s in Get-Module -ListAvailable -ErrorAction Stop) { $n += $s.Name }; [string]$n.Count + ': ' + ($n -join ', ') }; ",
+        r"Probe 'New-PSDrive found by its name alone' { (Get-Command New-PSDrive -ErrorAction Stop).Source }; ",
+        r"Probe 'Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility' { $n = @(); ",
+        r"foreach ($m in Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -PassThru -ErrorAction Stop) { ",
+        r"$n += $m.Path }; $n -join ', ' }; ",
+        r"Probe 'New-PSDrive found after the import' { (Get-Command New-PSDrive -ErrorAction Stop).Source }; ",
+        r"Probe 'New-PSDrive Work and Set-Location Work:\ after the import' { ",
+        r"$null = New-PSDrive -Name Work -PSProvider FileSystem -Root ([Environment]::CurrentDirectory) -Scope Global -ErrorAction Stop; ",
+        r"Set-Location Work:\ -ErrorAction Stop; Get-Content in.txt -ErrorAction Stop }; ",
+        r"Line ('---- the errors at the start (' + $start.Count + ')'); Dump $start; ",
+        r"Line ('---- the errors of what the failing tests run (' + $tried.Count + ')'); Dump $tried; ",
+        r"exit 0",
+    );
+
+    /// What [`diagnose_powershell_in_the_container`] runs in the container
+    /// with cmd: the same keys, folders and files without .NET.
+    #[cfg(windows)]
+    const DIAGNOSE_CMD: &str = concat!(
+        r"echo ==== in the container: cmd & ",
+        r"reg query HKLM\SOFTWARE\Microsoft\PowerShell\1\PowerShellEngine & ",
+        r"reg query HKLM\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine & ",
+        r"reg query HKLM\SOFTWARE\Microsoft\PowerShell\1\PowerShellSnapIns & ",
+        r"echo ---- dir C:\ & dir /b C:\ & echo ---- dir D:\ & dir /b D:\ & ",
+        r"echo ---- dir WindowsPowerShell & dir /b %SystemRoot%\System32\WindowsPowerShell\v1.0\Modules & ",
+        r"echo ---- dir GAC_MSIL & dir /b %SystemRoot%\Microsoft.NET\assembly\GAC_MSIL\System.Management.Automation & ",
+        r"echo ---- dir assembly & dir /b %SystemRoot%\assembly & ",
+        r"echo ---- read machine.config & copy /y %SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config NUL & ",
+        r"echo ---- read types.ps1xml & copy /y %SystemRoot%\System32\WindowsPowerShell\v1.0\types.ps1xml NUL",
+    );
+
+    /// What [`diagnose_powershell_in_the_container`] runs outside the
+    /// container: the permissions of the drives' roots, of the folders above
+    /// the granted one (`NERVE_DIAG_FOLDER`) and of what Windows PowerShell
+    /// reads at its start, each with its entry for ALL APPLICATION PACKAGES
+    /// (S-1-15-2-1), to compare with a stock Windows.
+    #[cfg(windows)]
+    const DIAGNOSE_OUTSIDE: &str = concat!(
+        r"function Line([string]$t) { [Console]::Out.WriteLine($t) }; ",
+        r"function Packages($a, [string]$rights) { $n = @(); foreach ($r in $a.Access) { ",
+        r"if ($r.IdentityReference.Value -match 'ALL APPLICATION PACKAGES' -or $r.IdentityReference.Value -eq 'S-1-15-2-1') { ",
+        r"$n += ('' + $r.AccessControlType + ' ' + $r.$rights + ', inherited ' + $r.IsInherited) } }; ",
+        r"Line ('  ALL APPLICATION PACKAGES: ' + $(if ($n) { $n -join '; ' } else { 'no entry' })) }; ",
+        r"$win = $env:SystemRoot; $ps = $win + '\System32\WindowsPowerShell\v1.0'; ",
+        r"$net = $win + '\Microsoft.NET'; $gac = $net + '\assembly\GAC_MSIL\'; ",
+        r"Line ('==== outside the container: ' + [Environment]::OSVersion.VersionString + ', ' + ",
+        r"(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').ProductName); ",
+        r"$paths = @(); foreach ($v in [IO.DriveInfo]::GetDrives()) { if ($v.DriveType -eq 'Fixed') { $paths += $v.Name } }; ",
+        r"$w = $env:NERVE_DIAG_FOLDER; ",
+        r"while ($w -and $paths -notcontains $w) { $paths += $w; $w = [IO.Path]::GetDirectoryName($w) }; ",
+        r"$paths += $win, ($win + '\System32'), $ps, ($ps + '\Modules'), ($ps + '\Modules\Microsoft.PowerShell.Management'), ",
+        r"($ps + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1'), ($ps + '\types.ps1xml'), ",
+        r"($env:ProgramFiles + '\WindowsPowerShell\Modules'), $net, ($net + '\assembly'), ($gac + 'System.Management.Automation'), ",
+        r"([IO.Directory]::GetDirectories($gac + 'System.Management.Automation')[0]), ",
+        r"($gac + 'Microsoft.PowerShell.Commands.Management'), ($win + '\assembly'), ",
+        r"($win + '\assembly\NativeImages_v4.0.30319_64'), ($net + '\Framework64\v4.0.30319\Config\machine.config'); ",
+        r"foreach ($p in $paths) { Line ('---- ' + $p); foreach ($l in (icacls $p 2>&1)) { Line ('  ' + $l) }; ",
+        r"try { $a = Get-Acl -LiteralPath $p -ErrorAction Stop; Packages $a 'FileSystemRights'; Line ('  SDDL ' + $a.Sddl) } ",
+        r"catch { Line ('  Get-Acl: ' + $_.Exception.Message) } }; ",
+        r"foreach ($k in 'SOFTWARE\Microsoft\PowerShell', 'SOFTWARE\Microsoft\PowerShell\1', ",
+        r"'SOFTWARE\Microsoft\PowerShell\1\PowerShellEngine', 'SOFTWARE\Microsoft\PowerShell\1\PowerShellSnapIns', ",
+        r"'SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine', 'SOFTWARE\Microsoft\.NETFramework') { ",
+        r"Line ('---- HKLM\' + $k); try { $a = Get-Acl -Path ('HKLM:\' + $k) -ErrorAction Stop; Packages $a 'RegistryRights'; ",
+        r"foreach ($l in $a.AccessToString.Split([Environment]::NewLine)) { if ($l) { Line ('  ' + $l) } }; ",
+        r"Line ('  SDDL ' + $a.Sddl) } catch { Line ('  Get-Acl: ' + $_.Exception.Message) } }",
+    );
+
+    /// What [`powershell_runs_in_an_appcontainer`] starts with, run in the
+    /// container `name` in `granted` (which holds `in.txt`), said under
+    /// `title` with the time it took and whether it read and wrote.
+    #[cfg(windows)]
+    fn diagnose_the_tests_start(title: &str, name: &str, granted: &std::path::Path) {
+        let _ = std::fs::remove_file(granted.join("out.txt"));
+        let script = format!(
+            "{POWERSHELL_START}Get-Content in.txt | Set-Content out.txt; (Get-Command New-PSDrive).Source"
+        );
+        let started = std::time::Instant::now();
+        let (code, log) = run_in_container(
+            name,
+            granted,
+            "powershell.exe",
+            &["-NoProfile", "-Command", &script],
+        );
+        let out = std::fs::read_to_string(granted.join("out.txt"));
+        println!(
+            "==== {title}: the failing tests' start ended with {code} after {:.1} s; out.txt: {out:?}\n{log}",
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    /// The roots of the fixed drives of this machine, as `C:\`.
+    #[cfg(windows)]
+    fn drive_roots() -> Vec<String> {
+        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+        const DRIVE_FIXED: u32 = 3;
+        // SAFETY: no arguments.
+        let mask = unsafe { GetLogicalDrives() };
+        (0..26u8)
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| format!("{}:\\", char::from(b'A' + i)))
+            .filter(|root| {
+                let wide: Vec<u16> = root.encode_utf16().chain([0]).collect();
+                // SAFETY: a NUL-terminated string.
+                unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_FIXED }
+            })
+            .collect()
+    }
+
+    /// `icacls` with `args`, its output.
+    #[cfg(windows)]
+    fn icacls(args: &[&str]) -> String {
+        match std::process::Command::new("icacls").args(args).output() {
+            Ok(o) => format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("cannot start icacls: {e}"),
+        }
+    }
+
+    /// A diagnostic for #105 and #106, run by hand on a runner where Windows
+    /// PowerShell in the container finds none of its own cmdlets (repeat.yml,
+    /// filter `--ignored --exact tests::diagnose_powershell_in_the_container
+    /// --nocapture`). In the container the product makes, started as the
+    /// failing tests start it, Windows PowerShell and then cmd say what they
+    /// can read of what PowerShell reads at its start, and PowerShell its
+    /// state and errors; outside it, the permissions of the same places, to
+    /// compare with a stock Windows. It passes whatever it finds.
+    ///
+    /// PowerShell's FileSystem provider makes a drive only of a root whose
+    /// attributes it reads, and without a drive it resolves no module folder.
+    /// So on a GitHub runner (`GITHUB_ACTIONS`), which goes with its job, a
+    /// fixed drive's root without an entry for ALL APPLICATION PACKAGES gets
+    /// one that reads its attributes, on the root alone, the tests' start
+    /// runs again, and the entries go. Nothing is changed elsewhere.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "a diagnostic, run by hand with --nocapture"]
+    fn diagnose_powershell_in_the_container() {
+        let base = tempfile::tempdir().unwrap();
+        let granted = base.path().join("granted");
+        std::fs::create_dir_all(&granted).unwrap();
+        std::fs::write(granted.join("in.txt"), "inside").unwrap();
+        let name = format!("nerve.test.diag.{}", std::process::id());
+        appcontainer::set(&granted, &name, Some(acl::masks(true, true, true)), false).unwrap();
+        diagnose_the_tests_start("as it is", &name, &granted);
+        let (code, log) = run_in_container(
+            &name,
+            &granted,
+            "powershell.exe",
+            &["-NoProfile", "-Command", DIAGNOSE_INSIDE],
+        );
+        println!("{log}\n==== Windows PowerShell in the container ended with {code}\n");
+        let (code, log) = run_in_container(&name, &granted, "cmd.exe", &["/C", DIAGNOSE_CMD]);
+        println!("{log}\n==== cmd in the container ended with {code}\n");
+        // Windows PowerShell's own module path, as in the container: the
+        // runner's would load PowerShell 7's modules.
+        match std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", DIAGNOSE_OUTSIDE])
+            .env_clear()
+            .envs(acl::container_env(std::env::vars_os()))
+            .env("NERVE_DIAG_FOLDER", &granted)
+            .output()
+        {
+            Ok(out) => println!(
+                "{}{}\n==== outside the container: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+                out.status
+            ),
+            Err(e) => println!("==== outside the container: cannot start powershell.exe: {e}"),
+        }
+        if std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") {
+            let mut given = Vec::new();
+            for root in drive_roots() {
+                if icacls(&[&root]).contains("ALL APPLICATION PACKAGES") {
+                    continue;
+                }
+                println!(
+                    "==== {root} gets ALL APPLICATION PACKAGES:(RA)\n{}",
+                    icacls(&[&root, "/grant", "*S-1-15-2-1:(RA)"])
+                );
+                given.push(root);
+            }
+            diagnose_the_tests_start("with the roots' attributes readable", &name, &granted);
+            for root in given {
+                println!(
+                    "==== {root} loses the entry again\n{}",
+                    icacls(&[&root, "/remove:g", "*S-1-15-2-1"])
+                );
+            }
+        }
+        appcontainer::set(&granted, &name, None, false).unwrap();
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
     /// In the container, `cd` and `pushd` go to whole paths of the folders
     /// the command may see, and with `..` up out of its working folder into
     /// one of them, and native programs start there. A folder it may not
