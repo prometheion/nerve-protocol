@@ -50,10 +50,13 @@ jobs:
     timeout-minutes: 45
     env:
       RUST_BACKTRACE: "1"
-      # As in the `windows` job: a long-name temp folder.
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
     steps:
+      # As in the `windows` job: a long-name temp folder. The `runner` context
+      # is not there for a job's own env, so a step writes it for the others.
+      - name: The temporary folder by its long name
+        run: |
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
