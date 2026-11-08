@@ -38,7 +38,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 
@@ -1103,28 +1103,31 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
     out
 }
 
-/// Brings the grants on this machine in line with `cfg` ([`wanted`],
-/// [`sync`]), and removes the profile of a container left without grants.
-/// Nothing to do where commands are not confined by grants (Linux).
-/// `report` is told how far a change is once it takes long (`Pace`): it
-/// passes down to every file and folder below the folder that it changes.
-/// For the node itself, which holds the lock that [`apply_outside`] looks
-/// at.
+/// Brings the grants on this machine in line with the config `current`
+/// gives, with the `~` of its rules ([`wanted`], [`sync`]), and removes the
+/// profile of a container left without grants. `current` is asked once this
+/// sync's turn has come ([`apply_in`]). Nothing to do where commands are not
+/// confined by grants (Linux). `report` is told how far a change is once it
+/// takes long (`Pace`): it passes down to every file and folder below the
+/// folder that it changes. For the node itself, which holds the lock that
+/// [`apply_outside`] looks at.
 pub fn apply(
     paths: &NodePaths,
-    cfg: &NodeConfig,
-    home: &Path,
+    current: impl FnOnce() -> (Arc<NodeConfig>, PathBuf),
     report: &mut dyn FnMut(&str),
 ) -> Synced {
     #[cfg(windows)]
     {
         let installed = crate::service::is_service_node(paths);
-        let want = wanted_on(installed, cfg, paths, home, &crate::paths::platform());
-        windows_sync(paths, &want, report)
+        let want = || {
+            let (cfg, home) = current();
+            wanted_on(installed, &cfg, paths, &home, &crate::paths::platform())
+        };
+        apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
     }
     #[cfg(not(windows))]
     {
-        let _ = (paths, cfg, home, report);
+        let _ = (paths, current, report);
         Synced::default()
     }
 }
@@ -1639,26 +1642,36 @@ impl Folders for Acls<'_> {
     }
 }
 
-#[cfg(windows)]
+/// [`apply`] for the grants `want`, as the tests on Windows give them.
+#[cfg(all(windows, test))]
 fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str)) -> Synced {
-    apply_in(paths, want, &mut Acls { report }, &mut WinProfiles)
+    apply_in(
+        paths,
+        || want.to_vec(),
+        &mut Acls { report },
+        &mut WinProfiles,
+    )
 }
 
-/// [`apply`] for `want`, on `folders` and the profiles in `store`. The
-/// profile of each container the sync left without grants goes in the same
-/// turn as the grants, so a sync that waited for this one returns only once
-/// it is gone. `center rm` asks the node for one (`folder.grants`) while the
+/// [`apply`] for the grants `want` gives, on `folders` and the profiles in
+/// `store`. `want` is asked once this sync's turn has come: the node starts a
+/// sync for each change, and one that waited for a sync of a newer config
+/// would otherwise put back a grant the owner took away since. The profile
+/// of each container the sync left without grants goes in the same turn as
+/// the grants, so a sync that waited for this one returns only once it is
+/// gone. `center rm` asks the node for one (`folder.grants`) while the
 /// node's own sync of the change may hold the turn, and then looks at the
 /// profiles itself: one still on its way out would be said to stay.
 #[cfg(any(windows, test))]
 fn apply_in(
     paths: &NodePaths,
-    want: &[Grant],
+    want: impl FnOnce() -> Vec<Grant>,
     folders: &mut impl Folders,
     store: &mut impl ProfileStore,
 ) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
-    let mut s = sync_in_turn(&record_file(paths), want, folders);
+    let want = want();
+    let mut s = sync_in_turn(&record_file(paths), &want, folders);
     for c in &s.emptied {
         if let Err(e) = store.remove(c) {
             s.errors.push(e.to_string());
@@ -3025,7 +3038,7 @@ mod tests {
     #[test]
     fn a_sync_after_the_nodes_own_finds_the_emptied_profile_gone() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, mpsc};
+        use std::sync::mpsc;
         /// A profile whose removal waits for the test's word.
         struct Slow {
             removing: mpsc::Sender<()>,
@@ -3062,7 +3075,7 @@ mod tests {
                     go: go_rx,
                     gone,
                 };
-                apply_in(&paths, &[], &mut f, &mut store)
+                apply_in(&paths, Vec::new, &mut f, &mut store)
             })
         };
         let wait = std::time::Duration::from_secs(20);
@@ -3074,7 +3087,7 @@ mod tests {
             let (paths, gone) = (paths.clone(), gone.clone());
             std::thread::spawn(move || {
                 let mut store = FakeProfiles::default();
-                let s = apply_in(&paths, &[], &mut Fake::default(), &mut store);
+                let s = apply_in(&paths, Vec::new, &mut Fake::default(), &mut store);
                 done.send(gone.load(Ordering::SeqCst)).unwrap();
                 s
             })
@@ -3091,6 +3104,60 @@ mod tests {
         assert!(s.errors.is_empty(), "{s:?}");
         let s = asked.join().unwrap();
         assert!(s.emptied.is_empty() && s.errors.is_empty(), "{s:?}");
+    }
+
+    /// A sync that waited for its turn applies the config as it is once
+    /// its turn has come: the node starts one for each change, and one
+    /// started for the older config of two quick changes, which waited while
+    /// the newer one took a grant off, must not put that grant back.
+    #[test]
+    fn a_sync_that_waited_applies_the_newest_config() {
+        use std::sync::mpsc;
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let file = record_file(&paths);
+        let a = grant(&container(&paths, &node("lab")), "/w/a", "r");
+        // The grants the node's config wants: `a`, until the owner takes it
+        // away.
+        let current = Arc::new(Mutex::new(vec![a.clone()]));
+        let mut f = Fake::default();
+        f.make("/w/a");
+        let mut store = FakeProfiles::default();
+        apply_in(
+            &paths,
+            || current.lock().unwrap().clone(),
+            &mut f,
+            &mut store,
+        );
+        assert_eq!(recorded(&file), std::slice::from_ref(&a));
+        // A sync runs: the one the node started for the change before.
+        let running = nerve_transport::sync::turn(&SYNC);
+        let (read, read_rx) = mpsc::channel();
+        let waited = {
+            let (paths, current) = (paths.clone(), current.clone());
+            std::thread::spawn(move || {
+                let mut f = Fake::default();
+                f.make("/w/a");
+                let want = || {
+                    let _ = read.send(());
+                    current.lock().unwrap().clone()
+                };
+                let s = apply_in(&paths, want, &mut f, &mut FakeProfiles::default());
+                (s, f.all())
+            })
+        };
+        // Time for it to read the config, were it to read it before its
+        // turn; then the owner takes `a` away, and the running sync takes
+        // it off.
+        let _ = read_rx.recv_timeout(std::time::Duration::from_millis(300));
+        current.lock().unwrap().clear();
+        let s = sync_in_turn(&file, &[], &mut f);
+        assert_eq!(s.removed, 1);
+        drop(running);
+        let (s, on) = waited.join().unwrap();
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert!(on.is_empty(), "the grant came back: {on:?}");
+        assert!(recorded(&file).is_empty());
     }
 
     /// What two cleanups did, each profile once.

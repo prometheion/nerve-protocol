@@ -950,6 +950,22 @@ impl Shared {
         Ok(crate::account::Own::of(&run.home, &entry.name))
     }
 
+    /// Brings the folder grants of Windows folder mode in line with the
+    /// config (crate::grants::apply): the config as it is once the sync's
+    /// turn has come, not one read before it waited, which a sync of a newer
+    /// one may have overtaken. Blocks; the log says how far a change that
+    /// takes long is.
+    pub fn sync_grants(&self) -> crate::grants::Synced {
+        let current = || {
+            let cfg = self.config();
+            let home = self.rules_home(&cfg);
+            (cfg, home)
+        };
+        crate::grants::apply(&self.paths, current, &mut |m| {
+            tracing::info!("folder grants: {m}")
+        })
+    }
+
     /// Brings the pairings' home and temporary folders in line with the
     /// config (crate::own_dirs::sync), on the installed Linux node: a new
     /// pairing's are made, those of a pairing that went are deleted. It
@@ -2513,11 +2529,9 @@ async fn supervise(shared: Arc<Shared>) {
         // a command syncs them as well before it runs.
         if shared.confinement.appcontainer && granted != Some(cfg.version) {
             granted = Some(cfg.version);
-            let (s, c) = (shared.clone(), cfg.clone());
+            let s = shared.clone();
             tokio::task::spawn_blocking(move || {
-                let synced = crate::grants::apply(&s.paths, &c, &s.rules_home(&c), &mut |m| {
-                    tracing::info!("folder grants: {m}")
-                });
+                let synced = s.sync_grants();
                 for e in synced.errors {
                     tracing::warn!("folder grants: {e}");
                 }
@@ -2749,15 +2763,10 @@ async fn pipe_folder_change(
     shared.bump();
     if shared.confinement.appcontainer {
         let s = shared.clone();
-        let synced = tokio::task::spawn_blocking(move || {
-            let cfg = s.config();
-            crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
-                tracing::info!("folder grants: {m}")
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
         if let Err(e) = synced {
             return Reply::Err(format!(
                 "the config is saved, but the folder grants do not follow it: {e}"
@@ -2784,11 +2793,7 @@ async fn pipe_folder_grants(shared: &Arc<Shared>, params: &Value) -> nerve_trans
         } else {
             0
         };
-        let cfg = s.config();
-        let synced = crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
-            tracing::info!("folder grants: {m}")
-        });
-        Ok::<Value, String>(synced.json(walked))
+        Ok::<Value, String>(s.sync_grants().json(walked))
     })
     .await;
     match r {

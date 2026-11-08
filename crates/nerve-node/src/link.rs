@@ -3417,7 +3417,7 @@ impl Link {
         // confined in allowlist mode too, where Landlock is there.
         let folder = sudo.is_none() && !as_root && by_folders && unconfined.is_none();
         let container = if folder && self.shared.confinement.appcontainer {
-            Some(self.container(entry, cfg, &home).await?)
+            Some(self.container(entry).await?)
         } else {
             None
         };
@@ -3780,26 +3780,21 @@ impl Link {
     }
 
     /// The AppContainer of the commands of this pairing (`entry`), once the
-    /// folder grants follow `cfg` (crate::grants); `home` is the `~` of the
-    /// rules. A grant of this pairing's container that its folders no longer
-    /// give and that could not be taken off stops the command, and so does a
-    /// record of the grants that cannot be read (`Synced::refusal`).
+    /// folder grants follow the config as it is then (crate::grants), also
+    /// where it changed since the gate let the command through. A grant of
+    /// this pairing's container that its folders no longer give and that
+    /// could not be taken off stops the command, and so does a record of the
+    /// grants that cannot be read (`Synced::refusal`).
     async fn container(
         &self,
         entry: &CenterEntry,
-        cfg: &NodeConfig,
-        home: &std::path::Path,
     ) -> Result<nerve_sandbox::ContainerSpec, RpcError> {
-        let (paths, cfg, home) = (self.shared.paths.clone(), cfg.clone(), home.to_path_buf());
+        let s = self.shared.clone();
         // A change that takes long holds the command; the log says how far
         // it is.
-        let synced = tokio::task::spawn_blocking(move || {
-            crate::grants::apply(&paths, &cfg, &home, &mut |m| {
-                tracing::info!("folder grants: {m}")
-            })
-        })
-        .await
-        .map_err(|e| RpcError::internal(e.to_string()))?;
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+            .await
+            .map_err(|e| RpcError::internal(e.to_string()))?;
         for e in &synced.errors {
             tracing::warn!("folder grants: {e}");
         }
