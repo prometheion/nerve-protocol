@@ -344,6 +344,10 @@ fn the_center_runs_as_a_windows_service() {
         let (ok, said) = center_with(&["status"], &[("NERVE_CENTER_STATE_DIR", decoy.path())]);
         assert!(!ok && said.contains("NERVE_CENTER_STATE_DIR"), "{said}");
         assert!(!decoy.path().join("tls.pem").exists());
+        // `install` takes its settings from the flags only too (round 9,
+        // security 1); it fails before it changes anything.
+        let (ok, said) = center_with(&["install"], &[("NERVE_CENTER_LISTEN", decoy.path())]);
+        assert!(!ok && said.contains("NERVE_CENTER_LISTEN"), "{said}");
         // Its folders are its account's and the administrators', its
         // settings the administrators' (the service reads them).
         let state = Path::new(&data).join("nerve-center").join("state");

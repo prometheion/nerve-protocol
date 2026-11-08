@@ -329,6 +329,25 @@ pub fn refuse_state_variable(given: &[String], elevated: bool) -> Result<(), Str
     Ok(())
 }
 
+/// An administrator's `install` takes `--name`, `--public-url` and `--listen`
+/// from the flags only: the variables of the account, which its other
+/// programs may set, would go into the settings file the service trusts and
+/// into the firewall rule (round 9, security 1). `given` is
+/// [`settings_given`]; `elevated` as for [`refuse_state_variable`].
+pub fn refuse_install_variables(given: &[String], elevated: bool) -> Result<(), String> {
+    if !elevated {
+        return Ok(());
+    }
+    for (flag, var) in INSTALL_SETTINGS {
+        if given.iter().any(|g| g == var) {
+            return Err(format!(
+                "{var} is set in this terminal, and an administrator's terminal takes the variables of the account's other programs too; give {flag} instead, or clear the variable"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Args {
     pub fn state_dir(&self) -> PathBuf {
         self.state_dir.clone().unwrap_or_else(default_state_dir)
@@ -515,6 +534,19 @@ mod tests {
         assert!(refuse_state_variable(&flag, true).is_ok());
         assert!(refuse_state_variable(&[], true).is_ok());
         assert!(refuse_state_variable(&var, false).is_ok());
+    }
+
+    /// An elevated `install` takes its settings from the flags only.
+    #[test]
+    fn an_elevated_install_takes_its_settings_from_the_flags_only() {
+        for (flag, var) in INSTALL_SETTINGS {
+            let v = vec![var.to_string()];
+            let e = refuse_install_variables(&v, true).unwrap_err();
+            assert!(e.contains(var) && e.contains(flag), "{e}");
+            assert!(refuse_install_variables(&v, false).is_ok());
+            assert!(refuse_install_variables(&[flag.to_string()], true).is_ok());
+        }
+        assert!(refuse_install_variables(&[], true).is_ok());
     }
 
     /// The owner's commands take the installed center's folder where there

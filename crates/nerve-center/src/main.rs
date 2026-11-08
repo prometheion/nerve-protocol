@@ -115,6 +115,16 @@ fn main() -> std::process::ExitCode {
     if let Some(cmd) = args.cmd.clone() {
         let mut out = std::io::stdout();
         let given = nerve_center::config::settings_given(&matches);
+        #[cfg(windows)]
+        let elevated = nerve_service::win::sid::is_admin();
+        #[cfg(not(windows))]
+        let elevated = false;
+        if matches!(cmd, Cmd::Install)
+            && let Err(e) = nerve_center::config::refuse_install_variables(&given, elevated)
+        {
+            eprintln!("nerve-center: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
         // What `install` writes into the service's settings.
         let set: Vec<(&str, String)> = nerve_center::config::INSTALL_SETTINGS
             .iter()

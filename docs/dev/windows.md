@@ -386,8 +386,9 @@ goes for the proxy and the trusted certificates (`HTTPS_PROXY`,
 environment, which only the administrators change, so a program of yours
 cannot steer its download. In an administrator's terminal `status`,
 `owner-token`, `backup` and `restore` refuse a state folder given by
-`NERVE_CENTER_STATE_DIR` (give `--state-dir`), and `backup` and `restore`
-say which folder they used.
+`NERVE_CENTER_STATE_DIR` (give `--state-dir`), `install` refuses
+`NERVE_CENTER_NAME`, `_PUBLIC_URL` and `_LISTEN` from a variable (give the
+flags), and `backup` and `restore` say which folder they used.
 
 `nerve-center update` stops the service, moves the old program aside, puts
 the new one in place and starts the service; a new program that does not
