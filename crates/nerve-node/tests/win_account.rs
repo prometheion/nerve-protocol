@@ -1,13 +1,21 @@
 //! Folder and allowlist mode as the command account on the installed Windows
-//! service (#149), end to end: two pairings of the conformance fake center
-//! run commands as `nerve-run`, each in its AppContainer. It checks that
+//! service (#149), end to end: three pairings of the conformance fake center
+//! run commands as `nerve-run`, each in its AppContainer, two in folder mode
+//! and one in allowlist mode. It checks that
 //! - a command in its folder works, and one outside is refused and audited;
 //! - one pairing reaches neither another's folders, nor its home, nor its
-//!   processes;
+//!   processes, nor `nerve-run`'s own profile, nor the node's pipes, by a
+//!   command or by the node's file calls (read as its container, Q4);
 //! - a folder without flags inside a `w` folder is closed;
+//! - allowlist mode runs as `nerve-run` in its container, and `--as-owner`
+//!   as the owner;
+//! - a folder outside the owner's profile whose files `nerve-run` made
+//!   changes its flags all the same;
 //! - `nerve-run` itself opens neither the node's config and state folders,
 //!   nor the owner's registry, nor the node's pipes;
-//! - with the network off a connection and a sudo command are refused.
+//! - with the network off a connection and a sudo command are refused;
+//! - a pairing's home stays when its last folder goes, and its container's
+//!   profile goes with the pairing.
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -17,8 +25,8 @@
 //! cargo test -p nerve-node --test win_account -- --ignored
 //! ```
 //!
-//! It pairs the service with the centers `wina` and `winb`, and removes them
-//! and its folder again.
+//! It pairs the service with the centers `wina`, `winb` and `winc`, and
+//! removes them and its folders again.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -37,6 +45,7 @@ use tokio::net::TcpStream;
 const WAIT: Duration = Duration::from_secs(90);
 const A: &str = "wina";
 const B: &str = "winb";
+const C: &str = "winc";
 /// The desktop app, whose program is the node's on Windows (#176).
 static APP: Edition = Edition {
     program: DESKTOP_PROGRAM,
@@ -71,14 +80,43 @@ async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
 
 async fn run_in(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> Result<Value, RpcError> {
     let wire = nerve_policy::paths::to_wire(cwd);
+    call(
+        conn,
+        "exec",
+        "run",
+        json!({"command": command, "cwd": wire}),
+    )
+    .await
+}
+
+/// A command that starts in its pairing's home.
+async fn run_home(conn: &mut Conn<TcpStream>, command: &str) -> Result<Value, RpcError> {
+    call(conn, "exec", "run", json!({"command": command})).await
+}
+
+async fn call(
+    conn: &mut Conn<TcpStream>,
+    cap: &str,
+    action: &str,
+    args: Value,
+) -> Result<Value, RpcError> {
     let id = conn
         .request(
             "invoke",
-            json!({"cap": "exec", "action": "run", "args": {"command": command, "cwd": wire}}),
+            json!({"cap": cap, "action": action, "args": args}),
         )
         .await
         .unwrap();
     conn.answer(id, WAIT, &mut Vec::new()).await.unwrap()
+}
+
+/// Waits until `done` holds, at most a minute.
+async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(std::time::Instant::now() < end, "{what}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn out(r: &Value) -> String {
@@ -113,6 +151,21 @@ fn owners_folder(p: &Path, owner_sid: &str) {
         .unwrap()
         .success();
     assert!(ok, "icacls {p:?}");
+}
+
+/// A folder made below the drive's root as the owner's, with the rights it
+/// inherits there (on Windows: every signed-in user may change what is in
+/// it, but not its permissions): what `nerve-run` makes in it is
+/// `nerve-run`'s own, whose permissions the owner may not change.
+fn open_folder(p: &Path, owner_sid: &str) {
+    std::fs::create_dir_all(p).unwrap();
+    let ok = Command::new("icacls")
+        .arg(p)
+        .args(["/setowner", &format!("*{owner_sid}")])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "icacls /setowner {p:?}");
 }
 
 /// The command account's password, as the install stored it.
@@ -245,11 +298,12 @@ fn load_profile(t: windows_sys::Win32::Foundation::HANDLE, name: &str) {
 
 async fn forget(paths: &nerve_node::NodePaths) {
     let _ = nerve_node::cli::edit(paths, |cfg| {
-        cfg.centers.retain(|c| c.name != A && c.name != B);
+        cfg.centers
+            .retain(|c| ![A, B, C].contains(&c.name.as_str()));
         Ok(())
     })
     .await;
-    for c in [A, B] {
+    for c in [A, B, C] {
         let _ = std::fs::remove_file(paths.key_file(c));
     }
 }
@@ -262,16 +316,21 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     let owner = env("NERVE_WIN_SUDO_ACCOUNT");
     let owner_password = env("NERVE_WIN_SUDO_PASSWORD");
     let owner_sid = env("NERVE_TEST_SID");
-    let base =
-        PathBuf::from(std::env::var("SystemDrive").unwrap_or("C:".into()) + "\\nerve-w2-test");
-    let _ = std::fs::remove_dir_all(&base);
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive.clone() + "\\nerve-w2-test");
+    let open = PathBuf::from(drive + "\\nerve-w2-open");
+    for d in [&base, &open] {
+        let _ = std::fs::remove_dir_all(d);
+    }
     owners_folder(&base, &owner_sid);
-    let (a, closed, b) = (
+    open_folder(&open, &owner_sid);
+    let (a, closed, b, c) = (
         base.join("a"),
         base.join("a").join("closed"),
         base.join("b"),
+        base.join("c"),
     );
-    for d in [&a, &closed, &b] {
+    for d in [&a, &closed, &b, &c] {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(b.join("secret.txt"), "b's").unwrap();
@@ -279,27 +338,38 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     forget(&paths).await;
     let mut ca = FakeCenter::start(false).await.unwrap();
     let mut cb = FakeCenter::start(false).await.unwrap();
+    let mut cc = FakeCenter::start(false).await.unwrap();
     nerve_node::pair::pair(&paths, &ca.link(), Some(A))
         .await
         .expect("pair a");
     nerve_node::pair::pair(&paths, &cb.link(), Some(B))
         .await
         .expect("pair b");
+    nerve_node::pair::pair(&paths, &cc.link(), Some(C))
+        .await
+        .expect("pair c");
     nerve_node::cli::edit(&paths, |cfg| {
         let ea = cfg.center_mut(A).expect("paired");
         ea.policy.mode = nerve_policy::Mode::Folder;
-        ea.policy.folders = vec![folder(&a, "rwx"), folder(&closed, "")];
+        ea.policy.folders = vec![folder(&a, "rwx"), folder(&closed, ""), folder(&open, "rwx")];
         let eb = cfg.center_mut(B).expect("paired");
         eb.policy.mode = nerve_policy::Mode::Folder;
         eb.policy.folders = vec![folder(&b, "rwx")];
+        let ec = cfg.center_mut(C).expect("paired");
+        ec.policy.mode = nerve_policy::Mode::Allowlist;
+        ec.policy.folders = vec![folder(&c, "rwx")];
+        ec.policy.allow = vec!["exec.run:*".into()];
         Ok(())
     })
     .await
     .expect("the owner's edit");
     let cfg = nerve_policy::SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
+    let container_a = nerve_node::grants::container(&paths, &cfg.center(A).unwrap().node_id);
     let container_b = nerve_node::grants::container(&paths, &cfg.center(B).unwrap().node_id);
+    let packages = PathBuf::from(r"C:\Users\nerve-run\AppData\Local\Packages");
     let mut conn_a = linked(&mut ca).await;
     let mut conn_b = linked(&mut cb).await;
+    let mut conn_c = linked(&mut cc).await;
 
     // In its folder a command runs, as nerve-run, in its container, with
     // its home there.
@@ -354,6 +424,19 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
                 closed.join("new.txt").display()
             ),
         ),
+        // The account's own profile is closed to its containers (#167).
+        (
+            "nerve-run's profile",
+            r"Get-ChildItem 'C:\Users\nerve-run'".into(),
+        ),
+        (
+            "nerve-run's settings",
+            r"Get-ChildItem 'C:\Users\nerve-run\AppData\Roaming'".into(),
+        ),
+        (
+            "nerve-run's containers",
+            format!("Get-ChildItem '{}'", packages.display()),
+        ),
     ] {
         let r = run_in(&mut conn_a, &a, &format!("{script}; exit [int](-not $?)"))
             .await
@@ -365,6 +448,142 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         );
     }
     assert!(!closed.join("new.txt").exists());
+
+    // The node's own file calls for a read as a's container (Q4): neither
+    // b's file, nor b's home, nor the closed folder, also not by a walk.
+    for (what, action, args) in [
+        (
+            "b's file",
+            "read",
+            json!({"path": nerve_policy::paths::to_wire(&b.join("secret.txt"))}),
+        ),
+        (
+            "b's home",
+            "list",
+            json!({"path": nerve_policy::paths::to_wire(&PathBuf::from(&ac))}),
+        ),
+        (
+            "the closed folder",
+            "list",
+            json!({"path": nerve_policy::paths::to_wire(&closed)}),
+        ),
+        (
+            "the closed folder's file",
+            "read",
+            json!({"path": nerve_policy::paths::to_wire(&closed.join("kept.txt"))}),
+        ),
+        (
+            "a walk for b's file",
+            "grep",
+            json!({"path": nerve_policy::paths::to_wire(&base), "pattern": "b's"}),
+        ),
+        (
+            "a walk for the closed folder's file",
+            "grep",
+            json!({"path": nerve_policy::paths::to_wire(&base), "pattern": "closed"}),
+        ),
+        (
+            "a walk for the names",
+            "find",
+            json!({"path": nerve_policy::paths::to_wire(&base), "glob": "**/*.txt"}),
+        ),
+    ] {
+        // Refused, or nothing of theirs in it.
+        if let Ok(r) = call(&mut conn_a, "fs", action, args).await {
+            let text = r.to_string();
+            assert!(
+                !text.contains("b's") && !text.contains("secret.txt") && !text.contains("kept.txt"),
+                "{what}: {r}"
+            );
+        }
+    }
+
+    // Nor the node's pipes from a container.
+    let pipe_names: Vec<String> = std::fs::read_dir(r"\\.\pipe\")
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("nerve-node"))
+        .collect();
+    assert!(!pipe_names.is_empty(), "the node's pipes are not there");
+    for name in &pipe_names {
+        let r = run_in(
+            &mut conn_a,
+            &a,
+            &format!(
+                "try {{ $p = [IO.Pipes.NamedPipeClientStream]::new('.', '{name}', 'InOut'); $p.Connect(3000); 'opened' }} catch {{ 'refused' }}"
+            ),
+        )
+        .await
+        .expect("a's look at the pipes");
+        assert!(
+            out(&r).contains("refused") && !out(&r).contains("opened"),
+            "{name}: {r}"
+        );
+    }
+
+    // Allowlist mode runs as nerve-run too, in its own container, with its
+    // home there, and reaches no other pairing's folder.
+    let r = run_in(
+        &mut conn_c,
+        &c,
+        &format!(
+            "whoami; $env:USERPROFILE; Get-Content '{}'",
+            b.join("secret.txt").display()
+        ),
+    )
+    .await
+    .expect("an allowlist command");
+    let said = out(&r);
+    assert!(said.to_lowercase().contains("nerve-run"), "{r}");
+    assert!(said.contains("\\AC\\home") && !said.contains("b's"), "{r}");
+    // With `--as-owner` it runs as the owner.
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(C).expect("paired").policy.as_owner = true;
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_in(&mut conn_c, &c, "whoami")
+        .await
+        .expect("an allowlist command as the owner");
+    assert!(
+        out(&r).to_lowercase().contains(&owner.to_lowercase())
+            && !out(&r).to_lowercase().contains("nerve-run"),
+        "{r}"
+    );
+
+    // A folder outside the owner's profile, where what nerve-run makes is
+    // nerve-run's: its flags change all the same, and the commands run.
+    let r = run_in(
+        &mut conn_a,
+        &open,
+        "New-Item -ItemType Directory made | Out-Null; Set-Content -Path made\\f.txt -Value made",
+    )
+    .await
+    .expect("a command in the open folder");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        for f in &mut ea.policy.folders {
+            if Path::new(&f.path) == open {
+                f.access = Access::parse("r").unwrap();
+            }
+        }
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_in(
+        &mut conn_a,
+        &open,
+        "Get-Content made\\f.txt; Set-Content -Path made\\g.txt -Value x; exit [int](-not $?)",
+    )
+    .await
+    .expect("a's command after its folder became read-only");
+    assert!(out(&r).contains("made"), "{r}");
+    assert_ne!(r["exit_code"], 0, "{r}");
+    assert!(!open.join("made").join("g.txt").exists());
 
     // Nor its processes: b's command waits, a's does not see or open it.
     let b_dir = b.clone();
@@ -471,6 +690,46 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
     assert!(e.message.contains("sudo list"), "{}", e.message);
 
+    // A pairing's home stays when its last folder goes.
+    nerve_node::cli::edit(&paths, |cfg| {
+        let eb = cfg.center_mut(B).expect("paired");
+        eb.policy.no_network = false;
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_home(&mut conn_b, "Set-Content -Path $HOME\\keep.txt -Value kept")
+        .await
+        .expect("b's command in its home");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(B).expect("paired").policy.folders.clear();
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_home(&mut conn_b, "Get-Content $HOME\\keep.txt")
+        .await
+        .expect("b's command without folders");
+    assert!(out(&r).contains("kept"), "{r}");
+    // Its container's profile goes with the pairing, and a's stays.
+    assert!(packages.join(&container_b).is_dir());
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.centers.retain(|e| e.name != B);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    // The node's next sync removes it: one comes with a's next command.
+    let _ = run_in(&mut conn_a, &a, "exit 0").await;
+    wait_for("b's container profile is still there", || {
+        !packages.join(&container_b).exists()
+    })
+    .await;
+    assert!(packages.join(&container_a).is_dir());
+
     forget(&paths).await;
-    let _ = std::fs::remove_dir_all(&base);
+    for d in [&base, &open] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
