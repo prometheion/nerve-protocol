@@ -621,6 +621,7 @@ mod tests {
         assert!(names_more_than_dots(&listing(&[".", "..", "backup"])));
         assert!(names_more_than_dots(&listing(&["backup"])));
         assert!(names_more_than_dots(&listing(&[".", "..."])));
+        assert!(names_more_than_dots(&listing(&[".", "..", "ab"])));
         let cut = listing(&[".", "..", "backup"]);
         assert!(names_more_than_dots(&cut[..cut.len() - 20]));
         assert!(names_more_than_dots(&[]));
