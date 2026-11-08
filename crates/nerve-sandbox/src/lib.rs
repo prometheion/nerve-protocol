@@ -102,7 +102,15 @@ pub struct ShimSpec {
 /// function's, so a failed `cd` sets `$?` and the exit code as the cmdlet
 /// does, whatever the error action. Other commands keep `..` on the drive.
 /// The text has no `"`, which the Windows command line would escape.
+///
+/// It first imports Windows PowerShell's two core modules by name. In a
+/// container on some machines (GitHub's Windows Server 2025 image among
+/// them) PowerShell reads every module but does not load one on its own
+/// when a command names a cmdlet, so `New-PSDrive`, `Get-Content` and
+/// `Out-File` were "not recognized" (#105, #106). After the import they are
+/// there; other modules still load on their own where that works.
 pub const POWERSHELL_START: &str = concat!(
+    r"Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; ",
     r"$null = New-PSDrive -Name Work -PSProvider FileSystem ",
     r"-Root ([Environment]::CurrentDirectory) -Scope Global -ErrorAction Stop; ",
     r"Set-Location Work:\ -ErrorAction Stop; ",
@@ -4425,6 +4433,10 @@ mod tests {
         }
         assert!(!POWERSHELL_START.contains('"'));
         assert!(POWERSHELL_START.ends_with("; "));
+        // The core modules first: a container may not load them on its own.
+        assert!(POWERSHELL_START.starts_with(
+            "Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; "
+        ));
         let (mut quoted, mut open) = (false, Vec::new());
         for c in POWERSHELL_START.chars() {
             match c {

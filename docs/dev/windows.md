@@ -346,6 +346,12 @@ folders.
   kept it from finding its own cmdlets and made it take half a minute to
   start. A module installed for all users (`Install-Module -Scope
   AllUsers`) is in the first folder.
+- Each PowerShell command in the container imports
+  `Microsoft.PowerShell.Management` and `Microsoft.PowerShell.Utility`
+  first. On some machines (GitHub's Windows Server 2025 image) PowerShell
+  in a container reads every module but does not load one on its own when
+  a command names a cmdlet; other modules still load on their own where
+  that works.
 
 - The node gives each folder a permission entry for the pairing's container,
   with the folder's rights. Everything below the folder inherits it. Windows
