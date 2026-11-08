@@ -1302,6 +1302,7 @@ pub(crate) mod tests {
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    closed_at: None,
                 })
                 .collect();
             // A profile per pairing, named after it.

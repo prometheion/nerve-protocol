@@ -78,6 +78,13 @@ pub struct Grant {
     /// those, whatever the folder shows. Empty once a change finished.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub toward: Vec<Access>,
+    /// A grant of no flag (a closed folder) whose folder was moved away
+    /// from the place closed to its container, which this names: it stays
+    /// where the folder is now while that place is closed ([`sync`]), as
+    /// what the folder holds is what the owner closed. `None` for every
+    /// other grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<PathBuf>,
 }
 
 impl Grant {
@@ -169,6 +176,7 @@ pub fn wanted(cfg: &NodeConfig, paths: &NodePaths, home: &Path, platform: &Platf
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    closed_at: None,
                 })
         })
         .collect()
@@ -231,6 +239,12 @@ pub struct Synced {
     /// record keeps them to try again. A command of their container must
     /// not run while one is left.
     pub stale: Vec<Grant>,
+    /// Folders closed to a container (a grant of no flag) whose denying
+    /// entry is not on as it should be: its change was refused or failed,
+    /// or could not be made. Such a folder keeps what it inherits from the
+    /// granted folder around it, so a command of that container must not
+    /// run while one is left, as for [`Synced::stale`].
+    pub unclosed: Vec<Grant>,
     /// Why the record could not be read or held, when it could not: which
     /// grants are on is then not known, so no command may run in any
     /// container until it can.
@@ -263,6 +277,12 @@ impl Synced {
                 "the command was not run: the node cannot tell which folders carry grants for the commands ({why})"
             ));
         }
+        if let Some(g) = self.unclosed.iter().find(|g| g.container == container) {
+            return Some(format!(
+                "the command was not run: {} is closed to this center's commands, and the node could not close it",
+                nerve_policy::paths::to_wire(&g.path)
+            ));
+        }
         self.stale.iter().find(|g| g.container == container).map(|g| {
             format!(
                 "the command was not run: {} keeps a grant for this center's commands that its folders no longer give, and it could not be taken off",
@@ -277,6 +297,7 @@ impl Synced {
         serde_json::json!({
             "errors": self.errors,
             "stale": self.stale.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
+            "unclosed": self.unclosed.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
             "walked": walked,
         })
     }
@@ -833,6 +854,29 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
             .zip(&marked_here)
             .any(|(o, m)| *m && o.same_place(g))
     };
+    // Whether `place` is closed to `container` by a wanted grant of no flag.
+    let closes = |container: &str, place: &Path| {
+        want.iter().any(|w| {
+            w.container == container && w.access == Access::NONE && same_path(&w.path, place)
+        })
+    };
+    // A denying grant on a closed folder that a command moved: within the
+    // granted folder around it a command renames it through that folder's
+    // rights, whatever its own entry says. It stays on where the folder is
+    // now, recorded there, while its place is closed (the place is put
+    // under a new entry of its own, as any folder made again): taking it
+    // off would give the commands what the owner closed.
+    let keeps_closed = |old: &Grant| {
+        old.access == Access::NONE
+            && closes(
+                &old.container,
+                old.closed_at.as_deref().unwrap_or(&old.path),
+            )
+    };
+    // One such grant at its new place, which no wanted grant names.
+    let moved_closed = |old: &Grant| {
+        old.closed_at.is_some() && keeps_closed(old) && !want.iter().any(|w| w.same_place(old))
+    };
     // Whether the sync changes the folder of a recorded grant: it is taken
     // off, here or where its folder is now, or replaced. Each such grant is
     // marked in the record before anything changes, and the mark goes once
@@ -841,13 +885,14 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
     let changes =
         |old: &Grant, (here, found): &(io::Result<Option<Look>>, Option<io::Result<Found>>)| {
             if at_path(old, here) {
-                !want
-                    .iter()
-                    .any(|w| w.same_place(old) && w.access == old.access)
-                    || !matches!(here, Ok(Some(l)) if l.granted)
-                    || unfinished_at(old)
+                !moved_closed(old)
+                    && (!want
+                        .iter()
+                        .any(|w| w.same_place(old) && w.access == old.access)
+                        || !matches!(here, Ok(Some(l)) if l.granted)
+                        || unfinished_at(old))
             } else {
-                matches!(found, Some(Ok(Found::At(_))))
+                matches!(found, Some(Ok(Found::At(_)))) && !keeps_closed(old)
             }
         };
     let mut changed = false;
@@ -882,6 +927,11 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
     let mut kept: Vec<Grant> = Vec::new();
     // The wanted grants that are on as they should be.
     let mut done = vec![false; want.len()];
+    // The wanted grants of no flag whose denying entry is on, or that have
+    // nothing to close; those that are not stop their container's commands
+    // ([`Synced::unclosed`]).
+    let mut shut: Vec<bool> = want.iter().map(|w| w.access != Access::NONE).collect();
+    let index = |w: &Grant| want.iter().position(|x| std::ptr::eq(x, w));
     // Recorded grants at their path that a wanted one replaces below.
     let mut replaced: Vec<Grant> = Vec::new();
     for (old, (here, found)) in record.iter().zip(seen) {
@@ -897,6 +947,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
                         && !unfinished_at(old) =>
                 {
                     done[i] = true;
+                    shut[i] = true;
                     let id = old.id.clone().or_else(|| look.and_then(|l| l.id));
                     changed |= id != old.id;
                     kept.push(Grant { id, ..old.clone() });
@@ -908,6 +959,12 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
                     kept.push(old.clone());
                 }
                 Some(_) => replaced.push(old.clone()),
+                None if moved_closed(old) => {
+                    if !look.is_some_and(|l| l.granted) {
+                        out.unclosed.push(old.clone());
+                    }
+                    kept.push(old.clone());
+                }
                 None => {
                     // Taking it off passes the change down too.
                     let links = links_at(&old.path);
@@ -949,6 +1006,22 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
             Ok(Found::Away) => {
                 out.away.push(old.clone());
                 kept.push(old.clone());
+            }
+            Ok(Found::At(now)) if keeps_closed(old) => {
+                changed = true;
+                let granted = matches!(
+                    folders.look(&now, &old.container, Access::NONE),
+                    Ok(Some(l)) if l.granted
+                );
+                let g = Grant {
+                    closed_at: Some(old.closed_at.clone().unwrap_or_else(|| old.path.clone())),
+                    path: now,
+                    ..old.clone()
+                };
+                if !granted {
+                    out.unclosed.push(g.clone());
+                }
+                kept.push(g);
             }
             Ok(Found::At(now)) => {
                 // Commands wrote in it, or below it, where it was (the record
@@ -1067,8 +1140,15 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
             Ok(()) => {
                 changed = true;
                 for (w, id) in todo.into_iter().zip(ids) {
+                    // A denying entry only takes rights away, also from the
+                    // other names of a file it reaches: no hard link holds
+                    // it back.
+                    let links = if w.access == Access::NONE {
+                        Links::Any
+                    } else {
+                        links_at(&w.path)
+                    };
                     // Refused before anything changed: what was there stays.
-                    let links = links_at(&w.path);
                     let whole = unfinished_at(w);
                     let access = Some(w.access);
                     if let Some(why) = held(folders, &w.path, &w.container, access, whole, links) {
@@ -1091,8 +1171,18 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
                         whole,
                         expect.as_deref(),
                     ) {
-                        Ok(id) => kept.push(Grant { id, ..w.clone() }),
-                        Err(e) if gone(&e) => {}
+                        Ok(id) => {
+                            if let Some(i) = index(w) {
+                                shut[i] = true;
+                            }
+                            kept.push(Grant { id, ..w.clone() })
+                        }
+                        // Nothing there to close.
+                        Err(e) if gone(&e) => {
+                            if let Some(i) = index(w) {
+                                shut[i] = true;
+                            }
+                        }
                         // Refused before anything changed: what was there
                         // stays.
                         Err(e) if refusal(&e) => {
@@ -1119,6 +1209,12 @@ fn sync_in_turn(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Sync
             }
         }
     }
+    out.unclosed.extend(
+        want.iter()
+            .zip(&shut)
+            .filter(|(_, s)| !**s)
+            .map(|(w, _)| w.clone()),
+    );
     out.emptied = record
         .iter()
         .map(|g| g.container.clone())
@@ -1826,6 +1922,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            closed_at: None,
         }
     }
 
@@ -1982,6 +2079,7 @@ mod tests {
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    closed_at: None,
                 })
                 .collect();
             all.sort_by(|a, b| a.path.cmp(&b.path));
@@ -4054,6 +4152,7 @@ mod tests {
                 id: None,
                 unfinished: false,
                 toward: Vec::new(),
+                closed_at: None,
             }),
             "{want:?}"
         );
@@ -4072,6 +4171,7 @@ mod tests {
                 id: None,
                 unfinished: false,
                 toward: Vec::new(),
+                closed_at: None,
             }]
         );
         // A node run by hand wants these; the installed service, whose
@@ -4159,6 +4259,105 @@ mod tests {
         assert_eq!(both[0].access, Access::parse("rw").unwrap());
     }
 
+    /// A closed folder's denying entry goes on also where a file below it
+    /// has another name (a local `git clone` links its objects): it only
+    /// takes rights away. One that does not go on (refused, failed, or not
+    /// on any more) stops its container's commands, since the folder keeps
+    /// the rights of the granted folder around it; other containers run.
+    #[test]
+    fn a_closed_folder_that_is_not_closed_stops_its_containers_commands() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/a");
+        f.make("/w/a/closed");
+        f.make("/w/b");
+        f.linked.push("/w/a/closed/.git/objects/x".into());
+        let (a, closed) = (grant("c1", "/w/a", "rw"), grant("c1", "/w/a/closed", ""));
+        let b = grant("c2", "/w/b", "rw");
+        let want = [a.clone(), closed.clone(), b.clone()];
+        let s = sync(&file, &want, &mut f);
+        assert_eq!(f.on("/w/a/closed"), [("c1".to_string(), Access::NONE)]);
+        assert!(s.unclosed.is_empty() && s.refusal("c1").is_none(), "{s:?}");
+
+        // Its entry cannot be put on again: the commands of c1 stop.
+        f.rm("/w/a/closed");
+        f.make("/w/a/closed");
+        f.locked.push("/w/a/closed".into());
+        let s = sync(&file, &want, &mut f);
+        let why = s.refusal("c1").expect("c1's commands stop");
+        assert!(why.contains("/w/a/closed") && why.contains("could not close"), "{why}");
+        assert!(s.refusal("c2").is_none(), "{s:?}");
+
+        // Nor where a command put something else in its place.
+        f.locked.clear();
+        f.foreign.push("/w/a/closed".into());
+        let s = sync(&file, &want, &mut f);
+        assert!(s.refusal("c1").is_some(), "{s:?}");
+        f.foreign.clear();
+        let s = sync(&file, &want, &mut f);
+        assert!(s.refusal("c1").is_none(), "{s:?}");
+        assert_eq!(f.on("/w/a/closed"), [("c1".to_string(), Access::NONE)]);
+
+        // Nothing there: nothing to close.
+        f.rm("/w/a/closed");
+        let s = sync(&file, &want, &mut f);
+        assert!(s.refusal("c1").is_none(), "{s:?}");
+    }
+
+    /// A command renames a closed folder within the folder around it, whose
+    /// rights let it, and makes a new one in its place: the denying entry
+    /// stays on the renamed folder, recorded where it is now, and the new
+    /// one gets its own. Once the owner opens the place, or on uninstall,
+    /// both come off.
+    #[test]
+    fn a_moved_closed_folder_stays_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/a");
+        f.make("/w/a/secret");
+        let (a, secret) = (grant("c1", "/w/a", "rw"), grant("c1", "/w/a/secret", ""));
+        let want = [a.clone(), secret.clone()];
+        sync(&file, &want, &mut f);
+        let none = || [("c1".to_string(), Access::NONE)];
+
+        f.mv("/w/a/secret", "/w/a/renamed");
+        f.make("/w/a/secret");
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
+        assert_eq!(f.on("/w/a/renamed"), none());
+        assert_eq!(f.on("/w/a/secret"), none());
+        let rec = read_record(&file).unwrap();
+        let moved = rec
+            .iter()
+            .find(|g| g.path == Path::new("/w/a/renamed"))
+            .expect("recorded where it is now");
+        assert_eq!(moved.closed_at.as_deref(), Some(Path::new("/w/a/secret")));
+        // It stays, also moved again, and nothing changes once it is in
+        // line.
+        f.mv("/w/a/renamed", "/w/a/again");
+        sync(&file, &want, &mut f);
+        f.sets = 0;
+        let s = sync(&file, &want, &mut f);
+        assert_eq!(f.sets, 0, "{:?}", f.all());
+        assert!(s.refusal("c1").is_none(), "{s:?}");
+        assert_eq!(f.on("/w/a/again"), none());
+
+        // Opened by the owner: both come off.
+        let s = sync(&file, std::slice::from_ref(&a), &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(f.all(), [a.clone()]);
+
+        // Uninstall takes a moved one off too.
+        sync(&file, &want, &mut f);
+        f.mv("/w/a/secret", "/w/a/other");
+        sync(&file, &want, &mut f);
+        assert_eq!(f.on("/w/a/other"), none());
+        sync(&file, &[], &mut f);
+        assert!(f.all().is_empty(), "{:?}", f.all());
+    }
+
     fn center(name: &str, folders: &[(&Path, &str)]) -> nerve_policy::CenterEntry {
         nerve_policy::CenterEntry {
             name: name.into(),
@@ -4225,6 +4424,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            closed_at: None,
         };
         let sorted = |mut v: Vec<Grant>| {
             v.sort_by(|a, b| (&a.container, &a.path).cmp(&(&b.container, &b.path)));
@@ -4295,6 +4495,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            closed_at: None,
         };
         let sorted = |mut v: Vec<Grant>| {
             v.sort_by(|a, b| a.path.cmp(&b.path));
@@ -4457,6 +4658,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            closed_at: None,
         }];
         let s = windows_sync(&paths, &want, &mut |_| {});
         assert!(s.errors.is_empty(), "{s:?}");
@@ -4795,6 +4997,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            closed_at: None,
         }];
         let s = windows_sync(&paths, &want, &mut |_| {});
         assert!(s.errors.is_empty(), "{s:?}");
