@@ -449,7 +449,7 @@ and nothing more.
 Done only at the CLI: `install`, `update`, `uninstall`, `service …`, `setup`,
 `sudo on`, `backup` and `restore`, `config accept`, every `ui …` change but
 revoking a token, the settings that decide which account commands run as
-(`machine.user`, `machine.allow_root`, `machine.sudo_path`, `machine.shell`;
+(`machine.allow_root`, `machine.sudo_path`, `machine.shell`;
 shown in the UI), and any setting under `ui`. The Overview shows the command
 to start, stop or restart the service; a page served by the service cannot
 restart it.

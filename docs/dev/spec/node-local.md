@@ -1638,7 +1638,7 @@ password from a client: `nerve-node sudo on` (it asks on the terminal) or a
 center with the settings grant `write` (protocol §7.4.1, sealed end to end so
 the center cannot read it). The node checks it with `sudo -S -k -v` (output
 discarded), run as the owner (§1: on the installed Linux node the account
-the unit names, on Windows `machine.user`, else the node's own user), so the
+the unit names, on Windows the one its service's key names, else the node's own user), so the
 password is the owner's, and refuses a wrong one with `invalid_args`; the
 switch then stays as it was. An allowed sudo command of a pairing whose
 commands run as the owner runs through sudo as the owner, with that
@@ -1870,10 +1870,11 @@ the node as a service.
 The installed node also takes commands from its owner, who is no root: on
 Linux the account the unit names (`NERVE_NODE_OWNER`, which `install` writes:
 the account that ran it), looked up by name at each request, and root; on
-Windows the SIDs in the service's registry value `Parameters\Owners`. It
+Windows the SID in the service's registry value `Parameters\Owner` (one owner,
+the account that installed it). It
 serves them `/run/nerve-node/owner.sock` (0666 in the unit's runtime folder)
 or the pipe `\\.\pipe\nerve-node-owner` (DACL: SYSTEM, the administrators, the
-owners; first instance; no remote clients), with the same lines and two
+owner; first instance; no remote clients), with the same lines and two
 methods. Who may run a command is decided by the account the kernel names
 for the caller (`SO_PEERCRED`); `nerve-run` is not the owner. The pipe's DACL
 names no package, so no AppContainer opens it.
@@ -1902,9 +1903,9 @@ given. The caller asks the passphrase and sends it as the input; a backup's
 new file is its own (`create_new`, 0600, a temporary name and a rename with
 `--overwrite`). A `restore` runs while the node is stopped: the daemon stops,
 runs it, and starts again (`Daemon::run_until`), and with `NERVE_OWNER` the
-program refuses a backup that would change one of the four `machine.*`
+program refuses a backup that would change one of the three `machine.*`
 settings above. A program
-with `NERVE_OWNER` refuses a change of `machine.user`, `machine.allow_root`,
+with `NERVE_OWNER` refuses a change of `machine.allow_root`,
 `machine.sudo_path` and `machine.shell`, and names the owner in the audit's
 settings entries (`"user"`). Starting and stopping the service is the service
 manager's: on Linux the service helper (`/usr/local/lib/nerve-node/service-control`,

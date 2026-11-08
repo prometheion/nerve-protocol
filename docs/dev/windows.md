@@ -19,13 +19,14 @@ Debian 12, Fedora 36 and later) and fontconfig.
 |---|---|---|
 | The node's program | `nerve-node`, or the [desktop app](desktop.md) | The desktop app only |
 | Shell for commands | `/bin/sh -c` | Windows PowerShell 5.1 (`powershell.exe -NoProfile -Command`) |
-| `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, confined by an AppContainer; not yet on the [installed service](#the-node-as-a-service-on-windows) |
-| `allowlist` and `user` mode run commands | Yes | Yes, in a Job Object, not confined to folders |
-| Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with the administrator token of the account commands run as ([sudo on Windows](#sudo-on-windows)) |
+| `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, as `nerve-run` in the pairing's AppContainer ([the account](#the-account-commands-run-as-on-windows)) |
+| `allowlist` and `user` mode run commands | Yes | Yes: `allowlist` as `nerve-run` in the pairing's AppContainer, or as you with `--as-owner`; `user` as you. Each in a Job Object |
+| Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with your administrator token ([sudo on Windows](#sudo-on-windows)) |
+| [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter | The AppContainer without its network capabilities, while the Windows Firewall service runs |
 | Control socket | Yes | A [control pipe](#the-control-pipe): every change at once, no providers |
 | [Limits per command](#limits-per-command) | A cgroup | The command's job object |
 | [Providers](capabilities.md#capability-providers-in-use) | Yes | Not yet |
-| [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Kept in `node.toml`, offered not yet |
+| [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Yes: as `nerve-run`, in the pairing's AppContainer |
 | Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node |
 | The center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
 | Config folder | `~/.config/nerve` | `C:\ProgramData\Nerve\config` (the installed service) |
@@ -55,18 +56,18 @@ Debian 12, Fedora 36 and later) and fontconfig.
   [the list there](#what-the-appcontainer-does-not-stop).
 - Output that is not UTF-8 is read in the OEM code page, the one a new
   console starts with.
-- A [sudo](#sudo-on-windows) command runs with the elevated token of
-  the account commands run as, which must be an administrator. Every other
-  command of that account runs with the token UAC filtered. UAC is no
-  security boundary, so those commands can get the administrator rights back
-  as well.
+- A [sudo](#sudo-on-windows) command runs with your elevated token (the
+  owner's), and you must be an administrator. Your other commands (`user`
+  mode, `allowlist` mode with `--as-owner`) run with the token UAC
+  filtered. UAC is no security boundary, so those commands can get the
+  administrator rights back as well.
 - Paths in rules and over the wire look like `/c/Users/x`.
 - The node runs only as the installed service, which the
   [desktop app](desktop.md) installs and starts, as its own account `nerve`:
   never elevated, and never by hand ([root and administrator](#root-and-administrator)).
 - A [capability of your own](capabilities.md#capabilities-of-your-own-in-nodetoml)
-  is kept in `node.toml`, also one for `windows`, but the node offers none
-  yet.
+  runs as `nerve-run` in the pairing's AppContainer, as the pairing's
+  commands do.
 
 ### Limits per command
 
@@ -185,20 +186,31 @@ The install does this, and the installer shows each step:
    that the install did not make is refused.
 2. Makes the folders and gives them an access list of their own: `nerve`,
    SYSTEM and the administrators, nothing inherited from the folders above.
-3. Sets the account that commands run as: the account that installs. An
-   account chosen before stays. The installer asks for that account's
-   password (**Your Windows password**) and stores it with DPAPI in the
-   config folder, so only what can open that folder can read it. A stored
-   password that still works is not asked for again.
-4. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
-5. Registers the service `nerve-node`, which runs as `nerve`, starts with the
-   machine and starts again after a failure.
-6. Registers the source `nerve-node` in the Windows Event Log, then starts
+3. Makes the local user `nerve-run`, which commands from centers run as
+   ([the account](#the-account-commands-run-as-on-windows)), with a long
+   random password stored with DPAPI in the config folder, and its profile.
+   It is no administrator, may log on as a batch job (its commands) and as
+   a service (step 6) only, and does not show on the sign-in screen. A
+   `nerve-run` that the install did not make is refused, and so is one that
+   can open the node's folders or your registry.
+4. Stores your password (**Your Windows password**) with DPAPI in the config
+   folder, for the commands that run as you: `user` mode, `allowlist` mode
+   with `--as-owner`, and sudo. A stored password that still works is not
+   asked for again.
+5. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
+6. Registers and starts the service `nerve-run-profile`, which runs as
+   `nerve-run` and does nothing but keep its profile loaded: Windows starts a
+   process in an AppContainer only for an account whose registry is loaded,
+   and only the service manager loads it for an account that is not signed
+   in.
+7. Registers the service `nerve-node`, which runs as `nerve`, starts with the
+   machine (after `nerve-run-profile`) and starts again after a failure.
+8. Registers the source `nerve-node` in the Windows Event Log, then starts
    the service. It waits until the node runs.
 
 | What | Where |
 |---|---|
-| `node.toml`, one key per center, the stored password of the account commands run as, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
+| `node.toml`, one key per center, `nerve-run`'s password and yours, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logging.md#the-log-as-the-owner-reads-it), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
 | The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](#the-windows-event-log)) |
@@ -207,10 +219,11 @@ The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
 the app's **Log** page shows. When it does not start, the Event Viewer says
 why, and the log has the rest.
 
-The install also makes the user who ran it an owner of the node: its SID goes
-into the service's registry key
+The install also makes the user who ran it the owner of the node: its SID
+goes into the service's registry key
 (`HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters`, value
-`Owners`), and the service lets it start, stop and restart the service. The
+`Owner`), and the service lets it start, stop and restart the service. A node
+has one owner: another user who installs over it takes that place. The
 owner changes the node in the app without administrator rights; the service
 runs the app's commands as `nerve` over a pipe open to the owners only, and
 audits them with the owner's name
@@ -242,53 +255,67 @@ node on Windows takes a proxy only if it needs no header and no password.
 A proxy with either is refused and changes nothing
 ([proxy](#a-proxy-for-the-service-on-windows)).
 
-To run the commands as another account, an ordinary one, set `machine.user`
-to its name under **Settings**, **Advanced**, **Any setting** (the app asks
-for an administrator's rights), then save that account's password under
-**Settings**, **General**, **Account for commands**, which installs the
-service again with it.
-
 ### The account commands run as on Windows
 
-Every command, and the node's file work for a center, runs as that account,
-logged on with its stored password. It must be a local account that has
-signed in once, so it has a profile folder. A command gets the account's
-environment, its profile folder as working folder when the call names none,
-and a job object that ends it with every process it started. While the
-account is not signed in, its registry (`HKCU`) is not loaded: a command
-then gets the usual folders of its profile (`APPDATA`, `TEMP` and so on),
-but not the variables the account set itself. An
-administrator's command runs as UAC gives it to a sign-in: the
-Administrators group only denies. Before a command starts, the node checks
-that the account can open neither the node's folders nor a file in them, and
-refuses it if it can. The install checks the same.
+`folder` mode, and `allowlist` mode unless the pairing runs as you
+(`--as-owner`), run commands as `nerve-run`, each pairing's in an
+AppContainer of its own ([folder mode](#what-a-command-can-reach-in-folder-mode-windows)),
+as Landlock holds them on Linux. The node logs `nerve-run` on as a batch
+job for each command, with the password the install stored, and starts its
+shim as it; the shim makes the container's profile in `nerve-run`'s profile
+and starts the command in the container. A command of `nerve-run` never
+runs outside its container. `user` mode and `allowlist` mode with
+`--as-owner` run as you, logged on with your stored password, outside a
+container; a sudo command with your administrator token.
 
-`folder` mode runs no command on the service yet: its AppContainer is not
-started as another account ([modes](#what-a-command-can-reach-in-folder-mode-windows)).
-Use `allowlist` or `user` mode for its centers.
+`nerve-run`'s permission entries on your folders are those of every
+pairing at once, so `nerve-run` alone reaches each pairing's folders. Only
+the containers keep the pairings apart: a process in a container opens
+only what both its container and `nerve-run` may. The node's file calls for
+a pairing (`fs`, the paths of a call) act in that pairing's container too,
+so a read outside its folders is what the container may read: the Windows
+folder, Program Files and what is open to every AppContainer, and nothing
+that only `nerve-run` may open.
 
-The commands of every pairing run as that one account, and a process's
-command line is open to the account's other processes: a pairing's command
-can read the command lines of the others' running commands (call values
-included), and `status` does not warn of it. Linux gives each command a
-`/proc` of its own ([Linux](sandbox-linux.md#a-proc-of-its-own)); W2 adds the
-Windows test of a pairing's processes (#149) and the answer for it.
+`nerve-run` cannot open the node's config and state folders, your registry
+(`HKEY_USERS\<your SID>`, with your environment variables) or the node's
+pipes: the install checks the first two, and the CI job all of them
+([tests](#tests-on-an-installed-node)).
 
-UAC is no security boundary: a command of an administrator can get the
-group's rights back and read the keys. The install warns about an account in
-Administrators or Backup Operators, and so do the Overview (`status`'s
-`owner_is_admin`) and giving a center the settings grant, as a center with
-the grant can set its own mode to `user`: the twin of root as the owner on
-Linux. Choose an ordinary account as above.
-[Sudo on Windows](#sudo-on-windows) needs an administrator: its
-commands run with the account's administrator rights on purpose.
+A command gets `nerve-run`'s own environment, not the service's or yours,
+with its home moved into its container's own folder (`AC`, below
+`C:\Users\nerve-run\AppData\Local\Packages\<container>`): `USERPROFILE`,
+`HOME`, `HOMEDRIVE`, `HOMEPATH` name `AC\home`, `APPDATA` the
+`AppData\Roaming` there, and Windows points `LOCALAPPDATA`, `TEMP` and `TMP`
+at `AC`. Each pairing has its own, and no pairing reaches another's. git
+trusts the repositories the command reaches (`safe.directory`), as on
+Linux. Programs that ask Windows for the profile folder instead of reading
+these variables (the known-folder API, OpenSSH's `known_hosts`) get
+`C:\Users\nerve-run`, which the container cannot write. The names in
+`machine.command_env` are passed on with the service's values.
 
-If the account's password changes, commands fail until you save the new one
-under **Settings**, **General**, **Account for commands**. A Microsoft
-account works with its Microsoft password, which can change outside the
-machine.
+The commands of one pairing cannot see or open another pairing's
+processes, nor yours: a container sees only its own processes (checked:
+the process list shows its own, and opening another container's process
+for any right is refused), the Windows counterpart of Linux's own `/proc`
+([Linux](sandbox-linux.md#a-proc-of-its-own)). Processes of `nerve-run`
+outside a container (its shim, `nerve-run-profile`) are open to other
+processes of `nerve-run` outside one; no command runs so.
 
-To start a process as that account, the service keeps two privileges,
+UAC is no security boundary: a command that runs as you, where you are an
+administrator, can get the group's rights back and read the keys. The
+install warns about an owner in Administrators or Backup Operators, and so
+do the Overview (`status`'s `owner_is_admin`) and giving a center the
+settings grant, as a center with the grant can set its own mode to `user`:
+the twin of root as the owner on Linux.
+[Sudo on Windows](#sudo-on-windows) needs you to be an administrator.
+
+If your password changes, commands that run as you fail until you save the
+new one under **Settings**, **General**, **Account for commands**. A
+Microsoft account works with its Microsoft password, which can change
+outside the machine.
+
+To start a process as another account, the service keeps two privileges,
 `SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows
 takes every other privilege from it, `SeImpersonatePrivilege` included. No
 command gets them.
@@ -306,19 +333,22 @@ it. An install over an installed node moves the old program aside the same
 way.
 
 **Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
-and removes the service, the source `nerve-node` of the Event Log (its
-entries stay), the user `nerve` and its profile, the program, the app's
-Start menu entry, its link handler and its entry in Apps & features. It also
-takes off the folder grants of `folder` mode left on your folders and removes
-the profiles of their AppContainers
+and removes the service, the service `nerve-run-profile`, the source
+`nerve-node` of the Event Log (its entries stay), the users `nerve` and
+`nerve-run` and their profiles (the commands' AppContainers have theirs in
+`nerve-run`'s), the program, the app's Start menu entry, its link handler and
+its entry in Apps & features. It also takes off the folder grants left on
+your folders, the containers' and `nerve-run`'s
 ([modes](#what-a-command-can-reach-in-folder-mode-windows)). With
 **Keep the data** the folders and the stored password stay, open to the
 administrators only; the [sudo](#sudo-on-windows) password goes, so
 sudo is off after a later install. A later install takes them up again.
 **Delete the data** deletes them. The installed program cannot delete its
 own file at once: it moves it aside, and Windows deletes it at its next
-start. Where Windows still holds the profile of `nerve` (Windows Search
-can), the uninstall says where to remove it after a restart.
+start. Where Windows still holds the profile of `nerve` or `nerve-run`
+(Windows Search can, and a loaded registry of `nerve-run` stays loaded after
+its service stopped until Windows restarts), the uninstall says where to
+remove it after a restart.
 
 ## What a command can reach in `folder` mode (Windows)
 
@@ -326,11 +356,9 @@ Each pairing's commands run in an AppContainer of their own. A new pairing
 gets a new one, also when you pair the same center again under the same
 name. Windows lets a
 process there open only what is granted to that container, and what it opens
-to every AppContainer. This holds for a node you run yourself. The
-[installed service](#the-node-as-a-service-on-windows) runs every command as another account,
-and does not start the AppContainer as that account yet: there `folder` mode
-runs no command (`confinement none`), and the service puts no grants on
-folders.
+to every AppContainer, and only where `nerve-run` may open it too
+([the account](#the-account-commands-run-as-on-windows)). `allowlist` mode
+runs in the container as well, unless the pairing runs as you.
 
 | A command can | Where |
 |---|---|
@@ -354,7 +382,8 @@ folders.
   that works.
 
 - The node gives each folder a permission entry for the pairing's container,
-  with the folder's rights. Everything below the folder inherits it. Windows
+  with the folder's rights, and on the installed service one for
+  `nerve-run` with the rights of every pairing that has the folder. Everything below the folder inherits it. Windows
   keeps the permissions of each file and folder, so the node writes the
   entry into each one below the folder: the first grant of a large folder,
   changing its rights and taking it off take a while. A change goes only as
@@ -377,6 +406,17 @@ folders.
   refused when it is added, in the app's folder picker too: the service
   runs in a session of its own, where a drive mapped at your sign-in does
   not exist, and the container reaches no network folder by its grants.
+- A folder without a flag inside a granted folder (a folder a pairing has
+  with `w`, and one inside it it has with none) is closed to that pairing's
+  container: the node gives it a denying entry, which counts before what it
+  inherits from the folder around it. Without it, it would inherit the
+  entry of the folder around.
+- A link to another machine (a symbolic link to `\\server\share`) is never
+  followed by the node: its walks and the paths of a call stop there,
+  refused. Following it would connect to that machine as the account the
+  node acts as, and send that account's NTLM answer there. A command in a
+  container that opens such a link gets "network access denied", and no
+  connection leaves the machine (checked).
 - Removing a folder or changing its rights under **Permissions ›
   Folders** changes the entry, and removing the pairing takes it off. That
   is the node's entry on the folder: permissions a command gave what it made
@@ -388,8 +428,11 @@ folders.
   holds hard links the check refuses, see below). The record of the entries
   is in the node's state folder: uninstall with the app, never by deleting
   the folders.
-- Each pairing's container has a profile in the account that runs the
-  node: a folder `%LOCALAPPDATA%\Packages\nerve.…` and a registry key. The
+- Each pairing's container has a profile in the account its commands run
+  as, `nerve-run` on the installed service: a folder
+  `%LOCALAPPDATA%\Packages\nerve.…` and a registry key. The node makes and
+  removes it through a helper it starts as `nerve-run`, which alone may write
+  that profile. The
   profile goes with the container's last folder entry: the running node
   removes it when the pairing's last granted folder is removed, deleted or
   moved away, when the pairing is removed, and at uninstall. The name comes
@@ -462,9 +505,11 @@ folders.
   `Get-Content ..\README.md` reads the working folder's own `README.md` or
   fails, but does not read the one above it. Give them a whole path for a
   folder above the one PowerShell stands in, or `cd` there first.
-- The command has the network, but not `localhost`. It has its own desktop,
-  so it cannot reach your windows or clipboard, and Windows gives its
-  container a folder of its own for temporary files.
+- The command has the network, but not `localhost`, unless the owner turned
+  the pairing's network off (below). It has its own desktop, so it cannot
+  reach your windows or clipboard, and Windows gives its container a folder
+  of its own for temporary files, where its home is too
+  ([the account](#the-account-commands-run-as-on-windows)).
 - What the AppContainer does not stop (the network, what Windows opens to
   every AppContainer, the environment the command starts with, and more) has
   [its own list](#what-the-appcontainer-does-not-stop) below.
@@ -571,14 +616,23 @@ planned.
   can listen on a port (checked). Whether another machine gets through to it
   is the Windows Firewall's say: with the firewall on and no rule for the
   port it did not, with a rule for the port it did (checked). The node adds
-  no firewall rule (code). The [network switch](sandbox-linux.md#no-network-for-a-centers-commands)
-  has no rule to hold here: with a center's network off, Windows runs none
-  of its `folder` mode commands.
-- **The environment.** The command starts with the node's environment: the node
-  clears nothing (code). Windows replaces `TEMP`, `TMP` and
-  `LOCALAPPDATA` with the container's own folder (checked). A secret in a
-  variable of the process that started the node, a token say, is visible to
-  every command. Start the node without such variables.
+  no firewall rule (code). With a pairing's
+  [network switch](sandbox-linux.md#no-network-for-a-centers-commands) off,
+  its container has none of the three capabilities (code), and Windows keeps
+  it off every network. Checked: a TCP connection is refused (10013), UDP gets
+  no answer, a name lookup fails, the machine's own addresses stay closed;
+  the same with every profile of the Windows Firewall off. Unlike Linux, which
+  leaves the resolver open, no name resolves then. That isolation is the
+  Windows Firewall service's (MpsSvc), which an administrator could not stop
+  (checked); while it does not run, the node runs none of the pairing's
+  commands. Commands that run as you (`user` mode, `--as-owner`) and sudo
+  commands do not run while the switch is off.
+- **The environment.** On the installed service a command starts with
+  `nerve-run`'s own environment, its home moved into its container, and the
+  names of `machine.command_env` (code,
+  [the account](#the-account-commands-run-as-on-windows)); none of the
+  service's other variables. Windows replaces `TEMP`, `TMP` and
+  `LOCALAPPDATA` with the container's own folder (checked).
 - **Files outside the folders.** Windows opens its own folder and Program
   Files to every AppContainer, and a command reads and runs programs there:
   what Windows's permissions on a file below them leave to all AppContainers
@@ -658,39 +712,33 @@ planned.
   hard links and for the permission entries a command gives what it makes is
   in the bullets of the section above.
 - **The sudo path.** A command on the [sudo list](#sudo-on-windows)
-  runs as the account commands run as, with that account's administrator
-  token, in a job but not in an AppContainer, and in every mode (code). The
-  folders do not apply to it: only the switch, the sudo list, the
+  runs as you, with your administrator token, in a job but not in an
+  AppContainer, and in every mode (code). The folders do not apply to it:
+  only the switch, the sudo list, the
   [deny rules](policy-engine.md#deny-a-command) and the
-  [protected paths](policy-engine.md#protected-paths-as-the-owner-sees-them) decide. On Windows sudo works on the
-  node installed as a service only, and there `folder` mode runs no other
-  command yet, since the AppContainer is not started for the service's
-  account. So on that node a `folder` mode command runs only when the sudo
-  list names it.
+  [protected paths](policy-engine.md#protected-paths-as-the-owner-sees-them)
+  decide, and none runs while the pairing's network is off.
 
 ## Sudo on Windows
 
-Windows has no `sudo` program. A sudo command runs as the
-[account commands run as](#the-account-commands-run-as-on-windows),
-with that account's administrator rights: the elevated token that "Run as
-administrator" gives, not the token UAC gives its other commands. So:
+Windows has no `sudo` program. A sudo command runs as you, the node's
+owner, with your administrator rights: the elevated token that "Run as
+administrator" gives, not the token UAC gives your other commands. Commands
+of `nerve-run`, which is no administrator, never get them. So:
 
 - It works on the node installed as a service, which on Windows is always
   the node ([Windows](#the-node-as-a-service-on-windows)).
-- The account commands run as must be an administrator. Otherwise the switch
-  refuses to turn on. An administrator's other commands run with the token
-  UAC filtered, but UAC is no security boundary: any command of that account,
-  not only a sudo command, can get the administrator rights back and read the
-  node's keys. While the account is an administrator, allow commands only to
-  centers you trust with the whole machine.
-- Turning it on asks for that account's password, the one the install
-  stored. A wrong password is refused and the switch stays as it was.
-- The node keeps the password with DPAPI in the config folder, as the
-  install keeps it (`sudo.dpapi`). Unlike on Linux, sudo stays on when the service
-  restarts. Turning it off removes the file, and uninstalling removes it
-  too. Neither takes the account out of Administrators: do that yourself to
-  close the other way to the administrator rights again. Turning it off
-  reminds you.
+- You must be an administrator. Otherwise the switch refuses to turn on.
+  Your other commands (`user` mode, `--as-owner`) run with the token UAC
+  filtered, but UAC is no security boundary: any of them can get the
+  administrator rights back and read the node's keys.
+- Turning it on asks for your password. A wrong password is refused and
+  the switch stays as it was.
+- The node keeps the password with DPAPI in the config folder (`sudo.dpapi`).
+  Unlike on Linux, sudo stays on when the service restarts. Turning it off
+  removes the file, and uninstalling removes it too. Neither takes you out
+  of Administrators. Turning it off reminds you.
+- No sudo command runs while the pairing's network is off.
 
 In the [desktop app](desktop.md), the **Sudo** section of **Permissions**
 turns it on and off, and the center's sudo list there takes the commands
@@ -705,7 +753,7 @@ Linux.
 The node starts the command line after `sudo` with the shell
 (`machine.shell`, Windows PowerShell 5.1 by default), logged on as a batch
 job: the logon Windows uses for a scheduled task that runs with highest
-privileges. The account needs the right "Log on as a batch job", which
+privileges. You need the right "Log on as a batch job", which
 administrators have unless a policy takes it. The command runs in a Job
 Object like every other command, so a timeout ends it.
 
@@ -781,10 +829,19 @@ job built:
   profile by a logon that loads it, as nobody signs in on a runner;
 - the app installs, starts, stops, restarts, updates and uninstalls Nerve
   (`nerve-node-desktop/tests/real.rs`);
-- the node is installed again with that account for commands, then the
-  sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
-  (`nerve-node/tests/win_limits.rs`), the account's batch logon and a folder
-  on a virtual disk mounted in a folder run on it.
+- the node is installed again by that account, its owner; the install makes
+  `nerve-run`, its profile (by a logon that loads it) and
+  `nerve-run-profile`, which the job checks. Then the sudo switch
+  (`nerve-node/tests/win_sudo.rs`), the limits per command
+  (`nerve-node/tests/win_limits.rs`), the command account
+  (`nerve-node/tests/win_account.rs`: a command in its folder works and one
+  outside is refused and audited; one pairing reaches neither another's
+  folders, nor its home, nor its processes; a folder without flags inside a
+  `w` folder is closed; `nerve-run` opens neither the node's config and state
+  folders, nor the owner's registry, nor the node's pipes; with the network
+  off a connection and a sudo command are refused), the account's batch
+  logon and a folder on a virtual disk mounted in a folder run on it;
+- the uninstall removes `nerve-run` and `nerve-run-profile` too.
 
 A test that skips fails the job. The `windows` job also keeps the debug
 `nerve-node-desktop.exe` and `nerve-center.exe` as the artifact

@@ -56,15 +56,17 @@ Installing changes the system, so the system asks for an administrator's
 password next: polkit's dialog on Linux, the UAC prompt on Windows. You
 become the node's owner: from then on the app needs it only for update,
 uninstall and a few more ([administrator rights](#administrator-rights)). On
-Windows the installer first asks for your own Windows password: commands
-from your centers run as you, and the service needs your password to start
-them ([Windows](windows.md#the-account-commands-run-as-on-windows)). That
+Windows the installer first asks for your own Windows password: the
+commands that run as you (`user` mode, `allowlist` mode as you, sudo) need
+it ([Windows](windows.md#the-account-commands-run-as-on-windows)). That
 holds when you are a standard user and an administrator types their name and
-password into the UAC prompt: the commands still run as you, not as the
+password into the UAC prompt: those commands still run as you, not as the
 administrator. If your password was mistyped, enter it again under
-**Settings**, **General**, **Account for commands**. On Linux `folder` and
-`allowlist` mode run them as `nerve-run`, an account of their own that
-install makes, and `user` mode as you ([modes](sandbox-linux.md#the-account-nerve-run)).
+**Settings**, **General**, **Account for commands**. `folder` and
+`allowlist` mode run commands as `nerve-run`, an account of their own that
+install makes (on Windows each pairing's in an AppContainer of its own), and
+`user` mode as you ([modes](sandbox-linux.md#the-account-nerve-run),
+[Windows](windows.md#the-account-commands-run-as-on-windows)).
 
 When it is done, **Open Nerve** opens the app. Its first-run steps pair the
 first center and choose its mode; **Back** goes to the step before, **Skip** past one. The downloaded
@@ -98,9 +100,8 @@ logging in again.
 The system's dialog (polkit on Linux, the UAC prompt on Windows) comes for
 these only, each time, for that one action, and the app says why first:
 update, uninstall, turning sudo on, and the settings `machine.allow_root`,
-`machine.sudo_path` and `machine.shell` (on Windows also `machine.user`, the
-account commands run as), which decide which account and program commands
-run as (also restoring a backup that would change them). The rights end with
+`machine.sudo_path` and `machine.shell`, which decide which program
+commands run as (also restoring a backup that would change them). The rights end with
 the action.
 
 Who changes the node's settings without a password:
@@ -113,9 +114,10 @@ Who changes the node's settings without a password:
   service, and polkit lets the owner run it (by a rule, or on polkit 0.105,
   as on Ubuntu 22.04, by a `.pkla` file); over SSH, or from a program
   outside a session, polkit asks for an administrator's password as before.
-- **Windows:** the administrators, and the user who installed (by SID, in the
-  service's registry key `Parameters\Owners`). The service lets that user
-  start, stop and restart it.
+- **Windows:** the administrators, and the owner, the user who installed
+  (by SID, in the service's registry key `Parameters\Owner`). There is one,
+  and another user's install makes that one the owner. The service lets the
+  owner start, stop and restart it.
 
 How: the running node takes the owner's command over a socket of its own
 (`/run/nerve-node/owner.sock`; on Windows a named pipe open to the owners
@@ -197,10 +199,10 @@ start.
 Settings has tabs. Each control runs the `config` command a terminal would,
 so the node checks a value as it checks the command line's.
 
-- **General**: the machine's **Name**; the **Account for commands** (on
-  Linux it says who runs them: `nerve-run`, or you in `user` mode; on
-  Windows, enter its new password there when it changed, or your own when no
-  account is chosen yet: the service needs it to start commands);
+- **General**: the machine's **Name**; the **Account for commands** (it says
+  who runs them: `nerve-run`, or you in `user` mode; on Windows, enter your
+  new password there when it changed: the service needs it to start the
+  commands that run as you);
   the **Shell** that runs each command (`machine.shell`); and how much the
   **Log** says (`log.level`).
 - **Keys**: in files, or in the system keyring where one can hold them. Where

@@ -533,9 +533,10 @@ reads is an action with effect `read` or `sense` (an entry with `state`,
 or state of its own, or sends events or a stream, write a
 [provider](#capability-providers-in-use) instead.
 
-They run on Linux, as the command account `nerve-run` of the [installed
-node](service.md#the-node-as-a-service) (below): a node you run yourself has no such account and
-offers none. Windows keeps them in `node.toml` and offers none yet.
+They run as the command account `nerve-run` of the [installed
+node](service.md#the-node-as-a-service) (below), on Windows in the pairing's
+AppContainer ([Windows](windows.md#the-account-commands-run-as-on-windows)):
+a node you run yourself has no such account and offers none.
 
 ### Add one
 
@@ -828,10 +829,8 @@ these limits:
   adding commands, take the grant back (`center settings off`). That
   leaves what it added; remove it too if you want it gone.
 
-The installed Linux node takes them. Windows takes none yet (issue
-[#176](https://github.com/prometheion/nerve-protocol/issues/176)), and a node
-you run yourself has no `nerve-run`: either refuses the center's add and
-says why.
+The installed node takes them, on Linux and Windows. A node you run
+yourself has no `nerve-run`: it refuses the center's add and says why.
 
 `cap` lists them with the source `center <name>`, and each one's
 command after yours; `cap --center <name>` only that center's:
