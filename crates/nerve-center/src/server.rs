@@ -1,5 +1,5 @@
 //! Starting the center: the node listener, the web UI, the HTTP MCP
-//! endpoint and the attach socket. `main` and the end-to-end tests both go
+//! endpoint and the attach socket (a pipe on Windows). `main` and the end-to-end tests both go
 //! through [`start`].
 
 use std::net::SocketAddr;
@@ -133,6 +133,17 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     {
         let listener = crate::attach::bind(&args.state_dir())?;
         tasks.push(tokio::spawn(crate::attach::serve(center.clone(), listener)));
+    }
+    // A pipe's name is open to every account, which could take it first:
+    // then the center runs, and a second one cannot attach.
+    #[cfg(windows)]
+    match crate::attach::bind(&args.state_dir()) {
+        Ok(listener) => tasks.push(tokio::spawn(crate::attach::serve(center.clone(), listener))),
+        Err(e) => center.log().record(
+            Level::Warn,
+            None,
+            &format!("{e}; a second nerve-center on this state folder cannot attach"),
+        ),
     }
 
     // State changes are batched; this writes them out now and then, notes
@@ -268,12 +279,12 @@ pub async fn run(args: Args) -> Result<(), String> {
                 state.display()
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             tracing::info!("attaching to the center that runs in {}", state.display());
             return crate::attach::relay(&state).await;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         return Err(format!(
             "another nerve-center already runs the center in {}",
             state.display()

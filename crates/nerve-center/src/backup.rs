@@ -228,7 +228,7 @@ fn inspect(state: &Path) -> Target {
 /// one that starts meanwhile finds the state folder taken. Both files are
 /// written whole; when the second cannot be, the first goes back.
 pub fn restore(state: &Path, b: &Parsed, replace: bool) -> Result<RestoreReport, String> {
-    let _lock = crate::attach::claim(state)?.ok_or_else(|| {
+    let _lock = crate::attach::try_lock(state)?.ok_or_else(|| {
         format!(
             "a nerve-center runs on {}: a restore never goes under a running center. Stop it (end the harness that started it, or the process that runs it), then restore",
             state.display()
@@ -935,7 +935,7 @@ mod tests {
         center(b.path(), "c1");
         let before = std::fs::read(b.path().join("state.json")).unwrap();
         // A running center holds the lock.
-        let lock = crate::attach::claim(b.path()).unwrap().unwrap();
+        let lock = crate::attach::try_lock(b.path()).unwrap().unwrap();
         let err = restore(b.path(), &parsed, true).err().unwrap();
         assert!(err.contains("runs on"), "{err}");
         assert_eq!(std::fs::read(b.path().join("state.json")).unwrap(), before);

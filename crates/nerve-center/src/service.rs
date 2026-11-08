@@ -434,7 +434,7 @@ fn status_lines(
     given_mcp: &crate::config::McpMode,
 ) -> Vec<String> {
     use crate::config::McpMode;
-    let mut lines = vec![run_line(state, crate::attach::runs(state), cfg!(unix))];
+    let mut lines = vec![run_line(state, crate::attach::runs(state))];
     if installed && cfg!(windows) {
         lines.push(windows_service_line());
     } else if installed {
@@ -555,9 +555,8 @@ fn windows_service_line() -> String {
 }
 
 /// The first line of `status`: whether a center runs in `state`, as
-/// `runs` ([`crate::attach::runs`]) says. Only `unix` has the lock that
-/// tells it; elsewhere a folder that exists says it cannot be told.
-fn run_line(state: &Path, runs: Option<bool>, unix: bool) -> String {
+/// `runs` ([`crate::attach::runs`]) says.
+fn run_line(state: &Path, runs: Option<bool>) -> String {
     match runs {
         Some(true) => format!("center: running, in {}", state.display()),
         Some(false) => format!("center: not running, in {}", state.display()),
@@ -573,10 +572,6 @@ fn run_line(state: &Path, runs: Option<bool>, unix: bool) -> String {
             admin_command("status")
         ),
         None if !state.exists() => format!("center: none has run in {} yet", state.display()),
-        None if !unix => format!(
-            "center: in {}; whether one runs there cannot be told on this system",
-            state.display()
-        ),
         None => format!("center: not running, in {}", state.display()),
     }
 }
@@ -1753,16 +1748,19 @@ mod tests {
         }
     }
 
-    /// Where no lock tells whether a center runs (Windows), `status` does
-    /// not say a running one does not run (round 1, correctness 7).
+    /// `status` says whether a center runs from its lock, which every
+    /// system has now (#64).
     #[test]
-    fn the_status_says_when_it_cannot_tell_whether_a_center_runs() {
+    fn the_status_says_whether_a_center_runs() {
         let d = tempfile::tempdir().unwrap();
-        let line = run_line(d.path(), None, false);
-        assert!(line.contains("cannot be told"), "{line}");
-        assert!(!line.contains("not running"), "{line}");
+        let lock = crate::attach::try_lock(d.path()).unwrap().unwrap();
+        let line = run_line(d.path(), crate::attach::runs(d.path()));
+        assert!(line.starts_with("center: running"), "{line}");
+        drop(lock);
+        let line = run_line(d.path(), crate::attach::runs(d.path()));
+        assert!(line.starts_with("center: not running"), "{line}");
         let gone = d.path().join("none");
-        assert!(run_line(&gone, None, false).contains("none has run"));
+        assert!(run_line(&gone, None).contains("none has run"));
     }
 
     /// Root's `status` does not wait on a FIFO the center's user put in

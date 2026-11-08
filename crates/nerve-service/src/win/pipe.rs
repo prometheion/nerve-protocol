@@ -36,7 +36,8 @@ pub fn name_for(prefix: &str, dir: &str) -> String {
 
 #[cfg(windows)]
 pub use sys::{
-    Descriptor, client_pid, foreign_owner, instance, node_owner_check, open_identified, owner_of,
+    Descriptor, PIPE_BUSY, client_pid, foreign_owner, instance, node_owner_check, open_identified,
+    owner_of,
 };
 
 #[cfg(windows)]
@@ -59,6 +60,9 @@ mod sys {
 
     use super::trusted_owner;
     use crate::win::sid::{well_known_sid, wide};
+
+    /// What opening a pipe says while every instance of it is in use.
+    pub const PIPE_BUSY: i32 = windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32;
 
     /// A security descriptor made from SDDL, freed when dropped.
     pub struct Descriptor(PSECURITY_DESCRIPTOR);
