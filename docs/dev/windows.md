@@ -292,7 +292,8 @@ trusts the repositories the command reaches (`safe.directory`), as on
 Linux. Programs that ask Windows for the profile folder instead of reading
 these variables (the known-folder API, OpenSSH's `known_hosts`) get
 `C:\Users\nerve-run`, which the container cannot write. The names in
-`machine.command_env` are passed on with the service's values.
+`machine.command_env` are passed on with the service's values, but for
+the home variables above, which stay the container's, as on Linux.
 
 The commands of one pairing cannot see or open another pairing's
 processes, nor yours: a container sees only its own processes (checked:

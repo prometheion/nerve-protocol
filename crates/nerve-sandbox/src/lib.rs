@@ -1174,12 +1174,32 @@ pub mod acl {
         ]
     }
 
+    /// What a container's command gets set besides the environment it
+    /// inherits: `env`, the variables the owner passes on, then its home
+    /// (`ac`, its container's folder, [`container_home`]), which wins, as
+    /// on Linux a pairing's own home does.
+    pub fn command_set(
+        ac: Option<&std::path::Path>,
+        env: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut set = env.to_vec();
+        set.extend(ac.map(container_home).unwrap_or_default());
+        set
+    }
+
     /// `vars` with each of `set` in place of a variable of its name
-    /// (Windows' names know no case).
+    /// (Windows' names know no case); of two in `set` with one name, the
+    /// later.
     pub fn with_vars(
         vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         set: &[(String, String)],
     ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let set: Vec<&(String, String)> = set
+            .iter()
+            .enumerate()
+            .filter(|(i, (k, _))| !set[i + 1..].iter().any(|(l, _)| l.eq_ignore_ascii_case(k)))
+            .map(|(_, v)| v)
+            .collect();
         let mut out: Vec<_> = vars
             .into_iter()
             .filter(|(k, _)| {
@@ -3339,12 +3359,7 @@ pub mod appcontainer {
         let exe = find(program)?;
         let app = wide(exe.as_os_str());
         let mut line = wide(OsStr::new(&command_line(&exe.to_string_lossy(), args)));
-        let mut set = if spec.home {
-            acl::container_home(&ac)
-        } else {
-            Vec::new()
-        };
-        set.extend(spec.env.iter().cloned());
+        let set = acl::command_set(spec.home.then_some(ac.as_path()), &spec.env);
         let env = env_block(acl::with_vars(
             acl::container_env(std::env::vars_os()),
             &set,
@@ -3720,13 +3735,26 @@ mod tests {
         assert_eq!(get("TEMP"), [r"C:\Users\nerve-run\AppData\Local\Temp"]);
         assert_eq!(get("GIT_CONFIG_KEY_0"), ["safe.directory"]);
         assert_eq!(get("GIT_CONFIG_VALUE_0"), ["*"]);
-        // The node's own variables the owner passes on come last and win.
-        let more = acl::with_vars(got.clone(), &[("Home".into(), "x".into())]);
-        assert_eq!(
+        // The node's variables the owner passes on (`machine.command_env`)
+        // do not move the home, also where they name it: it is in the
+        // environment once.
+        let passed = [
+            (
+                "Home".to_string(),
+                r"C:\Windows\ServiceProfiles\nerve".to_string(),
+            ),
+            ("HTTPS_PROXY".to_string(), "http://proxy".to_string()),
+        ];
+        let more = acl::with_vars(got.clone(), &acl::command_set(Some(ac), &passed));
+        let homes: Vec<_> = more
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("HOME"))
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(homes, [home]);
+        assert!(
             more.iter()
-                .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("HOME"))
-                .count(),
-            1
+                .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://proxy")
         );
     }
 
