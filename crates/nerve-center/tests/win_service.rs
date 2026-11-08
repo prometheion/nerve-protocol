@@ -389,8 +389,7 @@ fn the_center_runs_as_a_windows_service() {
         // service is never left down for the day (round 2, correctness 3).
         let restarts: Vec<&str> = failure
             .lines()
-            .filter(|l| l.contains("RESTART -- Delay"))
-            .map(str::trim)
+            .filter_map(|l| l.find("RESTART -- Delay").map(|at| l[at..].trim()))
             .collect();
         assert_eq!(
             restarts,
