@@ -835,8 +835,10 @@ mod tests {
         let mine = d.path().join("mine");
         std::fs::create_dir(&mine).unwrap();
         set_owner(&mine, &me);
+        // This account is the person's own, so the refusal says that one of
+        // their programs made it (foreign_text), not another account.
         let e = private_folder(&mine, &installed).unwrap_err();
-        assert!(e.contains("another account") && e.contains(&me), "{e}");
+        assert!(e.contains("a program of yours made it"), "{e}");
         assert!(admins_folder(&mine).is_err());
         private_folder(&mine, &own).unwrap();
 
