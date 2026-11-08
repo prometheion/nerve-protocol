@@ -280,6 +280,9 @@ pub async fn run(args: Args) -> Result<(), String> {
         ));
     };
     let running = start(&args, lock).await?;
+    // The Windows service runs now; nothing where this is no service.
+    #[cfg(windows)]
+    nerve_service::win::dispatch::running();
     match args.mcp {
         McpMode::Stdio => {
             crate::mcp::serve_stdio(running.center.clone()).await;
@@ -308,7 +311,15 @@ async fn signal() {
             _ = term.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    // The Windows service control manager asks the service to stop.
+    #[cfg(windows)]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = nerve_service::win::dispatch::stop_requested() => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }

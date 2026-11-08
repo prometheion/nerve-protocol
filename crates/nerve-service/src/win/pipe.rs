@@ -21,8 +21,23 @@ pub fn trusted_owner<S: PartialEq>(owner: &S, system: &S, admins: &S, node: Opti
     owner == system || owner == admins || node.is_some_and(|n| owner == n)
 }
 
+/// The name of the pipe `prefix` of a program's state folder `dir`: a hash
+/// of the folder, so the name says nothing of the account's paths and is
+/// never too long. The node's control pipe is named so (`nerve-node`), and
+/// the center's attach pipe (`nerve-center`).
+pub fn name_for(prefix: &str, dir: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, dir.to_lowercase().as_bytes());
+    let hex: String = digest.as_ref()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(r"\\.\pipe\{prefix}-{hex}")
+}
+
 #[cfg(windows)]
-pub use sys::{Descriptor, client_pid, foreign_owner, instance, owner_of};
+pub use sys::{
+    Descriptor, client_pid, foreign_owner, instance, node_owner_check, open_identified, owner_of,
+};
 
 #[cfg(windows)]
 mod sys {
@@ -54,6 +69,12 @@ mod sys {
     unsafe impl Sync for Descriptor {}
 
     impl Descriptor {
+        /// The descriptor, for a call that takes security attributes; it
+        /// lives as long as this.
+        pub fn raw(&self) -> PSECURITY_DESCRIPTOR {
+            self.0
+        }
+
         pub fn from_sddl(sddl: &str) -> io::Result<Descriptor> {
             let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
             // SAFETY: a NUL-terminated SDDL string; the descriptor is freed
@@ -141,6 +162,63 @@ mod sys {
         Ok(sid)
     }
 
+    /// Opens the pipe `name` as a client that the server may identify, not
+    /// act as: a pipe of another account learns who calls, but cannot use
+    /// the caller's rights.
+    pub fn open_identified(
+        name: &str,
+    ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+        use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(name)
+    }
+
+    /// Asks the node Nerve's installer put on this machine, on its control
+    /// pipe, whether the caller is a command it runs (`owner.check`):
+    /// [`nerve_transport::ctl::NOT_RUNNING`] where no node made the pipe.
+    /// A pipe that SYSTEM, the administrators or the node's account `nerve`
+    /// did not make is not asked.
+    pub async fn node_owner_check() -> Result<serde_json::Value, String> {
+        use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
+        let data = std::env::var_os("ProgramData")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| "C:\\ProgramData".into(), std::path::PathBuf::from);
+        let state = data.join(crate::NODE_SERVICE_STATE);
+        // As the node names it: by the folder's real path.
+        let dir = std::fs::canonicalize(&state)
+            .or_else(|_| std::path::absolute(&state))
+            .unwrap_or(state);
+        let name = super::name_for("nerve-node", &dir.to_string_lossy());
+        let mut busy = 0;
+        let client = loop {
+            match open_identified(&name) {
+                Ok(c) => break c,
+                Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+                    return Err(nerve_transport::ctl::NOT_RUNNING.into());
+                }
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && busy < 50 => {
+                    busy += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => return Err(format!("cannot ask the node on {name}: {e}")),
+            }
+        };
+        let nerve = crate::win::sid::sid_of("nerve").ok();
+        let raw = std::os::windows::io::AsRawHandle::as_raw_handle(&client);
+        let foreign = foreign_owner(raw as HANDLE, nerve.as_deref())
+            .map_err(|e| format!("cannot check the node's control pipe {name}: {e}"))?;
+        if foreign.is_some() {
+            return Err(format!(
+                "the control pipe {name} is not the node's, so nothing was asked on it; restart the node and run this again"
+            ));
+        }
+        let call = nerve_transport::ctl::call_on(client, "owner.check", serde_json::json!({}));
+        tokio::time::timeout(nerve_transport::ctl::ANSWER_WAIT, call)
+            .await
+            .map_err(|_| nerve_transport::ctl::NO_ANSWER.to_string())?
+    }
+
     /// The owner of the pipe `pipe` is open on when it is none of SYSTEM,
     /// the administrators and `account`, who alone may be trusted with what
     /// is sent on it: another account cannot make an object one of them owns.
@@ -173,6 +251,25 @@ mod tests {
         for other in ["WD", "BU", "AU", "NU", "AC", "S-1-15-"] {
             assert!(!dacl_text(nerve).contains(other), "{other}");
         }
+    }
+
+    /// A pipe's name hides the folder, holds no case of it, and differs per
+    /// program and folder.
+    #[test]
+    fn a_pipe_is_named_by_a_hash_of_its_folder() {
+        let a = name_for("nerve-center", r"C:\Users\Alice\AppData\Local\nerve-center");
+        assert!(a.starts_with(r"\\.\pipe\nerve-center-"), "{a}");
+        assert_eq!(a.len(), r"\\.\pipe\nerve-center-".len() + 32);
+        assert!(!a.contains("Alice"));
+        assert_eq!(
+            a,
+            name_for("nerve-center", r"c:\users\alice\appdata\local\nerve-center")
+        );
+        assert_ne!(
+            a,
+            name_for("nerve-node", r"C:\Users\Alice\AppData\Local\nerve-center")
+        );
+        assert_ne!(a, name_for("nerve-center", r"C:\other"));
     }
 
     /// The CLI talks to a pipe only when SYSTEM, the administrators or the

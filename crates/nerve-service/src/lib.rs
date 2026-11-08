@@ -239,21 +239,38 @@ pub fn failure(o: &std::process::Output) -> String {
 /// Refuses a service command that a command the node runs for a center
 /// runs, asking the nodes at the control sockets `sockets`: an agent cannot
 /// replace or remove the node or the center that way. A node that does not
-/// run, or does not know the question, runs no such command.
+/// run, or does not know the question, runs no such command. On Windows the
+/// installed node is asked on its control pipe instead ([`NODE_SERVICE_STATE`]).
 pub async fn owner_check(sockets: &[PathBuf]) -> Result<(), String> {
     #[cfg(unix)]
     for s in sockets {
-        match nerve_transport::ctl::call(s, "owner.check", serde_json::json!({})).await {
-            Ok(_) => {}
-            // No node runs, so no command of one does.
-            Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {}
-            // A node that does not know the method cannot answer it. It is let
-            // through.
-            Err(e) if e.starts_with("unknown method") => {}
-            Err(e) => return Err(e),
-        }
+        let answer = nerve_transport::ctl::call(s, "owner.check", serde_json::json!({})).await;
+        owner_answer(answer)?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = sockets;
+        owner_answer(win::pipe::node_owner_check().await)?;
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = sockets;
     Ok(())
 }
+
+/// What a node's answer to `owner.check` lets through.
+fn owner_answer(answer: Result<serde_json::Value, String>) -> Result<(), String> {
+    match answer {
+        Ok(_) => Ok(()),
+        // No node runs, so no command of one does.
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(()),
+        // A node that does not know the method cannot answer it. It is let
+        // through.
+        Err(e) if e.starts_with("unknown method") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The state folder of the node Nerve's installer puts on a Windows machine,
+/// below `program_data` (`%ProgramData%`); the name of its control pipe
+/// comes from it.
+pub const NODE_SERVICE_STATE: &str = "Nerve\\state";

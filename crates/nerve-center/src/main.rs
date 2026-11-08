@@ -8,6 +8,15 @@ use clap::{CommandFactory, FromArgMatches};
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
     let layout = nerve_center::service::Layout::system();
+    // The Windows service reads its settings from its own file, as systemd
+    // gives the Linux one its own: before anything reads the environment.
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).is_some_and(|a| a == "service")
+        && let Err(e) = nerve_center::win_host::take_settings(&layout)
+    {
+        eprintln!("nerve-center: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     // A setting given by an old name would be dropped without a word.
     if let Err(e) =
         nerve_center::config::refuse_old_names(|k| std::env::var(k).ok(), &layout.settings())
@@ -17,6 +26,17 @@ fn main() -> std::process::ExitCode {
     }
     let matches = nerve_center::config::Args::command().get_matches();
     let args = nerve_center::config::Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if args.cmd == Some(Cmd::Service) {
+        #[cfg(windows)]
+        return nerve_center::win_host::serve(args);
+        #[cfg(not(windows))]
+        {
+            eprintln!(
+                "nerve-center: `service` is how Windows starts the installed center; on Linux systemd starts `nerve-center` itself"
+            );
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     // `backup`, `restore`, `owner-token` and `status` are the owner's, run
     // by hand: no log, no server; on the installed center's folder where it
     // is installed.

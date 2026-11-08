@@ -186,9 +186,9 @@ pub struct Args {
 /// `nerve-center` runs the center.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Cmd {
-    /// Run the center as a service (as root)
+    /// Run the center as a service (as root or an administrator)
     ///
-    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root). --name, --public-url and --listen go into its settings.
+    /// Install the center as a service that starts with the machine and runs under an account of its own, with MCP over HTTP (Linux with systemd, as root; Windows, in an administrator's terminal). --name, --public-url and --listen go into its settings.
     Install,
     /// Show whether the center runs, its URLs and its machines
     ///
@@ -248,6 +248,11 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
+    /// Run as the Windows service (the service control manager starts it so)
+    ///
+    /// Run the center as the Windows service `install` registered, with the settings of its `center.env`. Only the service control manager starts it so.
+    #[command(hide = true)]
+    Service,
     /// Print the files of the service this program installs, as JSON (for `update`)
     ///
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.

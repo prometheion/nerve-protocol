@@ -7,7 +7,7 @@
 //! web UI. Its only subcommands are the
 //! owner's: `backup` and `restore` ([`backup`]), `owner-token` ([`owner`]),
 //! and `install`, `update` and `uninstall`, which run it as a service on
-//! Linux ([`service`]).
+//! Linux ([`service`]) and Windows ([`winsvc`]).
 //
 // Harnesses get Nerve through MCP only: this MCP server is the whole
 // integration surface. Native plugins are a backlog item.
@@ -33,3 +33,6 @@ pub mod streams;
 pub mod tools;
 pub mod ui;
 pub mod util;
+#[cfg(windows)]
+pub mod win_host;
+pub mod winsvc;

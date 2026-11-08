@@ -1,0 +1,256 @@
+//! A program run without the administrators' rights by a command that has
+//! them, as `update` asks a downloaded program its version before it puts
+//! it in place: a token made from this process's own with every privilege
+//! but one taken and the Administrators group for denying only.
+
+use std::io::{self, Read};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::Path;
+use std::time::Duration;
+
+use windows_sys::Win32::Foundation::{
+    HANDLE, HANDLE_FLAG_INHERIT, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows_sys::Win32::Security::{
+    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+    PSID, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl,
+    TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
+};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CreateProcessAsUserW, GetExitCodeProcess, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+};
+
+use crate::win::process::{token, token_info};
+use crate::win::sid::{sid_text, well_known_sid, wide};
+
+fn last() -> io::Error {
+    io::Error::last_os_error()
+}
+
+/// This process's token without the administrators' rights. What it makes
+/// belongs to its user and is open to that user and SYSTEM, as an
+/// administrator's own token would give it to the Administrators group:
+/// the program could not open its own process then.
+fn restricted() -> io::Result<OwnedHandle> {
+    let own = token(
+        None,
+        TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT,
+    )?;
+    let admins = well_known_sid(WinBuiltinAdministratorsSid)?;
+    let deny = [SID_AND_ATTRIBUTES {
+        Sid: admins.as_ptr() as PSID,
+        Attributes: 0,
+    }];
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: an open token, one SID to deny, a place for the new token.
+    if unsafe {
+        CreateRestrictedToken(
+            own.as_raw_handle(),
+            DISABLE_MAX_PRIVILEGE,
+            1,
+            deny.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            &mut h,
+        )
+    } == 0
+    {
+        return Err(last());
+    }
+    // SAFETY: the token the call made, owned from here.
+    let t = unsafe { OwnedHandle::from_raw_handle(h) };
+    let user = token_info(&own, TokenUser)?;
+    // SAFETY: the buffer holds a TOKEN_USER, whose SID points into it.
+    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let owner = TOKEN_OWNER { Owner: sid };
+    // SAFETY: the new token, opened with every right, and a TOKEN_OWNER.
+    if unsafe {
+        SetTokenInformation(
+            t.as_raw_handle(),
+            TokenOwner,
+            (&raw const owner).cast(),
+            std::mem::size_of::<TOKEN_OWNER>() as u32,
+        )
+    } == 0
+    {
+        return Err(last());
+    }
+    // SAFETY: a valid SID, read while the buffer lives.
+    let me = unsafe {
+        std::slice::from_raw_parts(
+            sid.cast::<u8>(),
+            windows_sys::Win32::Security::GetLengthSid(sid) as usize,
+        )
+    };
+    let me = sid_text(me).map_err(io::Error::other)?;
+    let sddl = wide(format!("D:(A;;GA;;;{me})(A;;GA;;;SY)"));
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated SDDL string; the descriptor is freed below.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(last());
+    }
+    let (mut present, mut defaulted) = (0, 0);
+    let mut dacl = std::ptr::null_mut();
+    // SAFETY: the descriptor just made; the DACL points into it, which is
+    // freed once it was set.
+    let r = unsafe {
+        if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 {
+            Err(last())
+        } else {
+            let d = TOKEN_DEFAULT_DACL { DefaultDacl: dacl };
+            if SetTokenInformation(
+                t.as_raw_handle(),
+                TokenDefaultDacl,
+                (&raw const d).cast(),
+                std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
+            ) == 0
+            {
+                Err(last())
+            } else {
+                Ok(())
+            }
+        }
+    };
+    // SAFETY: the descriptor from the conversion, freed once.
+    unsafe { LocalFree(sd) };
+    r.map(|()| t)
+}
+
+/// `program` with `args` in Windows' quoting: each in quotes that has a
+/// space or none at all.
+fn command_line(program: &Path, args: &[&str]) -> String {
+    let quote = |s: &str| {
+        if s.is_empty() || s.contains([' ', '\t']) {
+            format!("\"{s}\"")
+        } else {
+            s.to_string()
+        }
+    };
+    std::iter::once(format!("\"{}\"", program.display()))
+        .chain(args.iter().map(|a| quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Runs `program` with `args` (plain words, a path at most) without the
+/// administrators' rights, no longer than `limit`: its exit code and the
+/// first 64 KiB of its output. Its error output goes nowhere.
+pub fn output_of(program: &Path, args: &[&str], limit: Duration) -> io::Result<(u32, Vec<u8>)> {
+    let t = restricted()?;
+    let (mut reader, writer) = std::io::pipe()?;
+    let w = writer.as_raw_handle();
+    // The one handle the program gets: its output.
+    // SAFETY: an open handle of this process.
+    if unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+        return Err(last());
+    }
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESTDHANDLES,
+        hStdInput: std::ptr::null_mut(),
+        hStdOutput: w,
+        hStdError: std::ptr::null_mut(),
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    let mut line = wide(command_line(program, args));
+    // SAFETY: the restricted token, a writable command line, the startup
+    // information with the inheritable output handle; the handles the call
+    // returns are closed below.
+    let ok = unsafe {
+        CreateProcessAsUserW(
+            t.as_raw_handle(),
+            std::ptr::null(),
+            line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            CREATE_NO_WINDOW,
+            std::ptr::null(),
+            std::ptr::null(),
+            &si,
+            &mut pi,
+        )
+    };
+    // Only the program holds the pipe's end now, so reading ends with it.
+    drop(writer);
+    if ok == 0 {
+        return Err(last());
+    }
+    // SAFETY: handles the call returned, owned from here.
+    let (process, _thread) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(pi.hProcess),
+            OwnedHandle::from_raw_handle(pi.hThread),
+        )
+    };
+    let read = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = reader.by_ref().take(64 * 1024).read_to_end(&mut b);
+        b
+    });
+    let ms = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: an open process handle.
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), ms) } != WAIT_OBJECT_0 {
+        // SAFETY: as above.
+        unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+        let _ = read.join();
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "it did not end in time",
+        ));
+    }
+    let mut code = 0u32;
+    // SAFETY: an open process that ended, and a place for its code.
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+        return Err(last());
+    }
+    Ok((code, read.join().unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program run so says what it is asked, and is no administrator:
+    /// `whoami /groups` shows the Administrators group for denying only.
+    /// The tests run as an administrator.
+    #[test]
+    fn a_program_runs_without_the_administrators_rights() {
+        let cmd = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+        )
+        .join("System32")
+        .join("whoami.exe");
+        let (code, out) = output_of(&cmd, &["/groups"], Duration::from_secs(30)).unwrap();
+        assert_eq!(code, 0);
+        let out = String::from_utf8_lossy(&out);
+        // S-1-5-32-544, the Administrators group, held for deny only where
+        // it is held at all.
+        if let Some(line) = out.lines().find(|l| l.contains("S-1-5-32-544")) {
+            assert!(
+                line.contains("Group used for deny only") || line.contains("deny"),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            command_line(Path::new("C:\\a b\\p.exe"), &["--version", "x y"]),
+            "\"C:\\a b\\p.exe\" --version \"x y\""
+        );
+    }
+}
