@@ -656,6 +656,20 @@ pub fn folder_sets(
     protected: &Protected,
     writable: &[PathBuf],
 ) -> FolderSets {
+    folder_sets_closing(policy, home, protected, writable, &[])
+}
+
+/// [`folder_sets`] where a folder split around a protected entry gives
+/// nothing at or inside `closed` (the places of the folders closed to the
+/// container, [`container_grants`]): an entry of the split would carry the
+/// granted folder's flags.
+fn folder_sets_closing(
+    policy: &CenterPolicy,
+    home: &Path,
+    protected: &Protected,
+    writable: &[PathBuf],
+    closed: &[PathBuf],
+) -> FolderSets {
     // The boundary is judged by resolved places, so a writable folder
     // reached by one spelling catches a folder configured by another.
     let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
@@ -712,7 +726,7 @@ pub fn folder_sets(
             .filter(|(a, _)| f(*a))
             .map(|(_, p)| p.clone())
             .collect();
-        leave_protected_out(&granted, protected, write)
+        leave_protected_out_closing(&granted, protected, write, closed)
     };
     FolderSets {
         read: folders(&|a| a.read, false),
@@ -788,10 +802,37 @@ pub fn container_grants(
     writable: &[PathBuf],
 ) -> Vec<(PathBuf, Access)> {
     let protected = Protected::new(platform, home, own, &policy.protected);
-    let f = folder_sets(policy, home, &protected, writable);
+    let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
+    // A folder without a flag inside a granted one is closed to the
+    // container, whatever it inherits from the folder around (#149). Its
+    // place is found first: a granted folder split around a protected entry
+    // or an own folder hands its flags to its entries, and none of them may
+    // be a closed one.
+    let closed: Vec<(PathBuf, PathBuf, bool)> = policy
+        .folders
+        .iter()
+        .filter(|f| f.access == Access::NONE)
+        .filter_map(|f| {
+            let spelled = expand(home, &f.path)?;
+            let (path, placed) = closed_place(policy, &f.path, &spelled, &bounds, real, |p| {
+                nerve_policy::paths::remote_link(p).is_some()
+            })?;
+            Some((path, spelled, placed))
+        })
+        .collect();
+    // Where the place is not sure, where the folder resolves now is left
+    // out of a split too.
+    let mut skip: Vec<PathBuf> = closed.iter().map(|(p, _, _)| p.clone()).collect();
+    skip.extend(
+        closed
+            .iter()
+            .filter(|(_, _, placed)| !placed)
+            .map(|(_, s, _)| real(s)),
+    );
+    let f = folder_sets_closing(policy, home, &protected, writable, &skip);
     let mut out: Vec<(PathBuf, Access)> = Vec::new();
     for (set, flag) in [(f.read, 'r'), (f.write, 'w'), (f.exec, 'x')] {
-        for p in leave_out(&set, own) {
+        for p in leave_out_closing(&set, own, &skip) {
             let i = match out.iter().position(|(q, _)| within(q, &p) && within(&p, q)) {
                 Some(i) => i,
                 None => {
@@ -807,52 +848,85 @@ pub fn container_grants(
             }
         }
     }
-    // A folder without a flag inside a granted one is closed to the
-    // container, whatever it inherits from the folder around (#149): it
-    // gets an entry of no flag, which denies every right.
-    let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
-    for f in policy.folders.iter().filter(|f| f.access == Access::NONE) {
-        let Some(spelled) = expand(home, &f.path) else {
-            continue;
+    // A closed folder gets an entry of no flag, which denies every right.
+    // Where its place is not sure (the walk could not judge it, or it was
+    // replaced), whether it lies inside a granted folder is also asked of
+    // where it resolves now: one entry too many stops the pairing's
+    // commands at worst (`crate::grants::Synced::unclosed`), one too few
+    // takes the denying entry off a folder a command renamed.
+    for (path, spelled, placed) in closed {
+        let granted = |p: &Path| {
+            out.iter()
+                .any(|(q, a)| *a != Access::NONE && within(p, q) && !within(q, p))
         };
-        // A link to another machine: no container reaches a share (#149's
-        // probe), and the sync would follow it to put the entry on.
-        if nerve_policy::paths::remote_link(&spelled).is_some() {
-            continue;
-        }
-        // A closed folder lies inside a granted one, so commands may have
-        // put a link at its path or above it, as for the granted folders
-        // ([`led_away`], [`replaced`]). Followed, it would move the entry
-        // to where the link leads, and the folder the owner closed, which a
-        // command may have renamed meanwhile, would lose its own
-        // (crate::grants::sync). So the entry stays at the path as spelled
-        // from that link on: the sync finds the link there and refuses it,
-        // and the pairing's commands stop until the link is gone.
-        let resolved = real(&spelled);
-        let path = match walk_to(&spelled, &bounds, real) {
-            Ok(_) => match replaced(policy, &f.path, &resolved) {
-                Some(why) => {
-                    tracing::warn!("folder {} is closed at its path as given: {why}", f.path);
-                    spelled
-                }
-                None => resolved,
-            },
-            Err((why, at)) => {
-                tracing::warn!("folder {} is closed at its path as given: {why}", f.path);
-                at.unwrap_or(spelled)
-            }
-        };
-        let inside = out
+        let inside = granted(&path) || (!placed && granted(&real(&spelled)));
+        match out
             .iter()
-            .any(|(q, a)| *a != Access::NONE && within(&path, q) && !within(q, &path));
-        let listed = out
-            .iter()
-            .any(|(q, _)| within(q, &path) && within(&path, q));
-        if inside && !listed {
-            out.push((path, Access::NONE));
+            .position(|(q, _)| within(q, &path) && within(&path, q))
+        {
+            // The same place granted by another spelling: closed wins.
+            Some(i) => out[i].1 = Access::NONE,
+            None if inside => out.push((path, Access::NONE)),
+            None => {}
         }
     }
     out
+}
+
+/// Where the closed folder `spelled` (configured as `given`, `~` expanded)
+/// gets its denying entry, and whether that is the place the walk found;
+/// `None` where it gets none. `real` resolves the folder that holds a link
+/// for the walk, `remote` tells a path with a link to another machine on
+/// its way; the tests replace both.
+///
+/// A closed folder lies inside a granted one, so commands may have put a
+/// link at its path or above it, as for the granted folders ([`led_away`],
+/// [`replaced`]). Followed, it would move the entry to where the link
+/// leads, and the folder the owner closed, which a command may have renamed
+/// meanwhile, would lose its own (crate::grants::sync). So the place is
+/// the walk's ([`walk_to`]), the only look at the path: a link inside a `w`
+/// folder keeps the entry at the path as spelled from that link on, where
+/// the sync finds the link and refuses it, and the pairing's commands stop
+/// until the link is gone; whatever that link's target, also one on another
+/// machine. Otherwise the owner's links are followed, also where the folder
+/// itself is gone (renamed), so it stays the place the granted folder
+/// around it resolves to. A path with an owner's link to another machine
+/// gets none: no container reaches a share (#149's probe), and the sync
+/// would follow it to put the entry on.
+fn closed_place(
+    policy: &CenterPolicy,
+    given: &str,
+    spelled: &Path,
+    bounds: &[PathBuf],
+    real: impl Fn(&Path) -> PathBuf,
+    remote: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, bool)> {
+    let far = remote(spelled);
+    // Short names are written out as `folder add` stores them, but not
+    // through a link to another machine, which that would follow.
+    let long = if far {
+        spelled.to_path_buf()
+    } else {
+        long_names(spelled)
+    };
+    match walk_to(&long, bounds, &real) {
+        Err((why, Some(at))) => {
+            tracing::warn!("folder {given} is closed at its path as given: {why}");
+            Some((at, true))
+        }
+        _ if far => None,
+        Ok(walked) => match replaced(policy, given, &walked) {
+            Some(why) => {
+                tracing::warn!("folder {given} is closed at its path as given: {why}");
+                Some((spelled.to_path_buf(), false))
+            }
+            None => Some((walked, true)),
+        },
+        Err((why, None)) => {
+            tracing::warn!("folder {given} is closed at its path as given: {why}");
+            Some((spelled.to_path_buf(), false))
+        }
+    }
 }
 
 /// `p` resolved, as the policy compares paths (on Windows without the
@@ -1343,6 +1417,11 @@ fn steps(p: &Path) -> Vec<Step> {
 /// rule's path; an entry that is a symlink to or around an own folder is
 /// dropped as well.
 pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
+    leave_out_closing(paths, own, &[])
+}
+
+/// [`leave_out`], whose split gives nothing at or inside `closed`.
+fn leave_out_closing(paths: &[PathBuf], own: &[PathBuf], closed: &[PathBuf]) -> Vec<PathBuf> {
     let own: Vec<PathBuf> = own.iter().map(|o| real(o)).collect();
     let mut out = Vec::new();
     for p in paths {
@@ -1353,7 +1432,7 @@ pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
         if own.iter().any(|o| within(o, &r)) {
             let inside = |p: &Path| own.iter().any(|o| within(p, o));
             let holds = |p: &Path| own.iter().any(|o| within(o, p));
-            split(&r, &inside, &holds, &mut out);
+            split(&r, &inside, &holds, closed, &mut out);
         } else {
             out.push(p.clone());
         }
@@ -1368,13 +1447,23 @@ pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
 /// stays whole: it is a folder the owner released there, and
 /// `Protected::real_folder` has judged it for its flags.
 pub fn leave_protected_out(paths: &[PathBuf], protected: &Protected, write: bool) -> Vec<PathBuf> {
+    leave_protected_out_closing(paths, protected, write, &[])
+}
+
+/// [`leave_protected_out`], whose split gives nothing at or inside `closed`.
+fn leave_protected_out_closing(
+    paths: &[PathBuf],
+    protected: &Protected,
+    write: bool,
+    closed: &[PathBuf],
+) -> Vec<PathBuf> {
     let inside = |p: &Path| protected.in_entry(p, write);
     let holds = |p: &Path| protected.holds_entry(p, write);
     let mut out = Vec::new();
     for p in paths {
         let r = real(p);
         if !inside(&r) && holds(&r) {
-            split(&r, &inside, &holds, &mut out);
+            split(&r, &inside, &holds, closed, &mut out);
         } else {
             out.push(p.clone());
         }
@@ -1385,11 +1474,14 @@ pub fn leave_protected_out(paths: &[PathBuf], protected: &Protected, write: bool
 /// Pushes the entries of `dir` (which holds a folder to leave out) that hold
 /// none, and goes down into the ones that do. `inside` says whether a
 /// resolved path is such a folder or inside one, `holds` whether one lies
-/// below it.
+/// below it. An entry at or inside a `closed` folder, as named or resolved,
+/// is left out as well: it is closed to the container, and pushed it would
+/// carry the flags of the folder split.
 fn split(
     dir: &Path,
     inside: &dyn Fn(&Path) -> bool,
     holds: &dyn Fn(&Path) -> bool,
+    closed: &[PathBuf],
     out: &mut Vec<PathBuf>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1400,11 +1492,12 @@ fn split(
         let link = e.file_type().is_ok_and(|t| t.is_symlink());
         let r = real(&path);
         let held = holds(&r);
-        if inside(&r) || (held && link) {
+        let shut = closed.iter().any(|c| within(&r, c) || within(&path, c));
+        if inside(&r) || shut || (held && link) {
             continue;
         }
         if held {
-            split(&r, inside, holds, out);
+            split(&r, inside, holds, closed, out);
         } else {
             out.push(path);
         }
@@ -4381,6 +4474,60 @@ mod tests {
         // the one inside is not.
         assert_eq!(walk_by(&outside.join("name"), &w, real), Ok(docs.clone()));
         assert!(walk_by(&x.join("name"), &w, real).is_err());
+    }
+
+    /// A closed folder's place is the walk's, its only look at the path: a
+    /// link inside a `w` folder keeps the entry at the link's path whatever
+    /// that link's target, also one the remote check calls another
+    /// machine's; a resolution that leads elsewhere than the walk (a link
+    /// put at the path between two looks, played here) does not move it;
+    /// and only an owner's link to another machine leaves it out.
+    #[test]
+    fn a_closed_folder_is_closed_where_the_walk_finds_it() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        let (secret, decoy) = (work.join("secret"), work.join("decoy"));
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        let policy = CenterPolicy::default();
+        let given = secret.display().to_string();
+        let w = [work.clone()];
+        let never: fn(&Path) -> bool = |_| false;
+        let always: fn(&Path) -> bool = |_| true;
+
+        // No link: the walk's place.
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, real, never),
+            Some((secret.clone(), true))
+        );
+        // A resolution that leads elsewhere does not move it.
+        let elsewhere = |p: &Path| {
+            if p == secret.as_path() {
+                decoy.clone()
+            } else {
+                real(p)
+            }
+        };
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, elsewhere, never),
+            Some((secret.clone(), true))
+        );
+        // An owner's link to another machine: none.
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, real, always),
+            None
+        );
+        // A command's link at the path, inside the `w` folder: kept at the
+        // link, also where its target counts as another machine's.
+        std::fs::rename(&secret, work.join("renamed")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &secret).unwrap();
+        for remote in [never, always] {
+            assert_eq!(
+                closed_place(&policy, &given, &secret, &w, real, remote),
+                Some((secret.clone(), true))
+            );
+        }
     }
 
     /// `lands_at` follows a path a link at a time and answers with the first

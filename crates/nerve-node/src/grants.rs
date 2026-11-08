@@ -4524,6 +4524,80 @@ mod tests {
         assert_eq!(both[0].access, Access::parse("rw").unwrap());
     }
 
+    /// A granted folder that holds a protected entry is split into its
+    /// other entries, each with its flags; a closed folder among them, or
+    /// one that holds the protected entry itself, takes none of them: no
+    /// grant with a flag at or inside it, for the container or the command
+    /// account.
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_folder_takes_no_flags_from_a_split_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let home = root.join("home");
+        let work = root.join("work");
+        for p in [
+            home.join(".ssh"),
+            home.join("pub"),
+            home.join("private/deep"),
+            work.join("deploy"),
+            work.join("pub"),
+            work.join("private/deep"),
+        ] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(work.join("deploy/prod.key"), "").unwrap();
+        std::fs::write(work.join("private/prod.key"), "").unwrap();
+        let paths = NodePaths::new(root.join("cfg"), root.join("state"));
+        let run = "S-1-5-21-1-2-3-1011";
+        let cases: [(&Path, &str); 3] = [
+            // The home holds `.ssh`.
+            (&home, ""),
+            // An extra protected path beside the closed folder.
+            (&work, "deploy/prod.key"),
+            // One inside it: the split would go down into it.
+            (&work, "private/prod.key"),
+        ];
+        for (granted, extra) in cases {
+            let private = granted.join("private");
+            let mut lab = center("lab", &[(granted, "rw"), (&private, "")]);
+            if !extra.is_empty() {
+                lab.policy.protected.extra = vec![granted.join(extra).display().to_string()];
+            }
+            let mut cfg = NodeConfig::default();
+            cfg.centers.push(lab);
+            let want = wanted_on(Some(run), &cfg, &paths, &home, &Platform::Unix);
+            assert!(
+                want.iter()
+                    .any(|g| g.path == granted.join("pub") && g.access != Access::NONE),
+                "{extra}: split: {want:?}"
+            );
+            assert!(
+                !want
+                    .iter()
+                    .any(|g| g.path.starts_with(&private) && g.access != Access::NONE),
+                "{extra}: {want:?}"
+            );
+        }
+        // Granted by another spelling of its place (a link of the owner's)
+        // as well: closed wins.
+        let private = work.join("private");
+        std::os::unix::fs::symlink(&work, root.join("link")).unwrap();
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(center(
+            "lab",
+            &[
+                (&work, "rw"),
+                (&private, ""),
+                (&root.join("link/private"), "r"),
+            ],
+        ));
+        let want = wanted(&cfg, &paths, &home, &Platform::Unix);
+        let at: Vec<_> = want.iter().filter(|g| g.path == private).collect();
+        assert_eq!(at.len(), 1, "{want:?}");
+        assert_eq!(at[0].access, Access::NONE, "{want:?}");
+    }
+
     /// A closed folder's denying entry is held back where a file below it
     /// has another name (a local `git clone` links its objects), as any
     /// change of a folder commands write in: the file's list would be
@@ -4646,7 +4720,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_link_at_a_closed_folders_path_does_not_move_its_entry() {
-        for owners_link in [false, true] {
+        // The last two only rename the closed folder: with the granted
+        // folder named through a link of the owner's, the closed one is
+        // still found where that link leads, gone as it is.
+        for (owners_link, put_link) in [(false, true), (true, true), (true, false), (false, false)]
+        {
             let d = tempfile::tempdir().unwrap();
             let root = std::fs::canonicalize(d.path()).unwrap();
             let work = root.join("work");
@@ -4681,21 +4759,23 @@ mod tests {
             assert_eq!(f.on(&s(&secret)), none(), "{:?}", f.all());
 
             std::fs::rename(&secret, &renamed).unwrap();
-            std::fs::create_dir(&decoy).unwrap();
-            std::os::unix::fs::symlink(&decoy, &secret).unwrap();
             f.mv(&s(&secret), &s(&renamed));
-            f.make(&s(&decoy));
-            f.make(&s(&secret));
-            f.foreign.push(secret.clone());
+            if put_link {
+                std::fs::create_dir(&decoy).unwrap();
+                std::os::unix::fs::symlink(&decoy, &secret).unwrap();
+                f.make(&s(&decoy));
+                f.make(&s(&secret));
+                f.foreign.push(secret.clone());
+            }
             let now = want();
             let closed: Vec<_> = now.iter().filter(|g| g.access == Access::NONE).collect();
-            assert_eq!(closed.len(), 1, "{now:?}");
-            assert_eq!(closed[0].path, secret, "{now:?}");
+            assert_eq!(closed.len(), 1, "{owners_link} {put_link}: {now:?}");
+            assert_eq!(closed[0].path, secret, "{owners_link} {put_link}: {now:?}");
             for _ in 0..2 {
                 let synced = sync(&file, &now, &mut f);
                 assert_eq!(f.on(&s(&renamed)), none(), "{:?}", f.all());
                 assert!(f.on(&s(&decoy)).is_empty(), "{:?}", f.all());
-                assert!(synced.refusal(&lab).is_some(), "{synced:?}");
+                assert_eq!(synced.refusal(&lab).is_some(), put_link, "{synced:?}");
             }
         }
     }

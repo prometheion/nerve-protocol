@@ -424,9 +424,13 @@ runs in the container as well, unless the pairing runs as you.
   same pairing is granted, or above one, that place gets no entry, and the
   pairing's commands do not run until the folder is moved back or you open
   it. A link a command puts at a closed folder's path, or above it inside
-  a folder commands may write, is not followed: the folder stays closed
-  where it is, the link gets no entry, and the pairing's commands do not
-  run until the link is gone.
+  a folder commands may write, is not followed, whatever it points at
+  (another machine too): the folder stays closed where it is, the link gets
+  no entry, and the pairing's commands do not run until the link is gone.
+  A granted folder that holds a protected entry (your home holds `.ssh`) is
+  given as its other entries, each with its flags; a closed folder among
+  them gets none, nor does anything in it. A folder both granted (by
+  another spelling, through a link of yours) and closed is closed.
 - A link to another machine (a symbolic link to `\\server\share`) is never
   followed by the node: its walks, the paths of a call and the changes of
   the folders' entries stop there, refused, and a folder closed there gets
