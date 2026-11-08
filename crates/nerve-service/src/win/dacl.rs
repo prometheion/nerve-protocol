@@ -189,6 +189,30 @@ pub fn mine_may_own(sddl: &str) -> bool {
     !sddl.starts_with("O:")
 }
 
+/// Why an existing private folder is refused for its owner: `own` when it
+/// is this process's own account (a program of the same person, started
+/// without Run as administrator, made it, an agent's shell command among
+/// them), else another account, named by `who`.
+pub fn foreign_text(own: bool, who: &str) -> String {
+    if own {
+        "a program of yours made it without Run as administrator (an agent's shell command could), and could open it again; delete it, then run this again".into()
+    } else {
+        format!(
+            "another account ({who}) made it, and could open it again; delete it, then run this again"
+        )
+    }
+}
+
+/// Whether a folder with these attributes and reparse tag is a link: a
+/// name-surrogate reparse point (symbolic link, junction). Other reparse
+/// points are plain folders to the user, such as a OneDrive folder (cloud
+/// files tag); a tag that could not be read (`None`) counts as a link.
+pub fn is_link(attributes: u32, tag: Option<u32>) -> bool {
+    const REPARSE_POINT: u32 = 0x400;
+    const NAME_SURROGATE: u32 = 1 << 29;
+    attributes & REPARSE_POINT != 0 && tag.is_none_or(|t| t & NAME_SURROGATE != 0)
+}
+
 /// Makes `dir` a private folder with the DACL `sddl` (and the owner it
 /// names, if any): a new one with it from its first moment, so nobody puts
 /// anything in it first; one there already only when SYSTEM, the
@@ -204,12 +228,11 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
     use crate::win::pipe::Descriptor;
     use crate::win::sid::wide;
     let at = |e: String| format!("{}: {e}", dir.display());
-    if let Some(f) = open_folder(dir, READ_CONTROL | WRITE_DAC)? {
+    if let Some(f) = open_folder(dir, READ_CONTROL | WRITE_DAC, SHARE_ALL)? {
         if let Some(owner) = foreign_owner(&f, mine_may_own(sddl)).map_err(|e| at(e.to_string()))? {
             let who = crate::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
-            return Err(at(format!(
-                "another account ({who}) made it, and could open it again; delete it, then run this again"
-            )));
+            let own = crate::win::process::user_of(None).is_ok_and(|me| me == owner);
+            return Err(at(foreign_text(own, &who)));
         }
         return set_on(&f, sddl).map_err(at);
     }
@@ -231,6 +254,36 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The share mode of the opens that let others do what they like with the
+/// folder meanwhile.
+#[cfg(windows)]
+const SHARE_ALL: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+
+/// Opens the folder `dir`, which [`private_folder`] just made, and holds it:
+/// nobody can rename or delete it (share mode without delete) while the
+/// returned handle lives, so a path below it keeps meaning this folder. A
+/// link, or a folder that is not SYSTEM's, the administrators' or this
+/// account's, is refused.
+#[cfg(windows)]
+pub fn hold_folder(dir: &Path) -> Result<std::fs::File, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    };
+    let at = |e: String| format!("{}: {e}", dir.display());
+    let Some(f) = open_folder(dir, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE)? else {
+        return Err(at("it is not there".into()));
+    };
+    if foreign_owner(&f, true)
+        .map_err(|e| at(e.to_string()))?
+        .is_some()
+    {
+        return Err(at("another account owns it".into()));
+    }
+    Ok(f)
+}
+
 /// Refuses `dir` unless it is a folder, no link, that SYSTEM or the
 /// administrators own: what the installed service checks of its folders
 /// before it reads its settings, so a folder put in their place after the
@@ -239,7 +292,7 @@ pub fn private_folder(dir: &Path, sddl: &str) -> Result<(), String> {
 pub fn admins_folder(dir: &Path) -> Result<(), String> {
     use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
     let at = |e: String| format!("{}: {e}", dir.display());
-    let Some(f) = open_folder(dir, READ_CONTROL)? else {
+    let Some(f) = open_folder(dir, READ_CONTROL, SHARE_ALL)? else {
         return Err(at("it is not there; `nerve-center install` makes it".into()));
     };
     if let Some(owner) = foreign_owner(&f, false).map_err(|e| at(e.to_string()))? {
@@ -254,16 +307,15 @@ pub fn admins_folder(dir: &Path) -> Result<(), String> {
 /// Opens the folder `dir` itself, not what a link there points to, for
 /// `access`; `None` when nothing is there. A link or a file is refused.
 #[cfg(windows)]
-fn open_folder(dir: &Path, access: u32) -> Result<Option<std::fs::File>, String> {
+fn open_folder(dir: &Path, access: u32, share: u32) -> Result<Option<std::fs::File>, String> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     };
     let at = |e: String| format!("{}: {e}", dir.display());
     let f = match std::fs::OpenOptions::new()
         .access_mode(access)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(share)
         // A folder opens only with the backup flag; a link opens as itself.
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(dir)
@@ -276,13 +328,36 @@ fn open_folder(dir: &Path, access: u32) -> Result<Option<std::fs::File>, String>
         .metadata()
         .map_err(|e| at(e.to_string()))?
         .file_attributes();
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if is_link(attributes, reparse_tag(&f)) {
         return Err(at("it is a link, and a private folder is a folder".into()));
     }
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return Err(at("it is not a folder".into()));
     }
     Ok(Some(f))
+}
+
+/// The reparse tag of the file or folder open as `f`; `None` when it cannot
+/// be read.
+#[cfg(windows)]
+fn reparse_tag(f: &std::fs::File) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo, GetFileInformationByHandleEx,
+    };
+    // SAFETY: plain data that the call fills.
+    let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: an open handle and a buffer of the size given.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle() as HANDLE,
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    (ok != 0).then_some(info.ReparseTag)
 }
 
 /// The owner of the file or folder open as `f` when it is none of SYSTEM,
@@ -365,6 +440,29 @@ mod tests {
     /// already is taken from SYSTEM or the administrators only; this
     /// account's own folders (a harness center's state, the backup's hold)
     /// may be its own (round 3, security 1).
+    #[test]
+    fn only_a_name_surrogate_reparse_point_is_a_link() {
+        // A symbolic link and a junction; a cloud files placeholder; a
+        // plain folder; a tag that cannot be read.
+        assert!(is_link(0x410, Some(0xA000_000C)));
+        assert!(is_link(0x410, Some(0xA000_0003)));
+        assert!(!is_link(0x410, Some(0x9000_001A)));
+        assert!(!is_link(0x10, Some(0)));
+        assert!(!is_link(0x10, None));
+        assert!(is_link(0x410, None));
+    }
+
+    /// The refusal says a program of the person's own made the folder, not
+    /// that an intruder did, where the owner is this account (round 4,
+    /// correctness 2).
+    #[test]
+    fn a_folder_of_one_s_own_is_not_another_account_s() {
+        assert!(foreign_text(true, "S-1-5-21-1").contains("Run as administrator"));
+        assert!(!foreign_text(true, "S-1-5-21-1").contains("another account"));
+        let other = foreign_text(false, "S-1-5-21-1");
+        assert!(other.contains("another account (S-1-5-21-1)"), "{other}");
+    }
+
     #[test]
     fn only_a_folder_of_one_s_own_may_be_one_s_own() {
         let installed = owned_by_admins(&dacl_of(&["SY", "BA"], &[]));

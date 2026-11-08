@@ -161,8 +161,7 @@ fn netsh(args: &[String]) -> Result<String, String> {
 /// folders the install made: one put in their place since (another
 /// account's, or a link) is refused, not read (round 3, security 2).
 pub fn take_settings(layout: &Layout) -> Result<(), String> {
-    nerve_service::win::dacl::admins_folder(&layout.settings_dir)?;
-    nerve_service::win::dacl::admins_folder(&layout.state)?;
+    crate::winsvc::check_folders(layout, nerve_service::win::dacl::admins_folder)?;
     let path = layout.settings();
     let text = crate::winsvc::settings_text(std::fs::read_to_string(&path), &path)?;
     let set = crate::winsvc::settings_env(&text).map_err(|e| format!("{}: {e}", path.display()))?;

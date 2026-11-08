@@ -119,6 +119,18 @@ pub fn node_port(file: &str) -> u16 {
         .map_or(NODE_PORT, |a| a.port())
 }
 
+/// Runs `check` on the folders the service trusts at each start: the
+/// settings folder first (it holds `center.env`), then the state folder;
+/// the first refusal ends it. `take_settings` calls this before it reads
+/// any file (round 4, correctness 1).
+pub fn check_folders(
+    layout: &Layout,
+    check: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    check(&layout.settings_dir)?;
+    check(&layout.state)
+}
+
 /// The text of the settings file `path` as `read` found it. A file that is
 /// not there holds no setting, as systemd's `EnvironmentFile=-` takes the
 /// Linux unit: an administrator who removed it to start over gets the
@@ -951,6 +963,40 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e, NOT_INSTALLED);
+    }
+
+    /// The start checks the settings folder and the state folder, both,
+    /// settings first, and stops at the first refusal (round 4,
+    /// correctness 1).
+    #[test]
+    fn the_start_checks_both_folders_and_stops_at_a_refusal() {
+        let l = layout(Path::new("/x"));
+        let seen = std::cell::RefCell::new(Vec::new());
+        check_folders(&l, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*seen.borrow(), [l.settings_dir.clone(), l.state.clone()]);
+        seen.borrow_mut().clear();
+        let e = check_folders(&l, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            Err("no".into())
+        })
+        .unwrap_err();
+        assert_eq!(e, "no");
+        assert_eq!(
+            seen.borrow().as_slice(),
+            std::slice::from_ref(&l.settings_dir)
+        );
+        assert!(
+            check_folders(&l, |d| if d == l.state {
+                Err("no".into())
+            } else {
+                Ok(())
+            })
+            .is_err()
+        );
     }
 
     /// A start the manager refuses at once (the center ended on a setting

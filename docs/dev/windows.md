@@ -389,7 +389,10 @@ installed program, it moves that aside, and Windows deletes it at its next
 start.
 
 None of `install`, `update` and `uninstall` runs as a command of the
-installed node: the node's control pipe says whether the caller is one.
+installed node: the node's control pipe says whether the caller is one. A
+caller's environment cannot hide the node: where the service manager says
+the node's service runs and its pipe cannot be found, the command is
+refused.
 
 ### A second center attaches
 
@@ -405,8 +408,11 @@ its log; a second center then says whose the pipe is.
 The state folder of a center a harness starts gets an access list of its
 own on Windows: your account, SYSTEM and the administrators, which the owner
 token, the TLS key and the state take. A backup file gets the same from its
-first moment: it is written in a private folder beside it and moved into
-place. On loopback the center counts the process Windows names for the
+first moment: it is written in a private folder beside it, which is held
+open (nobody can rename it) until the file is moved into place. Where the
+installed center's path has no service registered (before the first install,
+after `uninstall` without `--purge`) it is open to the administrators only,
+so run a center or a restore there as an administrator. On loopback the center counts the process Windows names for the
 connection: by its account where the center may open the process (a center
 a harness starts runs as your account and opens yours), else by its session.
 The installed service is no administrator, so it cannot open another

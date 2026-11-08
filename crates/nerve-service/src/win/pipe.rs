@@ -178,10 +178,12 @@ mod sys {
             .open(name)
     }
 
-    /// The folder `%ProgramData%` stands for, as Windows names it: the
-    /// caller's environment says what the caller wants, and a command the
-    /// node runs could set it to a folder with no node in it (round 1,
-    /// security 5). The variable is only the fallback.
+    /// The folder `%ProgramData%` stands for, as Windows names it. The
+    /// caller's environment still reaches this (`SystemDrive` builds the
+    /// path), so a command the node runs could point it at a folder with no
+    /// node in it: the answer is never taken as proof that no node runs
+    /// ([`no_pipe`]; round 4, security 1). The `ProgramData` variable is
+    /// not read at all.
     pub(super) fn program_data() -> std::path::PathBuf {
         use std::os::windows::ffi::OsStringExt;
 
@@ -202,11 +204,24 @@ mod sys {
         });
         // SAFETY: the string from the call (or null), freed once.
         unsafe { CoTaskMemFree(path.cast()) };
-        known.unwrap_or_else(|| {
-            std::env::var_os("ProgramData")
-                .filter(|v| !v.is_empty())
-                .map_or_else(|| "C:\\ProgramData".into(), std::path::PathBuf::from)
-        })
+        known.unwrap_or_else(|| "C:\\ProgramData".into())
+    }
+
+    /// Whether the node's service is registered and not stopped, as the
+    /// service control manager says, whatever the caller's environment
+    /// says. An error reading it counts as running.
+    fn node_service_runs() -> bool {
+        use windows_sys::Win32::System::Services::{
+            SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_STOPPED,
+        };
+        let state = || -> Result<Option<u32>, String> {
+            let m = crate::win::scm::Scm::open(SC_MANAGER_CONNECT)?;
+            match m.service("nerve-node", SERVICE_QUERY_STATUS)? {
+                Some(s) => Ok(Some(s.status()?.dwCurrentState)),
+                None => Ok(None),
+            }
+        };
+        !matches!(state(), Ok(None) | Ok(Some(SERVICE_STOPPED)))
     }
 
     /// Asks the node Nerve's installer put on this machine, on its control
@@ -227,7 +242,7 @@ mod sys {
             match open_identified(&name) {
                 Ok(c) => break c,
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
-                    return Err(nerve_transport::ctl::NOT_RUNNING.into());
+                    return Err(super::no_pipe(node_service_runs()));
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && busy < 50 => {
                     busy += 1;
@@ -261,6 +276,19 @@ mod sys {
         let admins = well_known_sid(WinBuiltinAdministratorsSid)?;
         let account = account.map(<[u8]>::to_vec);
         Ok((!trusted_owner(&owner, &system, &admins, account.as_ref())).then_some(owner))
+    }
+}
+
+/// What a missing control pipe of the node means: "no node runs" only
+/// where the service control manager says its service does not run. A
+/// caller's environment can send the lookup to a folder with no pipe in
+/// it, so the missing pipe alone proves nothing.
+pub fn no_pipe(node_service_runs: bool) -> String {
+    if node_service_runs {
+        "the node's service runs, but its control pipe cannot be found; stop the node, then run this again"
+            .into()
+    } else {
+        nerve_transport::ctl::NOT_RUNNING.into()
     }
 }
 
@@ -316,6 +344,15 @@ mod tests {
         assert_eq!(system, sys::program_data());
         assert!(system.is_absolute());
         assert!(!system.starts_with(r"C:\somewhere-else"));
+    }
+
+    /// A pipe that cannot be found is "no node runs" only for a stopped or
+    /// missing service (round 4, security 1).
+    #[test]
+    fn a_missing_pipe_of_a_running_service_is_a_refusal() {
+        assert_eq!(no_pipe(false), nerve_transport::ctl::NOT_RUNNING);
+        assert_ne!(no_pipe(true), nerve_transport::ctl::NOT_RUNNING);
+        assert!(no_pipe(true).contains("service runs"));
     }
 
     /// The CLI talks to a pipe only when SYSTEM, the administrators or the

@@ -95,7 +95,13 @@ pub fn keeps_installed_dacl(is_the_folder: bool, registered: bool, is_the_servic
 /// what is in it (the owner token, the TLS key, the state) inherits; a
 /// folder another account made is refused. The installed center's folder
 /// keeps the DACL `install` gave it, which its service and the
-/// administrators share (crate::winsvc).
+/// administrators share (crate::winsvc). The installed center's path, while
+/// no service is registered, is the administrators' alone and never names
+/// this account: an administrator's elevated run and the same person's
+/// unelevated programs (an agent's shell command among them) are one
+/// account, and `install` takes the folder as it finds it (round 4,
+/// security 2). An unelevated center is refused there and told to run
+/// `install`.
 pub fn private_state(state: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -109,7 +115,10 @@ pub fn private_state(state: &std::path::Path) -> Result<(), String> {
             nerve_service::win::dispatch::is_service(),
         );
         if !keep {
-            return nerve_service::win::dacl::private_folder(state, &own_dacl()?);
+            return nerve_service::win::dacl::private_folder(
+                state,
+                &state_dacl(is_the_folder, &own_sid()?),
+            );
         }
     }
     nerve_transport::files::create_private_dir(state)
@@ -160,6 +169,16 @@ pub fn write_backup_file(
             nerve_transport::keys::random_token(8)
         ));
         nerve_service::win::dacl::private_folder(&hold, &own_dacl()?)?;
+        // Held until the file is in place: nobody can rename the folder and
+        // put a link of their own under its name (round 4, security 3).
+        let held = nerve_service::win::dacl::hold_folder(&hold);
+        let held = match held {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&hold);
+                return Err(e);
+            }
+        };
         let made = hold.join("backup");
         let done = write_file(&made, bytes, false)
             .and_then(|()| private_file(&made))
@@ -175,6 +194,7 @@ pub fn write_backup_file(
                 std::fs::rename(&made, file)
                     .map_err(|e| format!("cannot write {}: {e}", file.display()))
             });
+        drop(held);
         let _ = std::fs::remove_dir_all(&hold);
         done
     }
@@ -186,15 +206,52 @@ pub fn write_backup_file(
 /// The protected DACL of what this account keeps private on Windows.
 #[cfg(windows)]
 fn own_dacl() -> Result<String, String> {
+    Ok(nerve_service::win::dacl::dacl_of(
+        &[&own_sid()?, "SY", "BA"],
+        &[],
+    ))
+}
+
+/// This account's SID as text.
+#[cfg(windows)]
+fn own_sid() -> Result<String, String> {
     let me = nerve_service::win::process::user_of(None)
         .map_err(|e| format!("cannot read this account's SID: {e}"))?;
-    let me = nerve_service::win::sid::sid_text(&me)?;
-    Ok(nerve_service::win::dacl::dacl_of(&[&me, "SY", "BA"], &[]))
+    nerve_service::win::sid::sid_text(&me)
+}
+
+/// The DACL of a state folder that does not keep the installed one: the
+/// installed center's own path (`is_the_folder`) gets the administrators'
+/// alone, owned by them, so `install` can take it as it is; any other
+/// folder is this account's (`me`), SYSTEM's and the administrators'.
+pub fn state_dacl(is_the_folder: bool, me: &str) -> String {
+    use nerve_service::win::dacl::{dacl_of, owned_by_admins};
+    if is_the_folder {
+        owned_by_admins(&dacl_of(&["SY", "BA"], &[]))
+    } else {
+        dacl_of(&[me, "SY", "BA"], &[])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The installed center's path never names this account while nothing
+    /// is installed, and is owned by the administrators, so an elevated
+    /// run of the same person leaves nothing the unelevated person may
+    /// open (round 4, security 2).
+    #[test]
+    fn the_installed_path_is_never_opened_to_this_account() {
+        let me = "S-1-5-21-1-2-3-1001";
+        let installed = state_dacl(true, me);
+        assert!(!installed.contains(me), "{installed}");
+        assert!(installed.starts_with("O:BAD:P"), "{installed}");
+        assert!(!nerve_service::win::dacl::mine_may_own(&installed));
+        let other = state_dacl(false, me);
+        assert!(other.contains(me), "{other}");
+        assert!(nerve_service::win::dacl::mine_may_own(&other));
+    }
 
     /// A backup file is made once, private, and leaves nothing beside it;
     /// a name taken is kept unless `--overwrite` says otherwise (round 2,

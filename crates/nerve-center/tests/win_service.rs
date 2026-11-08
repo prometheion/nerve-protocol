@@ -807,6 +807,39 @@ if ($wait.Wait(40000)) {{
             std::thread::sleep(Duration::from_secs(2));
         }
 
+        // A settings folder whose owner is none of SYSTEM and the
+        // administrators is not read: the service ends at its start and the
+        // log names the folder (round 4, correctness 1).
+        let _ = system("sc.exe", &["stop", "nerve-center"]);
+        let until = Instant::now() + Duration::from_secs(60);
+        while service_pid().is_some() {
+            assert!(Instant::now() < until, "the service did not stop");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let folder = settings.display().to_string();
+        let _ = system("icacls.exe", &[&folder, "/setowner", "*S-1-5-32-545"]);
+        let _ = system("sc.exe", &["start", "nerve-center"]);
+        let until = Instant::now() + Duration::from_secs(60);
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("another account")
+        {
+            assert!(Instant::now() < until, "the log names no foreign owner");
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains(&folder), "{text}");
+        let _ = system("icacls.exe", &[&folder, "/setowner", "*S-1-5-32-544"]);
+        let until = Instant::now() + Duration::from_secs(120);
+        loop {
+            let _ = system("sc.exe", &["start", "nerve-center"]);
+            if std::net::TcpStream::connect(UI).is_ok() && http("GET", "/", &[], "").0 == 200 {
+                break;
+            }
+            assert!(Instant::now() < until, "the service did not start again");
+            std::thread::sleep(Duration::from_secs(2));
+        }
+
         // The same program again: nothing to update.
         let (ok, said) = center(&["update", "--from", &program().display().to_string()]);
         assert!(ok, "{said}");
