@@ -66,8 +66,7 @@ fn open_lock(state: &Path, create: bool) -> std::io::Result<File> {
 /// Takes the center lock, or `None` when another process holds it: a
 /// center runs there, or a restore.
 pub fn try_lock(state: &Path) -> Result<Option<Lock>, String> {
-    nerve_transport::files::create_private_dir(state)
-        .map_err(|e| format!("cannot create {}: {e}", state.display()))?;
+    crate::util::private_state(state)?;
     let path = state.join(LOCK_FILE);
     let file =
         open_lock(state, true).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
@@ -349,6 +348,37 @@ mod lock_tests {
         drop(lock);
         assert_eq!(runs(&state), Some(false));
         assert!(try_lock(&state).unwrap().is_some());
+    }
+
+    /// On Windows the state folder is this account's, SYSTEM's and the
+    /// administrators' alone, and what is put in it inherits that; a backup
+    /// file gets the same, whatever its folder hands down.
+    #[cfg(windows)]
+    #[test]
+    fn the_state_folder_and_a_backup_are_private_on_windows() {
+        let icacls = |p: &Path| {
+            let o = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let entries = |acl: &str| acl.lines().filter(|l| l.contains(":(")).count();
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        let _lock = try_lock(&state).unwrap().unwrap();
+        let acl = icacls(&state);
+        assert_eq!(entries(&acl), 3, "{acl}");
+        assert!(!acl.contains("(I)"), "{acl}");
+        std::fs::write(state.join("owner-token"), "x").unwrap();
+        let acl = icacls(&state.join("owner-token"));
+        assert_eq!(entries(&acl), 3, "{acl}");
+        let backup = d.path().join("c.bak");
+        std::fs::write(&backup, "x").unwrap();
+        crate::util::private_file(&backup).unwrap();
+        let acl = icacls(&backup);
+        assert_eq!(entries(&acl), 3, "{acl}");
+        assert!(!acl.contains("(I)"), "{acl}");
     }
 
     /// Every instance on a folder finds the same pipe, also by another

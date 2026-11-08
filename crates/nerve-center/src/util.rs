@@ -40,6 +40,52 @@ pub fn utc_minute(ms: u64) -> String {
     )
 }
 
+/// Makes the state folder `state` private, as 0700 is on Unix: on Windows a
+/// DACL of its own for this account, SYSTEM and the administrators, which
+/// what is in it (the owner token, the TLS key, the state) inherits; a
+/// folder another account made is refused. The installed center's folder
+/// keeps the DACL `install` gave it, which its service and the
+/// administrators share (crate::winsvc).
+pub fn private_state(state: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let installed = crate::service::Layout::system().state;
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        };
+        if !same(state, &installed) {
+            return nerve_service::win::dacl::private_folder(state, &own_dacl()?);
+        }
+    }
+    nerve_transport::files::create_private_dir(state)
+        .map_err(|e| format!("cannot create {}: {e}", state.display()))
+}
+
+/// Makes the file `path` this account's, SYSTEM's and the administrators'
+/// alone on Windows, whatever its folder hands down (a backup in the
+/// downloads); elsewhere its mode did that already.
+pub fn private_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let dacl = own_dacl()?;
+        nerve_service::win::dacl::set(path, &dacl.replace("(A;OICI;", "(A;;"))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
+/// The protected DACL of what this account keeps private on Windows.
+#[cfg(windows)]
+fn own_dacl() -> Result<String, String> {
+    let me = nerve_service::win::process::user_of(None)
+        .map_err(|e| format!("cannot read this account's SID: {e}"))?;
+    let me = nerve_service::win::sid::sid_text(&me)?;
+    Ok(nerve_service::win::dacl::dacl_of(&[&me, "SY", "BA"], &[]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

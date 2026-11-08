@@ -12,8 +12,11 @@
 //! A peer is its address, but on loopback every local process has one (or
 //! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
 //! is, so another account's connections never take the owner's places. On
-//! Linux the kernel names the account ([`nerve_transport::peer`]); where it
-//! cannot, all loopback peers are one.
+//! Linux the kernel names the account ([`nerve_transport::peer`]); on
+//! Windows the table of connections names the process, whose account it is
+//! where the center may read it, else its session (each person signed in
+//! has one; services share one): [`Peer::of_windows`]. Where neither can be
+//! told, all loopback peers are one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -73,8 +76,11 @@ enum Accounts {
     /// By the account the kernel names.
     #[cfg(target_os = "linux")]
     Kernel(nerve_transport::peer::Lookup),
+    /// By the process Windows' table of connections names.
+    #[cfg(windows)]
+    Windows,
     /// Not at all: every loopback peer is one.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg_attr(any(target_os = "linux", windows), allow(dead_code))]
     None,
     /// By address, as any other peer: a test's second address is another
     /// peer.
@@ -90,6 +96,13 @@ enum Peer {
     /// A loopback peer of this account.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Account(u32),
+    /// A loopback peer of this Windows account, by a hash of its SID.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Sid(u64),
+    /// A loopback peer of another Windows account than the center may read,
+    /// by its session.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Session(u32),
     /// A loopback peer whose account is not known.
     Local,
 }
@@ -105,12 +118,38 @@ impl Peer {
             #[cfg(target_os = "linux")]
             Accounts::Kernel(how) => nerve_transport::peer::account_of(peer, local, how)
                 .map_or(Peer::Local, Peer::Account),
+            #[cfg(windows)]
+            Accounts::Windows => {
+                use nerve_service::win::process::{session_of, user_of};
+                let pid = nerve_service::win::tcp::client_pid(peer, local);
+                let sid = pid.and_then(|p| user_of(Some(p)).ok());
+                Peer::of_windows(sid.as_deref(), pid.and_then(session_of))
+            }
             #[cfg(test)]
             Accounts::ByAddress => Peer::Addr(ip),
             Accounts::None => {
                 let _ = local;
                 Peer::Local
             }
+        }
+    }
+
+    /// A loopback peer on Windows: by the account `sid` of its process
+    /// where that could be read, else by its `session`. The center may read
+    /// only its own account's processes (and an administrator's all), so
+    /// another account is its session: a command a local node runs for a
+    /// center runs in the services' session, never in the owner's.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn of_windows(sid: Option<&[u8]>, session: Option<u32>) -> Peer {
+        use std::hash::{Hash, Hasher};
+        match (sid, session) {
+            (Some(sid), _) => {
+                let mut h = std::hash::DefaultHasher::new();
+                sid.hash(&mut h);
+                Peer::Sid(h.finish())
+            }
+            (None, Some(s)) => Peer::Session(s),
+            (None, None) => Peer::Local,
         }
     }
 
@@ -240,7 +279,9 @@ impl Server {
         let tls = (!plain).then(|| center.clone());
         #[cfg(target_os = "linux")]
         let accounts = Accounts::Kernel(nerve_transport::peer::Lookup::for_listener(local));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        let accounts = Accounts::Windows;
+        #[cfg(not(any(target_os = "linux", windows)))]
         let accounts = Accounts::None;
         Ok(Server {
             listener,
@@ -536,6 +577,23 @@ mod tests {
         drop(other);
     }
 
+    /// A Windows peer is its account where its process can be read, else
+    /// its session; two accounts, or two sessions, are two peers.
+    #[test]
+    fn a_windows_peer_is_its_account_or_its_session() {
+        let (alice, bob) = ([1u8, 5, 21, 1], [1u8, 5, 21, 2]);
+        let a = Peer::of_windows(Some(&alice), Some(1));
+        assert_eq!(a, Peer::of_windows(Some(&alice), Some(2)));
+        assert_ne!(a, Peer::of_windows(Some(&bob), Some(1)));
+        assert!(matches!(a, Peer::Sid(_)));
+        assert_eq!(Peer::of_windows(None, Some(0)), Peer::Session(0));
+        assert_ne!(
+            Peer::of_windows(None, Some(0)),
+            Peer::of_windows(None, Some(1))
+        );
+        assert_eq!(Peer::of_windows(None, None), Peer::Local);
+    }
+
     /// The kernel names the account of a real loopback peer, so this
     /// test's connections from two loopback addresses share its places.
     #[cfg(target_os = "linux")]
@@ -564,6 +622,28 @@ mod tests {
         assert_eq!(n, 0);
         drop(idle);
         task.abort();
+    }
+
+    /// On Windows the table of connections names the process of a real
+    /// loopback peer, and so its account: this test's own, on a listener on
+    /// loopback and on one on every address.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_names_the_account_of_a_loopback_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let own = nerve_service::win::process::user_of(None).unwrap();
+        let me = Peer::of_windows(Some(&own), None);
+        for (at, plain) in [("127.0.0.1:0", true), ("0.0.0.0:0", false)] {
+            let server = Server::bind(at, &c, plain).await.unwrap();
+            let port = server.local_addr().port();
+            let client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (tcp, peer) = server.listener.accept().await.unwrap();
+            assert_eq!(server.peer_of(&tcp, peer), me, "{at}");
+            drop(client);
+        }
     }
 
     /// A listener bound to every address still names the account of a

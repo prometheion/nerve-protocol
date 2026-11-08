@@ -102,6 +102,7 @@ pub fn backup(
     let parsed = parse(contents.clone())?;
     let bytes = backup::seal_with(&contents, pass, rounds)?;
     backup::write_file(file, &bytes, overwrite)?;
+    crate::util::private_file(file)?;
     Ok(BackupReport {
         name: parsed.store.center_name.clone(),
         id: parsed.store.center_id.clone(),

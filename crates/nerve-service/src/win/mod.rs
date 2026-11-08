@@ -4,8 +4,9 @@
 //! pipe only some accounts may open ([`pipe`]), and the job object a command
 //! runs in ([`job_object`], with its plain logic in [`job`]). The center's
 //! service also runs as a virtual account ([`service`]) under the manager's
-//! dispatcher ([`dispatch`]), asks who runs a process ([`process`]), and
-//! runs a program without the administrators' rights ([`restricted`]). What is plain logic
+//! dispatcher ([`dispatch`]), asks who runs a process ([`process`]) and
+//! which process holds a loopback connection ([`tcp`]), and runs a program
+//! without the administrators' rights ([`restricted`]). What is plain logic
 //! is compiled and tested on every platform.
 
 pub mod dacl;
@@ -26,3 +27,4 @@ pub mod scm;
 pub mod service;
 #[cfg(windows)]
 pub mod sid;
+pub mod tcp;
