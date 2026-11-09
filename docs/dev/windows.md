@@ -538,10 +538,33 @@ runs in the container as well, unless the pairing runs as you.
   again a few seconds after they stop changing (at most 30 seconds while
   they go on), and walks every granted folder when it starts: what you or
   an agent move, install or clone into a granted folder gets its entry by
-  itself. A folder on a removable drive is not watched (the log says so).
+  itself. It runs one such walk at a time and leaves a pause after it twice
+  as long as the walk took, so a command that makes new names all the time
+  gets a walk every few minutes at most on a big folder; a command of a
+  pairing does not wait for the walk. A walk that fails part way is
+  finished by the next sync (the grant stays marked), and one that could
+  not even be marked (the record could not be written) is walked at the
+  next start or by **Sync folders**.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
-  none runs).
+  none runs). What the watch costs, as NTFS sets it:
+  - While a folder is granted, the folders above it cannot be renamed or
+    moved, or deleted to the Recycle Bin: Explorer says the folder is open
+    in another program. Rename it before you grant the folder below, or
+    remove the grant (**Permissions › Folders**) first. The granted folder
+    itself and what is in it can be renamed. A walk holds the same for
+    the folders it is inside of, for as long as it is there; a tool that
+    renames a folder into place without a retry (Rust's `std::fs::rename`,
+    Python's `os.replace`) can fail with "access denied" in that moment.
+  - A folder on a removable drive (a stick or card) is not watched (the log
+    says so), since a held handle would keep it from being ejected. An
+    external hard disk or SSD is a fixed disk to Windows and is watched: it
+    cannot be removed safely while a folder on it is granted. Remove the
+    grant first.
+  - A folder whose watch ended (the folder went, or a read failed) is
+    watched again at the next sync; one that could not be opened (a link,
+    a drive that is not watched, an error) is not tried again while it stays
+    granted, and the log says why, once.
 - A network folder (`\\server\share`) or a folder on a network drive is
   refused when it is added, in the app's folder picker too: the service
   runs in a session of its own, where a drive mapped at your sign-in does
@@ -741,6 +764,10 @@ runs in the container as well, unless the pairing runs as you.
   - A closed folder that a command renames while the node changes the
     folders' entries may leave a file linked across its edge (by you)
     readable through the other name until the node walks that folder again.
+    A command's own renames start such a walk (a new name in the granted
+    folder wakes the watch), so it can time the window. Keep a repository
+    you hard-link across a closed folder's edge (`git clone --local`) out
+    of the folders a pairing writes.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it

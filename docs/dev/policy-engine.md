@@ -461,7 +461,24 @@ center's local name):
   sync after the start walks every grant (`Rewalk::Every`), as on Linux. The
   watches follow the record before and after each sync; a folder that cannot
   be watched is logged once and left to the other syncs while it stays
-  granted. On Linux a new file gets its entries from the default ACL and a
+  granted, and one whose watch ended or failed to start is opened again at
+  the next follow. What the watch holds stays bounded: the supervisor starts
+  one grant sync at a time (`Watch::next_sync`, the guard `Began`), the
+  changes meanwhile join the next walk, and a pause follows each sync, twice
+  as long as it took (`Pending::end`), so a command that makes names all the
+  time cannot keep the sync's turn for more than a third of the time. A
+  command of a pairing (`Shared::sync_grants_for_call`) does not wait for a
+  walk the watch started when the config is the one the last finished sync
+  saw (`Watch::walking`): it takes that sync's answer (`Synced::kept`, what
+  decides a refusal), since the walk only caps files linked in and adds
+  inherited entries; with a newer config it waits for the turn. A walk that
+  fails part way leaves its grant `unfinished`, which the next sync walks.
+  NTFS refuses to rename or move a folder with an open handle below it, so
+  the handle on a granted folder (and a walk's frames) holds the folders
+  above it; a volume's change journal would not, but needs a volume handle
+  as an administrator and reports every change of the drive, so it was not
+  used. External hard disks and SSDs report as fixed drives and are
+  watched. On Linux a new file gets its entries from the default ACL and a
   file with a second name keeps its own rights, so nothing waits for a walk.
 - A record in the state folder (`grants.json`) finds them again. It holds the
   file ID of each grant's object, since the grant is in that object's own
@@ -798,8 +815,8 @@ A folder gives rights. Each right is its own flag:
 | `w` | Write files: `fs.write`, and the paths another capability writes |
 | `x` | Run commands whose working directory is in the folder, and capabilities that run something at their paths |
 
-The flags do not imply each other. A write needs `w` and not `r`. A read needs
-`r` and not `w`. A command needs `x` and not `r`. A folder covers everything
+`w` reads too (`w` alone is `rw`): a write is allowed where `w` is set, a read
+where `r` or `w` is set. A command needs `x` and not `r`. A folder covers everything
 below it. Where folders nest, the deepest one decides.
 
 Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are

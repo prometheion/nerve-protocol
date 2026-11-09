@@ -1013,8 +1013,11 @@ impl Shared {
     /// watched for new names from before the sync (what changes while it
     /// walks is told) and follow what it left (crate::grant_watch).
     pub fn sync_grants_walking(&self, walk: crate::grants::Rewalk) -> crate::grants::Synced {
+        // The config version the sync saw, once its turn came.
+        let seen = std::cell::Cell::new(None);
         let current = || {
             let cfg = self.config();
+            seen.set(Some(cfg.version));
             let home = self.rules_home(&cfg);
             (cfg, home)
         };
@@ -1036,7 +1039,21 @@ impl Shared {
         });
         #[cfg(windows)]
         watch();
+        if let Some(version) = seen.get() {
+            self.grant_watch.finished(version, &synced);
+        }
         synced
+    }
+
+    /// [`Shared::sync_grants`] for a command or a file call of a pairing: it
+    /// does not wait for a walk of the folders where names changed
+    /// (crate::grant_watch) when the config is the one the last sync saw,
+    /// and takes that sync's answer.
+    pub fn sync_grants_for_call(&self) -> crate::grants::Synced {
+        match self.grant_watch.walking(self.config().version) {
+            Some(synced) => synced,
+            None => self.sync_grants(),
+        }
     }
 
     /// Brings the pairings' home and temporary folders in line with the
@@ -2617,26 +2634,6 @@ pub fn notify(at: &std::ffi::OsStr, state: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The grant sync the supervisor starts now, if any (`granted`: the config
-/// version it last synced, none before the first; `due`: the granted
-/// folders whose names changed, crate::grant_watch): the first walks every
-/// grant, one for folders that changed walks those (and follows the config
-/// as it is), one for a new config walks only what changes.
-fn grant_walk(
-    granted: Option<u64>,
-    version: u64,
-    due: Vec<PathBuf>,
-) -> Option<crate::grants::Rewalk> {
-    use crate::grants::Rewalk;
-    if granted.is_none() {
-        Some(Rewalk::Every)
-    } else if !due.is_empty() {
-        Some(Rewalk::At(due))
-    } else {
-        (granted != Some(version)).then_some(Rewalk::None)
-    }
-}
-
 /// Keeps one link task per center that should be linked. It works from the
 /// config in memory: the file is not reread here, so a file changed behind
 /// the node's back changes nothing (only the owner's reload reads it).
@@ -2657,18 +2654,22 @@ async fn supervise(shared: Arc<Shared>) {
         // granted folder while the node did not run gets its entries. After
         // it the node walks a granted folder soon after names in it changed
         // (crate::grant_watch).
-        if shared.confinement.appcontainer {
-            let due = shared.grant_watch.due(std::time::Instant::now());
-            if let Some(walk) = grant_walk(granted, cfg.version, due) {
-                granted = Some(cfg.version);
-                let s = shared.clone();
-                tokio::task::spawn_blocking(move || {
-                    let synced = s.sync_grants_walking(walk);
-                    for e in synced.errors {
-                        tracing::warn!("folder grants: {e}");
-                    }
-                });
-            }
+        if shared.confinement.appcontainer
+            && let Some((walk, began)) =
+                shared
+                    .grant_watch
+                    .next_sync(granted, cfg.version, std::time::Instant::now())
+        {
+            granted = Some(cfg.version);
+            let s = shared.clone();
+            tokio::task::spawn_blocking(move || {
+                let synced = s.sync_grants_walking(walk);
+                // Another sync may start from here.
+                drop(began);
+                for e in synced.errors {
+                    tracing::warn!("folder grants: {e}");
+                }
+            });
         }
         // On the installed Linux node the folders' ACLs follow it so
         // (crate::acl); a command of `nerve-run` syncs them as well before
@@ -4181,22 +4182,48 @@ mod tests {
         assert_eq!(grants_walk(&json!({})), AclWalk::Now);
     }
 
-    /// Windows' grant syncs: the first walks every grant, one where names
-    /// changed walks those folders (also with a new config), one for a new
-    /// config only what changes, and none while nothing changed.
-    #[test]
-    fn the_grant_sync_chooses_its_walk() {
-        use crate::grants::Rewalk;
-        let proj = vec![PathBuf::from("/w/proj")];
-        assert_eq!(grant_walk(None, 1, Vec::new()), Some(Rewalk::Every));
-        assert_eq!(grant_walk(None, 1, proj.clone()), Some(Rewalk::Every));
-        assert_eq!(
-            grant_walk(Some(1), 1, proj.clone()),
-            Some(Rewalk::At(proj.clone()))
+    /// A command's sync (`sync_grants_for_call`) takes the last sync's
+    /// answer while a walk the watch started runs and the config is the one
+    /// that sync saw.
+    #[tokio::test]
+    async fn a_commands_sync_does_not_wait_for_a_walk_of_the_watch() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let version = s.config().version;
+        let left = crate::grants::Synced {
+            unknown: Some("not readable".into()),
+            ..Default::default()
+        };
+        assert!(s.sync_grants_for_call().refusal("c1").is_none());
+        s.grant_watch.finished(version, &left);
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_none(),
+            "no walk runs: the sync is done"
         );
-        assert_eq!(grant_walk(Some(1), 2, proj.clone()), Some(Rewalk::At(proj)));
-        assert_eq!(grant_walk(Some(1), 2, Vec::new()), Some(Rewalk::None));
-        assert_eq!(grant_walk(Some(2), 2, Vec::new()), None);
+        let t0 = std::time::Instant::now();
+        let (_, walk) = s
+            .grant_watch
+            .next_sync(Some(version), version + 1, t0)
+            .unwrap();
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_none(),
+            "no walk of the watch"
+        );
+        drop(walk);
+        s.grant_watch.finished(version, &left);
+        let proj = std::path::PathBuf::from("/w/proj");
+        s.grant_watch.changed(&proj, t0);
+        let (_, walk) = s
+            .grant_watch
+            .next_sync(Some(version), version, t0 + crate::grant_watch::AT_MOST)
+            .unwrap();
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_some(),
+            "the walk's turn is not waited for"
+        );
+        drop(walk);
     }
 
     fn warnings(log: &Log) -> Vec<String> {

@@ -535,6 +535,18 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // Nor does the Add dialog make a folder that is written and not read.
+    perm.invoke_folder_choose();
+    perm.set_folder_read(false);
+    perm.set_folder_write(true);
+    perm.set_folder_execute(false);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
+    let f = &config(&paths).centers[0].policy.folders[0];
+    assert!(
+        f.access.read && f.access.write && !f.access.execute,
+        "{f:?}"
+    );
     // Sync folders walks the grants again. No node runs here: on Linux the
     // node walks them when it starts, on Windows this command does.
     perm.invoke_folder_sync();

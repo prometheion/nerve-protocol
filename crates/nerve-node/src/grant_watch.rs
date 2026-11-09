@@ -19,7 +19,22 @@
 //! What it holds stays bounded: one handle and one buffer per granted
 //! folder, and one entry per folder that changed, however many changes
 //! come. The walk itself is the grant sync's (crate::grants::apply, in its
-//! turn), so it never races a change of the config.
+//! turn), so it never races a change of the config. The supervisor starts
+//! one grant sync at a time ([`Watch::next_sync`]) and leaves a pause after
+//! a walk, twice as long as the walk took, so a command that makes new names
+//! all the time cannot keep the turn: the walk covers the changes of the
+//! whole time it ran, and the next one waits. A command of a pairing does
+//! not wait for a walk the watch started when the config is the one the
+//! last sync saw ([`Watch::walking`]): the walk only caps the files linked
+//! in and adds inherited entries, so what the command sees is as good as
+//! the walk's last answer.
+//!
+//! The handle on a granted folder has a cost NTFS sets: while it is open,
+//! the folders above the granted folder cannot be renamed or moved, only
+//! the granted folder itself and what is in it (docs/dev/windows.md says
+//! so). A volume's change journal would not hold a handle on a folder, but
+//! reading it takes an administrator's volume handle and sees every change
+//! of the drive, which is more than a granted folder is worth.
 //!
 //! On Linux a new file in a granted folder gets its ACL entries from the
 //! folder's default entries, and a file with a second name gets none and
@@ -31,6 +46,8 @@ use std::time::{Duration, Instant};
 
 use nerve_policy::paths::within;
 use nerve_transport::sync::lock;
+
+use crate::grants::{Rewalk, Synced};
 
 /// How long the names in a granted folder stay as they are before the node
 /// walks it: an install or a clone is a burst of new names, walked once.
@@ -77,10 +94,19 @@ pub fn wakes(buf: &[u8]) -> bool {
     }
 }
 
-/// The granted folders whose names changed and that are not walked yet.
+/// The granted folders whose names changed and that are not walked yet, and
+/// where the supervisor's grant syncs stand.
 #[derive(Debug, Default)]
 pub struct Pending {
     folders: Vec<Changed>,
+    /// When the grant sync the supervisor started began, while it runs.
+    running: Option<Instant>,
+    /// Whether that sync is a walk the watch asked for.
+    watch_walk: bool,
+    /// No walk of the watch before this: the pause after a walk.
+    not_before: Option<Instant>,
+    /// The config version the last finished sync saw, and what it left.
+    last: Option<(u64, Synced)>,
 }
 
 #[derive(Debug)]
@@ -104,10 +130,14 @@ impl Pending {
     }
 
     /// The folders to walk at `now`, which are pending no more: each one
-    /// whose names were quiet for [`QUIET`], or that waits [`AT_MOST`]. A
+    /// whose names were quiet for [`QUIET`], or that waits [`AT_MOST`],
+    /// none in the pause after a walk ([`Pending::end`]). A
     /// folder inside one of them goes along, due or not, as its walk goes
     /// through it; of the folders due, only the outermost are named.
     pub fn due(&mut self, now: Instant) -> Vec<PathBuf> {
+        if self.not_before.is_some_and(|t| now < t) {
+            return Vec::new();
+        }
         let ready = |c: &Changed| {
             now.saturating_duration_since(c.last) >= QUIET
                 || now.saturating_duration_since(c.first) >= AT_MOST
@@ -129,6 +159,33 @@ impl Pending {
             .retain(|c| !out.iter().any(|o| within(&c.path, o)));
         out
     }
+
+    /// A grant sync of the supervisor begins at `now`; `by_watch` when it
+    /// walks folders where names changed.
+    fn begin(&mut self, now: Instant, by_watch: bool) {
+        self.running = Some(now);
+        self.watch_walk = by_watch;
+    }
+
+    /// The sync ended at `now`. The next walk of the watch waits as long as
+    /// this sync took, twice over after it, so the walks hold the sync's
+    /// turn for a third of the time at most, however fast names come.
+    fn end(&mut self, now: Instant) {
+        if let Some(began) = self.running.take() {
+            self.not_before = Some(now + now.saturating_duration_since(began) * 2);
+        }
+        self.watch_walk = false;
+    }
+}
+
+/// A grant sync of the supervisor that runs: it ends when this is dropped,
+/// also when the sync panicked.
+pub struct Began(Arc<Mutex<Pending>>);
+
+impl Drop for Began {
+    fn drop(&mut self) {
+        lock(&self.0).end(Instant::now());
+    }
 }
 
 /// The watches of the granted folders, and what they found changed.
@@ -141,8 +198,65 @@ pub struct Watch {
 
 impl Watch {
     /// The granted folders to walk now ([`Pending::due`]).
+    #[cfg(test)]
     pub fn due(&self, now: Instant) -> Vec<PathBuf> {
         lock(&self.pending).due(now)
+    }
+
+    /// Names changed in `folder` at `now`.
+    #[cfg(all(test, unix))]
+    pub fn changed(&self, folder: &Path, now: Instant) {
+        lock(&self.pending).changed(folder, now);
+    }
+
+    /// The grant sync the supervisor starts at `now`, if any, and the
+    /// guard that holds the place until it ends: none while one runs (the
+    /// changes meanwhile join the next walk). `granted`: the config
+    /// version it last synced, none before the first. The first walks every
+    /// grant (as on Linux, so what was installed or moved into a granted
+    /// folder while the node did not run gets its entries), one for folders
+    /// that changed walks those (and follows the config as it is), one for
+    /// a new config walks only what changes.
+    pub fn next_sync(
+        &self,
+        granted: Option<u64>,
+        version: u64,
+        now: Instant,
+    ) -> Option<(Rewalk, Began)> {
+        let mut p = lock(&self.pending);
+        if p.running.is_some() {
+            return None;
+        }
+        let due = p.due(now);
+        let walk = if granted.is_none() {
+            Rewalk::Every
+        } else if !due.is_empty() {
+            Rewalk::At(due)
+        } else if granted != Some(version) {
+            Rewalk::None
+        } else {
+            return None;
+        };
+        p.begin(now, matches!(walk, Rewalk::At(_)));
+        Some((walk, Began(self.pending.clone())))
+    }
+
+    /// A grant sync finished that saw the config of `version`.
+    pub fn finished(&self, version: u64, synced: &Synced) {
+        lock(&self.pending).last = Some((version, synced.kept()));
+    }
+
+    /// What the last sync left, for a command that would wait for the turn
+    /// while a walk of the watch holds it: only when the config is the one
+    /// that sync saw. The walk only caps files linked in and adds inherited
+    /// entries, and a name made meanwhile is as unwalked as one made before
+    /// it; a changed config waits for the walk like any other sync.
+    pub fn walking(&self, version: u64) -> Option<Synced> {
+        let p = lock(&self.pending);
+        match &p.last {
+            Some((v, synced)) if p.watch_walk && *v == version => Some(synced.kept()),
+            _ => None,
+        }
     }
 
     /// Watches `folders` from now on, and no other: a new one is opened as
@@ -249,6 +363,15 @@ mod win {
             pending: &Arc<Mutex<Pending>>,
             act: impl FnOnce() -> std::io::Result<G>,
         ) {
+            // A thread that ended (its port failed) is started again.
+            if self
+                .running
+                .as_ref()
+                .and_then(|r| r.thread.as_ref())
+                .is_some_and(|t| t.is_finished())
+            {
+                self.running = None;
+            }
             let ended: Vec<PathBuf> = std::mem::take(&mut *lock(&self.ended));
             self.watched.retain(|w| !ended.contains(w));
             self.failed.retain(|f| folders.contains(f));
@@ -460,6 +583,9 @@ mod win {
                     "folder grants: the watch of the granted folders ended ({})",
                     std::io::Error::last_os_error()
                 );
+                for slot in slots.values() {
+                    lock(ended).push(slot.path.clone());
+                }
                 std::mem::forget(slots);
                 return;
             }
@@ -469,17 +595,6 @@ mod win {
                         Msg::Open(path, dir) => {
                             let k = next;
                             next += 1;
-                            // SAFETY: a valid handle and the port.
-                            if unsafe { CreateIoCompletionPort(dir.as_raw_handle(), port, k, 0) }
-                                .is_null()
-                            {
-                                tracing::warn!(
-                                    "folder grants: {} is not watched ({})",
-                                    path.display(),
-                                    std::io::Error::last_os_error()
-                                );
-                                continue;
-                            }
                             let mut slot = Slot {
                                 path,
                                 dir,
@@ -487,15 +602,29 @@ mod win {
                                 buf: vec![0u32; BUF / 4].into_boxed_slice(),
                                 closing: false,
                             };
-                            match slot.arm() {
+                            // SAFETY: a valid handle and the port.
+                            let started = if unsafe {
+                                CreateIoCompletionPort(slot.dir.as_raw_handle(), port, k, 0)
+                            }
+                            .is_null()
+                            {
+                                Err(std::io::Error::last_os_error())
+                            } else {
+                                slot.arm()
+                            };
+                            match started {
                                 Ok(()) => {
                                     slots.insert(k, slot);
                                 }
                                 Err(e) => {
+                                    // Watched again at the next follow, as
+                                    // after a failed read; no walk is asked
+                                    // for, which would only fail again.
                                     tracing::warn!(
                                         "folder grants: {} is not watched ({e})",
                                         slot.path.display()
                                     );
+                                    lock(ended).push(slot.path.clone());
                                 }
                             }
                         }
@@ -550,6 +679,45 @@ mod win {
                 end(slot);
                 slots.remove(&key);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// A watch that cannot start (here the handle is a file's, which
+        /// cannot be read for changes) ends at once, so the next follow
+        /// opens the folder again; it stayed "watched" for good before.
+        #[test]
+        fn a_watch_that_cannot_start_is_tried_again() {
+            let d = tempfile::tempdir().unwrap();
+            let file = d.path().join("f.txt");
+            std::fs::write(&file, "f").unwrap();
+            let pending = Arc::new(Mutex::new(Pending::default()));
+            let ended = Arc::new(Mutex::new(Vec::new()));
+            let running = start(pending.clone(), ended.clone()).unwrap();
+            let handle = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .open(&file)
+                .unwrap();
+            running.send(Msg::Open(file.clone(), OwnedHandle::from(handle)));
+            let mut told = false;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if *lock(&ended) == [file.clone()] {
+                    told = true;
+                    break;
+                }
+            }
+            assert!(told, "the failed start is told");
+            assert!(
+                lock(&pending)
+                    .due(Instant::now() + super::super::AT_MOST)
+                    .is_empty()
+            );
         }
     }
 }
@@ -680,6 +848,138 @@ mod tests {
         p.changed(inner, t0);
         p.changed(outer, t0);
         assert_eq!(p.due(t0 + QUIET), [outer]);
+    }
+
+    /// The supervisor's grant syncs: the first walks every grant, one where
+    /// names changed walks those folders (also with a new config), one for
+    /// a new config only what changes, and none while nothing changed.
+    #[test]
+    fn the_grant_sync_chooses_its_walk() {
+        let proj = PathBuf::from("/w/proj");
+        let t0 = Instant::now();
+        let later = t0 + AT_MOST;
+        let sync =
+            |w: &Watch, granted, version, now| w.next_sync(granted, version, now).map(|s| s.0);
+        let changed = |w: &Watch| lock(&w.pending).changed(&proj, t0);
+        let w = Watch::default();
+        assert_eq!(sync(&w, None, 1, later), Some(Rewalk::Every));
+        let w = Watch::default();
+        changed(&w);
+        assert_eq!(sync(&w, None, 1, later), Some(Rewalk::Every));
+        let w = Watch::default();
+        changed(&w);
+        assert_eq!(
+            sync(&w, Some(1), 1, later),
+            Some(Rewalk::At(vec![proj.clone()]))
+        );
+        let w = Watch::default();
+        changed(&w);
+        assert_eq!(
+            sync(&w, Some(1), 2, later),
+            Some(Rewalk::At(vec![proj.clone()]))
+        );
+        assert_eq!(
+            sync(&Watch::default(), Some(1), 2, later),
+            Some(Rewalk::None)
+        );
+        assert_eq!(sync(&Watch::default(), Some(2), 2, later), None);
+    }
+
+    /// New names every tick while a walk goes on start no second sync, so
+    /// the syncs cannot pile up behind the turn; the changes meanwhile join
+    /// the walk after it.
+    #[test]
+    fn one_grant_sync_runs_at_a_time() {
+        let proj = PathBuf::from("/w/proj");
+        let t0 = Instant::now();
+        let w = Watch::default();
+        let mut started = 0;
+        let mut held = Vec::new();
+        for s in 0..200u64 {
+            let now = t0 + Duration::from_secs(s);
+            lock(&w.pending).changed(&proj, now);
+            if let Some((_, began)) = w.next_sync(Some(1), 1, now) {
+                started += 1;
+                held.push(began);
+            }
+        }
+        assert_eq!(started, 1, "the sync that runs holds the place");
+        // Not even a new config starts one beside it.
+        assert!(
+            w.next_sync(Some(1), 2, t0 + Duration::from_secs(300))
+                .is_none()
+        );
+        held.clear();
+        lock(&w.pending).not_before = None;
+        assert!(
+            w.next_sync(Some(1), 1, t0 + Duration::from_secs(400))
+                .is_some()
+        );
+    }
+
+    /// After a walk that took 20 s the next one waits 40 s more, however
+    /// many names come: the walks hold the turn a third of the time at
+    /// most. A sync for a new config does not wait for the pause.
+    #[test]
+    fn a_walk_is_followed_by_a_pause_twice_its_length() {
+        let proj = Path::new("/w/proj");
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut p = Pending::default();
+        p.begin(at(0), true);
+        p.changed(proj, at(5));
+        p.end(at(20));
+        p.changed(proj, at(21));
+        assert!(p.due(at(21) + AT_MOST).is_empty(), "paused until 60 s");
+        assert!(p.due(at(59)).is_empty());
+        assert_eq!(p.due(at(60)), [proj]);
+        // A short walk leaves a short pause.
+        p.begin(at(100), true);
+        p.end(at(100));
+        p.changed(proj, at(101));
+        assert_eq!(p.due(at(101) + QUIET), [proj]);
+    }
+
+    /// A command does not wait for a walk the watch started when the config
+    /// is the one the last sync saw, and takes that sync's answer; with
+    /// another config, with no walk of the watch running, or before any
+    /// sync finished, it waits for the turn.
+    #[test]
+    fn a_command_takes_the_last_answer_during_a_walk_of_the_watch() {
+        let t0 = Instant::now();
+        let w = Watch::default();
+        let closed = crate::grants::Grant {
+            container: "c1".into(),
+            path: "/w/proj/vault".into(),
+            access: nerve_policy::config::Access::NONE,
+            id: None,
+            unfinished: false,
+            toward: Vec::new(),
+            closed_at: None,
+        };
+        let left = Synced {
+            unclosed: vec![closed],
+            errors: vec!["only the sync's own".into()],
+            ..Synced::default()
+        };
+        assert!(w.walking(1).is_none(), "no sync finished yet");
+        w.finished(1, &left);
+        lock(&w.pending).changed(Path::new("/w/proj"), t0);
+        assert!(w.walking(1).is_none(), "no walk runs");
+        let (_, began) = w.next_sync(Some(1), 1, t0 + AT_MOST).unwrap();
+        let answer = w.walking(1).expect("a walk of the watch runs");
+        assert!(answer.refusal("c1").is_some(), "{answer:?}");
+        assert!(answer.refusal("c2").is_none());
+        assert!(answer.errors.is_empty());
+        assert!(w.walking(2).is_none(), "a new config waits for the turn");
+        drop(began);
+        assert!(w.walking(1).is_none(), "the walk is over");
+        // A sync that is not a walk of the watch is waited for.
+        let (_, config) = w
+            .next_sync(Some(1), 3, t0 + Duration::from_secs(900))
+            .unwrap();
+        assert!(w.walking(1).is_none());
+        drop(config);
     }
 
     /// On Windows: a watched folder tells a new name below it, also a hard

@@ -1225,8 +1225,7 @@ grant or not.
   such confinement and refuses them. `allow` rules do not count. On Linux a command
   reads the system folders and its `r` folders, writes its `w` folders and
   runs programs from the system folders and its `x` folders (Landlock), each
-  flag with its own rule. A folder with `w` and not `r` can be written but
-  not read or listed by the command: its rule carries the write rights only.
+  flag with its own rule. A folder with `w` reads too: its rule carries the read rights as well.
   Landlock cannot run a file it may not read, so the rule of an `x` folder
   carries the right to read files by name (no listing); the `fs` actions of
   the center stay decided by `r`. The node's own folders are in none of these

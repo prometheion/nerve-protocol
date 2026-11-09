@@ -280,6 +280,18 @@ impl Synced {
         self
     }
 
+    /// What decides whether a command may run after this sync
+    /// ([`Synced::refusal`]), for a command that takes the answer of a sync
+    /// that ran before it.
+    pub fn kept(&self) -> Synced {
+        Synced {
+            stale: self.stale.clone(),
+            unclosed: self.unclosed.clone(),
+            unknown: self.unknown.clone(),
+            ..Synced::default()
+        }
+    }
+
     /// Why a command of `container` must not run after this sync, if it
     /// must not: a grant of its own that should be off is on, or the grants
     /// are not known at all.
@@ -379,13 +391,20 @@ fn mark_walks(file: &Path, walk: &Rewalk) -> Result<usize, String> {
 /// The folders the record of the node at `paths` holds a grant with flags
 /// on, where the last sync found them, each once: those the node watches
 /// for new names (crate::grant_watch). A closed folder lies inside one of
-/// them. Nothing where the record cannot be read.
+/// them. A granted file (also a split home's files) is no folder to watch:
+/// its folder is not granted, or is watched itself. Nothing where the
+/// record cannot be read.
 pub fn granted_folders(paths: &NodePaths) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = read_record(&record_file(paths))
         .unwrap_or_default()
         .into_iter()
         .filter(|g| g.access != Access::NONE)
         .map(|g| g.path)
+        .filter(|p| {
+            // A link or junction is kept: the watch says why it is not
+            // watched, which a plain file needs no word for.
+            std::fs::symlink_metadata(p).is_ok_and(|m| !m.is_file())
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -3151,6 +3170,27 @@ mod tests {
         // Marked once: the next sync walks nothing.
         sync_walking(&mut f, Rewalk::None);
         assert!(f.changes.is_empty(), "{:?}", f.changes);
+    }
+
+    /// The node watches the granted folders and not the granted files (a
+    /// split home's files are grants too), nor a folder that is not there.
+    #[test]
+    fn only_granted_folders_are_watched() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
+        let (proj, notes) = (d.path().join("proj"), d.path().join("notes.txt"));
+        std::fs::create_dir(&proj).unwrap();
+        std::fs::write(&notes, "n").unwrap();
+        let gone = d.path().join("gone");
+        let grants = [
+            grant("c1", proj.to_str().unwrap(), "rw"),
+            grant("c2", proj.to_str().unwrap(), "r"),
+            grant("c1", notes.to_str().unwrap(), "r"),
+            grant("c1", gone.to_str().unwrap(), "r"),
+            grant("c1", d.path().join("closed").to_str().unwrap(), ""),
+        ];
+        write_record(&record_file(&paths), &grants).unwrap();
+        assert_eq!(granted_folders(&paths), [proj]);
     }
 
     /// Two pairings whose projects are linked to one store (pnpm's): the
