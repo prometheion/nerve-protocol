@@ -623,13 +623,12 @@ pub struct FolderSets {
     pub exec: Vec<PathBuf>,
 }
 
-/// The folders of a center in `folders` mode by flag. The three flags are
-/// independent, so each set takes the folders with its own flag and nothing
-/// else: a folder with only `w` is in `write` alone, and the write rule
-/// carries no read right (the command can put files there but not list or
-/// read them), and a folder with only `x` can run its programs but not be
-/// listed: Landlock refuses to run a file it may not read, so the `exec`
-/// rule carries ReadFile and the files there can be read by name.
+/// The folders of a center in `folders` mode by flag: each set takes the
+/// folders with its flag. `w` reads too, so a folder with it is in `read`
+/// as well (and the write rule carries the read rights). A folder with only
+/// `x` can run its programs but not be listed: Landlock refuses to run a
+/// file it may not read, so the `exec` rule carries ReadFile and the files
+/// there can be read by name.
 ///
 /// Each folder is resolved again here, since it may have become a link
 /// after it was added and Landlock (like a Windows grant) follows a link in
@@ -839,9 +838,12 @@ pub fn container_grants(
                 }
             };
             let a = &mut out[i].1;
+            // `w` reads too. The write set is split finer than the read set
+            // (around the entries protected for writes), so a place of it
+            // may be one the read set holds only through a folder around it.
             match flag {
                 'r' => a.read = true,
-                'w' => a.write = true,
+                'w' => (a.read, a.write) = (true, true),
                 _ => a.execute = true,
             }
         }
@@ -3959,19 +3961,15 @@ mod tests {
     }
 
     /// Every combination of the three flags puts a folder in exactly the
-    /// sets of its flags: `w` without `r` is in `write` only.
+    /// sets of its flags; `w` reads too, so a folder with it is in `read`.
     #[test]
     fn each_folder_flag_puts_it_in_its_own_set() {
         // A home beside the folder, so that the folder holds none of its
         // protected entries.
         let (d, h) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let w = std::fs::canonicalize(d.path()).unwrap();
-        for bits in 0..8u8 {
-            let access = Access {
-                read: bits & 1 != 0,
-                write: bits & 2 != 0,
-                execute: bits & 4 != 0,
-            };
+        for letters in ["", "r", "w", "x", "rw", "rx", "wx", "rwx"] {
+            let access = Access::parse(letters).unwrap();
             let policy = CenterPolicy {
                 folders: vec![nerve_policy::config::Folder {
                     path: w.display().to_string(),
@@ -3981,7 +3979,11 @@ mod tests {
             };
             let spec = landlock_spec(&policy, h.path(), &[], &[]);
             let label = access.to_chmod();
-            assert_eq!(spec.read.contains(&w), access.read, "read set of {label}");
+            assert_eq!(
+                spec.read.contains(&w),
+                letters.contains(['r', 'w']),
+                "read set of {label}"
+            );
             assert_eq!(
                 spec.write.contains(&w),
                 access.write,

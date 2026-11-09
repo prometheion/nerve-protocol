@@ -292,8 +292,9 @@ component FolderSection inherits Section {
                     text: "Read";
                     label: "Read " + f.path;
                     on: f.read;
+                    // Write reads too, so read goes off with it.
                     toggled(on) => {
-                        Perm.folder-set(f.path, on, f.write, f.execute);
+                        Perm.folder-set(f.path, on, on && f.write, f.execute);
                     }
                 }
                 Chip {
@@ -301,7 +302,7 @@ component FolderSection inherits Section {
                     label: "Write " + f.path;
                     on: f.write;
                     toggled(on) => {
-                        Perm.folder-set(f.path, f.read, on, f.execute);
+                        Perm.folder-set(f.path, on || f.read, on, f.execute);
                     }
                 }
                 Chip {

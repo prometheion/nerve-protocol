@@ -123,12 +123,12 @@ The node confines commands with Landlock:
 
 | A command can | Where |
 |---|---|
-| Read | the system folders (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, `/proc`, `/sys`, `/dev`, `/run` but `/run/nerve-node`, and similar) and the `r` folders |
+| Read | the system folders (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, `/proc`, `/sys`, `/dev`, `/run` but `/run/nerve-node`, and similar) and the `r` and `w` folders |
 | Write | the `w` folders and the null devices (`/dev/null`, `/dev/zero`, `/dev/full`) |
 | Run programs | the system folders and the `x` folders |
 
-- A folder with `w` and no `r` can be written but not read or listed by a
-  command.
+- `w` reads too: the node reads a folder given `w` alone as `rw`, and the
+  write rule carries the read rights.
 - Landlock cannot run a file it may not read. So an `x` folder also lets a
   command read files there by name. It still cannot list the folder.
 - The node's own folders are in none of these sets.
@@ -552,7 +552,7 @@ says `as nerve-run, without Landlock` (the app says **Without Landlock**). What 
 another's is then gone, as the account is one for all of them, the
 pairings' own homes and temporary folders included (they are 0700, which
 keeps out other accounts, not another pairing), and so is the narrower set
-Landlock gives (`w` without `r`, `x` without listing). Once a second
+Landlock gives (`x` without listing). Once a second
 pairing's commands run as `nerve-run` there, `status`, `center add`, the
 pairing in `setup`, the app's **Centers** page and the node web UI warn of
 it (`warning: Without Landlock nothing keeps the pairings apart: …`). A

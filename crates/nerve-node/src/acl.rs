@@ -201,14 +201,14 @@ impl Acl {
 }
 
 /// The rights `access` gives on a folder: reading lists and enters it,
-/// writing makes and removes entries (and enters it), running enters it.
+/// writing reads too and makes and removes entries, running enters it.
 pub fn dir_perm(access: Access) -> u16 {
     let mut p = 0;
-    if access.read {
+    if access.read || access.write {
         p |= R | X;
     }
     if access.write {
-        p |= W | X;
+        p |= W;
     }
     if access.execute {
         p |= X;
@@ -216,11 +216,11 @@ pub fn dir_perm(access: Access) -> u16 {
     p
 }
 
-/// The rights `access` gives on a file of `mode`: running only a file that
-/// someone may run already.
+/// The rights `access` gives on a file of `mode` (writing reads too):
+/// running only a file that someone may run already.
 pub fn file_perm(access: Access, mode: u32) -> u16 {
     let mut p = 0;
-    if access.read {
+    if access.read || access.write {
         p |= R;
     }
     if access.write {
@@ -1427,12 +1427,18 @@ mod tests {
     fn the_flags_make_the_rights() {
         let a = |s: &str| Access::parse(s).unwrap();
         assert_eq!(dir_perm(a("r")), R | X);
-        assert_eq!(dir_perm(a("w")), W | X);
+        assert_eq!(dir_perm(a("w")), R | W | X, "w reads too");
         assert_eq!(dir_perm(a("x")), X);
         assert_eq!(dir_perm(a("")), 0);
         assert_eq!(file_perm(a("rwx"), 0o644), R | W);
         assert_eq!(file_perm(a("rx"), 0o755), R | X);
-        assert_eq!(file_perm(a("w"), 0o755), W);
+        assert_eq!(file_perm(a("w"), 0o755), R | W);
+        // Also flags that were not read from a config.
+        let w = Access {
+            write: true,
+            ..Access::NONE
+        };
+        assert_eq!((dir_perm(w), file_perm(w, 0o644)), (R | W | X, R | W));
     }
 
     /// `acl.json` is written with `format: 1`; a file without it is at

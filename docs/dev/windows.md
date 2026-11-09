@@ -614,17 +614,13 @@ runs in the container as well, unless the pairing runs as you.
 - A file or folder you move out of a granted folder on the same drive keeps
   the entry it inherited. `icacls <path> /reset` gives it the permissions of
   its new place.
-- The flags stay independent: `w` without `r` writes but neither reads nor
-  lists, `x` runs programs and reads files by name but does not list. The
-  permissions a command gives what it makes are the exception, see the
-  bullet on permission entries below.
-- Deleting and renaming need `r` and `w`, since Windows allows a move with
-  the same right as a delete: a command must not move what it cannot read
-  to a folder where it can. So in a folder with `w` but not `r`, a command
-  adds and changes files, but does not delete, rename or move any. A
-  granted folder or file itself is deleted, renamed or moved only through
-  the folder above it, with `r` and `w` there; on Linux too that needs a
-  right on the folder above.
+- `w` reads too (`w` alone is `rw`), and deletes and renames; `x` runs
+  programs and reads files by name but does not list. The permissions a
+  command gives what it makes are the exception, see the bullet on
+  permission entries below.
+- A granted folder or file itself is deleted, renamed or moved only through
+  the folder above it, with `w` there; on Linux too that needs a right on
+  the folder above.
 - A folder you grant inside another granted folder with `w` gets its entry
   only while it is a folder of its own there: not a junction or link to
   another place, not a file with a second name (a hard link), and with
@@ -679,11 +675,11 @@ runs in the container as well, unless the pairing runs as you.
   container, also not one of the same center or under the same name. The
   other two kinds count at once, for every pairing of the
   node and for every app on the machine that runs in an AppContainer (for
-  a capability: every such app that has it). In a
-  folder with `w` but not `r`, a command can make a folder that lets it
-  read what you or another pairing save into it later. So do not save
-  files a pairing must not read into a folder where it may write. After you
-  take `w` off a pairing's folder or remove the pairing, clean the folder.
+  a capability: every such app that has it). A folder a command made
+  keeps the entries it gave it, so the command may read what you or
+  another pairing save into it later, also once the grant is gone. After
+  you take `w` off a pairing's folder or remove the pairing, clean the
+  folder.
   Only `icacls <folder> /reset /T` removes all of them with certainty; it
   also resets permissions of your own below the folder. To keep those,
   find the entries with
@@ -694,8 +690,8 @@ runs in the container as well, unless the pairing runs as you.
   pnpm links `node_modules` to its store, uv links a `.venv` to its cache,
   and a local `git clone` links its objects. Such files are readable but not
   writable for commands: a pairing whose folder holds one of the names gets
-  read and run, and no more than each of its names' folders gives (none
-  under a `w`-only name), by entries of the node's own, with a denying
+  read and run, and no more than each of its names' folders gives, by
+  entries of the node's own, with a denying
   entry of every other right. So two pairings whose projects link to one
   store both read it, and the denial stays when Explorer or `icacls` passes
   a folder's permissions down to the file. A file whose names all lie in
@@ -720,18 +716,8 @@ runs in the container as well, unless the pairing runs as you.
   its own folder does not: once the folder's grant goes, the pairing reads
   it no more. A command can make a hard link
   only to a file it may write (Windows asks that of a sandboxed process
-  since 2015; checked), so it cannot read a file of yours through one. From
-  a folder it may write but not read, it can link a file it knows the name
-  of into a folder it may read; the walk keeps that file closed to it, and to
-  every pairing that has no grant on the write-only folder, while the grant
-  is on and after it is taken off (Linux refuses such a link), for as long
-  as the folder is there; the node keeps a
-  mark of the grant for that in `grants.json`. The walk cannot tell which
-  way such a link was made, so it closes a file of a shared project that a
-  command linked *into* its write-only folder the same way, to every other
-  pairing without a grant on that folder (Linux lets that link be made, and
-  the other pairing keeps its rights there). Delete the name in the
-  write-only folder to open it. Hard links only work within one drive. A grant on a single file with a second
+  since 2015; checked), so it cannot read a file of yours through one. Hard
+  links only work within one drive. A grant on a single file with a second
   name is refused where commands may write around it, and capped as above
   elsewhere. Limits:
   - `icacls /reset` and Explorer's "Replace all child object permission
@@ -747,24 +733,6 @@ runs in the container as well, unless the pairing runs as you.
   - A file another pairing's command made in a folder both pairings share
     also belongs to `nerve-run`: a pairing that linked it into its own
     folder keeps reading it once the folder's grant goes, as on Linux.
-  - A file linked out of a write-only folder is closed to every pairing
-    that has no grant on that folder, not only the one that linked it, and
-    stays closed through every later walk (**Sync folders** too) until its
-    mark goes: when the folder is gone, when the folder is granted to the
-    pairing again (the new grant decides), or at uninstall. Moving the
-    folder takes the mark along, so a new folder made at its old path and
-    granted does not end it, and neither does a sync that cannot look at the
-    folder. A pairing that has no folder left, is removed, or is the last
-    one and is paired again, leaves its marks, so a pairing made later is
-    held back too. Delete the file, or grant the folder again, to open it
-    sooner.
-  - The closing holds while one of the file's names lies in the write-only
-    folder. If you move your file out of that folder (a rename on the same
-    drive) while a command's link to it is in a granted folder, the next walk
-    that reaches the link (**Sync folders**, or a change of a grant there)
-    gives the pairing read on it. Before you file away something from a
-    folder you gave write only, look for links to it
-    (`fsutil hardlink list <file>`) and delete the ones in a granted folder.
   - A folder whose permission inheritance you turned off by hand is not
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)

@@ -264,7 +264,7 @@ async fn setup_steps(
             let rights = ask(
                 input,
                 out,
-                "What it may do there: r reads, w writes, x runs commands, as one word like rx [rwx]: ",
+                "What it may do there: r reads, w reads and writes, x runs commands, as one word like rx [rwx]: ",
             )?;
             // Folder mode runs a command only where it may run one, so
             // Enter gives a folder commands can work in.

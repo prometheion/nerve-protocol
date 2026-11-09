@@ -67,8 +67,7 @@ impl FolderChange {
     /// use. An empty word is refused: a folder that grants nothing is said
     /// so, never given by a slip.
     pub fn new_rights(rights: &str) -> Result<Access, String> {
-        const NAME: &str =
-            "name the rights: r (read), w (write), x (run commands), as one word like rw, or none";
+        const NAME: &str = "name the rights: r (read), w (read and write), x (run commands), as one word like rw, or none";
         match rights.trim() {
             "none" => Ok(Access::NONE),
             "" => Err(NAME.into()),

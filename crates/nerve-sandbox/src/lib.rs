@@ -767,9 +767,9 @@ pub mod landlock_rules {
         // that grants whole trees.
         let mut read = AccessFs::from_read(ABI_WANTED);
         read.remove(AccessFs::Execute);
-        // Only the write rights, so a folder that may be written but not read
-        // (`w` without `r`) stays unreadable; reading is the `read` set's.
-        let write = AccessFs::from_write(ABI_WANTED);
+        // A folder that may be written may be read too (nerve-policy reads
+        // `w` as `rw`), so the write set carries the read rights as well.
+        let write = AccessFs::from_write(ABI_WANTED) | read;
         let handled = AccessFs::from_all(ABI_WANTED);
         let mut rs = Ruleset::default().handle_access(handled).map_err(e)?;
         if !Scope::from_all(ABI_WANTED).is_empty() {
@@ -839,20 +839,19 @@ pub mod acl {
     //! below it, one for the files below it. Plain values, so they are
     //! tested on every platform.
     //!
-    //! The flags stay independent, as on Linux: `w` gives no read and no
-    //! listing, and `x` runs and reads files by name but lists nothing (a
-    //! program cannot run from a file it may not read, and a script is read
-    //! by its interpreter). No flag gives a right on the access list or the
-    //! owner, so a command cannot widen its own grants.
+    //! As on Linux, `w` reads too (nerve-policy reads `w` as `rw`) and also
+    //! deletes and renames, and `x` runs and reads files by name but lists
+    //! nothing (a program cannot run from a file it may not read, and a
+    //! script is read by its interpreter). No flag gives a right on the
+    //! access list or the owner, so a command cannot widen its own grants.
     //!
-    //! Deleting and renaming need `r` as well as `w`. Windows grants a move
-    //! by the same right as a delete, and a moved object keeps its own
-    //! access list until a change on its new folder passes that folder's
-    //! entries down to it: so a command that could move what it may not
-    //! read could make it readable, where on Linux Landlock refuses a rename
-    //! that gains rights. And a granted folder or file itself has no
-    //! `DELETE` ([`entries`]): a command deletes, renames or moves it only
-    //! where the folder above it gives that, as on Linux.
+    //! Windows grants a move by the same right as a delete, and a moved
+    //! object keeps its own access list until a change on its new folder
+    //! passes that folder's entries down to it; a command moves only what
+    //! it may read, so no move makes something readable that was not. A
+    //! granted folder or file itself has no `DELETE` ([`entries`]): a
+    //! command deletes, renames or moves it only where the folder above it
+    //! gives that, as on Linux.
 
     use crate::inherit::Gets;
 
@@ -902,19 +901,18 @@ pub mod acl {
     }
 
     /// The masks for a folder with these flags; both 0 without a flag.
+    /// `write` reads too.
     pub fn masks(read: bool, write: bool, execute: bool) -> Masks {
         let mut m = Masks::default();
-        if read {
+        if read || write {
             m.dir |= BASE | READ_DATA | READ_EA | EXECUTE;
             m.file |= BASE | READ_DATA | READ_EA;
         }
         if write {
-            m.dir |= BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
-            m.file |= BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
-            if read {
-                m.dir |= DELETE_CHILD | DELETE;
-                m.file |= DELETE;
-            }
+            m.dir |= WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
+            m.file |= WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
+            m.dir |= DELETE_CHILD | DELETE;
+            m.file |= DELETE;
         }
         if execute {
             m.dir |= BASE | EXECUTE;
@@ -4096,7 +4094,7 @@ mod tests {
         let r = file_cap(true, false, false);
         let caps = vec![
             (c.to_string(), Gets::Rights(file_cap(true, true, false))),
-            (w.to_string(), Gets::Rights(file_cap(false, true, false))),
+            (w.to_string(), Gets::Rights(file_cap(true, false, false))),
             (shut.to_string(), Gets::Closed),
             (away.to_string(), Gets::Unheld),
         ];
@@ -4115,18 +4113,17 @@ mod tests {
             out,
             [
                 Capped::Deny(0, acl::ALL & !r),
-                Capped::Deny(1, acl::ALL & !file_cap(false, true, false)),
+                Capped::Deny(1, acl::ALL & !r),
                 Capped::Deny(2, acl::ALL),
                 Capped::Entry(0, acl::ALL),
                 Capped::Entry(1, acl::WRITE_DATA),
                 Capped::Allow(0, r),
-                Capped::Allow(1, file_cap(false, true, false)),
+                Capped::Allow(1, r),
                 Capped::Entry(5, READ_AND_EXECUTE),
                 Capped::Entry(6, acl::ALL),
             ]
         );
         assert_eq!(r & (acl::WRITE_DATA | acl::DELETE | acl::WRITE_DAC), 0);
-        assert_eq!(file_cap(false, true, false) & acl::READ_DATA, 0);
 
         // The list it gave, as Windows writes it.
         let sid_of = |j: usize| caps[j].0.clone();
@@ -4290,16 +4287,16 @@ mod tests {
                 })
                 .collect()
         };
-        let (rw, rwx, w) = (
+        let (rw, rwx, x) = (
             acl::masks(true, true, false),
             acl::masks(true, true, true),
-            acl::masks(false, true, false),
+            acl::masks(false, false, true),
         );
         for (m, g) in [
             (rw, Gets::Rights(file_cap(true, true, false))),
             (rwx, Gets::Rights(file_cap(true, true, true))),
             (rwx, Gets::Rights(file_cap(true, false, false))),
-            (w, Gets::Rights(file_cap(false, true, false))),
+            (x, Gets::Rights(file_cap(false, false, true))),
             (rw, Gets::Closed),
         ] {
             assert!(capped_within(&ours(g), m), "{m:?} {g:?}");
@@ -4309,8 +4306,8 @@ mod tests {
             rw
         ));
         assert!(!capped_within(
-            &ours(Gets::Rights(file_cap(true, false, false))),
-            w
+            &ours(Gets::Rights(file_cap(false, false, true))),
+            acl::masks(true, false, false)
         ));
         assert!(!capped_within(&[(ALLOWED, 0, rw.file & !acl::DELETE)], rw));
         assert!(!capped_within(&[], rw));
@@ -4449,11 +4446,8 @@ mod tests {
         let w = masks(false, true, false);
         assert_eq!(w.dir & (WRITE_DATA | APPEND_DATA), WRITE_DATA | APPEND_DATA);
         assert_eq!(w.file & WRITE_DATA, WRITE_DATA);
-        assert_eq!(
-            (w.dir | w.file) & (READ_DATA | EXECUTE),
-            0,
-            "w reads nothing"
-        );
+        assert_eq!(w, masks(true, true, false), "w reads too");
+        assert_eq!(w.file & EXECUTE, 0, "w runs nothing");
         let x = masks(false, false, true);
         assert_eq!(x.file & (EXECUTE | READ_DATA), EXECUTE | READ_DATA);
         assert_eq!(x.dir & READ_DATA, 0, "x lists no folder");
@@ -4468,15 +4462,15 @@ mod tests {
             all.file,
             r.file | w.file | x.file | masks(true, true, false).file
         );
-        // A move is a delete to Windows: only what is read is moved, so no
-        // move makes what a command may not read readable at its new place.
-        for (r, w, x) in [(false, true, false), (false, true, true)] {
-            let m = masks(r, w, x);
-            assert_eq!((m.dir | m.file) & (DELETE | DELETE_CHILD), 0, "{r} {w} {x}");
+        // A move is a delete to Windows: only `w` deletes, and it reads, so
+        // no move makes what a command may not read readable at its new
+        // place.
+        for (r, x) in [(true, false), (false, true), (true, true)] {
+            let m = masks(r, false, x);
+            assert_eq!((m.dir | m.file) & (DELETE | DELETE_CHILD), 0, "{r} {x}");
         }
-        let rw = masks(true, true, false);
-        assert_eq!(rw.dir & (DELETE | DELETE_CHILD), DELETE | DELETE_CHILD);
-        assert_eq!(rw.file & DELETE, DELETE);
+        assert_eq!(w.dir & (DELETE | DELETE_CHILD), DELETE | DELETE_CHILD);
+        assert_eq!(w.file & DELETE, DELETE);
     }
 
     /// A granted folder or file itself is never deleted, renamed or moved
@@ -4853,12 +4847,12 @@ mod tests {
         appcontainer::set(&file, &name, None, false).unwrap();
     }
 
-    /// The flags are independent in the container too: a folder with `w`
-    /// alone is written and not read or listed, one with `x` alone runs its
-    /// program (and reads it by name) and is not listed or written.
+    /// In the container too `w` reads: a folder with `w` alone is written,
+    /// read and listed. One with `x` alone runs its program (and reads it
+    /// by name) and is not listed or written.
     #[cfg(windows)]
     #[test]
-    fn an_appcontainer_keeps_write_and_execute_apart_from_read() {
+    fn an_appcontainer_reads_where_it_writes_and_runs_apart_from_read() {
         let base = tempfile::tempdir().unwrap();
         let (work, wo, xo) = (
             base.path().join("work"),
@@ -4902,8 +4896,8 @@ mod tests {
             std::fs::read_to_string(wo.join("new.txt")).unwrap().trim(),
             "x"
         );
-        assert_ne!(run(format!(r#"type "{w}\old.txt" > got.txt"#)), 0);
-        assert_ne!(run(format!(r#"dir "{w}" > list.txt"#)), 0);
+        assert_eq!(run(format!(r#"type "{w}\old.txt" > got.txt"#)), 0);
+        assert_eq!(run(format!(r#"dir "{w}" > list.txt"#)), 0);
 
         let out = work.join("ran.txt");
         let ps = |c: String| {
@@ -4937,10 +4931,9 @@ mod tests {
         appcontainer::remove_profile(&name).unwrap();
     }
 
-    /// A command deletes, renames and moves inside a folder it reads and
-    /// writes, but neither moves a granted folder itself nor anything out of
-    /// a folder it only writes: a folder with `w` moved into one with `rw`
-    /// would be read there.
+    /// A command deletes, renames and moves inside a folder it writes, but
+    /// neither moves a granted folder itself nor anything out of a folder it
+    /// only reads.
     #[cfg(windows)]
     #[test]
     fn an_appcontainer_moves_only_what_it_reads_and_writes() {
@@ -4960,7 +4953,7 @@ mod tests {
         };
         grant(&work, true, true, true);
         grant(&empty, true, true, false);
-        grant(&outbox, false, true, false);
+        grant(&outbox, true, false, false);
         std::fs::write(work.join("a.txt"), "a").unwrap();
         let (w, o, e) = (work.display(), outbox.display(), empty.display());
         // .NET moves and deletes by name, where cmd would list the folder
@@ -5001,7 +4994,7 @@ mod tests {
         }
         assert!(outbox.join("secret.txt").exists() && outbox.join("sub").exists());
         assert!(empty.exists() && !work.join("o").exists() && !work.join("s.txt").exists());
-        assert!(!ps(format!(
+        assert!(ps(format!(
             r"[IO.File]::ReadAllText('{o}\secret.txt') | Set-Content got.txt"
         )));
 
@@ -6228,12 +6221,11 @@ mod tests {
         assert!(!other.join("no").exists() && !other.join("inner/no").exists());
     }
 
-    /// The flags are independent in the kernel too: a folder in `write` alone
-    /// can be written and not read or listed, and one in `exec` alone can run
-    /// its program and not be read.
+    /// A folder in `write` alone can be written, read and listed (`w` reads
+    /// too), and one in `exec` alone can run its program and not be read.
     #[cfg(target_os = "linux")]
     #[test]
-    fn landlock_write_without_read_and_execute_without_read() {
+    fn landlock_write_reads_too_and_execute_without_read() {
         if landlock_rules::abi_version().is_none() {
             eprintln!("skipped: no Landlock here");
             return;
@@ -6259,8 +6251,8 @@ mod tests {
             std::fs::read_to_string(wo.path().join("new")).unwrap(),
             "x\n"
         );
-        assert!(!confined_sh(&spec, &format!("cat {}/old", d(wo.path()))));
-        assert!(!confined_sh(&spec, &format!("ls {}", d(wo.path()))));
+        assert!(confined_sh(&spec, &format!("cat {}/old", d(wo.path()))));
+        assert!(confined_sh(&spec, &format!("ls {}", d(wo.path()))));
         assert!(confined_sh(&spec, &format!("{}/tool", d(xo.path()))));
         // Not listed, not written; a file can be read by name only because
         // Landlock cannot run what it may not read.

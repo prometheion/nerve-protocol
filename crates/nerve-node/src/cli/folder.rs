@@ -628,13 +628,13 @@ mod tests {
         // Two words are not one.
         assert!(run(&paths, &["folder", "add", dir, "r", "x"]).is_err());
         assert!(folders().is_empty());
-        // Each right alone, and several in one word.
+        // Each right alone, and several in one word; `w` reads too.
         for (rights, want) in [
             ("r", "r"),
-            ("w", "w"),
+            ("w", "rw"),
             ("x", "x"),
             ("rx", "rx"),
-            ("xw", "wx"),
+            ("xw", "rwx"),
             ("rwx", "rwx"),
         ] {
             run(&paths, &["folder", "add", dir, rights]).unwrap();

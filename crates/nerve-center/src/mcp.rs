@@ -975,7 +975,7 @@ pub fn tools() -> Value {
             "title": "List Nerve machines and capabilities",
             "description": "Shows what the machines (nodes) paired with this Nerve center offer, in three levels. \
     list() lists the nodes: name, id, online/offline/disabled, platform, how many capabilities each offers, your mode there and the account your commands run as. \
-    list(node) lists one node's capabilities, one line each: name and what it does, and in folder mode the folders you may use (r read, w write, x run commands). \
+    list(node) lists one node's capabilities, one line each: name and what it does, and in folder mode the folders you may use (r read, w read and write, x run commands). \
     list(node, capability) gives the details of one capability, or of a list of them: description, effect, params (a JSON schema) and the result. \
     Get the details of a capability before you execute it. \
     Example: {\"node\": \"build-box\", \"capability\": [\"fs.read\", \"exec.run\"]}",

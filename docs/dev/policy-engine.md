@@ -27,7 +27,7 @@ A pairing is a **center entry**. Its policy holds:
 |---|---|
 | `mode` | `allowlist` (default), `folder` or `user` |
 | `until` | Optional end of `folder` or `user` mode. Then the entry is back in `allowlist` |
-| `folders` | A path and `access`: three independent flags `r`, `w`, `x` |
+| `folders` | A path and `access`: the flags `r`, `w` (which reads too) and `x` |
 | `places` | The folders (by path) `folder add` recorded at their real place. The owner's: a center's write keeps it |
 | `caps` | `on`, `off` or `hidden`, per capability or action |
 | `allow`, `deny` | Rules for every action |
@@ -431,8 +431,7 @@ center's local name):
   whose folder cannot be found is stale, and one on a volume that is away
   is named, as always. The mark keeps the flags each
   stopped change was heading for (`Grant::toward`): until a change there
-  finishes, the place counts as written by those flags too (`w` without
-  `r` for a hard-linked file's pass, `grants::pass`), and a refused change whose place
+  finishes, the place counts as written by those flags too, and a refused change whose place
   may give flags other than the wanted ones is stale. Taking a grant off goes into every
   folder all the same, since Windows' own walk, which earlier versions
   used, writes a folder before what is below it. A link or junction gets
@@ -447,7 +446,7 @@ center's local name):
   and puts it on again on a folder made anew. A lock file
   (`grants.json.lock`) keeps the CLI and a running node from writing over each
   other's record, and a grant is recorded before it goes on.
-- `w` gives `DELETE` and `FILE_DELETE_CHILD` only with `r`, and a granted
+- `w` reads too and gives `DELETE` and `FILE_DELETE_CHILD`, and a granted
   folder's or file's own entry has no `DELETE` (`nerve_sandbox::acl`).
   Windows grants a move by `DELETE`, and a moved object keeps its own list
   until a change on its new folder passes that folder's entries down. So a
@@ -473,15 +472,12 @@ center's local name):
     node's own entries of an earlier cap go (`acl::uncapped`). That compares
     grant paths, while a grant's entry goes with its folder, so a sync in
     which a recorded grant is not at its path (moved, or it cannot be told)
-    gives no `Full` at all. Nor does a walk of a folder where a wanted or
-    recorded grant of any container, on it, above it or inside it, may
-    write but not read (`grants::pass`): a command that may make a folder
-    there sets its security descriptor at creation, without `WRITE_DAC`,
-    and the change passes an entry of its own there (read for its
-    container) down to a file it linked into that folder. Where every
-    container that may write there may read too, that entry gives nothing
-    new. A taken-off grant's mark (below) counts like the grant: the entry
-    stays after the take-off, which the node never removes.
+    gives no `Full` at all. A command that may make a folder there sets its
+    security descriptor at creation, without `WRITE_DAC`, and the change
+    passes an entry of its own there (read for its container) down to a
+    file it linked into that folder; every container that may write there
+    may read too (`w` reads), so that entry gives nothing new while the
+    grant is on.
   - Otherwise `Linked::Capped`, for every container of the wanted and
     recorded grants and the command account (`Judge::cap`): `Gets::Closed`
     where a name lies under a closed grant of it that no grant inside
@@ -531,27 +527,6 @@ center's local name):
     the node's allows, where `acl::capped` keeps it on the next walk (which
     may look at the file then), so that walk changes nothing. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
-
-  A recorded or wanted grant that gives write without read
-  (`Links::unread`, `Links::want`) closes a name under it to every
-  container that has no grant there, in the walk that takes it off (and in
-  the first sync that puts it on), so a file a command linked out of such a
-  folder into one that it, or another pairing, may read stays closed
-  (Linux refuses that link, `Refer`). The
-  take-off leaves a mark of the grant in the record (`Grant::off`; no
-  folder entry, no effect on `changes`, `walk_every` or `emptied`), which
-  `sync_in_turn` keeps apart from the grants and feeds to `Links::unread`
-  in every later sync, so **Sync folders** does not open the file. The mark
-  follows its folder (found by id; the place is told before a wanted grant
-  there is compared) and goes when the folder is gone, when a grant of the
-  container is wanted at the folder's place, or at uninstall (`keep`:
-  `remove_all` is the only caller that wants no grant and passes
-  `false`): a mark closes the file to the other pairings too and to one
-  paired later, so it does not go with its own pairing, nor with the last
-  one. A walk of a folder where a mark lies (at, above or inside it) gives
-  no `Linked::Full` either (`grants::pass`). A folder the node cannot look at (the owner's log-on
-  fails) leaves its mark as it is until a sync can look, as a mark dropped
-  cannot be found again.
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
@@ -1367,7 +1342,7 @@ command's sandbox leaves the folders out. A `user` mode command runs as you and 
 Only you can release one, on the machine.
 
 Grant a folder at or inside the protected path. The folder releases it for the
-rights it has, and no more: `r` for reads, `w` for writes, `x` for commands.
+rights it has, and no more: `r` for reads, `w` for writes and reads, `x` for commands.
 
 ```sh
 nerve-node folder add ~/.ssh r       # reads of ~/.ssh may now pass

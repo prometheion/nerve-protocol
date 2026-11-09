@@ -652,7 +652,7 @@ pub enum SudoCmd {
 pub enum FolderCmd {
     /// Let a center use a folder (r, w, x); none closes one to file calls only
     ///
-    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
+    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes and reads, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
     Add {
         /// The folder.
         path: PathBuf,

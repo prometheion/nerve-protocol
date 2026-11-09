@@ -1605,7 +1605,7 @@ mod tests {
         }
     }
 
-    /// A folder the owner closed (no flag, or no `r`) inside a folder with
+    /// A folder the owner closed (no flag, or `x` alone) inside a folder with
     /// `r` stays closed to reads where the command account holds them: the
     /// deepest folder decides, though the account may read there. A walk
     /// asks the same ([`read_reach`]).
@@ -1624,10 +1624,10 @@ mod tests {
             access: Access::NONE,
         });
         p.folders.push(Folder {
-            path: "/w/rw/drop".into(),
-            access: acc("w"),
+            path: "/w/rw/bin".into(),
+            access: acc("x"),
         });
-        for path in ["/w/rw/secret/prod.env", "/w/rw/drop/a"] {
+        for path in ["/w/rw/secret/prod.env", "/w/rw/bin/a"] {
             let at = t(path, false);
             for c in [fs_read(&at), marked("open", Effect::Read, &at)] {
                 assert_eq!(
@@ -1710,7 +1710,7 @@ mod tests {
             },
             Folder {
                 path: "/h/proj/secret".into(),
-                access: acc("w"),
+                access: acc("x"),
             },
         ];
         let home = t("/h", false);
@@ -1742,7 +1742,7 @@ mod tests {
                 &env,
                 &marked("save", Effect::Write, &t("/h/proj", true))
             ),
-            Decision::Allow
+            Decision::Forbidden("/h/proj holds a folder that does not allow writing".into())
         );
         assert_eq!(
             decide(
@@ -2551,7 +2551,7 @@ mod tests {
             ("r", call(Effect::Execute, &ssh, Some("ls")), "refused"),
             ("rw", call(Effect::Write, &keys_w, None), "allow"),
             ("rw", call(Effect::Read, &config_r, None), "allow"),
-            ("w", call(Effect::Read, &config_r, None), "refused"),
+            ("w", call(Effect::Read, &config_r, None), "allow"),
             ("rx", call(Effect::Execute, &ssh, Some("ls")), "allow"),
         ];
         for (access, c, want) in cases {
@@ -2761,7 +2761,7 @@ mod tests {
     }
 
     #[test]
-    fn write_without_read_and_execute_without_read() {
+    fn write_reads_too_and_execute_without_read() {
         let x = T::new();
         let env = x.env(true);
         let mut p = policy(Mode::Folder);
@@ -2778,7 +2778,7 @@ mod tests {
         let w = t("/w/drop/a", true);
         let r = t("/w/drop/a", false);
         assert_eq!(run(&p, &env, &call(Effect::Write, &w, None)), "allow");
-        assert_eq!(run(&p, &env, &call(Effect::Read, &r, None)), "refused");
+        assert_eq!(run(&p, &env, &call(Effect::Read, &r, None)), "allow");
         let cwd = cwd_at("/w/bin");
         assert_eq!(
             run(&p, &env, &call(Effect::Execute, &cwd, Some("./tool"))),

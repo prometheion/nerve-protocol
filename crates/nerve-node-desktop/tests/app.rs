@@ -528,7 +528,8 @@ fn the_app_drives_the_cli_end_to_end() {
         "{f:?}"
     );
     let path = perm.get_folders().row_data(0).unwrap().path;
-    perm.invoke_folder_set(path.clone(), true, true, false);
+    // Write alone reads too.
+    perm.invoke_folder_set(path.clone(), false, true, false);
     let f = &config(&paths).centers[0].policy.folders[0];
     assert!(
         f.access.read && f.access.write && !f.access.execute,

@@ -344,22 +344,22 @@ impl Reach {
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
                  line marked r, and one whose effect is read also, outside every folder, {OPEN}. \
                  {NO_FOLDER} A call may write only in the folders marked w, and a command may \
-                 start only in one marked x (r read, w write, x run commands)"
+                 start only in one marked x (r read, w read and write, x run commands)"
             )
         } else if reads && commands {
             "The node is in folder mode: a command may start only in a folder of the \
-             `folders:` line marked x (r read, w write, x run commands)"
+             `folders:` line marked x (r read, w read and write, x run commands)"
                 .to_string()
         } else if reads {
             format!(
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
                  line marked r, and one whose effect is read also, outside every folder, {OPEN}. \
-                 {NO_FOLDER} A call may write only in the folders marked w (r read, w write, x \
+                 {NO_FOLDER} A call may write only in the folders marked w (r read, w read and write, x \
                  run commands)"
             )
         } else {
             "The node is in folder mode: its calls may name paths only in the folders of the \
-             `folders:` line (r read, w write, x run commands)"
+             `folders:` line (r read, w read and write, x run commands)"
                 .to_string()
         };
         if commands && !reads {
@@ -1675,7 +1675,7 @@ mod tests {
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
                  line marked r, and one whose effect is read also, outside every folder, \
                  {open}. {never} A call may write only in the folders marked w (r read, w \
-                 write, x run commands). Where folders nest, the deepest one decides."
+                 read and write, x run commands). Where folders nest, the deepest one decides."
             )),
             "{a}"
         );
@@ -1685,7 +1685,7 @@ mod tests {
         assert!(
             a.starts_with(
                 "The node is in folder mode: a command may start only in a folder of the \
-                 `folders:` line marked x (r read, w write, x run commands). Where folders \
+                 `folders:` line marked x (r read, w read and write, x run commands). Where folders \
                  nest, the deepest one decides. The machine's sandbox holds"
             ),
             "{a}"
