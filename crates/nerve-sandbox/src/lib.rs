@@ -972,6 +972,9 @@ pub mod acl {
         /// An allowing entry of the node's own, for the SID at this place of
         /// the caps, with this mask.
         Allow(usize, u32),
+        /// An allowing entry of the node's own of [`READ_AND_EXECUTE`] for
+        /// the account the walk acts as ([`readable_by`]).
+        Reads,
     }
 
     /// A generic right of an entry written out as the rights of a file,
@@ -1072,6 +1075,39 @@ pub mod acl {
         let at = first_inherited.unwrap_or(out.len());
         let inherited = out.split_off(at);
         denies.chain(out).chain(allows).chain(inherited).collect()
+    }
+
+    /// `out`, a list [`capped`] gave for `aces`, with an allowing entry of
+    /// [`READ_AND_EXECUTE`] for `reader` (a SID as text), after the other
+    /// explicit entries and before the inherited ones. For the account the
+    /// walk acts as (the owner) on a file its list did not let it look at:
+    /// one a command linked from its own store into a granted folder keeps
+    /// the store's list, which names only the command account, its
+    /// container and the system, so without it the owner could not open
+    /// what an agent installed in their project. Read, not more, as on
+    /// Linux, where the owner reads such a file by its mode. Such an entry
+    /// that the list holds already (an earlier walk's) goes first, so a
+    /// walk that gives it again leaves the list as it is; the reader's other
+    /// entries stay.
+    pub fn readable_by(out: Vec<Capped>, aces: &[Ace], reader: &str) -> Vec<Capped> {
+        let ours = |i: usize| {
+            let a = &aces[i];
+            a.kind == ALLOWED
+                && a.flags & INHERITED == 0
+                && a.mask == READ_AND_EXECUTE
+                && a.sid
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(reader))
+        };
+        let inherited =
+            |e: &Capped| matches!(*e, Capped::Entry(i, _) if aces[i].flags & INHERITED != 0);
+        let mut out: Vec<Capped> = out
+            .into_iter()
+            .filter(|e| !matches!(*e, Capped::Entry(i, _) if ours(i)))
+            .collect();
+        let at = out.iter().position(inherited).unwrap_or(out.len());
+        out.insert(at, Capped::Reads);
+        out
     }
 
     /// The access list `aces` of a file with more than one name that
@@ -2268,6 +2304,24 @@ pub mod appcontainer {
                 maker: None,
             })
         }
+
+        /// The account this thread acts as (as a SID), where a cap
+        /// (`linked`) is to give it read: it may not look at the file, which
+        /// was opened as its maker then ([`Volume::open`], a file a command
+        /// linked in from its own store; [`acl::readable_by`]). `None`
+        /// otherwise.
+        fn reader(&self, obj: &Obj, linked: &Linked) -> io::Result<Option<String>> {
+            if self.maker.is_none() || !matches!(linked, Linked::Capped(_)) {
+                return Ok(None);
+            }
+            match open_in(obj.h, &[], READ_CONTROL | FILE_READ_ATTRIBUTES) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    acting_sid().map(Some)
+                }
+                Err(e) => Err(e),
+                Ok(_) => Ok(None),
+            }
+        }
     }
 
     /// This process' token, which Windows asks for as it works out what an
@@ -2651,7 +2705,8 @@ pub mod appcontainer {
                 Linked::Capped(_) => &now,
                 Linked::Full(_) => &lists.new,
             };
-            let new = capped(base, linked)?;
+            let reader = self.reader(obj, linked)?;
+            let new = capped(base, linked, reader.as_deref())?;
             Ok(if new.entries()? == now.entries()? {
                 Derived::Same(Lists {
                     new: now.clone(),
@@ -2665,9 +2720,10 @@ pub mod appcontainer {
 
     /// `sd` as `linked` says, the list of a file with more than one name:
     /// with no more than its cap allows the AppContainers
-    /// ([`acl::capped`]), or without the node's own entries of an earlier
-    /// cap ([`acl::uncapped`]).
-    fn capped(sd: &Sd, linked: &Linked) -> io::Result<Sd> {
+    /// ([`acl::capped`]), and read for `reader` where one is given
+    /// ([`acl::readable_by`]), or without the node's own entries of an
+    /// earlier cap ([`acl::uncapped`]).
+    fn capped(sd: &Sd, linked: &Linked, reader: Option<&str>) -> io::Result<Sd> {
         let (mut present, mut defaulted) = (0, 0);
         let mut dacl: *mut ACL = null_mut();
         // SAFETY: a valid descriptor; `dacl` points into it.
@@ -2731,9 +2787,14 @@ pub mod appcontainer {
                     .zip(&cap.containers)
                     .map(|(sid, (_, g))| (sid, *g))
                     .collect();
-                acl::capped(&list, &caps)
+                let out = acl::capped(&list, &caps);
+                match reader {
+                    Some(r) => acl::readable_by(out, &list, r),
+                    None => out,
+                }
             }
         };
+        let reader = reader.map(Sid::derive).transpose()?;
         let mut size = size_of::<ACL>() as u32;
         for e in &out {
             size += match *e {
@@ -2742,6 +2803,13 @@ pub mod appcontainer {
                 // SAFETY: a valid SID.
                 acl::Capped::Deny(j, _) | acl::Capped::Allow(j, _) => {
                     size_of::<ACCESS_ALLOWED_ACE>() as u32 - 4 + unsafe { GetLengthSid(sids[j].0) }
+                }
+                acl::Capped::Reads => {
+                    let r = reader
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("no reader"))?;
+                    // SAFETY: a valid SID.
+                    size_of::<ACCESS_ALLOWED_ACE>() as u32 - 4 + unsafe { GetLengthSid(r.0) }
                 }
             };
         }
@@ -2783,6 +2851,15 @@ pub mod appcontainer {
                     // SAFETY: the list has room for it.
                     check(unsafe {
                         AddAccessAllowedAceEx(new, ACL_REVISION_DS, 0, mask, sids[j].0)
+                    })?;
+                }
+                acl::Capped::Reads => {
+                    let r = reader
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("no reader"))?;
+                    // SAFETY: the list has room for it.
+                    check(unsafe {
+                        AddAccessAllowedAceEx(new, ACL_REVISION_DS, 0, acl::READ_AND_EXECUTE, r.0)
                     })?;
                 }
             }
@@ -3215,7 +3292,8 @@ pub mod appcontainer {
                     Linked::Capped(_) => &next.was,
                     Linked::Full(_) => &next.sd,
                 };
-                next.sd = capped(base, &linked)?;
+                let reader = volume.reader(&top, &linked)?;
+                next.sd = capped(base, &linked, reader.as_deref())?;
                 next.changed = next.sd.entries()? != next.was.entries()?;
             }
         }
@@ -3417,6 +3495,27 @@ pub mod appcontainer {
     /// The SID of the user this process runs as, as text.
     fn user_sid() -> io::Result<String> {
         let token = Token::open()?;
+        token_user(&token)
+    }
+
+    /// The SID of the account this thread acts as (whom it impersonates,
+    /// else this process' user), as text.
+    fn acting_sid() -> io::Result<String> {
+        let mut h: HANDLE = null_mut();
+        // SAFETY: the thread's own token, opened as the process, closed by
+        // the Token below.
+        if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut h) } == 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+                return Err(e);
+            }
+            return user_sid();
+        }
+        token_user(&Token(h))
+    }
+
+    /// The user of `token`, as text.
+    fn token_user(token: &Token) -> io::Result<String> {
         let mut len = 0u32;
         // SAFETY: the first call asks for the size only.
         unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
@@ -4019,6 +4118,7 @@ mod tests {
                     },
                     Capped::Deny(j, mask) => ace(DENIED, 0, mask, &sid_of(j)),
                     Capped::Allow(j, mask) => ace(ALLOWED, 0, mask, &sid_of(j)),
+                    Capped::Reads => unreachable!(),
                 })
                 .collect()
         };
@@ -4088,6 +4188,64 @@ mod tests {
         assert!(out.contains(&Capped::Allow(0, file_cap(true, true, false))));
     }
 
+    /// A capped file the walk could not look at (a command's own store's,
+    /// whose list names only the command account, its container and the
+    /// system) gets read and execute for the account the walk acts as, the
+    /// owner, after the explicit entries and before the inherited ones, so
+    /// the owner opens what an agent installed in their project (#149). A
+    /// walk that gives it again leaves the list as it is.
+    #[test]
+    fn a_capped_file_the_walk_could_not_look_at_is_read_by_its_account() {
+        use acl::{ALLOWED, Ace, Capped, DENIED, INHERITED, capped, file_cap, readable_by};
+        use inherit::Gets;
+        let ace = |kind, flags, mask, sid: &str| Ace {
+            kind,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let (c, run, owner) = ("S-1-15-2-1-2", "S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-1001");
+        let list = vec![
+            ace(DENIED, 0, acl::WRITE_DATA, owner),
+            ace(ALLOWED, INHERITED, acl::ALL, run),
+            ace(ALLOWED, INHERITED, acl::ALL, c),
+            ace(ALLOWED, INHERITED, acl::ALL, "S-1-5-18"),
+        ];
+        let caps = vec![(c.to_string(), Gets::Rights(file_cap(true, true, false)))];
+        let out = readable_by(capped(&list, &caps), &list, owner);
+        let r = file_cap(true, true, false);
+        assert_eq!(
+            out,
+            [
+                Capped::Deny(0, acl::ALL & !r),
+                Capped::Entry(0, acl::WRITE_DATA),
+                Capped::Allow(0, r),
+                Capped::Reads,
+                Capped::Entry(1, acl::ALL),
+                Capped::Entry(3, acl::ALL),
+            ]
+        );
+        let written: Vec<Ace> = out
+            .iter()
+            .map(|e| match *e {
+                Capped::Entry(i, mask) => Ace {
+                    mask,
+                    ..list[i].clone()
+                },
+                Capped::Deny(_, m) => ace(DENIED, 0, m, c),
+                Capped::Allow(_, m) => ace(ALLOWED, 0, m, c),
+                Capped::Reads => ace(ALLOWED, 0, acl::READ_AND_EXECUTE, owner),
+            })
+            .collect();
+        let again = readable_by(capped(&written, &caps), &written, owner);
+        assert_eq!(again.len(), written.len(), "{again:?}");
+        assert_eq!(again.iter().filter(|e| **e == Capped::Reads).count(), 1);
+        assert!(
+            !again.iter().any(|e| matches!(*e, Capped::Entry(3, _))),
+            "{again:?}"
+        );
+    }
+
     /// A granted file with more than one name carries the node's cap in
     /// place of the grant's own entry, and a sync that looks at it counts
     /// that as granted, so it does not put it on again each time: an
@@ -4104,7 +4262,7 @@ mod tests {
                 .map(|e| match *e {
                     Capped::Deny(_, m) => (DENIED, 0, m),
                     Capped::Allow(_, m) => (ALLOWED, 0, m),
-                    Capped::Entry(..) => unreachable!(),
+                    Capped::Entry(..) | Capped::Reads => unreachable!(),
                 })
                 .collect()
         };
@@ -4189,6 +4347,7 @@ mod tests {
                         mask,
                         sid: Some(caps[j].0.clone()),
                     },
+                    Capped::Reads => unreachable!(),
                 })
                 .collect()
         };
@@ -5105,9 +5264,11 @@ mod tests {
     /// standard user, or an administrator without its group), may not even
     /// look at it. The walk opens it, and its name in the store, as the
     /// command account ([`appcontainer::Below::maker`]) and caps it, where
-    /// it would stop at it with "access denied" (#149). Here the walk acts
-    /// as this process' user, administrators and privileges made unusable
-    /// (so it stands for the owner), and this process is the maker.
+    /// it would stop at it with "access denied" (#149), and gives the owner
+    /// read and execute on it, so the owner opens what the agent installed.
+    /// Here the walk acts as this process' user, with the signed-in users,
+    /// the administrators and privileges made unusable (so it stands for
+    /// the owner), and this process is the maker.
     #[cfg(windows)]
     #[test]
     fn a_linked_file_the_walk_may_not_look_at_is_opened_as_its_maker() {
@@ -5145,14 +5306,15 @@ mod tests {
         // The project: everyone, so the walk reaches it without this user.
         let (t, s) = (top.display().to_string(), store.display().to_string());
         run(&["icacls", &t, "/grant", "*S-1-1-0:(OI)(CI)F"]);
-        // The store: this user alone; whoever owns what is in it may only
-        // read its attributes.
+        // The store: the signed-in users alone, which the walker below is
+        // not (as only the command account is on a command's own store);
+        // whoever owns what is in it may only read its attributes.
         run(&[
             "icacls",
             &s,
             "/inheritance:r",
             "/grant:r",
-            &format!("*{me}:(OI)(CI)F"),
+            "*S-1-5-11:(OI)(CI)F",
             "*S-1-3-4:(OI)(CI)(RA)",
         ]);
         let (in_store, linked) = (store.join("x.js"), top.join("a\\x.js"));
@@ -5178,7 +5340,9 @@ mod tests {
             assert!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) } != 0);
             p
         };
-        let off = [sid(&me), sid("S-1-5-32-544")];
+        // The walker is this user, as the owner the walk acts as, without
+        // the groups the store lets in.
+        let off = [sid("S-1-5-11"), sid("S-1-5-32-544")];
         let disable: Vec<SID_AND_ATTRIBUTES> = off
             .iter()
             .map(|&p| SID_AND_ATTRIBUTES {
@@ -5254,6 +5418,8 @@ mod tests {
             maker: Some(process),
         };
         appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap();
+        // The walker, the owner, now opens what the command installed.
+        assert_eq!(std::fs::read(&linked).unwrap(), b"x");
         // SAFETY: a plain call.
         unsafe { RevertToSelf() };
         let names = asked.borrow()[0].clone();
@@ -5264,7 +5430,11 @@ mod tests {
         let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
         assert!(ours.iter().any(|l| l.contains("(DENY)")), "{lines}");
         assert!(ours.iter().any(|l| !l.contains("(DENY)")), "{lines}");
-        assert_eq!(others(&in_store), store_list, "the store's own entries");
+        // The store's own entries, and the owner's read.
+        let now = others(&in_store);
+        let added: Vec<&String> = now.iter().filter(|l| !store_list.contains(l)).collect();
+        assert!(store_list.iter().all(|l| now.contains(l)), "{now:?}");
+        assert!(added.len() == 1 && added[0].ends_with(":(RX)"), "{now:?}");
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},

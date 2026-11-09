@@ -494,7 +494,12 @@ center's local name):
     grant that holds the name, as Windows puts that folder's denial before
     the entries of the grants around it (a split folder gives a closed
     folder in it no grant, but none of the split's grants lies around it);
-    `Gets::Unheld` where none does (a name under no
+    a name in the container's own folder (its `AC` folder, where its
+    commands' pnpm store and uv cache are) or, for the command account, in
+    that account's profile counts as held, without restricting
+    (`Shut::own`), so a container keeps read on its own store's files once
+    no grant holds their other name; `Gets::Unheld` where nothing holds a
+    name (a name under no
     grant does not restrict: pnpm's store, uv's cache and a clone's source
     are read through the granted name). `acl::capped` cuts every allowing
     entry of an `S-1-15-…` SID to read and execute (a listed one's to its
@@ -509,7 +514,12 @@ center's local name):
     the folder walked would give it: the file keeps what it inherited under
     its other names (the owner's store, cache or repository) and gets none
     of the walked folder's entries for other accounts, while the container's
-    inherited entries go with the rest of the node's own. A change as any
+    inherited entries go with the rest of the node's own. Where the walk
+    had to open the file as the command account (a command's own store's
+    list names only that account, its container and the system), the
+    account the walk acts as, the owner, gets an allowing entry of read and
+    execute (`acl::readable_by`), as on Linux, where the owner reads such a
+    file by its mode. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
 
   This rests on Windows letting a sandboxed process link only a file it may

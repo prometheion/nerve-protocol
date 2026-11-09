@@ -586,7 +586,9 @@ runs in the container as well, unless the pairing runs as you.
   (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:
   until then the new files keep the store's permissions, so commands may
   not read what you installed, and you may not open what the agent
-  installed. A command can make a hard link
+  installed. After it you may read and run what the agent installed from
+  its own store, and its commands keep reading their store also once the
+  folder is no longer granted. A command can make a hard link
   only to a file it may write (Windows asks that of a sandboxed process
   since 2015; checked), so it cannot read a file of yours through one. Hard
   links only work within one drive. A grant on a single file with a second
@@ -601,6 +603,9 @@ runs in the container as well, unless the pairing runs as you.
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)
     instead.
+  - A closed folder that a command renames while the node changes the
+    folders' entries may leave a file linked across its edge (by you)
+    readable through the other name until the next **Sync folders**.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it
