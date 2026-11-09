@@ -3341,6 +3341,11 @@ impl Link {
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) && !sudo_call {
             self.acls_ready(cfg).await?;
+            // On Windows its folder is looked at below as the pairing's
+            // container, which sees it once the container's entries are on:
+            // the owner may have granted it just before the call.
+            #[cfg(windows)]
+            self.grants_ready(entry).await?;
         }
         // Where the pairing's home cannot be had and the call names no other
         // folder, the command has nowhere to start: it says why, and is in
@@ -3361,8 +3366,16 @@ impl Link {
         // The paths are looked at as the account (crate::account::FsAs).
         let rc = {
             let _as = act_as(looks_as.as_ref(), self.boxed().as_deref())?;
-            RunCall::parse(&inv.args, &start_in)?
+            RunCall::parse(&inv.args, &start_in)
         };
+        // A folder that does not resolve as the account (on Windows one the
+        // pairing's container may not look into, another pairing's) is
+        // refused and in the audit, as a file call's path is, once the
+        // switch is over.
+        let rc = rc.inspect_err(|e| {
+            let command = inv.args.get("command").and_then(Value::as_str);
+            self.audit_bad_path(inv, command.unwrap_or_default(), e);
+        })?;
         // A call may ask for less than the owner's most, never for more.
         let granted = cfg
             .limits

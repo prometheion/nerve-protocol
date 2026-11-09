@@ -394,7 +394,13 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     let cfg = nerve_policy::SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
     let container_a = nerve_node::grants::container(&paths, &cfg.center(A).unwrap().node_id);
     let container_b = nerve_node::grants::container(&paths, &cfg.center(B).unwrap().node_id);
-    let packages = PathBuf::from(r"C:\Users\nerve-run\AppData\Local\Packages");
+    // Its profile is where Windows put it: `C:\Users\nerve-run.<machine>`
+    // where an earlier account of that name left its folder.
+    let run_profile = nerve_node::account::lookup(nerve_node::account::RUN_USER)
+        .unwrap()
+        .expect("nerve-run")
+        .home;
+    let packages = run_profile.join(r"AppData\Local\Packages");
     let mut conn_a = linked(&mut ca).await;
     let mut conn_b = linked(&mut cb).await;
     let mut conn_c = linked(&mut cc).await;
@@ -417,9 +423,11 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     assert!(said.contains("\\AC\\home"), "{r}");
     assert!(a.join("ok.txt").is_file());
 
-    // Outside its folders it is refused, and that is in the audit log.
+    // Outside its folders it is refused, and that is in the audit log: the
+    // node looks at the folder as a's container, which may not look into
+    // b's, so it does not resolve.
     let e = run_in(&mut conn_a, &b, "Get-ChildItem").await.unwrap_err();
-    assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
+    assert_eq!(e.kind().as_str(), "bad_path", "{}", e.message);
     let audit = std::fs::read_to_string(paths.audit_log()).unwrap();
     assert!(
         audit
@@ -430,7 +438,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
 
     // A command of one pairing reaches neither the other's folder, nor its
     // home, nor a folder without flags inside its own `w` folder.
-    let ac = format!("C:\\Users\\nerve-run\\AppData\\Local\\Packages\\{container_b}\\AC");
+    let ac = packages.join(&container_b).join("AC").display().to_string();
     for (what, script) in [
         (
             "b's folder",
@@ -455,11 +463,14 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         // The account's own profile is closed to its containers (#167).
         (
             "nerve-run's profile",
-            r"Get-ChildItem 'C:\Users\nerve-run'".into(),
+            format!("Get-ChildItem '{}'", run_profile.display()),
         ),
         (
             "nerve-run's settings",
-            r"Get-ChildItem 'C:\Users\nerve-run\AppData\Roaming'".into(),
+            format!(
+                "Get-ChildItem '{}'",
+                run_profile.join(r"AppData\Roaming").display()
+            ),
         ),
         (
             "nerve-run's containers",

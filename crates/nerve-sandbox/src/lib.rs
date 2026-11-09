@@ -78,6 +78,14 @@ pub struct ShimSpec {
     /// ([`own_proc`]), so it sees only its own processes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own_proc: bool,
+    /// The folder the command starts in, which the shim enters first, as
+    /// the account it runs as. Windows: the node starts the shim of another
+    /// account elsewhere, as Windows checks the folder a process starts in
+    /// as the one that starts it, and the node's own account may not look
+    /// into the command's folder (a pairing's home in the container's
+    /// folder, the owner's folders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
 }
 
 /// What a PowerShell command in an AppContainer starts with. PowerShell
@@ -263,7 +271,15 @@ pub fn shim_main() -> i32 {
         return SHIM_FAILED;
     }
     match serde_json::from_slice::<ShimSpec>(&json) {
-        Ok(spec) => imp::run(spec),
+        Ok(spec) => {
+            if let Some(cwd) = &spec.cwd
+                && let Err(e) = std::env::set_current_dir(cwd)
+            {
+                eprintln!("nerve-node: cannot enter {}: {e}", cwd.display());
+                return SHIM_FAILED;
+            }
+            imp::run(spec)
+        }
         Err(e) => {
             eprintln!("nerve-node: bad exec shim spec: {e}");
             SHIM_FAILED
@@ -2343,13 +2359,20 @@ pub mod appcontainer {
         }
     }
 
-    /// This process' token, which Windows asks for as it works out what an
-    /// object inherits.
     /// Runs `f` on this thread as the account of the logon `token`, and
     /// then as the thread was again (itself, or whoever it acted as). An
     /// error where it cannot be that again: what follows must not run as
     /// the account.
     fn as_token<T>(token: HANDLE, f: impl FnOnce() -> T) -> io::Result<T> {
+        // As the process first: it holds the right to act as another.
+        // SAFETY: a logon token.
+        as_self(|| check(unsafe { ImpersonateLoggedOnUser(token) }).map(|()| f()))?
+    }
+
+    /// Runs `f` on this thread as this process, and then as the thread was
+    /// again (whoever it acted as). An error where it cannot be that again:
+    /// what follows must not run as the process.
+    fn as_self<T>(f: impl FnOnce() -> T) -> io::Result<T> {
         let mut was: HANDLE = null_mut();
         // SAFETY: the thread's own token, opened as the process, owned by
         // the Obj below.
@@ -2366,10 +2389,9 @@ pub mod appcontainer {
             }
             None
         };
-        // As the process first: it holds the right to act as another.
-        // SAFETY: plain calls; a logon token.
+        // SAFETY: plain call.
         check(unsafe { RevertToSelf() })?;
-        let r = check(unsafe { ImpersonateLoggedOnUser(token) }).map(|()| f());
+        let r = f();
         // SAFETY: plain calls; the thread's token opened above.
         let back = unsafe {
             RevertToSelf();
@@ -2379,13 +2401,19 @@ pub mod appcontainer {
             }
         };
         check(back)?;
-        r
+        Ok(r)
     }
 
+    /// This process' token, which Windows asks for as it works out what an
+    /// object inherits. Opened as the process: the account the thread acts
+    /// as may not open it (the installed service's owner may not open the
+    /// token of the node's account).
     fn process_token() -> io::Result<Obj> {
         let mut token: HANDLE = null_mut();
         // SAFETY: this process' own token, owned by the Obj below.
-        check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+        as_self(|| {
+            check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })
+        })??;
         Ok(Obj {
             h: token,
             owned: true,
@@ -4041,6 +4069,7 @@ mod tests {
                 ..ContainerSpec::new("nerve.x")
             }),
             own_proc: true,
+            cwd: Some("C:\\Users\\nerve-run\\x".into()),
         };
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<ShimSpec>(&j).unwrap(), s);
@@ -4048,7 +4077,10 @@ mod tests {
         assert!(serde_json::from_str::<ShimSpec>(extra).is_err());
         let plain = r#"{"program":"x","args":[],"parent":1}"#;
         let plain = serde_json::from_str::<ShimSpec>(plain).unwrap();
-        assert_eq!((plain.landlock, plain.container), (None, None));
+        assert_eq!(
+            (plain.landlock, plain.container, plain.cwd),
+            (None, None, None)
+        );
         let mut c = Confinement {
             landlock_abi: None,
             appcontainer: false,
@@ -5503,6 +5535,142 @@ mod tests {
             maker: None,
         };
         std::fs::remove_file(&linked).unwrap();
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+    }
+
+    /// The installed service changes the entries of the owner's folders
+    /// as the owner, who may not open the token of the node's own account,
+    /// which the walk asks Windows to work out what each object below
+    /// inherits: the walk opens it as the node (#149's first run on the
+    /// service, where every grant failed with "access denied"). Here the
+    /// walk acts as this process' user, restricted to everyone's and the
+    /// users' rights: the folders give everyone every right, this process'
+    /// token gives neither any.
+    #[cfg(windows)]
+    #[test]
+    fn a_walk_as_an_account_that_may_not_open_the_nodes_token_puts_its_grant_on() {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, ImpersonateLoggedOnUser, PSID,
+            RevertToSelf, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+        };
+        let base = tempfile::tempdir().unwrap();
+        let top = base.path().join("top");
+        std::fs::create_dir(&top).unwrap();
+        let t = top.display().to_string();
+        let o = std::process::Command::new("icacls")
+            .args([t.as_str(), "/grant", "*S-1-1-0:(OI)(CI)F"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        std::fs::create_dir(top.join("a")).unwrap();
+        std::fs::write(top.join("a").join("f.txt"), "x").unwrap();
+        // Everyone's and the users' rights: the users' let it load the
+        // system's programs, which give everyone nothing.
+        let only: Vec<SID_AND_ATTRIBUTES> = ["S-1-1-0", "S-1-5-32-545"]
+            .iter()
+            .map(|text| {
+                let mut p: PSID = std::ptr::null_mut();
+                let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
+                // SAFETY: a NUL-terminated string; the SID is freed below.
+                assert!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) } != 0);
+                SID_AND_ATTRIBUTES {
+                    Sid: p,
+                    Attributes: 0,
+                }
+            })
+            .collect();
+        let (mut process, mut walker): (HANDLE, HANDLE) =
+            (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: this process' own token, and a restricted copy of it,
+        // both closed below; the SID lives through the call.
+        unsafe {
+            assert!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                    &mut process,
+                ) != 0
+            );
+            assert!(
+                CreateRestrictedToken(
+                    process,
+                    DISABLE_MAX_PRIVILEGE,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    only.len() as u32,
+                    only.as_ptr(),
+                    &mut walker,
+                ) != 0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            for s in &only {
+                LocalFree(s.Sid);
+            }
+        }
+        struct Back(HANDLE, HANDLE);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                // SAFETY: plain calls; the tokens opened above.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(self.0);
+                    CloseHandle(self.1);
+                }
+            }
+        }
+        let _back = Back(process, walker);
+        // SAFETY: a token of this process' own user.
+        assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: an out pointer; a handle opened is closed at once.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if opened != 0 {
+            // SAFETY: the handle just opened.
+            unsafe { CloseHandle(token) };
+        }
+        assert_eq!(opened, 0, "the walker opens this process' token");
+
+        let name = format!("nerve.test.astoken.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        let put = appcontainer::set_below(&top, &name, Some(m), false, false, None, below);
+        // It still acts as the walker afterwards.
+        let mut now: HANDLE = std::ptr::null_mut();
+        // SAFETY: the thread's token, opened as the process, closed at once.
+        assert!(unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut now) } != 0);
+        // SAFETY: the handle just opened.
+        unsafe {
+            CloseHandle(now);
+            RevertToSelf();
+        }
+        put.unwrap();
+        let icacls = |p: &std::path::Path| {
+            let o = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        for p in ["", "a", "a\\f.txt"] {
+            assert!(icacls(&top.join(p)).contains("S-1-15-2-"), "{p}");
+        }
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
         appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
     }
 

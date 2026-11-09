@@ -2168,12 +2168,15 @@ fn not_remote(path: &Path) -> io::Result<()> {
 impl Folders for Acls<'_> {
     fn look(&mut self, path: &Path, container: &str, access: Access) -> io::Result<Option<Look>> {
         use nerve_sandbox::appcontainer;
+        // The links on the way are looked at as the owner too: the node's
+        // own account may not look into the owner's folders, and would
+        // find no link there.
+        let _as = self.act()?;
         // Nothing the node may look at: a recorded grant is looked for by
         // its object then (`locate`).
         if not_remote(path).is_err() {
             return Ok(None);
         }
-        let _as = self.act()?;
         let masks = masks_of(access);
         match appcontainer::look(path, container, masks) {
             Ok((id, granted)) => Ok(Some(Look {
@@ -2186,6 +2189,7 @@ impl Folders for Acls<'_> {
     }
 
     fn locate(&mut self, id: &str, near: &Path) -> io::Result<Found> {
+        let _as = self.act()?;
         // The folders on the way are opened to find the volume: not
         // through a link to another machine.
         let near = if not_remote(near).is_ok() {
@@ -2193,7 +2197,6 @@ impl Folders for Acls<'_> {
         } else {
             Path::new("")
         };
-        let _as = self.act()?;
         let id = id.parse().map_err(io::Error::other)?;
         nerve_sandbox::appcontainer::locate(&id, near)
     }
@@ -2209,13 +2212,13 @@ impl Folders for Acls<'_> {
         expect: Option<&str>,
     ) -> io::Result<Option<String>> {
         use nerve_sandbox::{acl, appcontainer};
-        not_remote(path)?;
         // What commands made belongs to the command account, whose list
         // the owner may not change outside their profile: the change is
         // made as that account there (`Below::maker`). Logged on before
         // the thread acts as the owner.
         let maker = self.owner.and_then(|_| crate::win_user::run_logon().ok());
         let _as = self.act()?;
+        not_remote(path)?;
         let masks = access.map(masks_of);
         let expect = expect
             .map(|e| e.parse::<acl::FileId>().map_err(io::Error::other))

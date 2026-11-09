@@ -2167,6 +2167,7 @@ pub async fn run(
             landlock: opts.landlock.clone(),
             container: opts.container.clone(),
             own_proc,
+            cwd: None,
         });
     // The shim of another account makes the container's profile in that
     // account's profile, which its service keeps loaded
@@ -2522,10 +2523,33 @@ fn memory_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u64> 
     job.filter(|j| j.out_of_memory()).map(|_| granted.memory_mb)
 }
 
-/// [`run`] as another account on Windows (crate::win_user): the shell, or
-/// the shim with the command's container (`shim`, its spec on its stdin),
-/// starts suspended with the account's token in the call's folder, is put
-/// in a job of its own and runs only then. It does not start when its
+/// What [`run_as`] starts: the shim, with `shim`'s confinement where there
+/// is one and otherwise none, which enters the call's folder `cwd` as the
+/// account before it starts `program` (nerve_sandbox::ShimSpec::cwd).
+/// Windows checks the folder a process starts in as the process that
+/// starts it, and the node's own account may not look into a pairing's
+/// home in its container's folder, nor into the owner's folders: a start
+/// there fails with "the directory name is invalid".
+#[cfg(any(windows, test))]
+fn entering(shim: Option<&ShimSpec>, program: &str, args: &[String], cwd: &Path) -> ShimSpec {
+    let mut spec = shim.cloned().unwrap_or_else(|| ShimSpec {
+        program: program.into(),
+        args: args.to_vec(),
+        parent: std::process::id(),
+        landlock: None,
+        container: None,
+        own_proc: false,
+        cwd: None,
+    });
+    spec.cwd = Some(cwd.to_path_buf());
+    spec
+}
+
+/// [`run`] as another account on Windows (crate::win_user): the shim
+/// ([`entering`]), with the command's container where `shim` has one, its
+/// spec on its stdin, starts suspended with the account's token in the
+/// program's own folder, which every account that runs it may enter, is
+/// put in a job of its own and runs only then. It does not start when its
 /// account can open the node's own folders, nor without a job: the node
 /// may not end another account's processes one by one, only the job. A
 /// sudo command starts with the account's administrator token instead
@@ -2579,30 +2603,18 @@ async fn run_as(
         ))
     })?;
     if let Some((_, granted)) = &opts.limits {
-        hold_to_limits(Some(&job), granted, shim.is_some())?;
+        hold_to_limits(Some(&job), granted, true)?;
     }
-    let (line, input) = match shim {
-        Some(spec) => (
-            windows_command_line(&opts.exe.display().to_string(), &[SHIM_ARG.to_string()]),
-            Some(
-                serde_json::to_vec(spec)
-                    .map_err(|e| RpcError::internal(format!("the shim's spec: {e}")))?,
-            ),
-        ),
-        None => (windows_command_line(program, args), None),
-    };
+    let line = windows_command_line(&opts.exe.display().to_string(), &[SHIM_ARG.to_string()]);
+    let input = serde_json::to_vec(&entering(shim, program, args, &call.cwd))
+        .map_err(|e| RpcError::internal(format!("the shim's spec: {e}")))?;
+    let start_in = opts.exe.parent().filter(|p| !p.as_os_str().is_empty());
     // The command's own token also starts the helper that asks it to end
     // (crate::win_stop).
     let token = elevated.unwrap_or(token);
     crate::win_stop::hear_ctrl_c();
-    let child = crate::win_user::spawn(&token, &line, Some(&call.cwd), Some(&account.home), input)
-        .map_err(|e| {
-            unavailable(format!(
-                "cannot start as {} in {}: {e}",
-                account.name,
-                to_wire(&call.cwd)
-            ))
-        })?;
+    let child = crate::win_user::spawn(&token, &line, start_in, Some(&account.home), Some(input))
+        .map_err(|e| unavailable(format!("cannot start as {}: {e}", account.name)))?;
     if let Err(e) = job.assign(child.process()) {
         child.kill();
         return Err(unavailable(crate::job::assign_error(
@@ -2740,6 +2752,32 @@ mod command_line_tests {
         );
         let own = args(&[r"HOMEPATH=\x", r"USERPROFILE=C:\Users\bob"]);
         assert_eq!(super::rehome_env(own.clone(), r"C:\Users\bob"), own);
+    }
+
+    /// A command of another account starts through the shim, which enters
+    /// the call's folder as that account (#149's first run on the service:
+    /// "the directory name is invalid"), with its container where it has
+    /// one and with no confinement otherwise.
+    #[test]
+    fn a_command_of_another_account_enters_its_folder_in_the_shim() {
+        let cwd =
+            std::path::Path::new(r"C:\Users\nerve-run\AppData\Local\Packages\nerve.x\AC\home");
+        let plain = super::entering(None, "powershell.exe", &args(&["-Command", "whoami"]), cwd);
+        assert_eq!(plain.program, std::path::Path::new("powershell.exe"));
+        assert_eq!(plain.args, args(&["-Command", "whoami"]));
+        assert_eq!(plain.cwd.as_deref(), Some(cwd));
+        assert_eq!(plain.parent, std::process::id());
+        assert!(plain.container.is_none() && plain.landlock.is_none() && !plain.own_proc);
+        let boxed = nerve_sandbox::ShimSpec {
+            container: Some(nerve_sandbox::ContainerSpec::new("nerve.x")),
+            ..plain.clone()
+        };
+        let mine = nerve_sandbox::ShimSpec {
+            cwd: None,
+            ..boxed.clone()
+        };
+        let entered = super::entering(Some(&mine), "ignored.exe", &[], cwd);
+        assert_eq!(entered, boxed);
     }
 }
 

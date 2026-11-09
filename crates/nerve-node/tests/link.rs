@@ -434,6 +434,42 @@ async fn an_overlong_command_line_is_refused_and_audited_with_the_reason() {
     node.stop().await;
 }
 
+/// A command whose folder does not resolve is refused, and the audit log
+/// says so with the reason, as for a file call's path: on the installed
+/// Windows node that is a folder the pairing's container may not look into.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_in_a_folder_that_does_not_resolve_is_refused_and_audited() {
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node(dir.path(), &center).await;
+    let mut conn = linked(&mut center).await;
+    let missing = dir.path().join("missing");
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {
+                "command": "echo hi", "cwd": missing.display().to_string()}}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .expect_err("no such folder");
+    assert_eq!(nerve_conformance::wire::code_of(&e), "bad_path");
+    let log = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    let line: Value = log
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .find(|v: &Value| v["action"] == "run")
+        .unwrap_or_else(|| panic!("no audit line for the run: {log}"));
+    assert_eq!(
+        (&line["decision"], &line["code"], &line["reason"]),
+        (&json!("forbidden"), &json!("bad_path"), &json!(e.message)),
+        "{line}"
+    );
+    assert_eq!(line["target"], "echo hi", "{line}");
+    node.stop().await;
+}
+
 /// In folder mode the folders give full access and allow rules change
 /// nothing; a deny rule still refuses.
 #[tokio::test(flavor = "multi_thread")]
