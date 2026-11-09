@@ -1861,15 +1861,27 @@ pub mod appcontainer {
             return Ok((id, false));
         }
         let mut have = Vec::new();
+        // An entry it inherits that allows the container something: a
+        // folder closed to it is not closed while it has one ([`closing`]),
+        // as where a tool passed the list of the folder around it down.
+        let mut opened = false;
         for ace in aces(dacl)? {
             // SAFETY: the ACE lies in `dacl`, valid while `_sd` lives; an
-            // allowed or denied ACE has its mask after the header.
+            // allowed or denied ACE has its mask after the header and its
+            // SID at SidStart.
             unsafe {
+                let a = ace as *const ACCESS_ALLOWED_ACE;
                 if own_for(ace, &sid) {
-                    let a = ace as *const ACCESS_ALLOWED_ACE;
                     have.push(((*ace).AceType, u32::from((*ace).AceFlags), (*a).Mask));
+                } else if (*ace).AceType == ACCESS_ALLOWED_ACE_TYPE
+                    && EqualSid(&raw const (*a).SidStart as PSID, sid.0) != 0
+                {
+                    opened = true;
                 }
             }
+        }
+        if masks.deny && opened {
+            return Ok((id, false));
         }
         let kind = if masks.deny {
             ACCESS_DENIED_ACE_TYPE
@@ -2465,6 +2477,86 @@ pub mod appcontainer {
         Sd::with(sd, new, sd.control()?)
     }
 
+    /// `sd` without the entries it inherited that allow anything to a
+    /// container whose own entry on it denies everything (a folder closed
+    /// to it, [`acl::closed`]). Windows does not hold a container to an
+    /// entry that denies it: it checks a container's process by the entries
+    /// that allow the container something, and one that inherits the grant
+    /// of the folder around it may do all that grant allows (#149's first
+    /// run on the service). The denial stays as the mark of the closed
+    /// folder; what is below it inherits its list without the grant.
+    fn closing(sd: &Sd) -> io::Result<Sd> {
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: a valid descriptor; `dacl` points into it.
+        check(unsafe {
+            GetSecurityDescriptorDacl(sd.ptr(), &mut present, &mut dacl, &mut defaulted)
+        })?;
+        if present == 0 || dacl.is_null() {
+            return Ok(sd.clone());
+        }
+        let all = aces(dacl)?;
+        // SAFETY: every ACE lies in `dacl`, valid while `sd` lives; an
+        // allowed or denied ACE has its mask after the header and its SID
+        // at SidStart.
+        let sid_of = |ace: *const ACE_HEADER| unsafe {
+            &raw const (*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as PSID
+        };
+        let mut closed = Vec::new();
+        for &ace in &all {
+            // SAFETY: as above.
+            let h = unsafe { &*ace };
+            let mask = unsafe { (*(ace as *const ACCESS_ALLOWED_ACE)).Mask };
+            if h.AceType == ACCESS_DENIED_ACE_TYPE
+                && u32::from(h.AceFlags) & INHERITED_ACE == 0
+                && mask & acl::ALL == acl::ALL
+                && sid_text(sid_of(ace))?.starts_with("S-1-15-2-")
+            {
+                closed.push(sid_of(ace));
+            }
+        }
+        let opens = |ace: *const ACE_HEADER| {
+            // SAFETY: as above.
+            let h = unsafe { &*ace };
+            h.AceType == ACCESS_ALLOWED_ACE_TYPE
+                && u32::from(h.AceFlags) & INHERITED_ACE != 0
+                // SAFETY: two valid SIDs.
+                && closed.iter().any(|&c| unsafe { EqualSid(sid_of(ace), c) } != 0)
+        };
+        if !all.iter().any(|&a| opens(a)) {
+            return Ok(sd.clone());
+        }
+        let mut info = ACL_SIZE_INFORMATION::default();
+        // SAFETY: a valid ACL and a buffer of the size given.
+        check(unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as *mut c_void,
+                size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        })?;
+        let size = info.AclBytesInUse.max(size_of::<ACL>() as u32);
+        let mut buf = vec![0u32; (size as usize).div_ceil(4)];
+        let new = buf.as_mut_ptr() as *mut ACL;
+        // SAFETY: the buffer holds `size` bytes.
+        check(unsafe { InitializeAcl(new, size, ACL_REVISION_DS) })?;
+        for &ace in all.iter().filter(|&&a| !opens(a)) {
+            // SAFETY: the ACE lies in `dacl` and is as long as its header
+            // says; the new list has room for all of them.
+            check(unsafe {
+                AddAce(
+                    new,
+                    ACL_REVISION_DS,
+                    u32::MAX,
+                    ace as *const c_void,
+                    u32::from((*ace).AceSize),
+                )
+            })?;
+        }
+        Sd::with(sd, new, sd.control()?)
+    }
+
     /// `sd` with the entries it inherited from a folder whose list is
     /// `parent` marked so. A list written before Windows marked inherited
     /// entries (no SE_DACL_AUTO_INHERITED, as in folders made that way, and
@@ -2521,11 +2613,12 @@ pub mod appcontainer {
             )
         })?;
         // SAFETY: the descriptor just made, copied, then freed once.
-        Ok(unsafe {
+        let made = unsafe {
             let copy = Sd::copy(made);
             DestroyPrivateObjectSecurity(&made);
             copy
-        })
+        };
+        closing(&made)
     }
 
     /// The list of the folder the object open as `f` is in now, by its
@@ -4835,6 +4928,95 @@ mod tests {
         appcontainer::set(&granted, &name, None, false).unwrap();
         assert_ne!(run(r"type sub\in.txt > copy2.txt".into()), 0);
         assert!(!granted.join("copy2.txt").exists());
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// A folder closed inside a granted one is closed to the container's
+    /// commands, and to what is below it, also where the grant around it
+    /// comes after the closure: Windows does not hold a container to an
+    /// entry that denies it, only to one that allows it nothing (#149's
+    /// first run on the service, where the closed folder stayed open).
+    /// `look` does not take a closed folder that inherits the grant again
+    /// (as when a tool passed the list around it down) as closed.
+    #[cfg(windows)]
+    #[test]
+    fn a_closed_folder_inside_a_granted_one_is_closed_to_its_container() {
+        let base = tempfile::tempdir().unwrap();
+        let granted = base.path().join("granted");
+        let closed = granted.join("closed");
+        std::fs::create_dir_all(closed.join("deep")).unwrap();
+        std::fs::write(closed.join("deep").join("kept.txt"), "kept").unwrap();
+        std::fs::write(granted.join("open.txt"), "open").unwrap();
+        let name = format!("nerve.test.closed.{}", std::process::id());
+        let rwx = acl::masks(true, true, true);
+        let d = |p: &std::path::Path| p.display().to_string();
+        // Whether `op` went through, and what PowerShell said.
+        let tried = |op: String| {
+            let (code, log) = run_in_container(
+                &name,
+                &granted,
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!("{POWERSHELL_START}try {{ {op}; exit 0 }} catch {{ $_; exit 3 }}"),
+                ],
+            );
+            assert!(code == 0 || code == 3, "{op}: {log}");
+            (code == 0, log)
+        };
+        let reads = || {
+            let all = [
+                "Get-Content -LiteralPath open.txt -ErrorAction Stop".to_string(),
+                format!(
+                    "Get-ChildItem -LiteralPath '{}' -ErrorAction Stop",
+                    d(&closed)
+                ),
+                format!(
+                    "Get-Content -LiteralPath '{}' -ErrorAction Stop",
+                    d(&closed.join("deep").join("kept.txt"))
+                ),
+            ]
+            .map(tried);
+            let said: Vec<String> = all.iter().map(|(_, l)| l.clone()).collect();
+            ((all[0].0, all[1].0, all[2].0), said)
+        };
+        // Closed first, granted after; then granted and closed again.
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        appcontainer::set(&granted, &name, Some(rwx), false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+        assert!(appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        appcontainer::set(&closed, &name, None, false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, true, true), "{said:?}");
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+        let write = format!(
+            "Set-Content -LiteralPath '{}' -Value x -ErrorAction Stop",
+            d(&closed.join("new.txt"))
+        );
+        assert!(!tried(write).0);
+        assert!(!closed.join("new.txt").exists());
+
+        // Windows passes the list of the granted folder down again, as
+        // icacls does: the closed folder inherits the grant, and `look`
+        // says it is not closed; the next change closes it again.
+        let o = std::process::Command::new("icacls")
+            .args([d(&granted).as_str(), "/grant", "*S-1-5-32-545:(OI)(CI)RX"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(!appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        assert!(appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+
+        for p in [&closed, &granted] {
+            appcontainer::set(p, &name, None, false).unwrap();
+        }
         appcontainer::remove_profile(&name).unwrap();
     }
 
