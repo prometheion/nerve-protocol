@@ -578,11 +578,17 @@ runs in the container as well, unless the pairing runs as you.
   or in the node's own folders closes the file under every name. A name in
   a folder the node cannot open (another account's) does not count. The
   node changes the file's entries only as a change reaches it: **Sync
-  folders** cuts one you widened back down. A command can make a hard link
+  folders** cuts one you widened back down. So after you or an agent
+  install dependencies or clone into a folder that is granted already
+  (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:
+  until then the new files keep the store's permissions, so commands may
+  not read what you installed, and you may not open what the agent
+  installed. A command can make a hard link
   only to a file it may write (Windows asks that of a sandboxed process
   since 2015; checked), so it cannot read a file of yours through one. Hard
   links only work within one drive. A grant on a single file with a second
-  name is refused. Limits:
+  name is refused where commands may write around it, and capped as above
+  elsewhere. Limits:
   - `icacls /reset` and Explorer's "Replace all child object permission
     entries" take the node's own entries off too: the file is widened until
     **Sync folders**.

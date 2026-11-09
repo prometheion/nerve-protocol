@@ -1090,6 +1090,28 @@ pub mod acl {
             .collect()
     }
 
+    /// Whether `have`, a container's explicit entries (kind, ACE flags,
+    /// mask) on a granted file with more than one name, are those
+    /// [`capped`] gives it under a grant of `m`: a denying entry of every
+    /// right it does not allow, and an allowing one of no more than the
+    /// grant gives within [`READ_AND_EXECUTE`], or none (closed). The node
+    /// caps such a file in place of the grant's own entry (#149): it counts
+    /// as granted, so a sync does not put it on again each time.
+    pub fn capped_within(have: &[(u8, u32, u32)], m: Masks) -> bool {
+        if m.deny {
+            return false;
+        }
+        let mut have = have.to_vec();
+        have.sort_unstable();
+        match have[..] {
+            [(DENIED, 0, d)] => d == ALL,
+            [(ALLOWED, 0, c), (DENIED, 0, d)] => {
+                c != 0 && c & !(m.file & READ_AND_EXECUTE) == 0 && d == ALL & !c
+            }
+            _ => false,
+        }
+    }
+
     /// The entries a grant of `m` is on a folder (`is_dir`) or a file, as
     /// (ACE flags, mask): for the folder itself, for the folders below it,
     /// and for the files below it. The granted folder or file itself has no
@@ -1745,8 +1767,9 @@ pub mod appcontainer {
 
     /// What is at `path` (its [`FileId`], `None` where the volume gives
     /// none), and whether its own entries for the container `name` are
-    /// exactly those [`set`] puts on for `masks`. NotFound when nothing is
-    /// there.
+    /// exactly those [`set`] puts on for `masks` (on a file with more than
+    /// one name, or the cap [`set_below`] gives it in their place:
+    /// [`acl::capped_within`]). NotFound when nothing is there.
     pub fn look(path: &Path, name: &str, masks: Masks) -> io::Result<(Option<FileId>, bool)> {
         let sid = Sid::derive(name)?;
         let f = open(path, READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -1797,7 +1820,18 @@ pub mod appcontainer {
             .collect();
         have.sort_unstable();
         want.sort_unstable();
-        Ok((id, have == want))
+        if have == want || is_dir {
+            return Ok((id, have == want));
+        }
+        // A file with more than one name gets the node's cap in place of
+        // the grant's entry ([`set_below`]).
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: an open handle and a buffer for the answer.
+        check(unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) })?;
+        Ok((
+            id,
+            info.nNumberOfLinks > 1 && acl::capped_within(&have, masks),
+        ))
     }
 
     /// The path of the object open as `f`: by its drive or the folder its
@@ -2433,7 +2467,20 @@ pub mod appcontainer {
 
         fn open(&mut self, dir: &Obj, name: &OsStr) -> io::Result<Option<Obj>> {
             let name: Vec<u16> = name.encode_wide().collect();
-            open_in(dir.h, &name, READ_CONTROL | FILE_READ_ATTRIBUTES)
+            let access = READ_CONTROL | FILE_READ_ATTRIBUTES;
+            // A file a command linked in from its own store (pnpm's, uv's,
+            // in its profile) keeps the store's list under every name, so
+            // the thread may not even look at it: opened as its maker then
+            // ([`Below::maker`]), as for a write.
+            match open_in(dir.h, &name, access) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    match self.maker {
+                        Some(t) => as_token(t, || open_in(dir.h, &name, access))?,
+                        None => Err(e),
+                    }
+                }
+                r => r,
+            }
         }
 
         fn kind(&mut self, obj: &Obj) -> io::Result<Kind> {
@@ -3986,6 +4033,55 @@ mod tests {
         assert_eq!(uncapped(&list, &[c.into()]).len(), list.len());
     }
 
+    /// A granted file with more than one name carries the node's cap in
+    /// place of the grant's own entry, and a sync that looks at it counts
+    /// that as granted, so it does not put it on again each time: an
+    /// allowing entry of no more than the grant's flags give within read
+    /// and execute with the denial of the rest, or the denial of every
+    /// right alone. A wider allow, the grant's own entry or none does not.
+    #[test]
+    fn a_capped_file_counts_as_granted() {
+        use acl::{ALL, ALLOWED, Capped, DENIED, capped, capped_within, file_cap};
+        use inherit::Gets;
+        let ours = |g: Gets| -> Vec<(u8, u32, u32)> {
+            capped(&[], &[("S-1-15-2-1-2".to_string(), g)])
+                .iter()
+                .map(|e| match *e {
+                    Capped::Deny(_, m) => (DENIED, 0, m),
+                    Capped::Allow(_, m) => (ALLOWED, 0, m),
+                    Capped::Entry(..) => unreachable!(),
+                })
+                .collect()
+        };
+        let (rw, rwx, w) = (
+            acl::masks(true, true, false),
+            acl::masks(true, true, true),
+            acl::masks(false, true, false),
+        );
+        for (m, g) in [
+            (rw, Gets::Rights(file_cap(true, true, false))),
+            (rwx, Gets::Rights(file_cap(true, true, true))),
+            (rwx, Gets::Rights(file_cap(true, false, false))),
+            (w, Gets::Rights(file_cap(false, true, false))),
+            (rw, Gets::Closed),
+        ] {
+            assert!(capped_within(&ours(g), m), "{m:?} {g:?}");
+        }
+        assert!(!capped_within(
+            &ours(Gets::Rights(file_cap(true, false, true))),
+            rw
+        ));
+        assert!(!capped_within(
+            &ours(Gets::Rights(file_cap(true, false, false))),
+            w
+        ));
+        assert!(!capped_within(&[(ALLOWED, 0, rw.file & !acl::DELETE)], rw));
+        assert!(!capped_within(&[], rw));
+        assert!(!capped_within(&[(DENIED, 0, ALL)], acl::closed()));
+        let r = file_cap(true, false, false);
+        assert!(!capped_within(&[(ALLOWED, 0, r), (DENIED, 0, ALL)], rw));
+    }
+
     /// Two containers with a grant on one name each of the same file (two
     /// projects linked to one store), walked in turn: the list is worked out
     /// under one name's folder each time, which holds only that one's
@@ -4915,6 +5011,19 @@ mod tests {
             );
         }
         assert!(ours(&top.join("a\\f.txt")).iter().any(writes));
+        // Granted itself, it carries the cap in place of the grant's
+        // entry, which counts as granted.
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut quiet,
+            maker: None,
+        };
+        appcontainer::set_below(&linked, &name, Some(m), false, false, None, below).unwrap();
+        assert!(
+            appcontainer::look(&linked, &name, m).unwrap().1,
+            "{}",
+            icacls(&linked)
+        );
         // Taken off, where no grant of it holds a name: neither the entry
         // nor the denial stays.
         let mut unheld = |_: &Path, _: u32, _: &[PathBuf]| {
@@ -4933,6 +5042,168 @@ mod tests {
         set(None, false);
         assert_eq!(lists(), at_first, "every list as it was");
         std::fs::remove_dir(&j).unwrap();
+    }
+
+    /// A file a command linked into a granted folder from a store of its
+    /// own (pnpm's, uv's, in its profile) keeps the store's list under
+    /// every name, so the owner, as whom the node's service walks (a
+    /// standard user, or an administrator without its group), may not even
+    /// look at it. The walk opens it, and its name in the store, as the
+    /// command account ([`appcontainer::Below::maker`]) and caps it, where
+    /// it would stop at it with "access denied" (#149). Here the walk acts
+    /// as this process' user, administrators and privileges made unusable
+    /// (so it stands for the owner), and this process is the maker.
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_file_the_walk_may_not_look_at_is_opened_as_its_maker() {
+        use std::path::{Path, PathBuf};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, ImpersonateLoggedOnUser, PSID,
+            RevertToSelf, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let base = tempfile::tempdir().unwrap();
+        let (top, store) = (base.path().join("top"), base.path().join("store"));
+        for d in [top.join("a"), store.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(top.join("a\\own.txt"), "x").unwrap();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new(args[0])
+                .args(&args[1..])
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{o:?}");
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let me = run(&["whoami", "/user", "/fo", "csv", "/nh"]);
+        let me = me
+            .trim()
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(me.starts_with("S-1-5-"), "{me}");
+        // The project: everyone, so the walk reaches it without this user.
+        let (t, s) = (top.display().to_string(), store.display().to_string());
+        run(&["icacls", &t, "/grant", "*S-1-1-0:(OI)(CI)F"]);
+        // The store: this user alone; whoever owns what is in it may only
+        // read its attributes.
+        run(&[
+            "icacls",
+            &s,
+            "/inheritance:r",
+            "/grant:r",
+            &format!("*{me}:(OI)(CI)F"),
+            "*S-1-3-4:(OI)(CI)(RA)",
+        ]);
+        let (in_store, linked) = (store.join("x.js"), top.join("a\\x.js"));
+        std::fs::write(&in_store, "x").unwrap();
+        std::fs::hard_link(&in_store, &linked).unwrap();
+
+        let sid = |text: &str| {
+            let mut p: PSID = std::ptr::null_mut();
+            let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
+            // SAFETY: a NUL-terminated string; the SID is freed below.
+            assert!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) } != 0);
+            p
+        };
+        let off = [sid(&me), sid("S-1-5-32-544")];
+        let disable: Vec<SID_AND_ATTRIBUTES> = off
+            .iter()
+            .map(|&p| SID_AND_ATTRIBUTES {
+                Sid: p,
+                Attributes: 0,
+            })
+            .collect();
+        let (mut process, mut walker): (HANDLE, HANDLE) =
+            (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: this process' own token, and a restricted copy of it,
+        // both closed below; the SIDs live through the call.
+        unsafe {
+            assert!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                    &mut process,
+                ) != 0
+            );
+            assert!(
+                CreateRestrictedToken(
+                    process,
+                    DISABLE_MAX_PRIVILEGE,
+                    disable.len() as u32,
+                    disable.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    &mut walker,
+                ) != 0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            for p in off {
+                LocalFree(p);
+            }
+        }
+        // This thread acts as the walker until the end, however the test
+        // ends.
+        struct Back(HANDLE, HANDLE);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                // SAFETY: plain calls; the tokens opened above.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(self.0);
+                    CloseHandle(self.1);
+                }
+            }
+        }
+        let _back = Back(process, walker);
+        // SAFETY: a token of this process' own user.
+        assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
+
+        let name = format!("nerve.test.maker.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let e = appcontainer::look(&linked, &name, m).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+        let asked: std::cell::RefCell<Vec<Vec<PathBuf>>> = Default::default();
+        let mut capped = |_: &Path, _: u32, names: &[PathBuf]| {
+            asked.borrow_mut().push(names.to_vec());
+            Ok(inherit::Linked::Capped(inherit::Cap {
+                containers: vec![(
+                    name.clone(),
+                    inherit::Gets::Rights(acl::file_cap(true, true, false)),
+                )],
+            }))
+        };
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut |_| {},
+            maker: Some(process),
+        };
+        appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap();
+        // SAFETY: a plain call.
+        unsafe { RevertToSelf() };
+        let names = asked.borrow()[0].clone();
+        for n in ["store\\x.js", "top\\a\\x.js"] {
+            assert!(names.iter().any(|p| p.ends_with(n)), "{n}: {names:?}");
+        }
+        let lines = icacls(&[&in_store.display().to_string()]);
+        let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
+        assert!(ours.iter().any(|l| l.contains("(DENY)")), "{lines}");
+        assert!(ours.iter().any(|l| !l.contains("(DENY)")), "{lines}");
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        std::fs::remove_file(&linked).unwrap();
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
     }
 
     /// A folder on a volume mounted in a folder (no drive letter) is found

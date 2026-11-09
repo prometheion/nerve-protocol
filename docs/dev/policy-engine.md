@@ -463,7 +463,9 @@ center's local name):
   (`NtQueryInformationFile` with the hard-link classes, each name's folder
   opened by its file ID, as the command account where the thread may not: a
   command's own store below its profile; a name whose folder neither may
-  open is left out), not by its path. `grants::Judge::verdict` gives:
+  open is left out), not by its path. The file itself is opened as the
+  command account too where the thread may not look at it: one a command
+  linked from its own store keeps the store's list under every name. `grants::Judge::verdict` gives:
   - `Linked::Full` where all names are listed, lie inside the changed
     folder (resolved), are held by exactly the same wanted and recorded
     grant paths of any container, and none is shut (below): every name gets
@@ -488,7 +490,11 @@ center's local name):
     folders, a folder without flags, which inside a split folder has no
     grant); `Gets::Rights(cap)` where a grant of it holds a name, `cap`
     being `acl::READ_AND_EXECUTE` cut to what each name's covering grants
-    give (`acl::file_cap`); `Gets::Unheld` where none does (a name under no
+    give (`acl::file_cap`), counting only those inside the deepest closed
+    grant that holds the name, as Windows puts that folder's denial before
+    the entries of the grants around it (a split folder gives a closed
+    folder in it no grant, but none of the split's grants lies around it);
+    `Gets::Unheld` where none does (a name under no
     grant does not restrict: pnpm's store, uv's cache and a clone's source
     are read through the granted name). `acl::capped` cuts every allowing
     entry of an `S-1-15-…` SID to read and execute (a listed one's to its
@@ -504,7 +510,9 @@ center's local name):
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
   execute does not hold. A grant put directly on a file with a second name
-  is refused (`not_own`). Not judged again: a file that lost its other
+  is refused where commands may write around it (`not_own`); elsewhere (an
+  entry of a split folder) it gets the cap in place of its own entry, which
+  `look` counts as granted (`acl::capped_within`). Not judged again: a file that lost its other
   names keeps the node's entries; a folder whose inheritance the owner
   turned off by hand counts as any folder (only a closed one closes). Only an
   error marked `acl::Untouched` (refused before a write, nothing at the
