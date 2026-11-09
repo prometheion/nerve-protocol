@@ -909,7 +909,12 @@ if ($wait.Wait(40000)) {{
             &system32("whoami.exe").display().to_string(),
         ]);
         assert!(!ok, "{said}");
-        assert!(said.contains("whoami.exe --version"), "{said}");
+        // The check runs the staged copy (`nerve-center.new.exe`), so the
+        // refusal names that one's `--version`, after the source it read.
+        assert!(
+            said.contains("whoami.exe") && said.contains("--version: exit code"),
+            "{said}"
+        );
         assert_eq!(std::fs::read(&installed).unwrap(), kept);
         // Another build of the center replaces it, and the service runs
         // the new file: a copy with bytes after its end, which Windows
