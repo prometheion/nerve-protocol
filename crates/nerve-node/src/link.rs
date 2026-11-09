@@ -4430,6 +4430,7 @@ mod tests {
             unfinished: false,
             toward: Vec::new(),
             closed_at: None,
+            off: false,
         };
         assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());
         let stale = Synced {

@@ -535,7 +535,13 @@ center's local name):
   name under it that no wanted grant of the container holds, in the walk
   that takes it off, so a file a command linked out of such a folder into
   one it may read stays closed (Linux refuses that link, `Refer`). The
-  closing lasts until a later walk reaches the file through its other name.
+  take-off leaves a mark of the grant in the record (`Grant::off`; no
+  folder entry, no effect on `changes`, `walk_every` or `emptied`), which
+  `sync_in_turn` keeps apart from the grants and feeds to `Links::unread`
+  in every later sync, so **Sync folders** does not open the file. The mark
+  follows its folder (found by id) and goes when the folder is gone, when a
+  grant of the container is wanted at its place, or when the container has
+  no wanted grant.
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
