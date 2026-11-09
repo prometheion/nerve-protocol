@@ -546,8 +546,9 @@ runs in the container as well, unless the pairing runs as you.
   as long as the config is unchanged, every granted and closed folder is
   still where the node recorded it, and nothing is at the place of a
   granted or closed folder or of a grant on a volume that was away when the
-  last sync found it missing; when a folder was moved or made again
-  meanwhile, the command waits for the walk and the sync that reacts to it.
+  last sync found it missing, and your Documents folder is where it was;
+  when a folder was moved or made again meanwhile, or Documents moved, the
+  command waits for the walk and the sync that reacts to it.
   The one exception is a folder made anew in a granted folder that is split
   around a protected entry (your home): it is reached only after a walk
   that runs then, so a command in it may fail with "access denied" once;

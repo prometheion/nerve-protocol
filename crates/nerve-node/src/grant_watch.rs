@@ -30,12 +30,13 @@
 //! or moved in while the node did not run) follows it as a walk of the
 //! watch. A command of a pairing does not wait for a walk of the watch when
 //! the config is the one the last sync saw and every recorded grant is
-//! still where it was, and nothing is at the place of a closed folder the
-//! last sync found missing ([`Watch::walking`], crate::grants::in_place): the
-//! walk only caps the files linked in and adds inherited entries, so what
-//! the command sees is as good as the last sync's answer; a folder that
-//! moved since is something the sync in its turn reacts to, and the command
-//! waits for it.
+//! still where it was, nothing is at the place of a folder the last sync
+//! found missing, and the owner's Documents folder is the one the last sync
+//! used ([`Watch::walking`], crate::grants::in_place): with all of these as
+//! they were, the walk only caps the files linked in and adds inherited
+//! entries, so what the command sees is as good as the last sync's answer;
+//! a folder that moved since, or Documents moved into a granted folder, is
+//! something the sync in its turn reacts to, and the command waits for it.
 //!
 //! A watch is of the object the record names at the folder's path, not of
 //! the path: the handle goes along with a folder renamed away, so one made
@@ -287,11 +288,12 @@ impl Watch {
 
     /// What the last sync left, for a command that would wait for the turn
     /// while a walk of the watch holds it: only when the config is the one
-    /// that sync saw. The walk only caps files linked in and adds inherited
-    /// entries, and a name made meanwhile is as unwalked as one made before
-    /// it; a changed config waits for the walk like any other sync. What
-    /// moved on the disk since is not told here: the caller looks at the
-    /// grants' folders itself (crate::grants::in_place).
+    /// that sync saw. A changed config waits for the walk like any other
+    /// sync. What moved on the disk since, and the owner's Documents folder,
+    /// are not told here: the caller looks at them itself
+    /// (crate::grants::in_place); with those as they were, the walk only
+    /// caps files linked in and adds inherited entries, and a name made
+    /// meanwhile is as unwalked as one made before it.
     pub fn walking(&self, version: u64) -> Option<Synced> {
         let p = lock(&self.pending);
         match &p.last {

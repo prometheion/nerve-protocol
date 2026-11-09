@@ -482,11 +482,15 @@ center's local name):
   every recorded grant is still at its path with its object, and nothing is
   at the path of a granted or closed folder the sync found missing or of a
   grant it kept on a volume that was away (`Synced::absent`, `Synced::away`; both in
-  `Synced::kept`; `grants::in_place`, a look at each, no change): it takes that sync's
-  answer (`Synced::kept`, what decides a refusal), since the walk only caps
-  files linked in and adds inherited entries. A newer config, or a folder
-  moved or made again since (which the sync in its turn takes off or
-  refuses), waits for the turn. A folder made in a granted folder that is
+  `Synced::kept`; `grants::in_place`, a look at each, no change), and the
+  protected list follows the platform that sync used (`Synced::platform`:
+  the owner's Documents folder, read again as the owner): it takes that sync's
+  answer (`Synced::kept`, what decides a refusal), since with all of these
+  as they were the walk only caps files linked in and adds inherited
+  entries. A newer config, a folder moved or made again since (which the
+  sync in its turn takes off or refuses), or a Documents folder moved
+  (into a granted folder, which the sync splits around its PowerShell
+  profiles), waits for the turn. A folder made in a granted folder that is
   split around a protected entry (your home) has no grant and no record
   at the last sync, so `in_place` cannot see it: a command in it is
   refused by the container until that walk ends, and the next command's

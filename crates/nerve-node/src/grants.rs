@@ -268,6 +268,11 @@ pub struct Synced {
     /// path: no grant is recorded for them, so a folder made there later is
     /// not seen as moved ([`in_place`]).
     pub absent: Vec<Grant>,
+    /// The platform the protected list followed for what the sync wanted
+    /// (crate::paths::platform_for: the owner's Documents folder): a
+    /// protected entry that moved into a granted folder since splits it
+    /// ([`in_place`]). `None` where the sync did not read it.
+    pub platform: Option<Platform>,
     /// Containers that had grants and have none now.
     pub emptied: Vec<String>,
     /// How many grants were taken off.
@@ -294,6 +299,7 @@ impl Synced {
             unknown: self.unknown.clone(),
             away: self.away.clone(),
             absent: self.absent.clone(),
+            platform: self.platform.clone(),
             ..Synced::default()
         }
     }
@@ -969,10 +975,12 @@ fn at_path(old: &Grant, here: &io::Result<Option<Look>>) -> bool {
 /// Whether every grant the record of the node at `paths` holds is still on
 /// its object at the path recorded, and nothing is at the path of a grant
 /// the last sync (`last`) found nothing for (a granted or closed folder that
-/// was not there, or on a volume that was away), looked at as a sync does but
-/// without changing or walking anything (so while another sync walks): a
-/// granted or closed folder that was moved, removed or made again since is
-/// not. A command that would wait for a long walk may go on with the answer
+/// was not there, or on a volume that was away), and the protected list
+/// follows the owner's Documents folder the last sync used, looked at as a
+/// sync does but without changing or walking anything (so while another
+/// sync walks): a granted or closed folder that was moved, removed or made
+/// again since is not, nor a Documents folder moved (into a granted folder,
+/// which the sync splits around its PowerShell profiles). A command that would wait for a long walk may go on with the answer
 /// of the last sync only while this holds; what moved on the disk is for a
 /// sync in its turn (a take-off of the moved grant, the refusal for a closed
 /// folder a command moved or made). `owner` as in [`apply`]. Not on
@@ -986,6 +994,7 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last
             &record_file(paths),
             last,
             || act_as(owner),
+            || Some(crate::paths::platform_for(paths)),
             &mut Acls {
                 report: &mut |_| {},
                 owner: None,
@@ -1000,13 +1009,16 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last
 }
 
 /// [`in_place`] for the record `file`, on `folders`, which `act` makes the
-/// looks as while its result lives. The record is read before `act` runs: it
-/// lives in the node's own state folder, which the owner may not read.
+/// looks as while its result lives, and the `platform` read as it acts (the
+/// owner's registry names the owner's Documents folder). The record is read
+/// before `act` runs: it lives in the node's own state folder, which the
+/// owner may not read.
 #[cfg(any(windows, test))]
 fn in_place_as<G>(
     file: &Path,
     last: &Synced,
     act: impl FnOnce() -> io::Result<G>,
+    platform: impl FnOnce() -> Option<Platform>,
     folders: &mut impl Folders,
 ) -> bool {
     let Ok(record) = read_record(file) else {
@@ -1015,9 +1027,10 @@ fn in_place_as<G>(
     let Ok(_as) = act() else {
         return false;
     };
-    record
-        .iter()
-        .all(|old| at_path(old, &folders.look(&old.path, &old.container, old.access)))
+    platform() == last.platform
+        && record
+            .iter()
+            .all(|old| at_path(old, &folders.look(&old.path, &old.container, old.access)))
         && last
             .absent
             .iter()
@@ -1025,10 +1038,11 @@ fn in_place_as<G>(
             .all(|g| !matches!(folders.look(&g.path, &g.container, g.access), Ok(Some(_))))
 }
 
-/// [`in_place_as`] with no change of whom the looks are made as.
+/// [`in_place_as`] with no change of whom the looks are made as, and the
+/// platform of the last sync.
 #[cfg(test)]
 fn in_place_with(file: &Path, last: &Synced, folders: &mut impl Folders) -> bool {
-    in_place_as(file, last, || Ok(()), folders)
+    in_place_as(file, last, || Ok(()), || last.platform.clone(), folders)
 }
 
 /// [`sync`], with what closes a name of a file with more than one name
@@ -1562,6 +1576,7 @@ pub fn apply(
     {
         let run = run_sid(paths);
         let owner = owner.filter(|_| run.is_some());
+        let used = std::cell::Cell::new(None);
         let want = || {
             let (cfg, home) = current();
             // The folders are resolved, walked and split as the owner sees
@@ -1575,18 +1590,22 @@ pub fn apply(
                     let platform = crate::paths::platform_for(paths);
                     let of = Shut::of(&cfg, paths, &home, &platform);
                     shut = with_own(of, &cfg, paths, run.as_deref());
-                    wanted_on(run.as_deref(), &cfg, paths, &home, &platform)
+                    let grants = wanted_on(run.as_deref(), &cfg, paths, &home, &platform);
+                    used.set(Some(platform));
+                    grants
                 },
             );
             (grants, pairings(paths, &cfg), shut)
         };
-        apply_in(
+        let mut synced = apply_in(
             paths,
             walk,
             want,
             &mut Acls { report, owner },
             &mut WinProfiles,
-        )
+        );
+        synced.platform = used.take();
+        synced
     }
     #[cfg(not(windows))]
     {
@@ -3537,14 +3556,61 @@ mod tests {
             std::fs::write(&file, "not json").unwrap();
             Ok(Acting(&file, kept))
         };
-        assert!(in_place_as(&file, &Synced::default(), acting, &mut f));
+        assert!(in_place_as(
+            &file,
+            &Synced::default(),
+            acting,
+            || None,
+            &mut f
+        ));
         // A logon that fails tells nothing.
         assert!(!in_place_as(
             &file,
             &Synced::default(),
             || Err::<(), _>(io::Error::other("no logon")),
+            || None,
             &mut f
         ));
+    }
+
+    /// The owner's Documents folder moved since the last sync (OneDrive's
+    /// backup into a granted folder): its PowerShell profiles are protected
+    /// only once a sync split the granted folder around them, so a command
+    /// does not take the last answer. The folder is read as the owner, whose
+    /// registry names it.
+    #[test]
+    fn a_documents_folder_moved_since_the_last_sync_is_not_in_place() {
+        use nerve_policy::protected::WinFolders;
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/proj");
+        let mut s = sync(&file, &[grant("c1", "/w/proj", "rw")], &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let at = |p: &str| {
+            Platform::Windows(WinFolders {
+                documents: vec![p.into()],
+                ..WinFolders::default()
+            })
+        };
+        s.platform = Some(at("/home/me/Documents"));
+        let last = s.kept();
+        let acting = std::cell::Cell::new(false);
+        let mut place = |now: &str| {
+            acting.set(false);
+            in_place_as(
+                &file,
+                &last,
+                || {
+                    acting.set(true);
+                    Ok(())
+                },
+                || acting.get().then(|| at(now)),
+                &mut f,
+            )
+        };
+        assert!(place("/home/me/Documents"));
+        assert!(!place("/w/proj/Documents"));
     }
 
     /// A granted or closed folder that was not there at the last sync has no
