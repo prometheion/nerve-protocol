@@ -531,6 +531,12 @@ center's local name):
     may look at the file then), so that walk changes nothing. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
 
+  A recorded grant that gave write without read (`Links::unread`) closes a
+  name under it that no wanted grant of the container holds, in the walk
+  that takes it off, so a file a command linked out of such a folder into
+  one it may read stays closed (Linux refuses that link, `Refer`). The
+  closing lasts until a later walk reaches the file through its other name.
+
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
   execute does not hold. A grant put directly on a file with a second name

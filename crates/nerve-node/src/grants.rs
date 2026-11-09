@@ -397,6 +397,12 @@ pub struct Links<'a> {
     /// it ([`Grant::closed_at`]): a name there is closed as one under a
     /// wanted closed folder.
     pub moved: &'a [Grant],
+    /// The recorded grants that gave a container write but no read, at
+    /// their folders now. They are taken off or about to be: a name there
+    /// that no grant of the container holds is closed to it, as the grant
+    /// closed what its commands could not read, so a file linked out of
+    /// the folder is not read through its other name once the folder goes.
+    pub unread: &'a [Grant],
     /// What closes a name to a container besides the grants.
     pub shut: &'a Shut,
     /// The paths of every wanted and recorded grant (of any container), by
@@ -686,7 +692,9 @@ impl<'a> Judge<'a> {
     /// one [`Shut`] closes), otherwise read and execute at most, and no more
     /// than the grants of the container that hold a name give there (inside
     /// the deepest closed folder that holds it, where one does). A name
-    /// under none of its grants does not restrict: such a file outside the
+    /// that only a taken-off grant of write without read held closes the
+    /// file ([`Links::unread`]). A name under none of its grants otherwise
+    /// does not restrict: such a file outside the
     /// folders (pnpm's store, uv's cache, the repository a clone came from)
     /// is read through the granted name, as on Linux, where it keeps its
     /// own, usually readable, rights. A name in its own folder (a store or
@@ -721,6 +729,18 @@ impl<'a> Judge<'a> {
                 })
             };
             if held.iter().any(|g| g.access == Access::NONE && !opened(g)) {
+                return Gets::Closed;
+            }
+            // Where the commands could write but not read, and no grant
+            // holds the name now: Linux refuses a link out of such a folder
+            // into one they may read (`Refer`), so the file stays closed.
+            if held.is_empty()
+                && self
+                    .links
+                    .unread
+                    .iter()
+                    .any(|g| g.container == container && within(name, &g.path))
+            {
                 return Gets::Closed;
             }
             if self.links.shut.owns(container, name, owner) {
@@ -994,10 +1014,25 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
             _ => None,
         })
         .collect();
+    // Each grant that gave write but no read, where its folder is now.
+    let unread: Vec<Grant> = record
+        .iter()
+        .zip(&seen)
+        .filter(|(old, _)| old.states().any(|a| a.write && !a.read))
+        .filter_map(|(old, (here, found))| match found {
+            _ if at_path(old, here) => Some(old.clone()),
+            Some(Ok(Found::At(now))) => Some(Grant {
+                path: now.clone(),
+                ..old.clone()
+            }),
+            _ => None,
+        })
+        .collect();
     // What a change of `dir` gives a file with more than one name.
     let links_at = |dir: &Path| Links {
         want,
         moved: &moved,
+        unread: &unread,
         shut,
         places: pass(dir, places.as_deref(), want, &record),
         containers: &containers,
@@ -2981,7 +3016,8 @@ mod tests {
         }
         let s = sync(&file, &[], &mut f);
         assert!(s.errors.is_empty() && s.removed == 1, "{s:?}");
-        assert_eq!(f.may(x, "c1"), access(""));
+        // The last grant was `w`: the file stays closed to the container.
+        assert_eq!(f.may(x, "c1").unwrap_or(Access::NONE), Access::NONE);
     }
 
     /// A folder closed inside a granted one closes a file with a name in it
@@ -3342,6 +3378,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A file that a command linked out of a folder it could only write
+    /// into one it may read is not read once the first folder's grant is
+    /// taken off: Linux refuses such a link, and the grant held the name
+    /// closed for the container while it was on. This holds for a file of
+    /// yours and for one in the container's own folder, and not for a name
+    /// that a grant still holds.
+    #[test]
+    fn a_file_linked_out_of_a_write_only_folder_is_not_read_once_it_goes() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
+        let file = record_file(&paths);
+        let home = Path::new("/w/home");
+        let c = container(&paths, &node("lab"));
+        let run = "S-1-5-21-1-2-3-1001";
+        let run_home = Path::new("/w/run");
+        let ac = crate::account::Own::in_container(run_home, &c).temp;
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(center(
+            "lab",
+            &[(Path::new("/w/proj"), "rw"), (Path::new("/w/drop"), "w")],
+        ));
+        let shut = Shut::of(&cfg, &paths, home, &Platform::Unix).own(&cfg, &paths, run, run_home);
+        let (proj, drop) = (grant(&c, "/w/proj", "rw"), grant(&c, "/w/drop", "w"));
+        let ac_k = ac.join("k");
+        for (other, owner) in [
+            ("/w/proj/b", "S-1-5-21-1-2-3-1000"),
+            (ac_k.to_str().unwrap(), run),
+        ] {
+            let mut f = Fake::default();
+            f.make("/w/proj");
+            f.make("/w/drop");
+            f.link(&["/w/drop/report", other]);
+            f.files[0].owner = Some(owner.into());
+            let s = sync_shut(&file, &[proj.clone(), drop.clone()], &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            let may = |f: &Fake| f.may(other, &c).unwrap_or(Access::NONE);
+            assert!(!may(&f).read, "{other} while it is on: {:?}", may(&f));
+            let s = sync_shut(&file, std::slice::from_ref(&proj), &shut, &mut f);
+            assert!(s.errors.is_empty() && s.removed == 1, "{s:?}");
+            assert!(!may(&f).read, "{other} taken off: {:?}", may(&f));
+        }
+
+        // A name that a grant still holds is read as any.
+        let mut f = Fake::default();
+        f.make("/w/proj");
+        f.make("/w/drop");
+        f.link(&["/w/drop/report", "/w/proj/b"]);
+        f.files[0].owner = Some("S-1-5-21-1-2-3-1000".into());
+        let all = [proj.clone(), drop.clone()];
+        let s = sync_shut(&file, &all, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let readable = [proj, grant(&c, "/w/drop", "rw")];
+        let s = sync_shut(&file, &readable, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert!(f.may("/w/proj/b", &c).is_some_and(|a| a.read));
     }
 
     /// A container's own folder counts where it is, not where it leads:
