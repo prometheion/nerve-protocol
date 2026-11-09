@@ -1187,7 +1187,7 @@ pub fn apply(
                         &cfg,
                         paths,
                         &home,
-                        &crate::paths::platform(),
+                        &crate::paths::platform_for(paths),
                     )
                 },
             );
@@ -1234,7 +1234,7 @@ pub fn apply_outside(
             cfg,
             paths,
             home,
-            &crate::paths::platform(),
+            &crate::paths::platform_for(paths),
         );
         sync_outside_in(
             paths,

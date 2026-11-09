@@ -2733,7 +2733,7 @@ impl Link {
         // Without the switch the entries are still there as written; only
         // the places they lead to through links are not found.
         let _as = act_as(account, None).ok().flatten();
-        Protected::new(&self.shared.platform, home, own, opts)
+        Protected::new(&self.shared.platform(), home, own, opts)
     }
 
     /// The shell a command line runs in, which the guard reads it by: the
@@ -4033,7 +4033,7 @@ pub(crate) fn may_take(
     }
     let home = shared.rules_home(cfg);
     let judged = Judged {
-        protected: Protected::new(&shared.platform, &home, &[], &entry.policy.protected),
+        protected: Protected::new(&shared.platform(), &home, &[], &entry.policy.protected),
         home,
         unconfined: None,
         sudo: false,

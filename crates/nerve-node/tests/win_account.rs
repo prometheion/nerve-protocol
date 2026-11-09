@@ -12,6 +12,8 @@
 //!   name; closed with a folder that holds them, under both names;
 //! - a folder in the owner's profile that holds a protected entry gives
 //!   its other entries, and the entry stays closed;
+//! - the owner's Documents folder redirected elsewhere (as by OneDrive's
+//!   backup) keeps PowerShell's profiles there protected;
 //! - allowlist mode runs as `nerve-run` in its container, and `--as-owner`
 //!   as the owner;
 //! - a folder outside the owner's profile whose files `nerve-run` made
@@ -690,6 +692,100 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     .expect("a's read of the protected entry");
     assert_ne!(r["exit_code"], 0, "{r}");
     assert!(!out(&r).contains("kept"), "{r}");
+
+    // The owner's Documents folder redirected (as OneDrive's backup does):
+    // PowerShell's profiles there are protected as in the usual place, read
+    // from the owner's registry by the service. A granted folder there is
+    // given as its other entries.
+    let docs =
+        PathBuf::from(std::env::var("SystemDrive").unwrap_or("C:".into()) + "\\nerve-w2-docs");
+    let _ = std::fs::remove_dir_all(&docs);
+    owners_folder(&docs, &owner_sid);
+    std::fs::create_dir(docs.join("WindowsPowerShell")).unwrap();
+    std::fs::write(docs.join("WindowsPowerShell").join("profile.ps1"), "# mine").unwrap();
+    std::fs::write(docs.join("beside.txt"), "before").unwrap();
+    load_profile(logon(&owner, &owner_password, 2), &owner);
+    let folders_key = format!(
+        "HKU\\{owner_sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+    );
+    let reg = |args: &[&str]| {
+        let o = Command::new("reg").args(args).output().unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let (_, before) = reg(&["query", &folders_key, "/v", "Personal"]);
+    let before = before
+        .lines()
+        .find(|l| l.contains("Personal"))
+        .and_then(|l| l.split("REG_EXPAND_SZ").nth(1).or(l.split("REG_SZ").nth(1)))
+        .map(|v| v.trim().to_string())
+        .unwrap_or("%USERPROFILE%\\Documents".into());
+    let set = |value: &str| {
+        let (ok, _) = reg(&[
+            "add",
+            &folders_key,
+            "/v",
+            "Personal",
+            "/t",
+            "REG_EXPAND_SZ",
+            "/d",
+            value,
+            "/f",
+        ]);
+        assert!(ok, "reg add {value}");
+    };
+    set(&docs.display().to_string());
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.push(folder(&docs, "rw"));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let beside = run_in(
+        &mut conn_a,
+        &a,
+        &format!(
+            "Set-Content -Path '{}' -Value beside",
+            docs.join("beside.txt").display()
+        ),
+    )
+    .await;
+    let profile = run_in(
+        &mut conn_a,
+        &a,
+        &format!(
+            "Set-Content -Path '{}' -Value taken; exit [int](-not $?)",
+            docs.join("WindowsPowerShell").join("profile.ps1").display()
+        ),
+    )
+    .await;
+    set(&before);
+    // Refused by the guard, or by the folder's missing entry.
+    if let Ok(r) = &profile {
+        assert_ne!(r["exit_code"], 0, "{r}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(docs.join("WindowsPowerShell").join("profile.ps1")).unwrap(),
+        "# mine"
+    );
+    let beside = beside.expect("a's write beside the profiles");
+    assert_eq!(beside["exit_code"], 0, "{beside}");
+    assert!(
+        std::fs::read_to_string(docs.join("beside.txt"))
+            .unwrap()
+            .contains("beside")
+    );
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.retain(|f| Path::new(&f.path) != docs);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let _ = std::fs::remove_dir_all(&docs);
 
     // Nor the node's pipes from a container.
     let pipe_names: Vec<String> = std::fs::read_dir(r"\\.\pipe\")

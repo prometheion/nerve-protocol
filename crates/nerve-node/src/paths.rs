@@ -280,6 +280,348 @@ pub fn platform() -> Platform {
     }
 }
 
+/// The platform the protected list follows for the node at `paths`: on the
+/// installed Windows service the owner's ([`owners_platform`]), whose
+/// Documents folder the service's own account does not see; elsewhere
+/// [`platform`], with the folders of whoever runs the node. Read anew at
+/// each call, as the owner's registry is there only while the owner is
+/// signed in.
+pub fn platform_for(paths: &NodePaths) -> Platform {
+    #[cfg(windows)]
+    if crate::service::is_service_node(paths)
+        && let Ok(Some(sid)) = crate::win_host::owner()
+    {
+        return owners_platform(paths, &sid);
+    }
+    let _ = paths;
+    platform()
+}
+
+/// [`platform_for`] on the installed service, for the owner whose SID is
+/// `sid`: the Documents folder where the owner's registry puts it
+/// ([`owners_documents`], remembered in the state folder for when that
+/// cannot be read, [`seen_documents`]), and the usual place below the
+/// owner's profile. The machine's folders (`%ProgramData%`,
+/// `%SystemRoot%`, `%ProgramFiles%`) are the same for every account.
+#[cfg(windows)]
+fn owners_platform(paths: &NodePaths, sid: &str) -> Platform {
+    let profile = crate::win_user::profile_of_sid(sid);
+    let read = owners_documents(sid, profile.as_deref());
+    let documents = seen_documents(&documents_file(paths), sid, read, &mut warn_once);
+    let var = |k: &str| {
+        if k.eq_ignore_ascii_case("USERPROFILE") {
+            profile.clone().map(OsString::from)
+        } else {
+            std::env::var_os(k)
+        }
+    };
+    Platform::Windows(windows_folders(var, documents))
+}
+
+/// Logs `message` unless it is the one logged last: the service reads the
+/// owner's folders before every command.
+#[cfg(windows)]
+fn warn_once(message: String) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut last = nerve_transport::sync::lock(&LAST);
+    if last.as_deref() != Some(message.as_str()) {
+        tracing::warn!("{message}");
+        *last = Some(message);
+    }
+}
+
+/// Where the installed node remembers the owner's Documents folder
+/// ([`seen_documents`]).
+#[cfg(any(windows, test))]
+fn documents_file(paths: &NodePaths) -> PathBuf {
+    paths.state_dir.join("owner-documents.json")
+}
+
+#[cfg(any(windows, test))]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct SeenDocuments {
+    #[serde(default)]
+    format: nerve_transport::files::Format,
+    sid: String,
+    /// `None`: in its usual place below the profile.
+    documents: Option<PathBuf>,
+}
+
+/// The owner's Documents folder for the protected list: `read` from the
+/// owner's registry (`Ok(None)` where it is in its usual place), which is
+/// remembered in `file` for the owner `sid`. Where it cannot be read (the
+/// owner's registry is loaded only while the owner is signed in, or a
+/// process of the owner's runs), the place remembered for the same owner,
+/// and `say` is told why; with nothing remembered, `None`: the usual place
+/// alone is protected, as before.
+#[cfg(any(windows, test))]
+fn seen_documents(
+    file: &Path,
+    sid: &str,
+    read: Result<Option<PathBuf>, String>,
+    say: &mut dyn FnMut(String),
+) -> Option<PathBuf> {
+    use nerve_transport::files::Format;
+    let remembered = || -> Option<SeenDocuments> {
+        let b = std::fs::read(file).ok()?;
+        Format::of_json(&b).check().ok()?;
+        serde_json::from_slice::<SeenDocuments>(&b)
+            .ok()
+            .filter(|s| s.sid == sid)
+    };
+    match read {
+        Ok(documents) => {
+            let now = SeenDocuments {
+                format: Format::CURRENT,
+                sid: sid.to_string(),
+                documents,
+            };
+            if remembered().as_ref() != Some(&now) {
+                let json = serde_json::to_vec_pretty(&now).expect("a path serialises");
+                // The CLI may not write the node's state folder: the node
+                // remembers it at its next read.
+                if let Err(e) = nerve_transport::files::write_private(file, &json) {
+                    tracing::debug!("cannot remember the owner's Documents folder: {e}");
+                }
+            }
+            now.documents
+        }
+        Err(why) => match remembered() {
+            Some(SeenDocuments {
+                documents: Some(d), ..
+            }) => {
+                say(format!(
+                    "cannot read the owner's Documents folder ({why}); protecting PowerShell's profiles in {}, where it was last seen, and below %USERPROFILE%\\Documents",
+                    d.display()
+                ));
+                Some(d)
+            }
+            Some(_) => None,
+            None => {
+                say(format!(
+                    "cannot read the owner's Documents folder ({why}); protecting PowerShell's profiles below %USERPROFILE%\\Documents only"
+                ));
+                None
+            }
+        },
+    }
+}
+
+/// The owner's Documents folder as the owner's registry has it
+/// (`User Shell Folders`, `Personal`, which OneDrive's backup and a
+/// redirect change), written out with the owner's variables
+/// ([`OwnerVars`]); `Ok(None)` where the owner's registry names none (the
+/// usual place). An error where the registry is not loaded, as before the
+/// owner signs in, or the value cannot be written out.
+#[cfg(windows)]
+fn owners_documents(sid: &str, profile: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    const FOLDERS: &str =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
+    if !reg::has_key(sid) {
+        return Err(
+            "the owner's registry is not loaded: the owner has not signed in since Windows started"
+                .into(),
+        );
+    }
+    let Some(value) = reg::text(&format!("{sid}\\{FOLDERS}"), "Personal")? else {
+        return Ok(None);
+    };
+    let name = crate::win_user::name_of_sid(sid).ok();
+    let vars = OwnerVars {
+        profile,
+        name: name.as_deref(),
+        volatile: reg::texts(&format!("{sid}\\Volatile Environment")),
+        environment: reg::texts(&format!("{sid}\\Environment")),
+        system: &|k| std::env::var(k).ok(),
+    };
+    let path = expand_vars(&value, &|k| vars.get(k))
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{value} names a variable the owner does not have"))?;
+    if path.is_absolute() {
+        Ok(Some(path))
+    } else {
+        Err(format!("{} is not a whole path", path.display()))
+    }
+}
+
+/// `value` with each `%NAME%` in it replaced by what `var` gives for the
+/// name; `None` where a name has nothing, or a `%` is not closed.
+#[cfg(any(windows, test))]
+fn expand_vars(value: &str, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let end = after.find('%')?;
+        let name = &after[..end];
+        if name.is_empty() {
+            return None;
+        }
+        out.push_str(&var(name)?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The variables of the owner's processes as Windows makes them for a
+/// sign-in: those of the owner's session (`volatile`), then the owner's own
+/// (`environment`, written out with what follows), then those of the
+/// profile (`USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `USERNAME`), then the
+/// machine's (`system`). Names compare without case.
+#[cfg(any(windows, test))]
+struct OwnerVars<'a> {
+    profile: Option<&'a Path>,
+    name: Option<&'a str>,
+    volatile: Vec<(String, String)>,
+    environment: Vec<(String, String)>,
+    system: &'a dyn Fn(&str) -> Option<String>,
+}
+
+#[cfg(any(windows, test))]
+impl OwnerVars<'_> {
+    fn get(&self, k: &str) -> Option<String> {
+        let find = |list: &[(String, String)]| {
+            list.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.clone())
+        };
+        find(&self.volatile)
+            .or_else(|| find(&self.environment).and_then(|v| expand_vars(&v, &|n| self.base(n))))
+            .or_else(|| self.base(k))
+    }
+
+    /// The profile's variables and the machine's.
+    fn base(&self, k: &str) -> Option<String> {
+        let profile = self.profile.map(|p| p.to_string_lossy().into_owned());
+        // `C:\Users\u` is `C:` and `\Users\u`.
+        let split = profile
+            .as_deref()
+            .filter(|p| p.as_bytes().get(1) == Some(&b':'))
+            .map(|p| p.split_at(2));
+        match k.to_ascii_uppercase().as_str() {
+            "USERPROFILE" => profile.clone(),
+            "HOMEDRIVE" => split.map(|(d, _)| d.to_string()),
+            "HOMEPATH" => split.map(|(_, r)| r.to_string()),
+            "USERNAME" => self.name.map(str::to_string),
+            _ => (self.system)(k),
+        }
+    }
+}
+
+/// The owner's registry below `HKEY_USERS`, read as this process may.
+#[cfg(windows)]
+mod reg {
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS,
+    };
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_USERS, KEY_READ, REG_EXPAND_SZ, REG_SZ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ,
+        RRF_RT_REG_SZ, RegCloseKey, RegEnumValueW, RegGetValueW, RegOpenKeyExW,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn text_of(buf: &[u16]) -> String {
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..n])
+    }
+
+    /// The key `path` below `HKEY_USERS`, open for reading.
+    fn open(path: &str) -> Option<HKEY> {
+        let mut h = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated name and a place for the handle.
+        (unsafe { RegOpenKeyExW(HKEY_USERS, wide(path).as_ptr(), 0, KEY_READ, &mut h) } == 0)
+            .then_some(h)
+    }
+
+    /// Whether the key `path` is there (a user's hive is while it is loaded).
+    pub fn has_key(path: &str) -> bool {
+        // SAFETY: the key just opened.
+        open(path).map(|h| unsafe { RegCloseKey(h) }).is_some()
+    }
+
+    /// The string value `name` of the key `path`, as written (`%…%` not
+    /// expanded); `None` where it is not there.
+    pub fn text(path: &str, name: &str) -> Result<Option<String>, String> {
+        let (key, value) = (wide(path), wide(name));
+        let mut buf = vec![0u16; 260];
+        loop {
+            let mut len = (buf.len() * 2) as u32;
+            // SAFETY: NUL-terminated names and a buffer of the size given.
+            let r = unsafe {
+                RegGetValueW(
+                    HKEY_USERS,
+                    key.as_ptr(),
+                    value.as_ptr(),
+                    RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr().cast(),
+                    &mut len,
+                )
+            };
+            match r {
+                0 => return Ok(Some(text_of(&buf))),
+                ERROR_FILE_NOT_FOUND => return Ok(None),
+                ERROR_MORE_DATA => buf.resize((len as usize).div_ceil(2) + 1, 0),
+                e => {
+                    return Err(format!(
+                        "HKEY_USERS\\{path}\\{name}: {}",
+                        std::io::Error::from_raw_os_error(e as i32)
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Every string value of the key `path`, as written; none where it is
+    /// not there.
+    pub fn texts(path: &str) -> Vec<(String, String)> {
+        let Some(h) = open(path) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for i in 0.. {
+            let mut name = vec![0u16; 16_384];
+            let mut data = vec![0u16; 16_384];
+            let (mut nlen, mut dlen, mut kind) = (name.len() as u32, (data.len() * 2) as u32, 0u32);
+            // SAFETY: an open key and buffers of the sizes given.
+            let r = unsafe {
+                RegEnumValueW(
+                    h,
+                    i,
+                    name.as_mut_ptr(),
+                    &mut nlen,
+                    std::ptr::null(),
+                    &mut kind,
+                    data.as_mut_ptr().cast(),
+                    &mut dlen,
+                )
+            };
+            if r == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if r == 0 && (kind == REG_SZ || kind == REG_EXPAND_SZ) {
+                data.truncate((dlen as usize) / 2);
+                out.push((
+                    String::from_utf16_lossy(&name[..nlen as usize]),
+                    text_of(&data),
+                ));
+            }
+            if r != 0 && r != ERROR_MORE_DATA {
+                break;
+            }
+        }
+        // SAFETY: the key opened above.
+        unsafe { RegCloseKey(h) };
+        out
+    }
+}
+
 /// The Documents folder as Windows has it, wherever OneDrive's backup or a
 /// redirect moved it; `None`, logged, when it cannot be read (the usual
 /// place below the profile is protected all the same).
@@ -503,6 +845,137 @@ mod tests {
         // Not moved: once.
         let f = windows_folders(env, Some("c:\\users\\u\\documents".into()));
         assert_eq!(f.documents, [PathBuf::from("c:\\users\\u\\documents")]);
+    }
+
+    /// A value of the owner's registry is written out with the owner's
+    /// variables: the session's before the owner's own (which are written
+    /// out with the profile's), then the profile's, then the machine's;
+    /// names without case. A name without a value, or a `%` not closed,
+    /// writes out nothing.
+    #[test]
+    fn the_owners_documents_are_written_out_with_the_owners_variables() {
+        let pairs = |l: &[(&str, &str)]| -> Vec<(String, String)> {
+            l.iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect()
+        };
+        let system = |k: &str| {
+            match k {
+                "SystemDrive" => Some("C:"),
+                // The service's own, which is not the owner's.
+                "USERPROFILE" => Some("C:\\Windows\\ServiceProfiles\\nerve"),
+                "OneDrive" => Some("C:\\Windows\\ServiceProfiles\\nerve\\OneDrive"),
+                _ => None,
+            }
+            .map(str::to_string)
+        };
+        let vars = OwnerVars {
+            profile: Some(Path::new("C:\\Users\\u")),
+            name: Some("u"),
+            volatile: pairs(&[("HOMESHARE", "\\\\server\\u")]),
+            environment: pairs(&[
+                ("OneDrive", "%USERPROFILE%\\OneDrive"),
+                ("TEMP", "%nothing%"),
+            ]),
+            system: &system,
+        };
+        let get = |k: &str| vars.get(k);
+        for (value, written) in [
+            ("%USERPROFILE%\\Documents", Some("C:\\Users\\u\\Documents")),
+            (
+                "%onedrive%\\Documents",
+                Some("C:\\Users\\u\\OneDrive\\Documents"),
+            ),
+            ("%HOMEDRIVE%%HOMEPATH%\\Docs", Some("C:\\Users\\u\\Docs")),
+            ("%SystemDrive%\\%USERNAME%", Some("C:\\u")),
+            ("%HOMESHARE%\\Docs", Some("\\\\server\\u\\Docs")),
+            ("D:\\Documents", Some("D:\\Documents")),
+            ("%TEMP%\\x", None),
+            ("%NOPE%\\Documents", None),
+            ("C:\\50%\\x", None),
+        ] {
+            assert_eq!(expand_vars(value, &get).as_deref(), written, "{value}");
+        }
+        // Without a profile, none of the profile's variables.
+        let bare = OwnerVars {
+            profile: None,
+            name: None,
+            volatile: Vec::new(),
+            environment: Vec::new(),
+            system: &system,
+        };
+        assert_eq!(bare.get("HOMEDRIVE"), None);
+        assert_eq!(bare.get("USERPROFILE"), None);
+    }
+
+    /// The owner's Documents folder read from the owner's registry is
+    /// remembered in the state folder; where the registry cannot be read
+    /// (the owner not signed in since Windows started), the place
+    /// remembered for the same owner is protected, and the log says so.
+    /// Another owner's place is not taken, and with nothing remembered the
+    /// usual place alone is.
+    #[test]
+    fn the_owners_documents_are_remembered_for_when_they_cannot_be_read() {
+        let d = tempfile::tempdir().unwrap();
+        let file = documents_file(&NodePaths::new(d.path(), d.path()));
+        let mut said = Vec::new();
+        let mut say = |m: String| said.push(m);
+        let moved = PathBuf::from("D:\\OneDrive\\Documents");
+        let gone = || Err("not loaded".to_string());
+        assert_eq!(seen_documents(&file, "S-1-5-21-1", gone(), &mut say), None);
+        assert_eq!(
+            seen_documents(&file, "S-1-5-21-1", Ok(Some(moved.clone())), &mut say),
+            Some(moved.clone())
+        );
+        assert_eq!(
+            seen_documents(&file, "S-1-5-21-1", gone(), &mut say),
+            Some(moved.clone())
+        );
+        assert_eq!(seen_documents(&file, "S-1-5-21-2", gone(), &mut say), None);
+        // Back in its usual place, protected anyway: nothing to say.
+        assert_eq!(
+            seen_documents(&file, "S-1-5-21-1", Ok(None), &mut say),
+            None
+        );
+        assert_eq!(seen_documents(&file, "S-1-5-21-1", gone(), &mut say), None);
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(
+            said[0].contains("not loaded") && said[0].ends_with("only"),
+            "{said:?}"
+        );
+        assert!(said[1].contains("D:\\OneDrive\\Documents"), "{said:?}");
+        assert!(said[2].ends_with("only"), "{said:?}");
+    }
+
+    /// The real read of the owner's registry: for this process' own user,
+    /// whose registry is loaded, it finds the folder the known-folder API
+    /// gives (or none, where that is the usual place). Only a Windows run
+    /// reaches it.
+    #[cfg(windows)]
+    #[test]
+    fn the_owners_documents_are_read_from_the_owners_registry() {
+        let o = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap();
+        let line = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let sid = line
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(sid.starts_with("S-1-5-"), "{line}");
+        let profile = crate::win_user::profile_of_sid(&sid).expect("a profile");
+        let known = known_documents().expect("the Documents known folder");
+        let read = owners_documents(&sid, Some(&profile)).unwrap();
+        let read = read.unwrap_or_else(|| profile.join("Documents"));
+        assert!(
+            read.to_string_lossy()
+                .eq_ignore_ascii_case(&known.to_string_lossy()),
+            "{read:?} {known:?}"
+        );
+        assert!(owners_documents("S-1-5-21-1-2-3-4242", None).is_err());
     }
 
     /// With the keys in the keyring, the session bus and GNOME Keyring's folder

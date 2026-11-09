@@ -1250,7 +1250,10 @@ On Windows the list also holds the OpenSSH server's files in
 `%ProgramData%\ssh`, the registry hives in `%SystemRoot%\System32\config`, the
 all-users Startup folder, Windows PowerShell's home and its profiles, PowerShell
 7's install folder, the user's PowerShell profiles and modules in `Documents`,
-and `NTUSER.DAT`. PowerShell 7 counts when installed with the MSI or winget. A
+and `NTUSER.DAT`. `Documents` counts in its usual place and where Windows has
+it (OneDrive's backup or a redirect moves it); the installed service reads that
+from your registry, and remembers the last place it saw for when you are not
+signed in. PowerShell 7 counts when installed with the MSI or winget. A
 copy unpacked from a zip file, installed as a .NET tool or put in a folder of
 your choice is not covered.
 
