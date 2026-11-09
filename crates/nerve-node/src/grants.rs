@@ -10,8 +10,10 @@
 //! The node keeps a record of the grants it put on (`grants.json` in its
 //! state folder), so it finds them again to take them off, also after the
 //! config changed while it did not run. It brings them in line when it
-//! starts, when its config changes (also before the control pipe answers a
-//! folder change, crate::pipe), and before each folder-mode command; the
+//! starts (walking every grant then), when its config changes (also before
+//! the control pipe answers a folder change, crate::pipe), before each
+//! folder-mode command, and walks a granted folder again soon after names
+//! in it changed (crate::grant_watch); the
 //! CLI does when it writes the config itself, which on Windows it does for
 //! every other change and when no node runs (`cli::edit`). The comparison
 //! and the record are plain logic, tested on every platform; the change on
