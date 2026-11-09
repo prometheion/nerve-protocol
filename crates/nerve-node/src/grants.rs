@@ -400,21 +400,18 @@ fn mark_walks(file: &Path, walk: &Rewalk) -> Result<usize, String> {
     Ok(count)
 }
 
-/// The folders the record of the node at `paths` holds a grant with flags
+/// The places the record of the node at `paths` holds a grant with flags
 /// on, where the last sync found them, each once with the objects the
 /// record names there: those the node watches for new names
-/// (crate::grant_watch). A closed folder lies inside one of them. A granted
-/// file (also a split home's files) is no folder to watch: its folder is not
-/// granted, or is watched itself. Nothing where the record cannot be read.
+/// (crate::grant_watch). A closed folder lies inside one of them. Read from
+/// the record alone, as the node: what is at each place now (a granted file,
+/// also a split home's files, is no folder to watch) is for the watch to
+/// look at as the owner, since the node's own account may not see into the
+/// owner's profile. Nothing where the record cannot be read.
 pub fn granted_folders(paths: &NodePaths) -> Vec<crate::grant_watch::Folder> {
     let mut out: Vec<crate::grant_watch::Folder> = Vec::new();
     let grants = read_record(&record_file(paths)).unwrap_or_default();
     for g in grants.into_iter().filter(|g| g.access != Access::NONE) {
-        // A link or junction is kept: the watch says why it is not
-        // watched, which a plain file needs no word for.
-        if !std::fs::symlink_metadata(&g.path).is_ok_and(|m| !m.is_file()) {
-            continue;
-        }
         match out.iter_mut().find(|f| f.path == g.path) {
             Some(f) => {
                 if let Some(id) = g.id.filter(|id| !f.ids.contains(id)) {
@@ -3300,10 +3297,12 @@ mod tests {
         assert!(f.changes.is_empty(), "{:?}", f.changes);
     }
 
-    /// The node watches the granted folders and not the granted files (a
-    /// split home's files are grants too), nor a folder that is not there.
+    /// The places to watch come from the record alone, granted files and
+    /// places with nothing there too: the node may not look at the owner's
+    /// folders, and the watch looks at them as the owner
+    /// (crate::grant_watch). A closed folder is no place to watch.
     #[test]
-    fn only_granted_folders_are_watched() {
+    fn the_places_to_watch_are_read_from_the_record_alone() {
         let d = tempfile::tempdir().unwrap();
         let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
         let (proj, notes) = (d.path().join("proj"), d.path().join("notes.txt"));
@@ -3326,18 +3325,18 @@ mod tests {
             grant("c1", d.path().join("closed").to_str().unwrap(), ""),
         ];
         write_record(&record_file(&paths), &grants).unwrap();
-        // Each folder once, with the objects the record names there.
+        // Each place once, with the objects the record names there.
+        let place = |path: PathBuf, ids: &[&str]| crate::grant_watch::Folder {
+            path,
+            ids: ids.iter().map(|i| i.to_string()).collect(),
+        };
         assert_eq!(
             granted_folders(&paths),
             [
-                crate::grant_watch::Folder {
-                    path: lib,
-                    ids: vec!["v:3".into()]
-                },
-                crate::grant_watch::Folder {
-                    path: proj,
-                    ids: vec!["v:1".into(), "v:2".into()]
-                }
+                place(gone, &[]),
+                place(lib, &["v:3"]),
+                place(notes, &[]),
+                place(proj, &["v:1", "v:2"]),
             ]
         );
     }

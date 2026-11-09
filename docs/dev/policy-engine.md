@@ -444,8 +444,10 @@ center's local name):
   an install or a clone links files in with their store's list, so commands
   could not read what the owner installed, nor the owner what a command
   installed from its own store, until a walk. Each folder the record holds a
-  grant with flags on (`grants::granted_folders`) gets one handle, opened as
-  the owner on the service, not through a link, not on a removable drive (a
+  grant with flags on (`grants::granted_folders`, read from the record as
+  the node) gets one handle, looked at and opened as the owner on the
+  service (`grant_watch::to_open`: `nerve` may not even stat a folder in the
+  owner's profile; a granted file is remembered and not watched), not through a link, not on a removable drive (a
   held handle keeps it from being ejected) or another machine, and read with
   `ReadDirectoryChangesW` over its subtree, overlapped, on one completion
   port and one thread, into a buffer of its own (64 KiB). It asks for names

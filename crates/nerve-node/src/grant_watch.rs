@@ -302,9 +302,9 @@ impl Watch {
         }
     }
 
-    /// Watches `folders` from now on, and no other: a new one is opened as
-    /// `act` acts (the owner, whose folders they are, on the installed
-    /// service), one no longer granted is closed. `folders` is asked once
+    /// Watches `folders` from now on, and no other: a new one is looked at
+    /// and opened as `act` acts (the owner, whose folders they are, on the
+    /// installed service), one no longer granted is closed. `folders` is asked once
     /// the watches are held, so of two syncs that follow, the last to hold
     /// them follows the newest record. A watch on an object the record no
     /// longer names at its path is closed and opened again there. A folder that could not be started
@@ -373,6 +373,56 @@ fn reconcile<'a>(
     (close, open)
 }
 
+/// What is at the path of a granted place, as [`at`] finds it.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum At {
+    Nothing,
+    /// A plain file: a granted file, a split home's too.
+    File,
+    /// A folder, a link or junction, or what could not be looked at: opened,
+    /// and where it is no folder of its own the open says why.
+    Other,
+}
+
+/// What is at `path`, as whoever this thread acts as sees it.
+#[cfg(any(windows, test))]
+fn at(path: &Path) -> At {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => At::File,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => At::Nothing,
+        _ => At::Other,
+    }
+}
+
+/// The places of `new` to open, looked at (`look`, [`at`]) while `act`
+/// acts, which goes on while its result lives: on the installed service the
+/// owner, whose profile the node's own account may not look into (it would
+/// find nothing there). A place with nothing there is left for the next
+/// follow; a plain file is no folder to watch and goes into `files`, which
+/// the caller does not look at again while the record names it so. Where
+/// `act` fails, the looks run as the node, and the log says why.
+#[cfg(any(windows, test))]
+fn to_open<'a, G>(
+    new: Vec<&'a Folder>,
+    files: &mut Vec<Folder>,
+    act: impl FnOnce() -> std::io::Result<G>,
+    look: impl Fn(&Path) -> At,
+) -> (Option<G>, Vec<&'a Folder>) {
+    let acting = act()
+        .inspect_err(|e| tracing::warn!("folder grants: {e}"))
+        .ok();
+    let mut open = Vec::new();
+    for f in new {
+        match look(&f.path) {
+            At::Nothing => {}
+            At::File => files.push(f.clone()),
+            At::Other => open.push(f),
+        }
+    }
+    (acting, open)
+}
+
 /// How many times in a row a folder's watch may fail to start before it is
 /// left alone while the folder stays granted: a start that fails once may
 /// be a folder busy or just made, one that fails again will not work, and
@@ -437,7 +487,7 @@ mod win {
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 
-    use super::{Folder, Held, NOTIFY, Pending, Starts, lock, reconcile, wakes};
+    use super::{Folder, Held, NOTIFY, Pending, Starts, at, lock, reconcile, to_open, wakes};
 
     /// The size of each folder's buffer: the most one notification over the
     /// network may carry; a burst beyond it runs over, which walks the
@@ -463,6 +513,10 @@ mod win {
         failed: HashSet<PathBuf>,
         /// How often each folder's watch failed to start in a row.
         starts: Starts,
+        /// The granted places that are plain files, with the objects the
+        /// record names there: not watched, and not looked at again while
+        /// the record names them so ([`to_open`]).
+        files: Vec<Folder>,
         /// The folders whose watch ended (gone, or an error), and whether
         /// it had started: watched again at the next follow where they are
         /// still granted.
@@ -528,13 +582,22 @@ mod win {
             let paths: Vec<PathBuf> = folders.iter().map(|f| f.path.clone()).collect();
             self.starts.keep(&paths);
             self.failed.retain(|f| paths.contains(f));
-            let (gone, new) = reconcile(&self.watched, folders, |f| self.failed.contains(f));
+            self.files.retain(|f| folders.contains(f));
+            let (gone, new) = reconcile(&self.watched, folders, |f| {
+                self.failed.contains(f) || self.files.iter().any(|x| x.path == f)
+            });
             self.watched.retain(|(w, _)| !gone.contains(w));
             if let Some(r) = &self.running {
                 for g in gone {
                     r.send(Msg::Close(g));
                 }
             }
+            if new.is_empty() {
+                return;
+            }
+            // Looked at and opened as the owner, whose folders they are;
+            // the handle keeps what it was opened with.
+            let (_as, new) = to_open(new, &mut self.files, act, at);
             if new.is_empty() {
                 return;
             }
@@ -550,11 +613,6 @@ mod win {
                     }
                 }
             }
-            // Opened as the owner, whose folders they are; the handle keeps
-            // what it was opened with.
-            let _as = act()
-                .inspect_err(|e| tracing::warn!("folder grants: {e}"))
-                .ok();
             for f in new {
                 match open(&f.path) {
                     Ok((h, id)) => {
@@ -1204,6 +1262,50 @@ mod tests {
         p.changed(proj, at(5));
         p.end(at(60));
         assert_eq!(p.due(at(60) + QUIET), [proj]);
+    }
+
+    /// On the installed service the node's own account may not look into
+    /// the owner's profile, so the granted places are looked at as the
+    /// owner (`act`), before any is opened: a folder (or a link, which the
+    /// open says why it does not watch) is opened, a plain file is
+    /// remembered and not watched, and a place with nothing there is left
+    /// for the next follow.
+    #[cfg(unix)]
+    #[test]
+    fn the_granted_places_are_looked_at_as_the_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let (proj, notes) = (d.path().join("proj"), d.path().join("notes.txt"));
+        std::fs::create_dir(&proj).unwrap();
+        std::fs::write(&notes, "n").unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&proj, &link).unwrap();
+        let place = |path: &Path| Folder {
+            path: path.to_path_buf(),
+            ids: vec!["v:1".into()],
+        };
+        let places = [
+            place(&proj),
+            place(&notes),
+            place(&d.path().join("gone")),
+            place(&link),
+        ];
+        let acting = std::cell::Cell::new(false);
+        let mut files = Vec::new();
+        let (held, open) = to_open(
+            places.iter().collect(),
+            &mut files,
+            || {
+                acting.set(true);
+                Ok(())
+            },
+            |p| {
+                assert!(acting.get(), "{} is looked at as the node", p.display());
+                at(p)
+            },
+        );
+        assert!(held.is_some());
+        assert_eq!(open, [&places[0], &places[3]]);
+        assert_eq!(files, [places[1].clone()]);
     }
 
     /// A watch is of the object the record names at the folder's path, not
