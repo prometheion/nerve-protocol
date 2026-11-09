@@ -805,6 +805,10 @@ pub(crate) struct Shared {
     /// failed again ([`ACL_RETRY`]).
     #[cfg(target_os = "linux")]
     pub acl_tried: Mutex<Option<std::time::Instant>>,
+    /// Windows: the watches of the granted folders, which tell where names
+    /// changed, so the node walks those folders by itself
+    /// (crate::grant_watch).
+    pub grant_watch: crate::grant_watch::Watch,
 }
 
 impl Shared {
@@ -1001,18 +1005,66 @@ impl Shared {
     /// On the installed service the folders are the owner's: their entries
     /// are read and changed as the owner (crate::grants::apply).
     pub fn sync_grants(&self) -> crate::grants::Synced {
+        self.sync_grants_walking(crate::grants::Rewalk::None)
+    }
+
+    /// [`Shared::sync_grants`] that also walks the grants `walk` names into
+    /// every folder below them, in the same turn. The granted folders are
+    /// watched for new names from before the sync (what changes while it
+    /// walks is told) and follow what it left (crate::grant_watch).
+    pub fn sync_grants_walking(&self, walk: crate::grants::Rewalk) -> crate::grants::Synced {
+        // The config version the sync saw, once its turn came.
+        let seen = std::cell::Cell::new(None);
         let current = || {
             let cfg = self.config();
+            seen.set(Some(cfg.version));
             let home = self.rules_home(&cfg);
             (cfg, home)
         };
-        let owner = self
-            .service
-            .then(|| self.owner_account(&self.config()).ok().flatten())
-            .flatten();
-        crate::grants::apply(&self.paths, owner.as_ref(), current, &mut |m| {
+        let owner = self.grants_owner();
+        #[cfg(windows)]
+        let watch = || {
+            self.grant_watch.follow(
+                || crate::grants::granted_folders(&self.paths),
+                || crate::grants::act_as(owner.as_ref()),
+            )
+        };
+        #[cfg(windows)]
+        watch();
+        let synced = crate::grants::apply(&self.paths, owner.as_ref(), current, walk, &mut |m| {
             tracing::info!("folder grants: {m}")
-        })
+        });
+        #[cfg(windows)]
+        watch();
+        if let Some(version) = seen.get() {
+            self.grant_watch.finished(version, &synced);
+        }
+        synced
+    }
+
+    /// The installed service's owner, as whom the folders' entries are read
+    /// and changed (crate::grants::apply); none on a node run by hand.
+    fn grants_owner(&self) -> Option<crate::service::Account> {
+        self.service
+            .then(|| self.owner_account(&self.config()).ok().flatten())
+            .flatten()
+    }
+
+    /// [`Shared::sync_grants`] for a command or a file call of a pairing: it
+    /// does not wait for a walk of the watch (crate::grant_watch) when the
+    /// config is the one the last sync saw and every recorded grant is still
+    /// where it was (crate::grants::in_place), and takes that sync's answer.
+    /// A folder moved or made again meanwhile is for the sync to react to,
+    /// which the command waits for.
+    pub fn sync_grants_for_call(&self) -> crate::grants::Synced {
+        match self.grant_watch.walking(self.config().version) {
+            Some(synced)
+                if crate::grants::in_place(&self.paths, self.grants_owner().as_ref(), &synced) =>
+            {
+                synced
+            }
+            _ => self.sync_grants(),
+        }
     }
 
     /// Brings the pairings' home and temporary folders in line with the
@@ -2293,6 +2345,7 @@ impl Daemon {
             sudo_for: Mutex::default(),
             account_cache: Mutex::default(),
             told_keyring: Default::default(),
+            grant_watch: Default::default(),
             grace: opts.resume_grace,
             program_wait: opts.program_wait,
             providers: Default::default(),
@@ -2607,12 +2660,23 @@ async fn supervise(shared: Arc<Shared>) {
         shared.settle_sudo();
         let cfg = shared.config();
         // The folder grants follow the config as it changes (crate::grants);
-        // a command syncs them as well before it runs.
-        if shared.confinement.appcontainer && granted != Some(cfg.version) {
+        // a command syncs them as well before it runs. The first sync walks
+        // every grant, as on Linux: what was installed or moved into a
+        // granted folder while the node did not run gets its entries. After
+        // it the node walks a granted folder soon after names in it changed
+        // (crate::grant_watch).
+        if shared.confinement.appcontainer
+            && let Some((walk, began)) =
+                shared
+                    .grant_watch
+                    .next_sync(granted, cfg.version, std::time::Instant::now())
+        {
             granted = Some(cfg.version);
             let s = shared.clone();
             tokio::task::spawn_blocking(move || {
-                let synced = s.sync_grants();
+                let synced = s.sync_grants_walking(walk);
+                // Another sync may start from here.
+                drop(began);
                 for e in synced.errors {
                     tracing::warn!("folder grants: {e}");
                 }
@@ -4127,6 +4191,50 @@ mod tests {
         assert_eq!(grants_walk(&json!({"every": true})), AclWalk::Every);
         assert_eq!(grants_walk(&json!({"every": false})), AclWalk::Now);
         assert_eq!(grants_walk(&json!({})), AclWalk::Now);
+    }
+
+    /// A command's sync (`sync_grants_for_call`) takes the last sync's
+    /// answer while a walk the watch started runs and the config is the one
+    /// that sync saw.
+    #[tokio::test]
+    async fn a_commands_sync_does_not_wait_for_a_walk_of_the_watch() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let version = s.config().version;
+        let left = crate::grants::Synced {
+            unknown: Some("not readable".into()),
+            ..Default::default()
+        };
+        assert!(s.sync_grants_for_call().refusal("c1").is_none());
+        s.grant_watch.finished(version, &left);
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_none(),
+            "no walk runs: the sync is done"
+        );
+        let t0 = std::time::Instant::now();
+        let (_, walk) = s
+            .grant_watch
+            .next_sync(Some(version), version + 1, t0)
+            .unwrap();
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_none(),
+            "no walk of the watch"
+        );
+        drop(walk);
+        s.grant_watch.finished(version, &left);
+        let proj = std::path::PathBuf::from("/w/proj");
+        s.grant_watch.changed(&proj, t0);
+        let (_, walk) = s
+            .grant_watch
+            .next_sync(Some(version), version, t0 + crate::grant_watch::AT_MOST)
+            .unwrap();
+        assert!(
+            s.sync_grants_for_call().refusal("c1").is_some(),
+            "the walk's turn is not waited for"
+        );
+        drop(walk);
     }
 
     fn warnings(log: &Log) -> Vec<String> {

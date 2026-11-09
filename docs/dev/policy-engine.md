@@ -27,7 +27,7 @@ A pairing is a **center entry**. Its policy holds:
 |---|---|
 | `mode` | `allowlist` (default), `folder` or `user` |
 | `until` | Optional end of `folder` or `user` mode. Then the entry is back in `allowlist` |
-| `folders` | A path and `access`: three independent flags `r`, `w`, `x` |
+| `folders` | A path and `access`: the flags `r`, `w` (which reads too) and `x` |
 | `places` | The folders (by path) `folder add` recorded at their real place. The owner's: a center's write keeps it |
 | `caps` | `on`, `off` or `hidden`, per capability or action |
 | `allow`, `deny` | Rules for every action |
@@ -431,8 +431,7 @@ center's local name):
   whose folder cannot be found is stale, and one on a volume that is away
   is named, as always. The mark keeps the flags each
   stopped change was heading for (`Grant::toward`): until a change there
-  finishes, the place counts as written by those flags too (`w` without
-  `r` for a hard-linked file's pass, `grants::pass`), and a refused change whose place
+  finishes, the place counts as written by those flags too, and a refused change whose place
   may give flags other than the wanted ones is stale. Taking a grant off goes into every
   folder all the same, since Windows' own walk, which earlier versions
   used, writes a folder before what is below it. A link or junction gets
@@ -440,6 +439,72 @@ center's local name):
   object it is about. A change that takes long tells how far it is
   (`grants::paced`: after 3 s, then every 15 s, and how it ended), on stderr
   in the CLI and in the log of a running node.
+- The running node walks a granted folder again by itself once names in it
+  changed (`grant_watch`): a file a change never reaches keeps its list, and
+  an install or a clone links files in with their store's list, so commands
+  could not read what the owner installed, nor the owner what a command
+  installed from its own store, until a walk. Each folder the record holds a
+  grant with flags on (`grants::granted_folders`, read from the record as
+  the node) gets one handle, looked at and opened as the owner on the
+  service (`grant_watch::to_open`: `nerve` may not even stat a folder in the
+  owner's profile; a granted file is remembered and not watched), not through a link, not on a removable drive (a
+  held handle keeps it from being ejected) or another machine, and read with
+  `ReadDirectoryChangesW` over its subtree, overlapped, on one completion
+  port and one thread, into a buffer of its own (64 KiB). It asks for names
+  only (`FILE_NOTIFY_CHANGE_FILE_NAME | DIR_NAME`), never security, so the
+  walk's own writes do not wake it; a name added or renamed to marks the
+  folder (`Pending`, one entry per folder), and so does a notification that
+  ran over or a read that failed (the folder went). The supervisor takes the
+  folders quiet for 3 s, or waiting 30 s (`QUIET`, `AT_MOST`), the outermost
+  of nested ones, and hands them to the grant sync (`Shared::sync_grants_walking`,
+  `grants::Rewalk::At`), which marks their grants unfinished inside its turn
+  (`mark_walks`, as `folder sync` does for every grant) and so walks each into
+  every folder below it, after any change of the config before it. The first
+  sync after the start is a plain one (`Rewalk::None`, so a command finds its
+  answer at once); the walk of every grant (`Rewalk::Every`, as on Linux)
+  follows it as a walk of the watch (`Pending::start_walk`). The
+  watches follow the record before and after each sync; a folder that cannot
+  be watched is logged once and left to the other syncs while it stays
+  granted, and one whose watch ended is opened again at the next follow (one
+  that failed to start twice in a row is left alone, `Starts`). The folders
+  to follow are read from the record under the watches' lock, so the last
+  follow sees the newest record. A watch is of the object the record names at
+  the path (`grant_watch::Folder`, the handle's file ID against the grants'
+  ids, `reconcile`), so a granted folder renamed away and made again at its
+  path (the handle goes along with the old folder) is closed and opened on the
+  new one once the sync moved the grant. What the watch holds stays bounded: the supervisor starts
+  one grant sync at a time (`Watch::next_sync`, the guard `Began`), the
+  changes meanwhile join the next walk, and a pause follows each walk, twice
+  as long as it took (`Pending::end`; a sync that walks nothing leaves none,
+  nor does the start walk, which is the longest and no name made it),
+  so a command that makes names all the time cannot keep the sync's turn for
+  more than a third of the time. A command of a pairing
+  (`Shared::sync_grants_for_call`) does not wait for a walk of the watch when
+  the config is the one the last finished sync saw (`Watch::walking`) and
+  every recorded grant is still at its path with its object, and nothing is
+  at the path of a granted or closed folder the sync found missing or of a
+  grant it kept on a volume that was away (`Synced::absent`, `Synced::away`; both in
+  `Synced::kept`; `grants::in_place`, a look at each, no change), and the
+  protected list follows the platform that sync used (`Synced::platform`:
+  the owner's Documents folder, read again as the owner): it takes that sync's
+  answer (`Synced::kept`, what decides a refusal), since with all of these
+  as they were the walk only caps files linked in and adds inherited
+  entries. A newer config, a folder moved or made again since (which the
+  sync in its turn takes off or refuses), or a Documents folder moved
+  (into a granted folder, which the sync splits around its PowerShell
+  profiles), waits for the turn. A folder made in a granted folder that is
+  split around a protected entry (your home) has no grant and no record
+  at the last sync, so `in_place` cannot see it: a command in it is
+  refused by the container until that walk ends, and the next command's
+  sync puts the grant on. A walk that
+  fails part way leaves its grant `unfinished`, which the next sync walks.
+  NTFS refuses to rename or move a folder with an open handle below it, so
+  the handle on a granted folder (and a walk's frames) holds the folders
+  above it; a volume's change journal would not, but needs a volume handle
+  as an administrator and reports every change of the drive, so it was not
+  used. External hard disks and SSDs report as fixed drives and are
+  watched. On Linux a new file gets its entries from the default ACL and a
+  file with a second name keeps its own rights, so nothing waits for a walk.
 - A record in the state folder (`grants.json`) finds them again. It holds the
   file ID of each grant's object, since the grant is in that object's own
   access list and goes with it: a grant on a moved or renamed folder comes off
@@ -447,7 +512,7 @@ center's local name):
   and puts it on again on a folder made anew. A lock file
   (`grants.json.lock`) keeps the CLI and a running node from writing over each
   other's record, and a grant is recorded before it goes on.
-- `w` gives `DELETE` and `FILE_DELETE_CHILD` only with `r`, and a granted
+- `w` reads too and gives `DELETE` and `FILE_DELETE_CHILD`, and a granted
   folder's or file's own entry has no `DELETE` (`nerve_sandbox::acl`).
   Windows grants a move by `DELETE`, and a moved object keeps its own list
   until a change on its new folder passes that folder's entries down. So a
@@ -473,15 +538,19 @@ center's local name):
     node's own entries of an earlier cap go (`acl::uncapped`). That compares
     grant paths, while a grant's entry goes with its folder, so a sync in
     which a recorded grant is not at its path (moved, or it cannot be told)
-    gives no `Full` at all. Nor does a walk of a folder where a wanted or
-    recorded grant of any container, on it, above it or inside it, may
-    write but not read (`grants::pass`): a command that may make a folder
-    there sets its security descriptor at creation, without `WRITE_DAC`,
-    and the change passes an entry of its own there (read for its
-    container) down to a file it linked into that folder. Where every
-    container that may write there may read too, that entry gives nothing
-    new. A taken-off grant's mark (below) counts like the grant: the entry
-    stays after the take-off, which the node never removes.
+    gives no `Full` at all, and neither does a changed folder with a closed
+    grant inside it (`Judge::closed_inside`): a command may rename that
+    folder while the walk goes on, and the names compared would be stale. A closed
+    folder outside the walked folder, in another folder a container writes,
+    can be moved into it in the same way; `closed_inside` does not look for
+    that (it would cap every project under a writable folder that holds a
+    closed one), so a file linked across such a folder's edge may get the
+    walked folder's list until the next walk. A command that may make a folder there sets its
+    security descriptor at creation, without `WRITE_DAC`, and the change
+    passes an entry of its own there (read for its container) down to a
+    file it linked into that folder; every container that may write there
+    may read too (`w` reads), so that entry gives nothing new while the
+    grant is on.
   - Otherwise `Linked::Capped`, for every container of the wanted and
     recorded grants and the command account (`Judge::cap`): `Gets::Closed`
     where a name lies under a closed grant of it that no grant inside
@@ -531,27 +600,6 @@ center's local name):
     the node's allows, where `acl::capped` keeps it on the next walk (which
     may look at the file then), so that walk changes nothing. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
-
-  A recorded or wanted grant that gives write without read
-  (`Links::unread`, `Links::want`) closes a name under it to every
-  container that has no grant there, in the walk that takes it off (and in
-  the first sync that puts it on), so a file a command linked out of such a
-  folder into one that it, or another pairing, may read stays closed
-  (Linux refuses that link, `Refer`). The
-  take-off leaves a mark of the grant in the record (`Grant::off`; no
-  folder entry, no effect on `changes`, `walk_every` or `emptied`), which
-  `sync_in_turn` keeps apart from the grants and feeds to `Links::unread`
-  in every later sync, so **Sync folders** does not open the file. The mark
-  follows its folder (found by id; the place is told before a wanted grant
-  there is compared) and goes when the folder is gone, when a grant of the
-  container is wanted at the folder's place, or at uninstall (`keep`:
-  `remove_all` is the only caller that wants no grant and passes
-  `false`): a mark closes the file to the other pairings too and to one
-  paired later, so it does not go with its own pairing, nor with the last
-  one. A walk of a folder where a mark lies (at, above or inside it) gives
-  no `Linked::Full` either (`grants::pass`). A folder the node cannot look at (the owner's log-on
-  fails) leaves its mark as it is until a sync can look, as a mark dropped
-  cannot be found again.
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
@@ -799,8 +847,8 @@ A folder gives rights. Each right is its own flag:
 | `w` | Write files: `fs.write`, and the paths another capability writes |
 | `x` | Run commands whose working directory is in the folder, and capabilities that run something at their paths |
 
-The flags do not imply each other. A write needs `w` and not `r`. A read needs
-`r` and not `w`. A command needs `x` and not `r`. A folder covers everything
+`w` reads too (`w` alone is `rw`): a write is allowed where `w` is set, a read
+where `r` or `w` is set. A command needs `x` and not `r`. A folder covers everything
 below it. Where folders nest, the deepest one decides.
 
 Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
@@ -1367,7 +1415,7 @@ command's sandbox leaves the folders out. A `user` mode command runs as you and 
 Only you can release one, on the machine.
 
 Grant a folder at or inside the protected path. The folder releases it for the
-rights it has, and no more: `r` for reads, `w` for writes, `x` for commands.
+rights it has, and no more: `r` for reads, `w` for writes and reads, `x` for commands.
 
 ```sh
 nerve-node folder add ~/.ssh r       # reads of ~/.ssh may now pass

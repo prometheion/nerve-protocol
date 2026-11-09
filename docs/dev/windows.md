@@ -534,11 +534,53 @@ runs in the container as well, unless the pairing runs as you.
   refused, the pairing's commands do not run. A change that takes more than a few seconds says
   how far it is: the node writes it to its log, and a command waits for
   it.
-- A file or folder moved into a granted folder keeps the access list it
-  had, without the entry. **Sync folders** under **Permissions ›
-  Folders** walks every grant again into every folder below it, which gives
-  it the entry (`folder sync`; the running node does it, or the app's
-  command when none runs).
+- The running node watches each granted folder for new names and walks it
+  again a few seconds after they stop changing (at most 30 seconds while
+  they go on), and walks every granted folder once after it starts: what
+  you or an agent move, install or clone into a granted folder gets its
+  entry by itself. It runs one such walk at a time and leaves a pause after
+  it twice as long as the walk took (none after the start walk, which goes
+  through every grant and so is the longest), so a command that makes new
+  names all the time gets a walk every few minutes at most on a big folder.
+  A command of a pairing does not wait for such a walk (the start walk too)
+  as long as the config is unchanged, every granted and closed folder is
+  still where the node recorded it, and nothing is at the place of a
+  granted or closed folder or of a grant on a volume that was away when the
+  last sync found it missing, and your Documents folder is where it was;
+  when a folder was moved or made again meanwhile, or Documents moved, the
+  command waits for the walk and the sync that reacts to it.
+  The one exception is a folder made anew in a granted folder that is split
+  around a protected entry (your home): it is reached only after a walk
+  that runs then, so a command in it may fail with "access denied" once;
+  run it again. A walk
+  that fails part way is
+  finished by the next sync (the grant stays marked), and one that could
+  not even be marked (the record could not be written) is walked at the
+  next start or by **Sync folders**.
+  **Sync folders** under **Permissions › Folders** walks every grant at
+  once (`folder sync`; the running node does it, or the app's command when
+  none runs). What the watch costs, as NTFS sets it:
+  - While a folder is granted, the folders above it cannot be renamed or
+    moved, or deleted to the Recycle Bin: Explorer says the folder is open
+    in another program. Rename it before you grant the folder below, or
+    remove the grant (**Permissions › Folders**) first. The granted folder
+    itself and what is in it can be renamed. A walk holds the same for
+    the folders it is inside of, for as long as it is there; a tool that
+    renames a folder into place without a retry (Rust's `std::fs::rename`,
+    Python's `os.replace`) can fail with "access denied" in that moment.
+  - A folder on a removable drive (a stick or card) is not watched (the log
+    says so), since a held handle would keep it from being ejected. An
+    external hard disk or SSD is a fixed disk to Windows and is watched: it
+    cannot be removed safely while a folder on it is granted. Remove the
+    grant first.
+  - A watch is of the folder object, not of its path: a granted folder you
+    rename away (the watch goes along with it) and make again at its path,
+    with `git clone` or a tool that swaps a folder into place, is watched
+    again at the next sync, which moves the grant onto the new folder.
+  - A folder whose watch ended (the folder went, or a read failed) is
+    watched again at the next sync; one that could not be opened (a link,
+    a drive that is not watched, an error) is not tried again while it stays
+    granted, and the log says why, once.
 - A network folder (`\\server\share`) or a folder on a network drive is
   refused when it is added, in the app's folder picker too: the service
   runs in a session of its own, where a drive mapped at your sign-in does
@@ -614,17 +656,13 @@ runs in the container as well, unless the pairing runs as you.
 - A file or folder you move out of a granted folder on the same drive keeps
   the entry it inherited. `icacls <path> /reset` gives it the permissions of
   its new place.
-- The flags stay independent: `w` without `r` writes but neither reads nor
-  lists, `x` runs programs and reads files by name but does not list. The
-  permissions a command gives what it makes are the exception, see the
-  bullet on permission entries below.
-- Deleting and renaming need `r` and `w`, since Windows allows a move with
-  the same right as a delete: a command must not move what it cannot read
-  to a folder where it can. So in a folder with `w` but not `r`, a command
-  adds and changes files, but does not delete, rename or move any. A
-  granted folder or file itself is deleted, renamed or moved only through
-  the folder above it, with `r` and `w` there; on Linux too that needs a
-  right on the folder above.
+- `w` reads too (`w` alone is `rw`), and deletes and renames; `x` runs
+  programs and reads files by name but does not list. The permissions a
+  command gives what it makes are the exception, see the bullet on
+  permission entries below.
+- A granted folder or file itself is deleted, renamed or moved only through
+  the folder above it, with `w` there; on Linux too that needs a right on
+  the folder above.
 - A folder you grant inside another granted folder with `w` gets its entry
   only while it is a folder of its own there: not a junction or link to
   another place, not a file with a second name (a hard link), and with
@@ -679,11 +717,11 @@ runs in the container as well, unless the pairing runs as you.
   container, also not one of the same center or under the same name. The
   other two kinds count at once, for every pairing of the
   node and for every app on the machine that runs in an AppContainer (for
-  a capability: every such app that has it). In a
-  folder with `w` but not `r`, a command can make a folder that lets it
-  read what you or another pairing save into it later. So do not save
-  files a pairing must not read into a folder where it may write. After you
-  take `w` off a pairing's folder or remove the pairing, clean the folder.
+  a capability: every such app that has it). A folder a command made
+  keeps the entries it gave it, so the command may read what you or
+  another pairing save into it later, also once the grant is gone. After
+  you take `w` off a pairing's folder or remove the pairing, clean the
+  folder.
   Only `icacls <folder> /reset /T` removes all of them with certainty; it
   also resets permissions of your own below the folder. To keep those,
   find the entries with
@@ -694,8 +732,8 @@ runs in the container as well, unless the pairing runs as you.
   pnpm links `node_modules` to its store, uv links a `.venv` to its cache,
   and a local `git clone` links its objects. Such files are readable but not
   writable for commands: a pairing whose folder holds one of the names gets
-  read and run, and no more than each of its names' folders gives (none
-  under a `w`-only name), by entries of the node's own, with a denying
+  read and run, and no more than each of its names' folders gives, by
+  entries of the node's own, with a denying
   entry of every other right. So two pairings whose projects link to one
   store both read it, and the denial stays when Explorer or `icacls` passes
   a folder's permissions down to the file. A file whose names all lie in
@@ -708,30 +746,18 @@ runs in the container as well, unless the pairing runs as you.
   (the owner's store, cache or repository) stays under both names, and the
   granted folder's entries for them do not reach it. The node changes the
   file's entries only as a change reaches it: **Sync
-  folders** cuts one you widened back down. So after you or an agent
-  install dependencies or clone into a folder that is granted already
-  (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:
-  until then the new files keep the store's permissions, so commands may
-  not read what you installed, and you may not open what the agent
-  installed. After it you may read and run what the agent installed from
-  its own store. On the installed service its commands keep reading their
+  folders** cuts one you widened back down. What you or an agent install or
+  clone into a granted folder (`pnpm install`, `uv sync`,
+  `git clone --local`) keeps the store's permissions until the node walks
+  the folder by itself, seconds later (above). After that you may read and
+  run what the agent installed from its own store. On the installed service its commands keep reading their
   store also once the folder is no longer granted: a file its commands made
   there belongs to `nerve-run`. A file of yours that a command linked into
   its own folder does not: once the folder's grant goes, the pairing reads
   it no more. A command can make a hard link
   only to a file it may write (Windows asks that of a sandboxed process
-  since 2015; checked), so it cannot read a file of yours through one. From
-  a folder it may write but not read, it can link a file it knows the name
-  of into a folder it may read; the walk keeps that file closed to it, and to
-  every pairing that has no grant on the write-only folder, while the grant
-  is on and after it is taken off (Linux refuses such a link), for as long
-  as the folder is there; the node keeps a
-  mark of the grant for that in `grants.json`. The walk cannot tell which
-  way such a link was made, so it closes a file of a shared project that a
-  command linked *into* its write-only folder the same way, to every other
-  pairing without a grant on that folder (Linux lets that link be made, and
-  the other pairing keeps its rights there). Delete the name in the
-  write-only folder to open it. Hard links only work within one drive. A grant on a single file with a second
+  since 2015; checked), so it cannot read a file of yours through one. Hard
+  links only work within one drive. A grant on a single file with a second
   name is refused where commands may write around it, and capped as above
   elsewhere. Limits:
   - `icacls /reset` and Explorer's "Replace all child object permission
@@ -747,31 +773,29 @@ runs in the container as well, unless the pairing runs as you.
   - A file another pairing's command made in a folder both pairings share
     also belongs to `nerve-run`: a pairing that linked it into its own
     folder keeps reading it once the folder's grant goes, as on Linux.
-  - A file linked out of a write-only folder is closed to every pairing
-    that has no grant on that folder, not only the one that linked it, and
-    stays closed through every later walk (**Sync folders** too) until its
-    mark goes: when the folder is gone, when the folder is granted to the
-    pairing again (the new grant decides), or at uninstall. Moving the
-    folder takes the mark along, so a new folder made at its old path and
-    granted does not end it, and neither does a sync that cannot look at the
-    folder. A pairing that has no folder left, is removed, or is the last
-    one and is paired again, leaves its marks, so a pairing made later is
-    held back too. Delete the file, or grant the folder again, to open it
-    sooner.
-  - The closing holds while one of the file's names lies in the write-only
-    folder. If you move your file out of that folder (a rename on the same
-    drive) while a command's link to it is in a granted folder, the next walk
-    that reaches the link (**Sync folders**, or a change of a grant there)
-    gives the pairing read on it. Before you file away something from a
-    folder you gave write only, look for links to it
-    (`fsutil hardlink list <file>`) and delete the ones in a granted folder.
   - A folder whose permission inheritance you turned off by hand is not
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)
     instead.
-  - A closed folder that a command renames while the node changes the
-    folders' entries may leave a file linked across its edge (by you)
-    readable through the other name until the next **Sync folders**.
+  - Inside a granted folder that holds a closed folder, a file with more
+    than one name gets read and run at most for the pairing, not write,
+    whatever the folder around gives: a command may rename the closed
+    folder while a walk goes on, and the walk judges a file by the names it
+    has when it gets there. A closed folder elsewhere in a folder the
+    pairing writes can be moved into the walked folder just as well, and
+    the node does not look for it (that would cap the linked files of
+    every project under a writable folder that holds any closed folder): a
+    file linked across such a closed folder's edge can then be read and
+    written through the walked folder's name until the next walk, which
+    sees the moved folder and closes it again. For the same reason a closed folder that a
+    command renames during a walk may leave a file linked across its edge
+    (by you) readable through the other name until the node walks that
+    folder again, which comes no sooner than twice the walk's length
+    later. A command's own renames start such a walk (a new name in the
+    granted folder wakes the watch), and one rename a few seconds after a
+    new name is enough, so it can time the window. Keep a repository you
+    hard-link across a closed folder's edge (`git clone --local`) out of
+    the folders a pairing writes.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it

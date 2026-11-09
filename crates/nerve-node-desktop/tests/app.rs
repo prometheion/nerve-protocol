@@ -528,7 +528,20 @@ fn the_app_drives_the_cli_end_to_end() {
         "{f:?}"
     );
     let path = perm.get_folders().row_data(0).unwrap().path;
-    perm.invoke_folder_set(path.clone(), true, true, false);
+    // Write alone reads too.
+    perm.invoke_folder_set(path.clone(), false, true, false);
+    let f = &config(&paths).centers[0].policy.folders[0];
+    assert!(
+        f.access.read && f.access.write && !f.access.execute,
+        "{f:?}"
+    );
+    // Nor does the Add dialog make a folder that is written and not read.
+    perm.invoke_folder_choose();
+    perm.set_folder_read(false);
+    perm.set_folder_write(true);
+    perm.set_folder_execute(false);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
     let f = &config(&paths).centers[0].policy.folders[0];
     assert!(
         f.access.read && f.access.write && !f.access.execute,

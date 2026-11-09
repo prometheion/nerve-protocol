@@ -1598,9 +1598,10 @@ mod tests {
         let ro = [with("/home/u/.ssh", "r")];
         assert!(p.check(keys, false, &ro).is_none());
         assert!(p.check(keys, true, &ro).is_some());
-        let wo = [with("/home/u/.ssh", "w")];
-        assert!(p.check(keys, true, &wo).is_none());
-        assert!(p.check(keys, false, &wo).is_some());
+        // `w` reads too.
+        let w = [with("/home/u/.ssh", "w")];
+        assert!(p.check(keys, true, &w).is_none());
+        assert!(p.check(keys, false, &w).is_none());
         assert!(p.check(keys, true, &[folder("/home/u/.ssh")]).is_none());
         let nested = [folder("/home/u/.ssh"), with("/home/u/.ssh/keep", "r")];
         assert!(

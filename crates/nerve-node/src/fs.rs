@@ -409,7 +409,7 @@ pub fn links_below(
                     // Gone since it was found: nothing there to follow.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     // The folder handed over is the one it may not list,
-                    // most often one granted `w` without `r`: the walk may
+                    // most often one granted `x` without `r`: the walk may
                     // enter it but not list it. Saying so points at the
                     // grant, not at a closed folder below it.
                     Err(_) if closed == Closed::Refuse && dir == t.path => {
@@ -1782,7 +1782,7 @@ mod tests {
         );
     }
 
-    /// A handed folder the walk may enter but not list (granted `w`
+    /// A handed folder the walk may enter but not list (granted `x`
     /// without `r`) refuses another account's program with a text that
     /// names that folder as the one it may not list, and is left out for
     /// the walking account's.
@@ -1797,7 +1797,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let inbox = d.path().canonicalize().unwrap().join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
-        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o300)).unwrap();
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o100)).unwrap();
         let handed = [Target {
             path: inbox.clone(),
             access: PathAccess::Write,

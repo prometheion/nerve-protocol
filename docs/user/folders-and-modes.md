@@ -60,11 +60,11 @@ A folder gives rights, each its own letter:
 | Right | Allows |
 |---|---|
 | `r` | Reading: the file calls stat, list, read, grep and find |
-| `w` | Writing files |
+| `w` | Writing files, and reading them as `r` does |
 | `x` | Running commands whose working folder is in it |
 
-The letters do not imply each other for file calls: a command needs `x` and
-not `r`. A command in an `x` folder can also read its files by name, not list
+`w` reads too, so `w` alone is `rw`. A command needs `x` and not `r`. A
+command in an `x` folder can also read its files by name, not list
 them ([what a command can reach](../dev/sandbox-linux.md#what-a-command-can-reach-in-folder-mode)). A
 folder covers everything below it, and where folders nest the deepest one
 decides.

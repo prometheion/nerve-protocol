@@ -3891,10 +3891,12 @@ impl Link {
     /// cannot be read ([`grants_refusal`]). A command waits for it
     /// ([`Link::container`]), and so does the node's own file work as the
     /// container on Windows, whose reads its entries decide (Q4). A change
-    /// that takes long holds the call; the log says how far it is.
+    /// that takes long holds the call; the log says how far it is. A walk
+    /// the node started because names changed does not
+    /// ([`crate::daemon::Shared::sync_grants_for_call`]).
     async fn grants_ready(&self, entry: &CenterEntry) -> Result<String, RpcError> {
         let s = self.shared.clone();
-        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants_for_call())
             .await
             .map_err(|e| RpcError::internal(e.to_string()))?;
         let name = crate::grants::container(&self.shared.paths, &entry.node_id);
@@ -4430,7 +4432,6 @@ mod tests {
             unfinished: false,
             toward: Vec::new(),
             closed_at: None,
-            off: false,
         };
         assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());
         let stale = Synced {
