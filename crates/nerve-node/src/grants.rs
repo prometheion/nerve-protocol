@@ -2315,6 +2315,54 @@ fn write_profiles(file: &Path, containers: &[String]) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", file.display()))
 }
 
+/// Notes the containers of the pairings in `cfg` among those whose profiles
+/// the node may have made (`profiles.json`). The node does so at its start,
+/// before it takes a call: a pairing removed before its first sync saw it
+/// then has its profile removed by the sync after the change too
+/// ([`apply_in`]), also one that never had a grant. Its syncs run only after
+/// it, and no other process writes the file.
+pub fn note_pairings(paths: &NodePaths, cfg: &NodeConfig) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        note_in(&profiles_file(paths), &pairings(paths, cfg))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (paths, cfg);
+        Ok(())
+    }
+}
+
+/// [`note_pairings`] for the containers `live`, in the file `file`.
+#[cfg(any(windows, test))]
+fn note_in(file: &Path, live: &[String]) -> Result<(), String> {
+    let mut all = read_profiles(file)?;
+    let before = all.len();
+    for c in live {
+        if !all.contains(c) {
+            all.push(c.clone());
+        }
+    }
+    if all.len() == before {
+        return Ok(());
+    }
+    all.sort();
+    write_profiles(file, &all)
+}
+
+/// Holds off every sync of this process while the guard lives: a test of
+/// the node's start sees what only its start wrote ([`noted`]).
+#[cfg(all(windows, test))]
+pub(crate) fn hold_syncs() -> std::sync::MutexGuard<'static, ()> {
+    nerve_transport::sync::turn(&SYNC)
+}
+
+/// The containers in `profiles.json` at `paths` ([`note_pairings`]).
+#[cfg(all(windows, test))]
+pub(crate) fn noted(paths: &NodePaths) -> Vec<String> {
+    read_profiles(&profiles_file(paths)).unwrap()
+}
+
 /// [`apply`] for the grants `want` gives, on `folders` and the profiles in
 /// `store`. `want` gives the grants, the containers of the config's
 /// pairings ([`pairings`]) and what closes a linked file's name besides the
@@ -4322,6 +4370,43 @@ mod tests {
             s.profiles.removed.is_empty() && store.there.contains(&lab),
             "{s:?}"
         );
+    }
+
+    /// A pairing removed before the node's first sync saw it: the note the
+    /// node makes at its start (`note_pairings`) has the first sync after
+    /// the change remove its profile, though it never had a grant. Without
+    /// it, `center rm` right after the start found the profile left to the
+    /// owner, or not, as the start's sync came first or not.
+    #[test]
+    fn a_pairing_removed_before_the_first_sync_loses_its_profile() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let home = container(&paths, &node("home"));
+        let lab = container(&paths, &node("lab"));
+        let file = profiles_file(&paths);
+        note_in(&file, std::slice::from_ref(&home)).unwrap();
+        // Each once, also when noted again, beside what was there.
+        note_in(&file, &[lab.clone(), home.clone()]).unwrap();
+        let mut both = vec![home.clone(), lab.clone()];
+        both.sort();
+        assert_eq!(read_profiles(&file), Ok(both));
+        let mut f = Fake::default();
+        let mut store = FakeProfiles {
+            there: vec![home.clone()],
+            ..Default::default()
+        };
+        // The first sync sees the config with `lab` only.
+        let s = apply_in(
+            &paths,
+            Rewalk::None,
+            || (Vec::new(), vec![lab.clone()], Shut::default()),
+            &mut f,
+            &mut store,
+        );
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(store.removed, std::slice::from_ref(&home));
+        assert_eq!(read_profiles(&file), Ok(vec![lab.clone()]));
     }
 
     /// A sync that waited for its turn applies the config as it is once

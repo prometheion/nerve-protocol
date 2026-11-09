@@ -131,13 +131,15 @@ pub(super) async fn rm(
     // So is the profile of its container on Windows (crate::grants):
     // with its last grant when the record names it, else found by
     // the pairing. A node that runs took the change, and takes the
-    // grants off and the profile of a container left without grants
-    // itself, in its own time: asked to do that now, it is done before
-    // the profiles are looked at here, so none it removes is said to
-    // stay. Its own sync of the change may have taken the grants off
-    // first: the sync asked for here waits until that one removed the
-    // profile too (crate::grants::apply). Any other profile stays while
-    // it runs, as a command of the pairing may still run in it.
+    // grants off and the profile of each pairing it had itself, in its
+    // own time: also of one removed before its first sync, as it noted
+    // its pairings at its start (crate::grants::note_pairings). Asked to
+    // do that now, it is done before the profiles are looked at here,
+    // so none it removes is said to stay. Its own sync of the change may
+    // have taken the grants off first: the sync asked for here waits
+    // until that one removed the profile too (crate::grants::apply). Any
+    // other profile stays while it runs, as a command of the pairing may
+    // still run in it.
     #[cfg(windows)]
     match node_call(&paths, "folder.grants", json!({})).await {
         Ok(_) => {}
@@ -478,8 +480,9 @@ mod tests {
 
     /// On Windows: the profile of a pairing with folder entries goes with
     /// their grants at `center rm`, which says so where no node runs. A
-    /// running node takes the change and that profile itself; a profile
-    /// without grants stays while it runs, which `center rm` says. A node
+    /// running node takes the change and that profile itself, also the
+    /// profile of a pairing that never had a folder, right after its start
+    /// (before its first sync), and `center rm` says none stays. A node
     /// that runs without its pipe is no node to write behind: nothing
     /// changes.
     #[cfg(windows)]
@@ -511,16 +514,19 @@ mod tests {
         }
 
         // A pairing that never had a folder: the running node removes its
-        // profile with the pairing too, as the profile goes with the pairing.
-        let (d, paths) = setup(&["home"]);
-        let name = crate::grants::container(&paths, "n");
-        let profile = profile_of(&name);
-        with_node(d.path(), &paths, |_| {
-            let out = run(&paths, &["center", "rm"]).unwrap();
-            assert!(out.contains("unpaired home"), "{out}");
-            assert!(!out.contains("stays"), "{out}");
-        });
-        assert!(!profile.exists(), "{}", profile.display());
+        // profile with the pairing too, as the profile goes with the pairing,
+        // whether or not its first sync came before `center rm`: a few rounds.
+        for _ in 0..3 {
+            let (d, paths) = setup(&["home"]);
+            let name = crate::grants::container(&paths, "n");
+            let profile = profile_of(&name);
+            with_node(d.path(), &paths, |_| {
+                let out = run(&paths, &["center", "rm"]).unwrap();
+                assert!(out.contains("unpaired home"), "{out}");
+                assert!(!out.contains("stays"), "{out}");
+                assert!(!profile.exists(), "{}", profile.display());
+            });
+        }
 
         let (_d, paths, name, profile) = granted_home();
         let out = run(&paths, &["center", "rm"]).unwrap();

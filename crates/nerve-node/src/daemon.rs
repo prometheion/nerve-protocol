@@ -2368,6 +2368,15 @@ impl Daemon {
         // A file that says on starts off: on Linux the password lives in
         // memory only; Windows holds the one kept with DPAPI (crate::winsudo).
         shared.settle_sudo();
+        // The profile of a pairing's container goes with the pairing, by the
+        // node's note of the pairings it had (crate::grants::note_pairings).
+        // Noted before the first call and the first sync: a pairing removed
+        // before that sync saw it has its profile removed too.
+        if shared.confinement.appcontainer
+            && let Err(e) = crate::grants::note_pairings(&paths, &cfg)
+        {
+            tracing::warn!("folder grants: {e}");
+        }
         let ctl = if opts.ctl {
             Some(start_ctl(shared.clone()).await?)
         } else {
@@ -3465,6 +3474,54 @@ fn given_in_home(cfg: &NodeConfig, home: &std::path::Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod every_platform {
     use super::*;
+
+    /// On Windows the node notes its pairings' containers at its start,
+    /// before its first sync could (crate::grants::note_pairings): `center
+    /// rm` right after the start then finds the node removing the profile of
+    /// a pairing without grants, not leaving it to the owner.
+    #[cfg(windows)]
+    #[test]
+    fn the_node_notes_its_pairings_before_its_first_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(nerve_policy::CenterEntry {
+            name: "home".into(),
+            url: "http://127.0.0.1:1".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "n-home".into(),
+            settings: Default::default(),
+            // No link is dialled.
+            paused: true,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: Default::default(),
+            capabilities: Vec::new(),
+        });
+        cfg.save(&paths.config_file()).unwrap();
+        let mut opts = NodeOptions::new(paths.clone());
+        opts.home = d.path().to_path_buf();
+        opts.ctl = false;
+        opts.full_rights = Some(false);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        // No sync of the node runs before this is dropped.
+        let held = crate::grants::hold_syncs();
+        let daemon = rt.block_on(Daemon::start(opts)).unwrap();
+        assert!(daemon.shared.confinement.appcontainer);
+        let noted = crate::grants::noted(&paths);
+        drop(held);
+        rt.block_on(daemon.stop());
+        assert_eq!(noted, [crate::grants::container(&paths, "n-home")]);
+    }
 
     /// The installed node names the account each pairing's commands run as
     /// without a lookup: `nerve-run` unless the pairing runs as the owner,
