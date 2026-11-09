@@ -535,7 +535,7 @@ mod tests {
     }
 
     /// On Windows: when the grants of the pairings that stay do not follow
-    /// (a hard link below a folder they write), `center rm` still removes
+    /// (a folder whose permissions nobody may change), `center rm` still removes
     /// the pairing's profile, as nothing names it once the pairing is gone,
     /// and then says what failed.
     #[cfg(windows)]
@@ -545,8 +545,12 @@ mod tests {
         let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        std::fs::write(work.join("a.txt"), "x").unwrap();
-        std::fs::hard_link(work.join("a.txt"), work.join("b.txt")).unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(&work)
+            .args(["/deny", "*S-1-1-0:(WDAC)"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
         let real = nerve_policy::paths::resolve(&work).unwrap();
         let mut cfg = NodeConfig::default();
         let mut home = entry("home");

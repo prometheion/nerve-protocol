@@ -885,7 +885,7 @@ pub mod acl {
     }
 
     /// Every right a file or folder has (FILE_ALL_ACCESS).
-    const ALL: u32 = 0x1F_01FF;
+    pub const ALL: u32 = 0x1F_01FF;
 
     /// The masks of a folder without a flag inside a folder the container
     /// is granted: every right denied to it there and below, whatever it
@@ -925,6 +925,142 @@ pub mod acl {
     pub const OBJECT_INHERIT: u32 = 0x1;
     pub const CONTAINER_INHERIT: u32 = 0x2;
     pub const INHERIT_ONLY: u32 = 0x8;
+    pub const INHERITED: u8 = 0x10;
+
+    /// The most an AppContainer may have on a file with more than one name
+    /// (hard links) whose names lie under different grants: read it, run
+    /// it, and look at it, as on Linux such a file keeps its own, usually
+    /// readable, rights (#149).
+    pub const READ_AND_EXECUTE: u32 = BASE | READ_DATA | READ_EA | EXECUTE;
+
+    /// What a name of such a file under a grant with these flags allows
+    /// the file, within [`READ_AND_EXECUTE`].
+    pub fn file_cap(read: bool, write: bool, execute: bool) -> u32 {
+        masks(read, write, execute).file & READ_AND_EXECUTE
+    }
+
+    /// The kinds of entries of an access list (`ACE_HEADER::AceType`) that
+    /// [`capped`] tells apart.
+    pub const ALLOWED: u8 = 0;
+    pub const DENIED: u8 = 1;
+    const ALLOWED_COMPOUND: u8 = 4;
+    const ALLOWED_OBJECT: u8 = 5;
+    const ALLOWED_CALLBACK: u8 = 9;
+    const ALLOWED_CALLBACK_OBJECT: u8 = 11;
+
+    /// An entry of an access list, as [`capped`] looks at it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Ace {
+        pub kind: u8,
+        pub flags: u8,
+        pub mask: u32,
+        /// Its SID as text (`S-1-…`), for the kinds that have it right
+        /// after the mask (allowed and denied, also with a condition).
+        pub sid: Option<String>,
+    }
+
+    /// One entry of a list [`capped`] gives.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Capped {
+        /// The entry at this place of the list it was given, with this mask.
+        Entry(usize, u32),
+        /// A denying entry of the node's own, for the SID at this place of
+        /// the caps, with this mask.
+        Deny(usize, u32),
+    }
+
+    /// A generic right of an entry written out as the rights of a file,
+    /// as Windows maps them; the rights an entry on a file cannot give
+    /// (the system list, the most allowed) go.
+    fn mapped(mask: u32) -> u32 {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const GENERIC_EXECUTE: u32 = 0x2000_0000;
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let mut m = mask & ALL;
+        for (generic, rights) in [
+            (GENERIC_READ, BASE | READ_DATA | READ_EA),
+            (
+                GENERIC_WRITE,
+                BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES,
+            ),
+            (GENERIC_EXECUTE, BASE | EXECUTE),
+            (GENERIC_ALL, ALL),
+        ] {
+            if mask & generic != 0 {
+                m |= rights;
+            }
+        }
+        m
+    }
+
+    /// The access list `aces` of a file with more than one name, with no
+    /// more than `caps` gives each SID (as text, `None`: nothing, it is
+    /// closed to it) and [`READ_AND_EXECUTE`] every other AppContainer and
+    /// capability (`S-1-15-…`): an entry that allows more is cut down to
+    /// that, one that allows nothing then goes. Each SID of `caps` that an
+    /// entry allowed more, or that is closed, gets a denying entry of the
+    /// node's own, first in the list, of every right it may not have: it
+    /// stays when Windows passes a folder's list down to the file again (as
+    /// Explorer and `icacls` do, which would give it the folder's whole
+    /// entry), until the node works the list out anew. The node's denying
+    /// entries for the SIDs of `caps` are worked out anew here: one stays
+    /// while the SID is allowed anything at all, so a list worked out from
+    /// one already cut down keeps it. Every other entry stays as it is.
+    pub fn capped(aces: &[Ace], caps: &[(String, Option<u32>)]) -> Vec<Capped> {
+        let listed = |sid: &str| caps.iter().position(|(s, _)| s.eq_ignore_ascii_case(sid));
+        // The cap of an entry's SID, where it has one.
+        let cap_of = |sid: &str| match listed(sid) {
+            Some(j) => Some(caps[j].1.unwrap_or(0) & READ_AND_EXECUTE),
+            None => sid
+                .get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("S-1-15-"))
+                .then_some(READ_AND_EXECUTE),
+        };
+        let mut more = vec![false; caps.len()];
+        let mut had = vec![false; caps.len()];
+        let mut allowed = vec![false; caps.len()];
+        let mut out = Vec::new();
+        for (i, a) in aces.iter().enumerate() {
+            let explicit = a.flags & INHERITED == 0;
+            let j = a.sid.as_deref().and_then(listed);
+            let cap = a.sid.as_deref().and_then(cap_of);
+            match (a.kind, j, cap) {
+                // The node's own, worked out again below.
+                (DENIED, Some(j), _) if explicit => had[j] = true,
+                (ALLOWED | ALLOWED_CALLBACK, _, Some(cap)) => {
+                    let m = mapped(a.mask);
+                    if let Some(j) = j {
+                        more[j] |= m & !cap != 0;
+                        allowed[j] |= m & cap != 0;
+                    }
+                    if m & cap != 0 {
+                        out.push(Capped::Entry(i, m & cap));
+                    }
+                }
+                // The SID of these does not follow the mask: whoever it is,
+                // it gets no more than read and execute.
+                (ALLOWED_COMPOUND | ALLOWED_OBJECT | ALLOWED_CALLBACK_OBJECT, _, _) => {
+                    let m = mapped(a.mask) & READ_AND_EXECUTE;
+                    if m != 0 {
+                        out.push(Capped::Entry(i, m));
+                    }
+                }
+                _ => out.push(Capped::Entry(i, a.mask)),
+            }
+        }
+        let denies = caps
+            .iter()
+            .enumerate()
+            .filter_map(|(j, (_, cap))| match cap {
+                None => Some(Capped::Deny(j, ALL)),
+                Some(c) if more[j] || (had[j] && allowed[j]) => {
+                    Some(Capped::Deny(j, ALL & !(c & READ_AND_EXECUTE)))
+                }
+                Some(_) => None,
+            });
+        denies.chain(out).collect()
+    }
 
     /// The entries a grant of `m` is on a folder (`is_dir`) or a file, as
     /// (ACE flags, mask): for the folder itself, for the folders below it,
@@ -1301,7 +1437,7 @@ pub mod appcontainer {
     };
 
     use super::acl::{self, FileId, Found, Masks, command_line, entries};
-    use crate::inherit::{self, Derived, Kind, Objects, Walk, Walked};
+    use crate::inherit::{self, Cap, Derived, Kind, Linked, Objects, Walk, Walked};
 
     // The flags of `acl::entries` are Windows' own.
     const _: () = assert!(
@@ -2335,15 +2471,6 @@ pub mod appcontainer {
             list.write(w.h)
         }
 
-        fn at(&mut self, obj: &Obj, path: &Path) -> io::Result<bool> {
-            let there = match open_itself(path, FILE_READ_ATTRIBUTES) {
-                Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(e) => return Err(e),
-            };
-            Ok(id_by(obj.h)? == id_of(&there)?)
-        }
-
         fn names_of(&mut self, obj: &Obj) -> io::Result<Vec<PathBuf>> {
             // By 128-bit IDs where the volume gives them (ReFS); NTFS gives
             // 64-bit ones only, which are the low half of its 128-bit IDs.
@@ -2407,6 +2534,129 @@ pub mod appcontainer {
             }
             Ok(out)
         }
+
+        fn cap(
+            &mut self,
+            obj: &Obj,
+            derived: Derived<Lists>,
+            cap: &Cap,
+        ) -> io::Result<Derived<Lists>> {
+            let lists = match derived {
+                Derived::Kept => return Ok(Derived::Kept),
+                Derived::Same(l) | Derived::Changed(l) => l,
+            };
+            let now = Sd::of(obj.h)?;
+            let new = capped(&lists.new, cap)?;
+            Ok(if new.entries()? == now.entries()? {
+                Derived::Same(Lists {
+                    new: now.clone(),
+                    was: now,
+                })
+            } else {
+                Derived::Changed(Lists { new, was: now })
+            })
+        }
+    }
+
+    /// `sd` with no more than `cap` allows the AppContainers, as
+    /// [`acl::capped`] works it out: the list of a file with more than one
+    /// name.
+    fn capped(sd: &Sd, cap: &Cap) -> io::Result<Sd> {
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: a valid descriptor; `dacl` points into it.
+        check(unsafe {
+            GetSecurityDescriptorDacl(sd.ptr(), &mut present, &mut dacl, &mut defaulted)
+        })?;
+        if present == 0 || dacl.is_null() {
+            // No list lets everyone in; the node gives it none (`next`).
+            return Err(io::Error::other(
+                "it has more than one name and no access list, so everyone may open it; the node does not give it one",
+            ));
+        }
+        let old = aces(dacl)?;
+        let mut list = Vec::with_capacity(old.len());
+        for &ace in &old {
+            // SAFETY: every ACE starts with its header and has its mask
+            // right after it; the kinds below have their SID after the mask.
+            let (kind, flags, mask) = unsafe {
+                let a = ace as *const ACCESS_ALLOWED_ACE;
+                ((*ace).AceType, (*ace).AceFlags, (*a).Mask)
+            };
+            let sid = match kind {
+                0 | 1 | 9 | 10 => {
+                    // SAFETY: as above.
+                    let p = unsafe { &raw const (*(ace as *const ACCESS_ALLOWED_ACE)).SidStart };
+                    Some(sid_text(p as PSID)?)
+                }
+                _ => None,
+            };
+            list.push(acl::Ace {
+                kind,
+                flags,
+                mask,
+                sid,
+            });
+        }
+        let sids: Vec<Sid> = cap
+            .containers
+            .iter()
+            .map(|(name, _)| Sid::derive(name))
+            .collect::<io::Result<_>>()?;
+        let caps: Vec<(String, Option<u32>)> = sids
+            .iter()
+            .zip(&cap.containers)
+            .map(|(sid, (_, c))| Ok((sid_text(sid.0)?, *c)))
+            .collect::<io::Result<_>>()?;
+        let out = acl::capped(&list, &caps);
+        let mut size = size_of::<ACL>() as u32;
+        for e in &out {
+            size += match *e {
+                // SAFETY: an ACE of the old list, as long as its header says.
+                acl::Capped::Entry(i, _) => u32::from(unsafe { (*old[i]).AceSize }),
+                // SAFETY: a valid SID.
+                acl::Capped::Deny(j, _) => {
+                    size_of::<ACCESS_ALLOWED_ACE>() as u32 - 4 + unsafe { GetLengthSid(sids[j].0) }
+                }
+            };
+        }
+        let mut buf = vec![0u32; (size as usize).div_ceil(4)];
+        let new = buf.as_mut_ptr() as *mut ACL;
+        // SAFETY: the buffer holds `size` bytes.
+        check(unsafe { InitializeAcl(new, size, ACL_REVISION_DS) })?;
+        for e in out {
+            match e {
+                acl::Capped::Entry(i, mask) => {
+                    // SAFETY: the ACE lies in `dacl`, as long as its header
+                    // says, with its mask right after the header.
+                    let mut bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            old[i] as *const u8,
+                            usize::from((*old[i]).AceSize),
+                        )
+                    }
+                    .to_vec();
+                    bytes[4..8].copy_from_slice(&mask.to_le_bytes());
+                    // SAFETY: a whole ACE, and room for it in the new list.
+                    check(unsafe {
+                        AddAce(
+                            new,
+                            ACL_REVISION_DS,
+                            u32::MAX,
+                            bytes.as_ptr() as *const c_void,
+                            bytes.len() as u32,
+                        )
+                    })?;
+                }
+                acl::Capped::Deny(j, mask) => {
+                    // SAFETY: the list has room for it.
+                    check(unsafe {
+                        AddAccessDeniedAceEx(new, ACL_REVISION_DS, 0, mask, sids[j].0)
+                    })?;
+                }
+            }
+        }
+        Sd::with(sd, new, sd.control()?)
     }
 
     /// The names (hard links) of the object open as `h`, as Windows gives
@@ -2659,8 +2909,8 @@ pub mod appcontainer {
 
     /// What a change of a grant asks of what it reaches below its folder.
     pub struct Below<'a> {
-        /// Whether a file with more than one name (hard links) whose list
-        /// changes may change ([`Walk::links`]); `None`: any may.
+        /// What a file with more than one name (hard links) gets
+        /// ([`Walk::links`]); `None`: it changes as any file.
         pub links: Option<inherit::Links<'a>>,
         /// Told how far the change is, now and then.
         pub progress: &'a mut dyn FnMut(Walked),
@@ -2674,17 +2924,15 @@ pub mod appcontainer {
 
     /// Passes the list `next` of the folder open as `f` (at `path`) down
     /// ([`inherit::pass_down`]), into every folder with `every`, and
-    /// writes it on the folder last with `write_top`; only looks with
-    /// `write` false.
+    /// writes it on the folder last with `write_top`.
     fn pass(
         f: &std::fs::File,
         path: &Path,
         next: &Next,
         write_top: bool,
         every: bool,
-        write: bool,
         below: Below,
-    ) -> io::Result<(Walked, Option<inherit::Stop>)> {
+    ) -> io::Result<Walked> {
         let mut volume = Volume::new()?;
         volume.maker = below.maker;
         let top = Obj {
@@ -2700,9 +2948,9 @@ pub mod appcontainer {
             top,
             lists,
             path,
-            write_top && write,
+            write_top,
             Walk {
-                write,
+                write: true,
                 every,
                 links: below.links,
                 progress: below.progress,
@@ -2742,9 +2990,8 @@ pub mod appcontainer {
     /// [`FileId`] of the object it changed, as its handle names it, when
     /// the volume names one, and how far the change went below it.
     ///
-    /// A file below with more than one name that `below.links` refuses as
-    /// the change reaches it stops the change there, as an error: what it
-    /// changed below `path` stays, and `path` keeps its list.
+    /// A file with more than one name, `path` itself or one below it, gets
+    /// what `below.links` says ([`inherit::pass_down`]).
     ///
     /// With `whole`, the change goes into every folder below, also where
     /// the list of `path` stays as it is: an earlier change there may have
@@ -2762,7 +3009,7 @@ pub mod appcontainer {
         own: bool,
         whole: bool,
         expect: Option<FileId>,
-        below: Below,
+        mut below: Below,
     ) -> io::Result<(Option<FileId>, Walked)> {
         let sid = Sid::derive(name)?;
         let refuse = |why: String| {
@@ -2811,57 +3058,37 @@ pub mod appcontainer {
         {
             return refuse(why);
         }
-        let next = next(&f, &sid, masks)?;
+        let mut next = next(&f, &sid, masks)?;
         if own && masks.is_some() && next.protected {
             return refuse("its permissions do not inherit from its folder".into());
+        }
+        // A granted file with more than one name, as one below a folder.
+        if !next.is_dir
+            && !next.protected
+            && let Some(links) = below.links.as_mut()
+        {
+            let top = Obj {
+                h: f.as_raw_handle(),
+                owned: false,
+            };
+            let mut volume = Volume::new()?;
+            let names = volume.kind(&top)?.names;
+            if names > 1
+                && let Linked::Capped(cap) = links(path, names, &volume.names_of(&top)?)?
+            {
+                next.sd = capped(&next.sd, &cap)?;
+                next.changed = next.sd.entries()? != next.was.entries()?;
+            }
         }
         let every = masks.is_none() || whole;
         let mut walked = Walked::default();
         if next.is_dir && (next.changed || every) {
             // The walk writes the list of `path` itself last.
-            let (w, stopped) = pass(&f, path, &next, next.changed, every, true, below)?;
-            walked = w;
-            if let Some(stop) = stopped {
-                let folder = if stop.top_written {
-                    // Made in the folder while the walk was below it.
-                    "after the folder itself got the change"
-                } else {
-                    "with the folder itself as it was"
-                };
-                return Err(io::Error::other(format!(
-                    "{} below it has {} names (hard links), and the change would reach them all; it stopped there, {folder}",
-                    stop.path.display(),
-                    stop.names
-                )));
-            }
+            walked = pass(&f, path, &next, next.changed, every, below)?;
         } else if next.changed {
             next.sd.write(f.as_raw_handle())?;
         }
         Ok((id_of(&f).ok(), walked))
-    }
-
-    /// The first file below the folder `path` with more than one name (hard
-    /// links) whose list [`set_below`] would change for the container
-    /// `name` and `masks`, and that `below.links` refuses (also one whose
-    /// path no longer leads to it), with how many names it has; and how far
-    /// it looked. Changes nothing. `None` for a file, and where the change
-    /// reaches no such file. `whole` as for [`set_below`].
-    pub fn reaches(
-        path: &Path,
-        name: &str,
-        masks: Option<Masks>,
-        whole: bool,
-        below: Below,
-    ) -> io::Result<(Option<(PathBuf, u32)>, Walked)> {
-        let sid = Sid::derive(name)?;
-        let f = open(path, READ_CONTROL | FILE_READ_ATTRIBUTES).map_err(gone)?;
-        let next = next(&f, &sid, masks)?;
-        let every = masks.is_none() || whole;
-        if !next.is_dir || !(next.changed || every) {
-            return Ok((None, Walked::default()));
-        }
-        let (walked, found) = pass(&f, path, &next, false, every, false, below)?;
-        Ok((found.map(|s| (s.path, s.names)), walked))
     }
 
     /// `e`, marked as nothing at the path where it says so.
@@ -3578,6 +3805,93 @@ mod tests {
     /// A folder without a flag inside a granted one is closed to the
     /// container: one denied entry, every right, for it and all below it,
     /// a file just itself.
+    /// A file with more than one name gets no more than its caps: the
+    /// container's entry, inherited or its own, and with generic rights, is
+    /// cut down to read and execute (to nothing for `w` alone, which then
+    /// goes), and a denying entry of every other right comes first; a
+    /// container closed there gets only a denying entry. Other AppContainers
+    /// and capabilities are cut down too, without a denying entry; the
+    /// owner's entries and other denials stay. Worked out again from the
+    /// list it gave, and from that list widened again by Windows, the same
+    /// comes out; once the container has nothing, its denial goes too.
+    #[test]
+    fn a_file_with_more_than_one_name_gets_no_more_than_its_caps() {
+        use acl::{ALLOWED, Ace, Capped, DENIED, INHERITED, READ_AND_EXECUTE, capped, file_cap};
+        let ace = |kind, flags, mask, sid: &str| Ace {
+            kind,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let rw = acl::masks(true, true, false).file;
+        let (c, w, shut) = ("S-1-15-2-1-2", "S-1-15-2-3-4", "S-1-15-2-5-6");
+        let caps = vec![
+            (c.to_string(), Some(file_cap(true, true, false))),
+            (w.to_string(), Some(file_cap(false, true, false))),
+            (shut.to_string(), None),
+        ];
+        let list = vec![
+            ace(ALLOWED, 0, acl::ALL, "S-1-5-21-1-2-3-1001"),
+            ace(DENIED, 0, acl::WRITE_DATA, "S-1-5-21-1-2-3-1002"),
+            ace(ALLOWED, INHERITED, rw, c),
+            ace(ALLOWED, INHERITED, 0x4000_0000, w),
+            ace(ALLOWED, INHERITED, rw, shut),
+            ace(ALLOWED, INHERITED, 0x1000_0000, "S-1-15-3-1"),
+            ace(ALLOWED, INHERITED, acl::ALL, "S-1-5-18"),
+        ];
+        let out = capped(&list, &caps);
+        let r = file_cap(true, false, false);
+        assert_eq!(
+            out,
+            [
+                Capped::Deny(0, acl::ALL & !r),
+                Capped::Deny(1, acl::ALL & !file_cap(false, true, false)),
+                Capped::Deny(2, acl::ALL),
+                Capped::Entry(0, acl::ALL),
+                Capped::Entry(1, acl::WRITE_DATA),
+                Capped::Entry(2, r),
+                Capped::Entry(3, file_cap(false, true, false)),
+                Capped::Entry(5, READ_AND_EXECUTE),
+                Capped::Entry(6, acl::ALL),
+            ]
+        );
+        assert_eq!(r & (acl::WRITE_DATA | acl::DELETE | acl::WRITE_DAC), 0);
+        assert_eq!(file_cap(false, true, false) & acl::READ_DATA, 0);
+
+        // The list it gave, as Windows writes it.
+        let sid_of = |j: usize| caps[j].0.clone();
+        let written = |out: &[Capped], from: &[Ace]| -> Vec<Ace> {
+            out.iter()
+                .map(|e| match *e {
+                    Capped::Entry(i, mask) => Ace {
+                        mask,
+                        ..from[i].clone()
+                    },
+                    Capped::Deny(j, mask) => ace(DENIED, 0, mask, &sid_of(j)),
+                })
+                .collect()
+        };
+        let once = written(&out, &list);
+        assert_eq!(written(&capped(&once, &caps), &once), once);
+        // Widened again: the folder's whole entries back below the node's
+        // own denials, as Windows passes a list down.
+        let mut widened: Vec<Ace> = once[..5].to_vec();
+        widened.extend(list[2..].iter().cloned());
+        assert_eq!(written(&capped(&widened, &caps), &widened), once);
+
+        // The container's entry taken off: its denial goes too.
+        let gone: Vec<Ace> = once
+            .iter()
+            .filter(|a| !(a.kind == ALLOWED && a.sid.as_deref() == Some(c)))
+            .cloned()
+            .collect();
+        let again = written(&capped(&gone, &caps), &gone);
+        assert!(
+            !again.iter().any(|a| a.sid.as_deref() == Some(c)),
+            "{again:?}"
+        );
+    }
+
     #[test]
     fn a_closed_folder_denies_every_right_to_it_and_below() {
         use acl::*;
@@ -4357,41 +4671,59 @@ mod tests {
         appcontainer::set(&closed, &name, None, false).unwrap();
         assert!(!has(&closed) && protected(&closed), "{}", icacls(&closed));
 
+        // A file with a second name outside, capped: it reads and runs,
+        // and has a denying entry of every other right, under either name.
         let linked = top.join("a\\b\\l.txt");
         let o = outside.join("o.txt");
         std::fs::hard_link(&o, &linked).unwrap();
-        let before = icacls(&o);
-        let mut asked: Vec<Vec<PathBuf>> = Vec::new();
-        let mut no = |_: &Path, _: u32, names: &[PathBuf]| -> std::io::Result<bool> {
-            asked.push(names.to_vec());
-            Ok(false)
+        let asked: std::cell::RefCell<Vec<Vec<PathBuf>>> = Default::default();
+        let cap = inherit::Cap {
+            containers: vec![(name.clone(), Some(acl::file_cap(true, true, false)))],
+        };
+        let mut capped = |_: &Path, _: u32, names: &[PathBuf]| {
+            asked.borrow_mut().push(names.to_vec());
+            Ok(inherit::Linked::Capped(cap.clone()))
         };
         let mut quiet = |_: inherit::Walked| {};
         let below = appcontainer::Below {
-            links: Some(&mut no),
+            links: Some(&mut capped),
             progress: &mut quiet,
             maker: None,
         };
-        let (found, _) = appcontainer::reaches(&top, &name, Some(m), false, below).unwrap();
-        assert_eq!(found, Some((linked.clone(), 2)));
-        assert!(!has(&top.join("a\\f.txt")), "nothing changed");
-        let below = appcontainer::Below {
-            links: Some(&mut no),
-            progress: &mut quiet,
-            maker: None,
-        };
-        let e =
-            appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap_err();
-        assert!(e.to_string().contains("hard links"), "{e}");
-        let names = asked.first().unwrap();
+        appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap();
+        let names = asked.borrow()[0].clone();
         for n in ["outside\\o.txt", "top\\a\\b\\l.txt"] {
             assert!(names.iter().any(|p| p.ends_with(n)), "{n}: {names:?}");
         }
-        assert!(
-            !appcontainer::look(&top, &name, m).unwrap().1,
-            "the folder stays"
-        );
-        assert_eq!(icacls(&o), before);
+        assert!(appcontainer::look(&top, &name, m).unwrap().1);
+        // The container's lines of a list, and whether one allows a write.
+        let ours = |p: &Path| -> Vec<String> {
+            icacls(p)
+                .lines()
+                .filter(|l| l.contains("S-1-15-2-"))
+                .map(str::to_string)
+                .collect()
+        };
+        let writes = |l: &String| ["(W", ",W", "(M)", "(F)"].iter().any(|w| l.contains(w));
+        for p in [&o, &linked] {
+            let lines = ours(p);
+            assert!(lines.iter().any(|l| l.contains("(DENY)")), "{lines:?}");
+            let allows: Vec<&String> = lines.iter().filter(|l| !l.contains("(DENY)")).collect();
+            assert!(!allows.is_empty(), "{lines:?}");
+            assert!(
+                allows.iter().all(|l| l.contains("(R") && !writes(l)),
+                "{lines:?}"
+            );
+        }
+        assert!(ours(&top.join("a\\f.txt")).iter().any(writes));
+        // Taken off: neither the entry nor the denial stays.
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut quiet,
+            maker: None,
+        };
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+        assert!(ours(&o).is_empty(), "{}", icacls(&o));
         std::fs::remove_file(&linked).unwrap();
         set(None, false);
         assert_eq!(lists(), at_first, "every list as it was");
