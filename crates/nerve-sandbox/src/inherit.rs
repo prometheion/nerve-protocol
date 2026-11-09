@@ -69,6 +69,9 @@ pub trait Objects {
     /// that cannot be opened (another account's) is left out: the caller
     /// tells by the count of names that one is missing.
     fn names_of(&mut self, obj: &Self::Obj) -> io::Result<Vec<PathBuf>>;
+    /// The owner of `obj`, a SID as text, where it names one: who made the
+    /// file, as no grant lets a command change it.
+    fn owner(&mut self, obj: &Self::Obj) -> io::Result<Option<String>>;
     /// What the list of `obj`, a file with more than one name, becomes as
     /// `linked` says: `Same` where that is the list `obj` has now. A
     /// [`Linked::Capped`] works from the list `obj` has, not from `derived`
@@ -159,8 +162,9 @@ pub enum Gets {
 }
 
 /// What a file with more than one name gets: its path by the names walked,
-/// how many names it has, and those names ([`Objects::names_of`]).
-pub type Links<'a> = &'a mut dyn FnMut(&Path, u32, &[PathBuf]) -> io::Result<Linked>;
+/// how many names it has, those names ([`Objects::names_of`]), and its
+/// owner ([`Objects::owner`]).
+pub type Links<'a> = &'a mut dyn FnMut(&Path, u32, &[PathBuf], Option<&str>) -> io::Result<Linked>;
 
 /// [`Walk::progress`] is told after every this many objects.
 pub const STEP: u64 = 256;
@@ -304,7 +308,8 @@ pub fn pass_down<O: Objects>(
                 if kind.names > 1 && !kind.walked() && !matches!(derived, Derived::Kept) =>
             {
                 let capped = objects.names_of(&obj).and_then(|names| {
-                    let linked = links(&path, kind.names, &names)?;
+                    let owner = objects.owner(&obj)?;
+                    let linked = links(&path, kind.names, &names, owner.as_deref())?;
                     objects.cap(&obj, derived, &linked)
                 });
                 match capped {
@@ -597,6 +602,10 @@ mod tests {
             Ok(all)
         }
 
+        fn owner(&mut self, _: &usize) -> io::Result<Option<String>> {
+            Ok(None)
+        }
+
         /// An entry of a container in a cap becomes `<entry>:r` (some
         /// rights) or `<entry>:closed`, as the node's own entries do; `Full`
         /// drops such an own entry of its containers.
@@ -789,7 +798,7 @@ mod tests {
         let cap = Cap {
             containers: vec![("g".into(), Gets::Rights(1)), ("h".into(), Gets::Closed)],
         };
-        let mut capped = |p: &Path, n: u32, names: &[PathBuf]| {
+        let mut capped = |p: &Path, n: u32, names: &[PathBuf], _: Option<&str>| {
             asked.borrow_mut().push((p.to_path_buf(), n));
             // Judged by the names the file itself gives.
             assert!(names.contains(&p.to_path_buf()) && names.len() == n as usize);
@@ -815,7 +824,8 @@ mod tests {
         // Full, and without `links`: as any file.
         for full in [true, false] {
             let mut f = Fake::new(tree);
-            let mut pass = |_: &Path, _: u32, _: &[PathBuf]| Ok(Linked::Full(Vec::new()));
+            let mut pass =
+                |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| Ok(Linked::Full(Vec::new()));
             let links: Option<Links> = if full { Some(&mut pass) } else { None };
             f.grant_with(&["g"], false, true, links, &mut |_| {});
             assert_eq!(f.has("a/y"), ["g"]);
@@ -825,7 +835,8 @@ mod tests {
         let mut f = Fake::new(tree);
         f.grant_with(&["g"], false, true, None, &mut |_| {});
         f.node("a/y").own = ["g:r", "h:closed", "mine"].map(String::from).into();
-        let mut full = |_: &Path, _: u32, _: &[PathBuf]| Ok(Linked::Full(vec!["g".into()]));
+        let mut full =
+            |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| Ok(Linked::Full(vec!["g".into()]));
         f.grant_with(&["g"], true, true, Some(&mut full), &mut |_| {});
         let own: Vec<&String> = f.node("a/y").own.iter().collect();
         assert_eq!(own, ["h:closed", "mine"]);
@@ -894,7 +905,7 @@ mod tests {
             &["g"],
             false,
             true,
-            Some(&mut |_, _, _| Ok(Linked::Capped(cap.clone()))),
+            Some(&mut |_, _, _, _| Ok(Linked::Capped(cap.clone()))),
             &mut |_| {},
         );
         assert_eq!(f.nodes[0].own.iter().collect::<Vec<_>>(), ["g"]);

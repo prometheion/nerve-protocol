@@ -423,9 +423,13 @@ pub struct Shut {
     /// Each container's own folder (its AppContainer's `AC` folder, where
     /// pnpm and uv keep their store and cache) and the command account's
     /// profile, by the container or the account's SID: a name there holds
-    /// the file for it to read and run ([`Judge::cap`]).
+    /// a file the command account made for it to read and run
+    /// ([`Judge::cap`]).
     #[cfg(any(windows, test))]
     own: Vec<(String, PathBuf)>,
+    /// The command account's SID, the owner of what its commands make.
+    #[cfg(any(windows, test))]
+    run: String,
 }
 
 /// [`Shut`] for one container.
@@ -476,50 +480,51 @@ impl Shut {
         Shut {
             lists,
             own: Vec::new(),
+            run: String::new(),
         }
     }
 
     /// `self` with the own folders of the containers of `cfg` and of the
-    /// command account `run` (its SID; `None` on a node run by hand, whose
-    /// commands run as itself), in the profile `run_home` of the account
-    /// the commands run as.
-    pub fn own(
-        mut self,
-        cfg: &NodeConfig,
-        paths: &NodePaths,
-        run: Option<&str>,
-        run_home: &Path,
-    ) -> Shut {
-        let mut own: Vec<(String, PathBuf)> = cfg
-            .centers
-            .iter()
-            .map(|c| {
-                let name = container(paths, &c.node_id);
-                let ac = crate::account::Own::in_container(run_home, &name).temp;
-                (name, ac)
-            })
-            .collect();
-        if let Some(sid) = run.filter(|s| !s.is_empty()) {
-            own.push((sid.to_string(), run_home.to_path_buf()));
+    /// command account `run` (its SID), in its profile `run_home`: on the
+    /// installed service, where the files its commands make belong to it.
+    /// On a node run by hand the commands run as you, so nothing tells a
+    /// store's file from one of yours a command linked there, and no
+    /// folder holds a file.
+    pub fn own(mut self, cfg: &NodeConfig, paths: &NodePaths, run: &str, run_home: &Path) -> Shut {
+        // Also where the profile resolves, as the names of a file come,
+        // but not a container's own folder: its commands may make that a
+        // link to a folder they may write, which would then count as
+        // theirs.
+        let mut homes = vec![run_home.to_path_buf()];
+        if let Ok(real) = nerve_policy::paths::resolve(run_home)
+            && real != run_home
+        {
+            homes.push(real);
         }
-        // Also where they resolve, as the names of a file come.
-        let real: Vec<(String, PathBuf)> = own
-            .iter()
-            .filter_map(|(c, p)| {
-                let r = nerve_policy::paths::resolve(p).ok()?;
-                (r != *p).then(|| (c.clone(), r))
-            })
-            .collect();
-        own.extend(real);
+        let mut own = Vec::new();
+        for home in &homes {
+            for c in &cfg.centers {
+                let name = container(paths, &c.node_id);
+                let ac = crate::account::Own::in_container(home, &name).temp;
+                own.push((name, ac));
+            }
+            own.push((run.to_string(), home.clone()));
+        }
         self.own = own;
+        self.run = run.to_string();
         self
     }
 
-    /// Whether `name` lies in `container`'s own folder ([`Shut::own`]).
-    fn owns(&self, container: &str, name: &Path) -> bool {
-        self.own
-            .iter()
-            .any(|(c, p)| c == container && within(name, p))
+    /// Whether `name` lies in `container`'s own folder ([`Shut::own`]) and
+    /// the file is the command account's (`owner`): one its commands made
+    /// there. A file of yours keeps you as its owner wherever a command
+    /// links it, and no grant lets a command change that.
+    fn owns(&self, container: &str, name: &Path, owner: Option<&str>) -> bool {
+        owner.is_some_and(|o| !self.run.is_empty() && o.eq_ignore_ascii_case(&self.run))
+            && self
+                .own
+                .iter()
+                .any(|(c, p)| c == container && within(name, p))
     }
 
     /// Whether `name` is closed to `container`'s commands: it lies in a
@@ -623,8 +628,9 @@ impl<'a> Judge<'a> {
         }
     }
 
-    /// What a file with `n` names, `all` of them listed, gets.
-    fn verdict(&self, n: u64, all: &[PathBuf]) -> Linked {
+    /// What a file with `n` names, `all` of them listed, owned by `owner`
+    /// (a SID), gets.
+    fn verdict(&self, n: u64, all: &[PathBuf], owner: Option<&str>) -> Linked {
         let containers = self.links.containers;
         let shut = all
             .iter()
@@ -635,7 +641,7 @@ impl<'a> Judge<'a> {
         Linked::Capped(Cap {
             containers: containers
                 .iter()
-                .map(|c| (c.clone(), self.cap(c, all)))
+                .map(|c| (c.clone(), self.cap(c, all, owner)))
                 .collect(),
         })
     }
@@ -684,12 +690,15 @@ impl<'a> Judge<'a> {
     /// folders (pnpm's store, uv's cache, the repository a clone came from)
     /// is read through the granted name, as on Linux, where it keeps its
     /// own, usually readable, rights. A name in its own folder (a store or
-    /// cache of its commands, [`Shut::own`]) holds the file for it to read
-    /// and run: the node's entries take the place of what the file
-    /// inherits there, so without them the container would lose its own
-    /// store's files once no grant holds another name. Where nothing holds
-    /// any name, [`Gets::Unheld`]: the node's own entries for it go.
-    fn cap(&self, container: &str, all: &[PathBuf]) -> Gets {
+    /// cache of its commands, [`Shut::own`]) holds a file the command
+    /// account made (`owner`) for it to read and run: the node's entries
+    /// take the place of what the file inherits there, so without them the
+    /// container would lose its own store's files once no grant holds
+    /// another name. Not one of yours that a command linked there from a
+    /// folder it was granted: as on Linux, where a grant taken off leaves
+    /// such a file only its own mode. Where nothing holds any name,
+    /// [`Gets::Unheld`]: the node's own entries for it go.
+    fn cap(&self, container: &str, all: &[PathBuf], owner: Option<&str>) -> Gets {
         use nerve_sandbox::acl;
         let mut cap = acl::READ_AND_EXECUTE;
         let mut held_any = false;
@@ -714,7 +723,7 @@ impl<'a> Judge<'a> {
             if held.iter().any(|g| g.access == Access::NONE && !opened(g)) {
                 return Gets::Closed;
             }
-            if self.links.shut.owns(container, name) {
+            if self.links.shut.owns(container, name, owner) {
                 held_any = true;
                 continue;
             }
@@ -1366,14 +1375,16 @@ fn run_sid(paths: &NodePaths) -> Option<String> {
     Some(sid)
 }
 
-/// The profile of the account commands run as, which holds the
-/// containers' own folders: the command account's (`run`, its SID) on the
-/// installed service, else this process' user's.
+/// `shut` with the containers' own folders ([`Shut::own`]) in the profile
+/// of the command account (`run`, its SID) on the installed service.
 #[cfg(windows)]
-fn run_home(run: Option<&str>) -> Option<PathBuf> {
+fn with_own(shut: Shut, cfg: &NodeConfig, paths: &NodePaths, run: Option<&str>) -> Shut {
     match run.filter(|s| !s.is_empty()) {
-        Some(sid) => crate::win_user::profile_of_sid(sid),
-        None => std::env::var_os("USERPROFILE").map(PathBuf::from),
+        Some(sid) => match crate::win_user::profile_of_sid(sid) {
+            Some(at) => shut.own(cfg, paths, sid, &at),
+            None => shut,
+        },
+        None => shut,
     }
 }
 
@@ -1408,10 +1419,7 @@ pub fn apply(
                 || {
                     let platform = crate::paths::platform_for(paths);
                     let of = Shut::of(&cfg, paths, &home, &platform);
-                    shut = match run_home(run.as_deref()) {
-                        Some(at) => of.own(&cfg, paths, run.as_deref(), &at),
-                        None => of,
-                    };
+                    shut = with_own(of, &cfg, paths, run.as_deref());
                     wanted_on(run.as_deref(), &cfg, paths, &home, &platform)
                 },
             );
@@ -1456,10 +1464,12 @@ pub fn apply_outside(
         let platform = crate::paths::platform_for(paths);
         let run = run_sid(paths);
         let want = wanted_on(run.as_deref(), cfg, paths, home, &platform);
-        let mut shut = Shut::of(cfg, paths, home, &platform);
-        if let Some(at) = run_home(run.as_deref()) {
-            shut = shut.own(cfg, paths, run.as_deref(), &at);
-        }
+        let shut = with_own(
+            Shut::of(cfg, paths, home, &platform),
+            cfg,
+            paths,
+            run.as_deref(),
+        );
         sync_outside_in(
             paths,
             &want,
@@ -2034,7 +2044,9 @@ impl Folders for Acls<'_> {
         // Each file with more than one name is judged as the change gets to
         // it, by the names it has then.
         let judge = Judge::new(path, links);
-        let mut check = |_: &Path, n: u32, all: &[PathBuf]| Ok(judge.verdict(n.into(), all));
+        let mut check = |_: &Path, n: u32, all: &[PathBuf], owner: Option<&str>| {
+            Ok(judge.verdict(n.into(), all, owner))
+        };
         let doing = if access.is_some() {
             Doing::Put
         } else {
@@ -2443,7 +2455,7 @@ mod tests {
                     .collect();
                 let f = &mut self.files[i];
                 f.inherited = inherited;
-                match judge.verdict(names.len() as u64, &names) {
+                match judge.verdict(names.len() as u64, &names, f.owner.as_deref()) {
                     Linked::Full(listed) => {
                         f.own.retain(|(c, _)| !listed.contains(c));
                         f.capped = false;
@@ -2485,6 +2497,8 @@ mod tests {
         /// Whether its last walk capped it, which cuts every inherited
         /// entry to read and run.
         capped: bool,
+        /// Its owner's SID; `None`: yours.
+        owner: Option<String>,
     }
 
     impl Folders for Fake {
@@ -3240,10 +3254,11 @@ mod tests {
     }
 
     /// A file a command linked from its own store (pnpm's, in its
-    /// container's own folder) into a granted project stays readable to
-    /// that container and the command account after the project's grant
-    /// comes off: the store's name holds it for them, so the take-off does
-    /// not leave them without the entries the file had in their own store.
+    /// container's own folder; the command account made it) into a granted
+    /// project stays readable to that container and the command account
+    /// after the project's grant comes off: the store's name holds it for
+    /// them, so the take-off does not leave them without the entries the
+    /// file had in their own store.
     #[test]
     fn a_file_from_a_containers_own_store_stays_readable_to_it() {
         let access = |a: &str| Some(Access::parse(a).unwrap());
@@ -3257,8 +3272,7 @@ mod tests {
         let c = container(&paths, &node("lab"));
         let run = "S-1-5-21-1-2-3-1001";
         let run_home = Path::new("/w/run");
-        let shut =
-            Shut::of(&cfg, &paths, home, &Platform::Unix).own(&cfg, &paths, Some(run), run_home);
+        let shut = Shut::of(&cfg, &paths, home, &Platform::Unix).own(&cfg, &paths, run, run_home);
         let store = crate::account::Own::in_container(run_home, &c)
             .temp
             .join("pnpm/store/x.js");
@@ -3267,6 +3281,7 @@ mod tests {
         f.make("/w/home/proj");
         let x = "/w/home/proj/node_modules/x.js";
         f.link(&[x, store]);
+        f.files[0].owner = Some(run.into());
         let want = [
             grant(&c, "/w/home/proj", "rw"),
             grant(run, "/w/home/proj", "rw"),
@@ -3281,6 +3296,92 @@ mod tests {
         for who in [c.as_str(), run] {
             assert_eq!(f.may(store, who), access("rx"), "{who}");
         }
+    }
+
+    /// A file of yours that a command linked from a granted folder into
+    /// its container's own folder gets no read there once the folder's
+    /// grant comes off: you still own it, so the container's own folder
+    /// does not hold it, as on Linux, where it keeps only its own mode.
+    /// Nor does a `w` folder's file give read while the grant is on.
+    #[test]
+    fn a_file_of_yours_linked_into_a_containers_own_folder_is_not_held_there() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
+        let file = record_file(&paths);
+        let home = Path::new("/w/home");
+        let c = container(&paths, &node("lab"));
+        let run = "S-1-5-21-1-2-3-1001";
+        let run_home = Path::new("/w/run");
+        let ac = crate::account::Own::in_container(run_home, &c).temp;
+        for (folder, flags, readable) in [("/w/home/proj", "rw", true), ("/w/drop", "w", false)] {
+            let mut cfg = NodeConfig::default();
+            cfg.centers
+                .push(center("lab", &[(Path::new(folder), flags)]));
+            let shut =
+                Shut::of(&cfg, &paths, home, &Platform::Unix).own(&cfg, &paths, run, run_home);
+            let mut f = Fake::default();
+            f.make(folder);
+            let mine = format!("{folder}/.env");
+            let linked = ac.join("k");
+            f.link(&[&mine, linked.to_str().unwrap()]);
+            f.files[0].owner = Some("S-1-5-21-1-2-3-1000".into());
+            let want = [grant(&c, folder, flags), grant(run, folder, flags)];
+            let s = sync_shut(&file, &want, &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            for who in [c.as_str(), run] {
+                let may = f.may(&mine, who).unwrap_or(Access::NONE);
+                assert_eq!(may.read, readable, "{folder} {who}: {may:?}");
+            }
+            let s = sync_shut(&file, &[], &shut, &mut f);
+            assert!(s.errors.is_empty() && s.removed == 2, "{s:?}");
+            for who in [c.as_str(), run] {
+                let may = f.may(&mine, who).unwrap_or(Access::NONE);
+                assert!(
+                    !may.read && !may.execute,
+                    "{folder} {who} taken off: {may:?}"
+                );
+            }
+        }
+    }
+
+    /// A container's own folder counts where it is, not where it leads:
+    /// its commands may make it a link to a folder they may write, which
+    /// would otherwise hold the files there for them, so a `w` folder's
+    /// file linked into a folder they may read would be read.
+    #[cfg(unix)]
+    #[test]
+    fn a_containers_own_folder_made_a_link_holds_nothing_where_it_leads() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
+        let file = record_file(&paths);
+        let home = d.path().join("home");
+        let (proj, drop) = (d.path().join("proj"), d.path().join("drop"));
+        for p in [&home, &proj, &drop] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let mut cfg = NodeConfig::default();
+        cfg.centers
+            .push(center("lab", &[(&proj, "rw"), (&drop, "w")]));
+        let c = container(&paths, &node("lab"));
+        let run = "S-1-5-21-1-2-3-1001";
+        let run_home = d.path().join("run");
+        let ac = crate::account::Own::in_container(&run_home, &c).temp;
+        std::fs::create_dir_all(ac.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&drop, &ac).unwrap();
+        let shut = Shut::of(&cfg, &paths, &home, &Platform::Unix).own(&cfg, &paths, run, &run_home);
+        let mut f = Fake::default();
+        let (proj_s, drop_s) = (proj.to_str().unwrap(), drop.to_str().unwrap());
+        f.make(proj_s);
+        f.make(drop_s);
+        let report = drop.join("report");
+        let r = proj.join("r");
+        f.link(&[report.to_str().unwrap(), r.to_str().unwrap()]);
+        f.files[0].owner = Some(run.into());
+        let want = [grant(&c, proj_s, "rw"), grant(&c, drop_s, "w")];
+        let s = sync_shut(&file, &want, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let may = f.may(r.to_str().unwrap(), &c).unwrap_or(Access::NONE);
+        assert!(!may.read, "{may:?}");
     }
 
     /// A file that was capped and later changes as any file (its other

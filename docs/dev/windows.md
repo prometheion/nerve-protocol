@@ -587,8 +587,11 @@ runs in the container as well, unless the pairing runs as you.
   until then the new files keep the store's permissions, so commands may
   not read what you installed, and you may not open what the agent
   installed. After it you may read and run what the agent installed from
-  its own store, and its commands keep reading their store also once the
-  folder is no longer granted. A command can make a hard link
+  its own store. On the installed service its commands keep reading their
+  store also once the folder is no longer granted: a file its commands made
+  there belongs to `nerve-run`. A file of yours that a command linked into
+  its own folder does not: once the folder's grant goes, the pairing reads
+  it no more. A command can make a hard link
   only to a file it may write (Windows asks that of a sandboxed process
   since 2015; checked), so it cannot read a file of yours through one. Hard
   links only work within one drive. A grant on a single file with a second
@@ -599,6 +602,14 @@ runs in the container as well, unless the pairing runs as you.
     **Sync folders**.
   - A file that lost its other names keeps the node's entries; a pairing
     whose folder goes keeps read on it until `icacls <file> /reset`.
+  - On a node you run yourself, commands run as you, so the node cannot
+    tell the store's files from yours: once no granted folder holds a store
+    file's other name, the pairing's commands may not read it in their
+    store either. pnpm or uv then fails on that package until you delete
+    the store or cache (in the container's `AC` folder).
+  - A file another pairing's command made in a folder both pairings share
+    also belongs to `nerve-run`: a pairing that linked it into its own
+    folder keeps reading it once the folder's grant goes, as on Linux.
   - A folder whose permission inheritance you turned off by hand is not
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)

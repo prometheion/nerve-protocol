@@ -497,8 +497,15 @@ center's local name):
     a name in the container's own folder (its `AC` folder, where its
     commands' pnpm store and uv cache are) or, for the command account, in
     that account's profile counts as held, without restricting
-    (`Shut::own`), so a container keeps read on its own store's files once
-    no grant holds their other name; `Gets::Unheld` where nothing holds a
+    (`Shut::own`), where the file's owner is the command account (one its
+    commands made: no grant gives `WRITE_OWNER`, so a file of the owner's
+    a command linked there keeps the owner's SID), so a container keeps
+    read on its own store's files once no grant holds their other name,
+    and not on the owner's file it linked into its folder. Only on the
+    installed service, where the commands run as `nerve-run`; on a node run
+    by hand nothing holds. The profile is compared where it resolves, the
+    `AC` folder as written below it, since a command may make that a link;
+    `Gets::Unheld` where nothing holds a
     name (a name under no
     grant does not restrict: pnpm's store, uv's cache and a clone's source
     are read through the granted name). `acl::capped` cuts every allowing
@@ -519,7 +526,9 @@ center's local name):
     list names only that account, its container and the system), the
     account the walk acts as, the owner, gets an allowing entry of read and
     execute (`acl::readable_by`), as on Linux, where the owner reads such a
-    file by its mode. A change as any
+    file by its mode. It goes after the other explicit entries and before
+    the node's allows, where `acl::capped` keeps it on the next walk (which
+    may look at the file then), so that walk changes nothing. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
 
   This rests on Windows letting a sandboxed process link only a file it may
