@@ -982,12 +982,10 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last
     {
         // Logged on once for all the looks.
         let owner = owner.filter(|_| run_sid(paths).is_some());
-        let Ok(_as) = act_as(owner) else {
-            return false;
-        };
-        in_place_with(
+        in_place_as(
             &record_file(paths),
             last,
+            || act_as(owner),
             &mut Acls {
                 report: &mut |_| {},
                 owner: None,
@@ -1001,10 +999,20 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last
     }
 }
 
-/// [`in_place`] for the record `file`, on `folders`.
+/// [`in_place`] for the record `file`, on `folders`, which `act` makes the
+/// looks as while its result lives. The record is read before `act` runs: it
+/// lives in the node's own state folder, which the owner may not read.
 #[cfg(any(windows, test))]
-fn in_place_with(file: &Path, last: &Synced, folders: &mut impl Folders) -> bool {
+fn in_place_as<G>(
+    file: &Path,
+    last: &Synced,
+    act: impl FnOnce() -> io::Result<G>,
+    folders: &mut impl Folders,
+) -> bool {
     let Ok(record) = read_record(file) else {
+        return false;
+    };
+    let Ok(_as) = act() else {
         return false;
     };
     record
@@ -1015,6 +1023,12 @@ fn in_place_with(file: &Path, last: &Synced, folders: &mut impl Folders) -> bool
             .iter()
             .chain(&last.away)
             .all(|g| !matches!(folders.look(&g.path, &g.container, g.access), Ok(Some(_))))
+}
+
+/// [`in_place_as`] with no change of whom the looks are made as.
+#[cfg(test)]
+fn in_place_with(file: &Path, last: &Synced, folders: &mut impl Folders) -> bool {
+    in_place_as(file, last, || Ok(()), folders)
 }
 
 /// [`sync`], with what closes a name of a file with more than one name
@@ -3500,6 +3514,39 @@ mod tests {
         // A record that cannot be read tells nothing.
         std::fs::write(&file, "not json").unwrap();
         assert!(!in_place_with(&file, &none, &mut f));
+    }
+
+    /// The record is read as the node, before the looks act as the owner:
+    /// the installed node's state folder is closed to a standard owner, and
+    /// a read that fails makes every command wait for the walk.
+    #[test]
+    fn the_record_is_read_before_the_looks_act_as_the_owner() {
+        struct Acting<'a>(&'a Path, String);
+        impl Drop for Acting<'_> {
+            fn drop(&mut self) {
+                std::fs::write(self.0, &self.1).unwrap();
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/proj");
+        let s = sync(&file, &[grant("c1", "/w/proj", "rw")], &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        // While the looks act as the owner, the record cannot be read.
+        let acting = || {
+            let kept = std::fs::read_to_string(&file).unwrap();
+            std::fs::write(&file, "not json").unwrap();
+            Ok(Acting(&file, kept))
+        };
+        assert!(in_place_as(&file, &Synced::default(), acting, &mut f));
+        // A logon that fails tells nothing.
+        assert!(!in_place_as(
+            &file,
+            &Synced::default(),
+            || Err::<(), _>(io::Error::other("no logon")),
+            &mut f
+        ));
     }
 
     /// A closed folder that was not there at the last sync has no record,
