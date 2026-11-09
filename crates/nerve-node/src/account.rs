@@ -271,7 +271,7 @@ pub const NO_OWNER: &str = "this node has no owner, as `install` ran as root and
 /// What a command of the installed node gets that would run as the owner
 /// while the node has none: on Windows the owner is who installed it.
 #[cfg(windows)]
-pub const NO_OWNER: &str = "this node has no owner, as whom user mode and allowlist mode as the owner run commands: install Nerve again as yourself, with its installer";
+pub const NO_OWNER: &str = "this node has no owner, as whom user mode and allowlist mode as the owner run commands: install Nerve again as yourself, with the desktop app's installer";
 
 /// How `install` starts the line saying that it has no password of the
 /// owner on Windows, so no command runs as the owner.
@@ -1312,21 +1312,22 @@ mod tests {
         // Joined, not spelled out: Windows separates the parts with a backslash.
         let own = Path::new(RUN_HOME).join("home-lab");
         let (home, temp) = (own.join("home"), own.join("tmp"));
-        assert_eq!(
-            paths,
-            [
-                "/tmp",
-                "/var/tmp",
-                home.to_str().unwrap(),
-                temp.to_str().unwrap()
-            ]
-        );
+        // Windows shares no folder of temporary files: the container's own
+        // folder holds them.
+        let shared: &[&str] = if cfg!(windows) {
+            &[]
+        } else {
+            &["/tmp", "/var/tmp"]
+        };
+        let mut want = shared.to_vec();
+        want.extend([home.to_str().unwrap(), temp.to_str().unwrap()]);
+        assert_eq!(paths, want);
         assert!(
             paths
                 .iter()
                 .all(|p| !shared_folder(p) || p.ends_with("tmp"))
         );
-        assert!(shared_folder("/tmp") && !shared_folder(paths[3]));
+        assert!(shared_folder("/tmp") && !shared_folder(paths.last().unwrap()));
         assert!(
             b.iter()
                 .all(|f| f.access.read && f.access.write && f.access.execute)

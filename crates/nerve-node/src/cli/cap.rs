@@ -850,8 +850,8 @@ mod tests {
         assert_eq!(c.params["required"], json!(["path"]));
         assert_eq!(c.summary, "The end of a log.");
         assert_eq!(c.timeout_secs, Some(5));
-        // A node run by hand has no nerve-run; Windows offers none yet.
-        let not_here = if cfg!(target_os = "linux") {
+        // A node run by hand has no nerve-run, on Linux and on Windows.
+        let not_here = if cfg!(any(target_os = "linux", windows)) {
             "this node does not offer it: runs as nerve-run"
         } else {
             "this node does not offer it: a node on"
