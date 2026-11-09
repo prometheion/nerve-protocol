@@ -603,6 +603,42 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
             "{listed}"
         );
     }
+    // A file a command links from a store of its own: pnpm and uv keep
+    // theirs in LOCALAPPDATA, which for a command is a folder below
+    // `nerve-run`'s profile that the owner, as whom the node changes the
+    // folders, may not open. A later change of the project's flags walks it
+    // all the same (the node finds that name as `nerve-run`), and the
+    // commands go on running.
+    let r = run_in(
+        &mut conn_a,
+        &proj,
+        "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; New-Item -ItemType Directory -Force -Path $s | Out-Null; Set-Content -Path (Join-Path $s 'f.js') -Value stored; New-Item -ItemType HardLink -Path linked.js -Target (Join-Path $s 'f.js') | Out-Null; exit [int](-not $?)",
+    )
+    .await
+    .expect("a's link from its own store");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    for flags in ["rwx", "rw"] {
+        nerve_node::cli::edit(&paths, |cfg| {
+            let ea = cfg.center_mut(A).expect("paired");
+            for f in &mut ea.policy.folders {
+                if Path::new(&f.path) == proj {
+                    f.access = Access::parse(flags).unwrap();
+                }
+            }
+            Ok(())
+        })
+        .await
+        .expect("the owner's edit");
+        let r = run_in(
+            &mut conn_a,
+            &proj,
+            "Get-Content linked.js; exit [int](-not $?)",
+        )
+        .await
+        .expect(flags);
+        assert_eq!(r["exit_code"], 0, "{flags}: {r}");
+        assert!(out(&r).contains("stored"), "{flags}: {r}");
+    }
     // Closing the folder that holds it: the commands go on running, and
     // the file is closed under both names, also after the project's
     // flags change (a change of the folder around it) and the next sync.
@@ -762,7 +798,12 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         ),
     )
     .await;
+    // Remembered for when the owner's registry is not loaded, in the
+    // node's state folder, which the owner the sync acts as may not write.
+    let seen = std::fs::read_to_string(paths.state_dir.join("owner-documents.json"))
+        .expect("the owner's Documents folder remembered");
     set(&before);
+    assert!(seen.contains("nerve-w2-docs"), "{seen}");
     // Refused by the guard, or by the folder's missing entry.
     if let Ok(r) = &profile {
         assert_ne!(r["exit_code"], 0, "{r}");

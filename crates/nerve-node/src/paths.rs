@@ -306,8 +306,17 @@ pub fn platform_for(paths: &NodePaths) -> Platform {
 #[cfg(windows)]
 fn owners_platform(paths: &NodePaths, sid: &str) -> Platform {
     let profile = crate::win_user::profile_of_sid(sid);
-    let read = owners_documents(sid, profile.as_deref());
-    let documents = seen_documents(&documents_file(paths), sid, read, &mut warn_once);
+    // Only a thread that acts as the owner may read the owner's registry
+    // (the node's own account may not): one that does not takes the
+    // remembered place without a word.
+    let (read, quiet) = match owners_documents(sid, profile.as_deref(), &mut warn_once) {
+        Ok(d) => (Ok(d), false),
+        Err(Unread::Denied(why)) => (Err(why), true),
+        Err(Unread::Other(why)) => (Err(why), false),
+    };
+    let mut debug = |m: String| tracing::debug!("{m}");
+    let say: &mut dyn FnMut(String) = if quiet { &mut debug } else { &mut warn_once };
+    let documents = seen_documents(&documents_file(paths), sid, read, say);
     let var = |k: &str| {
         if k.eq_ignore_ascii_case("USERPROFILE") {
             profile.clone().map(OsString::from)
@@ -364,7 +373,7 @@ fn seen_documents(
 ) -> Option<PathBuf> {
     use nerve_transport::files::Format;
     let remembered = || -> Option<SeenDocuments> {
-        let b = std::fs::read(file).ok()?;
+        let b = as_node(|| std::fs::read(file)).ok()?;
         Format::of_json(&b).check().ok()?;
         serde_json::from_slice::<SeenDocuments>(&b)
             .ok()
@@ -381,7 +390,7 @@ fn seen_documents(
                 let json = serde_json::to_vec_pretty(&now).expect("a path serialises");
                 // The CLI may not write the node's state folder: the node
                 // remembers it at its next read.
-                if let Err(e) = nerve_transport::files::write_private(file, &json) {
+                if let Err(e) = as_node(|| nerve_transport::files::write_private(file, &json)) {
                     tracing::debug!("cannot remember the owner's Documents folder: {e}");
                 }
             }
@@ -408,23 +417,61 @@ fn seen_documents(
     }
 }
 
+/// Runs `f`, a look at the node's state folder, as the node itself: on
+/// the installed Windows service the thread may act as the owner, who may
+/// not open that folder ([`crate::win_user::as_process`]).
+#[cfg(any(windows, test))]
+fn as_node<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(windows)]
+    {
+        crate::win_user::as_process(f)?
+    }
+    #[cfg(not(windows))]
+    {
+        f()
+    }
+}
+
+/// Why [`owners_documents`] could not read the owner's folder.
+#[cfg(windows)]
+enum Unread {
+    /// This thread may not read the owner's registry: it does not act as
+    /// the owner.
+    Denied(String),
+    Other(String),
+}
+
 /// The owner's Documents folder as the owner's registry has it
 /// (`User Shell Folders`, `Personal`, which OneDrive's backup and a
 /// redirect change), written out with the owner's variables
-/// ([`OwnerVars`]); `Ok(None)` where the owner's registry names none (the
-/// usual place). An error where the registry is not loaded, as before the
-/// owner signs in, or the value cannot be written out.
+/// ([`OwnerVars`]) and taken where it is on this machine
+/// ([`documents_at`]); `Ok(None)` where the owner's registry names none
+/// (the usual place). An error where the registry is not loaded, as before
+/// the owner signs in, may not be read, or the value cannot be written out.
 #[cfg(windows)]
-fn owners_documents(sid: &str, profile: Option<&Path>) -> Result<Option<PathBuf>, String> {
+fn owners_documents(
+    sid: &str,
+    profile: Option<&Path>,
+    say: &mut dyn FnMut(String),
+) -> Result<Option<PathBuf>, Unread> {
     const FOLDERS: &str =
         "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
-    if !reg::has_key(sid) {
-        return Err(
-            "the owner's registry is not loaded: the owner has not signed in since Windows started"
-                .into(),
-        );
+    match reg::has_key(sid) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(Unread::Other(
+                "the owner's registry is not loaded: the owner has not signed in since Windows started"
+                    .into(),
+            ));
+        }
+        Err(e) => {
+            return Err(Unread::Denied(format!(
+                "the node may not read the owner's registry as itself ({e})"
+            )));
+        }
     }
-    let Some(value) = reg::text(&format!("{sid}\\{FOLDERS}"), "Personal")? else {
+    let Some(value) = reg::text(&format!("{sid}\\{FOLDERS}"), "Personal").map_err(Unread::Other)?
+    else {
         return Ok(None);
     };
     let name = crate::win_user::name_of_sid(sid).ok();
@@ -435,13 +482,37 @@ fn owners_documents(sid: &str, profile: Option<&Path>) -> Result<Option<PathBuf>
         environment: reg::texts(&format!("{sid}\\Environment")),
         system: &|k| std::env::var(k).ok(),
     };
-    let path = expand_vars(&value, &|k| vars.get(k))
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("{value} names a variable the owner does not have"))?;
-    if path.is_absolute() {
-        Ok(Some(path))
+    let path = expand_vars(&value, &|k| vars.get(k)).ok_or_else(|| {
+        Unread::Other(format!("{value} names a variable the owner does not have"))
+    })?;
+    documents_at(path, say).map_err(Unread::Other)
+}
+
+/// The owner's Documents folder `path`, written out, as the protected list
+/// takes it: a whole path on a drive of this machine. One on another
+/// machine (a share, where a domain's folder redirection puts it) is not
+/// taken, and `say` is told: the list resolves its entries, which would
+/// connect there as whoever the node acts as, for every command, and send
+/// that account's NTLM answer to whatever host the value names. No
+/// container reaches a share (#149's probe), so the usual place is
+/// protected only. An error for a path that is not whole.
+#[cfg(any(windows, test))]
+fn documents_at(path: String, say: &mut dyn FnMut(String)) -> Result<Option<PathBuf>, String> {
+    if nerve_policy::paths::remote_target(&path) {
+        say(format!(
+            "the owner's Documents folder {path} is on another machine, which the node does not connect to; protecting PowerShell's profiles below %USERPROFILE%\\Documents only"
+        ));
+        return Ok(None);
+    }
+    let rest = path.strip_prefix(r"\\?\").unwrap_or(&path).as_bytes();
+    let on_drive = rest.len() >= 3
+        && rest[0].is_ascii_alphabetic()
+        && rest[1] == b':'
+        && matches!(rest[2], b'\\' | b'/');
+    if on_drive {
+        Ok(Some(PathBuf::from(path)))
     } else {
-        Err(format!("{} is not a whole path", path.display()))
+        Err(format!("{path} is not a whole path"))
     }
 }
 
@@ -531,18 +602,34 @@ mod reg {
         String::from_utf16_lossy(&buf[..n])
     }
 
-    /// The key `path` below `HKEY_USERS`, open for reading.
-    fn open(path: &str) -> Option<HKEY> {
+    /// The key `path` below `HKEY_USERS`, open for reading; the error
+    /// Windows gives where it is not.
+    fn open_key(path: &str) -> Result<HKEY, u32> {
         let mut h = std::ptr::null_mut();
         // SAFETY: a NUL-terminated name and a place for the handle.
-        (unsafe { RegOpenKeyExW(HKEY_USERS, wide(path).as_ptr(), 0, KEY_READ, &mut h) } == 0)
-            .then_some(h)
+        match unsafe { RegOpenKeyExW(HKEY_USERS, wide(path).as_ptr(), 0, KEY_READ, &mut h) } {
+            0 => Ok(h),
+            e => Err(e),
+        }
     }
 
-    /// Whether the key `path` is there (a user's hive is while it is loaded).
-    pub fn has_key(path: &str) -> bool {
-        // SAFETY: the key just opened.
-        open(path).map(|h| unsafe { RegCloseKey(h) }).is_some()
+    /// The key `path` below `HKEY_USERS`, open for reading.
+    fn open(path: &str) -> Option<HKEY> {
+        open_key(path).ok()
+    }
+
+    /// Whether the key `path` is there (a user's hive is while it is
+    /// loaded); an error where it may not be opened.
+    pub fn has_key(path: &str) -> std::io::Result<bool> {
+        match open_key(path) {
+            Ok(h) => {
+                // SAFETY: the key just opened.
+                unsafe { RegCloseKey(h) };
+                Ok(true)
+            }
+            Err(ERROR_FILE_NOT_FOUND) => Ok(false),
+            Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+        }
     }
 
     /// The string value `name` of the key `path`, as written (`%…%` not
@@ -947,6 +1034,32 @@ mod tests {
         assert!(said[2].ends_with("only"), "{said:?}");
     }
 
+    /// A Documents folder on another machine (a domain's folder
+    /// redirection, or a value a process of the owner's wrote) is not taken
+    /// for the protected list, which would connect there to resolve it: the
+    /// usual place is protected, and the log says why. One on a drive is
+    /// taken; one that is not a whole path is an error.
+    #[test]
+    fn the_owners_documents_on_another_machine_are_not_taken() {
+        let mut said = Vec::new();
+        for share in [
+            r"\\server\share\u\Documents",
+            r"\\?\UNC\server\share\Documents",
+            r"//server/share/Documents",
+        ] {
+            let got = documents_at(share.to_string(), &mut |m| said.push(m));
+            assert_eq!(got, Ok(None), "{share}");
+        }
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(said[0].contains("another machine"), "{said:?}");
+        for local in [r"C:\Users\u\OneDrive\Documents", r"\\?\D:\Docs", "E:/Docs"] {
+            let got = documents_at(local.to_string(), &mut |m| said.push(m));
+            assert_eq!(got, Ok(Some(PathBuf::from(local))), "{local}");
+        }
+        assert!(documents_at("Documents".into(), &mut |_| {}).is_err());
+        assert_eq!(said.len(), 3, "{said:?}");
+    }
+
     /// The real read of the owner's registry: for this process' own user,
     /// whose registry is loaded, it finds the folder the known-folder API
     /// gives (or none, where that is the usual place). Only a Windows run
@@ -968,14 +1081,16 @@ mod tests {
         assert!(sid.starts_with("S-1-5-"), "{line}");
         let profile = crate::win_user::profile_of_sid(&sid).expect("a profile");
         let known = known_documents().expect("the Documents known folder");
-        let read = owners_documents(&sid, Some(&profile)).unwrap();
+        let Ok(read) = owners_documents(&sid, Some(&profile), &mut |_| {}) else {
+            panic!("the own registry is read");
+        };
         let read = read.unwrap_or_else(|| profile.join("Documents"));
         assert!(
             read.to_string_lossy()
                 .eq_ignore_ascii_case(&known.to_string_lossy()),
             "{read:?} {known:?}"
         );
-        assert!(owners_documents("S-1-5-21-1-2-3-4242", None).is_err());
+        assert!(owners_documents("S-1-5-21-1-2-3-4242", None, &mut |_| {}).is_err());
     }
 
     /// With the keys in the keyring, the session bus and GNOME Keyring's folder
