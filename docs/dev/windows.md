@@ -597,8 +597,8 @@ runs in the container as well, unless the pairing runs as you.
   a folder it may write but not read, it can link a file it knows the name
   of into a folder it may read; the walk keeps that file closed to it while
   the grant is on, and after it is taken off (Linux refuses such a link),
-  for as long as the folder is there and the pairing has other grants; the
-  node keeps a mark of the grant for that in `grants.json`. Hard links only work within one drive. A grant on a single file with a second
+  for as long as the folder is there and the pairing stays; the node keeps a
+  mark of the grant for that in `grants.json`. Hard links only work within one drive. A grant on a single file with a second
   name is refused where commands may write around it, and capped as above
   elsewhere. Limits:
   - `icacls /reset` and Explorer's "Replace all child object permission
@@ -617,8 +617,10 @@ runs in the container as well, unless the pairing runs as you.
   - A file linked out of a write-only folder stays closed to the pairing
     through every later walk (**Sync folders** too) until its mark goes:
     when the folder is gone, when the folder is granted to the pairing again
-    (the new grant decides), or when the pairing has no grant left. Moving
-    the folder takes the mark along. Delete the file, or grant the folder
+    (the new grant decides), or when the pairing is removed. Moving the
+    folder takes the mark along, so a new folder made at its old path and
+    granted does not end it. A pairing that has no folder left keeps its
+    marks. Delete the file, or grant the folder
     again, to open it sooner.
   - A folder whose permission inheritance you turned off by hand is not
     looked at: a file linked from it into a granted folder gets that

@@ -100,8 +100,8 @@ pub struct Grant {
     /// [`Links::unread`] true there, so a file a command linked out of the
     /// folder stays closed under every later walk, as a file Linux would
     /// not have let it link. It goes when its folder is gone, when a
-    /// grant of its container is wanted at its place again, or when the
-    /// container has none left ([`sync`]).
+    /// grant of its container is wanted at its place again, or when its
+    /// pairing is removed ([`sync`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub off: bool,
 }
@@ -250,7 +250,6 @@ pub fn wanted_on(
 }
 
 /// Whether the grant's `container` is an account's SID ([`wanted_on`]).
-#[cfg(any(windows, test))]
 fn is_account(container: &str) -> bool {
     container.starts_with("S-1-")
 }
@@ -914,13 +913,42 @@ pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
 /// [`sync`], with what closes a name of a file with more than one name
 /// besides the grants (`shut`).
 fn sync_shut(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Folders) -> Synced {
+    let mut live: Vec<String> = want.iter().map(|g| g.container.clone()).collect();
+    live.sort();
+    live.dedup();
+    sync_lived(file, want, &live, shut, folders)
+}
+
+/// [`sync_shut`] for the pairings `live` (the containers of the config's
+/// pairings, [`pairings`]), which the marks of grants taken off follow
+/// ([`Grant::off`]). [`sync_shut`] takes those of the grants wanted.
+fn sync_lived(
+    file: &Path,
+    want: &[Grant],
+    live: &[String],
+    shut: &Shut,
+    folders: &mut impl Folders,
+) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
-    sync_in_turn(file, want, shut, folders)
+    sync_in_turn(file, want, live, shut, folders)
+}
+
+/// Whether the marks of `container` stay ([`Grant::off`]): it is a live
+/// pairing's, or the command account's while any pairing is live (its
+/// grants are the union of theirs, [`wanted_on`]).
+fn lives(live: &[String], container: &str) -> bool {
+    live.iter().any(|c| c == container) || (is_account(container) && !live.is_empty())
 }
 
 /// [`sync_shut`] by a caller that holds the turn ([`SYNC`]) already: the
 /// node, which removes profiles in the same turn ([`apply_in`]).
-fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Folders) -> Synced {
+fn sync_in_turn(
+    file: &Path,
+    want: &[Grant],
+    live: &[String],
+    shut: &Shut,
+    folders: &mut impl Folders,
+) -> Synced {
     let out = Synced::default();
     // Without a state folder nothing is recorded, and with nothing wanted
     // there is nothing to do: no folder and no lock file are made for it
@@ -951,32 +979,45 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
         Err(_) => true,
     };
     // Each mark of a grant taken off, where its folder is now. It stays
-    // while its container has a wanted grant and none at its place (one
-    // there is put on or held as any grant), and its folder is there.
+    // while its container is a live pairing's, its folder is there, and no
+    // grant of the container is wanted at the place the folder is now (one
+    // there is put on or held as any grant). The place is told first: a
+    // grant wanted at the path of a folder that was moved away is on
+    // another folder.
     let mut off_changed = false;
     let mut off_now: Vec<Grant> = Vec::new();
     for m in &off {
-        if !want.iter().any(|w| w.container == m.container) || want.iter().any(|w| w.same_place(m))
-        {
+        if !lives(live, &m.container) {
             off_changed = true;
             continue;
         }
         let here = folders.look(&m.path, &m.container, m.access);
-        if at_path(m, &here) {
-            off_now.push(m.clone());
-            continue;
-        }
-        match m.id.as_deref().map(|id| folders.locate(id, &m.path)) {
-            Some(Ok(Found::At(now))) => {
-                off_changed = true;
-                off_now.push(Grant {
-                    path: now,
-                    ..m.clone()
-                });
+        let at = if at_path(m, &here) {
+            m.clone()
+        } else {
+            match m.id.as_deref().map(|id| folders.locate(id, &m.path)) {
+                Some(Ok(Found::At(now))) => {
+                    off_changed = true;
+                    Grant {
+                        path: now,
+                        ..m.clone()
+                    }
+                }
+                Some(Ok(Found::Gone)) | None => {
+                    off_changed = true;
+                    continue;
+                }
+                // Away, or not to be told: a later sync looks again.
+                Some(Ok(Found::Away) | Err(_)) => {
+                    off_now.push(m.clone());
+                    continue;
+                }
             }
-            Some(Ok(Found::Gone)) | None => off_changed = true,
-            // Away, or not to be told: a later sync looks again.
-            Some(Ok(Found::Away) | Err(_)) => off_now.push(m.clone()),
+        };
+        if want.iter().any(|w| w.same_place(&at)) {
+            off_changed = true;
+        } else {
+            off_now.push(at);
         }
     }
     // Each recorded grant's object, looked up before anything changes: and
@@ -1206,8 +1247,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                             changed = true;
                             out.removed += 1;
                             left.extend(
-                                want.iter()
-                                    .any(|w| w.container == old.container)
+                                lives(live, &old.container)
                                     .then(|| old.left_unread(&old.path))
                                     .flatten(),
                             );
@@ -1263,8 +1303,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                         changed = true;
                         out.removed += 1;
                         left.extend(
-                            want.iter()
-                                .any(|w| w.container == old.container)
+                            lives(live, &old.container)
                                 .then(|| old.left_unread(&now))
                                 .flatten(),
                         );
@@ -1617,7 +1656,7 @@ fn sync_outside_in(
     folders: &mut impl Folders,
     store: &mut impl ProfileStore,
 ) -> Synced {
-    let mut s = sync_shut(&record_file(paths), want, shut, folders);
+    let mut s = sync_lived(&record_file(paths), want, live, shut, folders);
     let emptied: Vec<String> = s
         .emptied
         .iter()
@@ -2271,7 +2310,7 @@ fn apply_in(
 ) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
     let (want, live, shut) = want();
-    let mut s = sync_in_turn(&record_file(paths), &want, &shut, folders);
+    let mut s = sync_in_turn(&record_file(paths), &want, &live, &shut, folders);
     // A profile goes with its pairing: those of containers the sync left
     // without grants and of pairings the node had, unless the pairing is
     // still there.
@@ -3604,18 +3643,84 @@ mod tests {
         assert!(marks(&file).is_empty());
         assert!(f.may("/w/proj/b", &c).is_some_and(|a| a.read));
 
-        // The pairing has no grant left: nothing keeps a mark for it, and
-        // the take-off of its last grants leaves none.
+        // The folder was moved away and a new one made at its path, which
+        // is granted to the pairing: the new grant decides on the new
+        // folder only, whether a sync ran between or not.
+        for between in [false, true] {
+            let mut f = start();
+            let s = sync_shut(&file, rest, &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            f.mv("/w/drop", "/w/old");
+            f.files[0].names[0] = "/w/old/report".into();
+            f.make("/w/drop");
+            if between {
+                let s = sync_shut(&file, rest, &shut, &mut f);
+                assert!(s.errors.is_empty(), "{s:?}");
+            }
+            let both = [proj.clone(), drop.clone()];
+            let s = sync_shut(&file, &both, &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            assert_eq!(walk_every(&file), Ok(2));
+            let s = sync_shut(&file, &both, &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            assert!(!may(&f).read, "moved, between {between}: {:?}", may(&f));
+            assert_eq!(marks(&file), [PathBuf::from("/w/old")]);
+        }
+
+        // The pairing stays while it has no grant left, and so does the
+        // mark, whether the grants went in one change or in two, and
+        // whether the take-off of the rest failed: granting the project
+        // again does not open the file. It goes with the pairing.
+        let live = [c.clone()];
+        for (rest_locked, one_change) in [(false, false), (false, true), (true, true)] {
+            let mut f = start();
+            if !one_change {
+                sync_lived(&file, rest, &live, &shut, &mut f);
+                assert_eq!(marks(&file).len(), 1);
+            }
+            if rest_locked {
+                f.locked.push("/w/proj".into());
+            }
+            let s = sync_lived(&file, &[], &live, &shut, &mut f);
+            assert_eq!(s.errors.is_empty(), !rest_locked, "{s:?}");
+            assert_eq!(marks(&file).len(), 1, "{rest_locked} {one_change}");
+            f.locked.clear();
+            let s = sync_lived(&file, rest, &live, &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            assert!(!may(&f).read, "{rest_locked} {one_change}: {:?}", may(&f));
+            let s = sync_lived(&file, &[], &[], &shut, &mut f);
+            assert!(s.errors.is_empty(), "{s:?}");
+            assert!(marks(&file).is_empty() && recorded(&file).is_empty());
+        }
+
+        // The take-off runs where a moved folder is now, and the mark is
+        // left there while the pairing lives, with no grant wanted. The
+        // command account's grants are the pairings' union: its mark stays
+        // while any pairing does, and goes with the last.
+        let run = "S-1-5-21-1-2-3-1001";
         let mut f = start();
-        sync_shut(&file, rest, &shut, &mut f);
-        assert_eq!(marks(&file).len(), 1);
-        let s = sync_shut(&file, &[], &shut, &mut f);
+        f.mv("/w/drop", "/w/moved");
+        f.files[0].names[0] = "/w/moved/report".into();
+        let s = sync_lived(&file, &[], &live, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(marks(&file), [PathBuf::from("/w/moved")]);
+        let mut f = start();
+        let all = [grant(run, "/w/proj", "rw"), grant(run, "/w/drop", "w")];
+        let s = sync_lived(&file, &all, &live, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let s = sync_lived(&file, &[], &live, &shut, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        let account = |file: &Path| {
+            read_record(file)
+                .unwrap()
+                .iter()
+                .filter(|g| g.off && g.container == run)
+                .count()
+        };
+        assert_eq!(account(&file), 1);
+        let s = sync_lived(&file, &[], &[], &shut, &mut f);
         assert!(s.errors.is_empty(), "{s:?}");
         assert!(marks(&file).is_empty());
-        let mut f = start();
-        let s = sync_shut(&file, &[], &shut, &mut f);
-        assert!(s.errors.is_empty(), "{s:?}");
-        assert!(marks(&file).is_empty() && recorded(&file).is_empty());
     }
 
     /// A container's own folder counts where it is, not where it leads:
@@ -4131,7 +4236,7 @@ mod tests {
         // it off.
         let _ = read_rx.recv_timeout(std::time::Duration::from_millis(300));
         current.lock().unwrap().clear();
-        let s = sync_in_turn(&file, &[], &Shut::default(), &mut f);
+        let s = sync_in_turn(&file, &[], &[], &Shut::default(), &mut f);
         assert_eq!(s.removed, 1);
         drop(running);
         let (s, on) = waited.join().unwrap();

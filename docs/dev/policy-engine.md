@@ -539,9 +539,11 @@ center's local name):
   folder entry, no effect on `changes`, `walk_every` or `emptied`), which
   `sync_in_turn` keeps apart from the grants and feeds to `Links::unread`
   in every later sync, so **Sync folders** does not open the file. The mark
-  follows its folder (found by id) and goes when the folder is gone, when a
-  grant of the container is wanted at its place, or when the container has
-  no wanted grant.
+  follows its folder (found by id; the place is told before a wanted grant
+  there is compared) and goes when the folder is gone, when a grant of the
+  container is wanted at the folder's place, or when the pairing is removed
+  (`live`, the config's pairings, which `apply_in` and `sync_outside_in`
+  pass; the command account's mark stays while any pairing is live).
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
