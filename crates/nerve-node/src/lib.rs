@@ -24,6 +24,9 @@ use nerve_service::eventlog;
 pub mod exec;
 mod folder_change;
 pub mod fs;
+// The watch is Windows-only in use; its timing is tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod grant_watch;
 pub mod grants;
 // The job is Windows-only in use; its choices are tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]

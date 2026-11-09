@@ -327,21 +327,67 @@ impl Synced {
 /// grant then (`folder sync`). How many grants there are.
 pub fn walk_every(file: &Path) -> Result<usize, String> {
     let _one = nerve_transport::sync::turn(&SYNC);
+    mark_walks(file, &Rewalk::Every)
+}
+
+/// Which recorded grants a sync walks again into every folder below them,
+/// besides those a change reaches ([`apply`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rewalk {
+    None,
+    /// Every one, as the node's first sync after its start does: what was
+    /// installed or moved into a granted folder while it did not run gets
+    /// its entries.
+    Every,
+    /// Those on these folders (as the record names them): where names
+    /// changed since (crate::grant_watch).
+    At(Vec<PathBuf>),
+}
+
+/// Marks the grants of the record `file` that `walk` names as unfinished,
+/// so the next sync walks them into every folder below them; how many it
+/// marked. The caller holds the turn ([`SYNC`]).
+fn mark_walks(file: &Path, walk: &Rewalk) -> Result<usize, String> {
+    let named = |g: &Grant| match walk {
+        Rewalk::None => false,
+        Rewalk::Every => true,
+        Rewalk::At(folders) => folders.contains(&g.path),
+    };
+    if *walk == Rewalk::None {
+        return Ok(0);
+    }
     let _held =
         RecordLock::take(file).map_err(|e| format!("{}: {e}", lock_file(file).display()))?;
     let record = read_record(file)?;
-    if record.is_empty() {
+    let count = record.iter().filter(|g| named(g)).count();
+    if count == 0 {
         return Ok(0);
     }
     let marked: Vec<Grant> = record
         .iter()
         .map(|g| Grant {
-            unfinished: true,
+            unfinished: g.unfinished || named(g),
             ..g.clone()
         })
         .collect();
     write_record(file, &marked)?;
-    Ok(record.len())
+    Ok(count)
+}
+
+/// The folders the record of the node at `paths` holds a grant with flags
+/// on, where the last sync found them, each once: those the node watches
+/// for new names (crate::grant_watch). A closed folder lies inside one of
+/// them. Nothing where the record cannot be read.
+pub fn granted_folders(paths: &NodePaths) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = read_record(&record_file(paths))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| g.access != Access::NONE)
+        .map(|g| g.path)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// What a sync looks at and changes on the folders: on Windows their
@@ -1379,6 +1425,7 @@ pub fn apply(
     paths: &NodePaths,
     owner: Option<&crate::service::Account>,
     current: impl FnOnce() -> (Arc<NodeConfig>, PathBuf),
+    walk: Rewalk,
     report: &mut dyn FnMut(&str),
 ) -> Synced {
     #[cfg(windows)]
@@ -1403,11 +1450,17 @@ pub fn apply(
             );
             (grants, pairings(paths, &cfg), shut)
         };
-        apply_in(paths, want, &mut Acls { report, owner }, &mut WinProfiles)
+        apply_in(
+            paths,
+            walk,
+            want,
+            &mut Acls { report, owner },
+            &mut WinProfiles,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (paths, owner, current, report);
+        let _ = (paths, owner, current, walk, report);
         Synced::default()
     }
 }
@@ -1929,7 +1982,9 @@ impl Acls<'_> {
 /// Acts as `owner`, where there is one, on this thread while the result
 /// lives ([`Acls::act`]).
 #[cfg(windows)]
-fn act_as(owner: Option<&crate::service::Account>) -> io::Result<Option<crate::win_user::FsAs>> {
+pub(crate) fn act_as(
+    owner: Option<&crate::service::Account>,
+) -> io::Result<Option<crate::win_user::FsAs>> {
     owner
         .map(|o| {
             crate::win_user::FsAs::new(o).map_err(|e| {
@@ -2049,6 +2104,7 @@ impl Folders for Acls<'_> {
 fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str)) -> Synced {
     apply_in(
         paths,
+        Rewalk::None,
         || (want.to_vec(), Vec::new(), Shut::default()),
         &mut Acls {
             report,
@@ -2123,17 +2179,24 @@ fn write_profiles(file: &Path, containers: &[String]) -> Result<(), String> {
 /// the grants, so a sync that waited for this one returns only once it is
 /// gone. `center rm` asks the node for one (`folder.grants`) while the
 /// node's own sync of the change may hold the turn, and then looks at the
-/// profiles itself: one still on its way out would be said to stay.
+/// profiles itself: one still on its way out would be said to stay. The
+/// grants `walk` names are marked to be walked whole in the same turn, so
+/// the walk is this sync's, after any change of the config before it.
 #[cfg(any(windows, test))]
 fn apply_in(
     paths: &NodePaths,
+    walk: Rewalk,
     want: impl FnOnce() -> (Vec<Grant>, Vec<String>, Shut),
     folders: &mut impl Folders,
     store: &mut impl ProfileStore,
 ) -> Synced {
     let _one = nerve_transport::sync::turn(&SYNC);
+    let marked = mark_walks(&record_file(paths), &walk);
     let (want, live, shut) = want();
     let mut s = sync_in_turn(&record_file(paths), &want, &shut, folders);
+    if let Err(e) = marked {
+        s.errors.push(e);
+    }
     // A profile goes with its pairing: those of containers the sync left
     // without grants and of pairings the node had, unless the pairing is
     // still there.
@@ -3045,6 +3108,49 @@ mod tests {
         assert_eq!(f.may(x, "c1"), access("r"));
     }
 
+    /// A file linked into a granted folder after its grant (an install, a
+    /// clone) keeps its store's list through a sync that changes nothing
+    /// there, and gets its cap once a sync walks that folder
+    /// ([`Rewalk::At`], where names changed, crate::grant_watch): only that
+    /// folder, in the sync's own turn. [`Rewalk::Every`] walks them all.
+    #[test]
+    fn a_sync_walks_the_folders_where_names_changed() {
+        let access = |a: &str| Some(Access::parse(a).unwrap());
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
+        let mut f = Fake::default();
+        f.make("/w/proj");
+        f.make("/w/other");
+        let want = vec![grant("c1", "/w/proj", "rw"), grant("c1", "/w/other", "r")];
+        let sync_walking = |f: &mut Fake, walk: Rewalk| {
+            f.changes.clear();
+            let want = want.clone();
+            let s = apply_in(
+                &paths,
+                walk,
+                || (want, Vec::new(), Shut::default()),
+                f,
+                &mut FakeProfiles::default(),
+            );
+            assert!(s.errors.is_empty() && s.stale.is_empty(), "{s:?}");
+        };
+        sync_walking(&mut f, Rewalk::None);
+        let (x, y) = ("/w/proj/node_modules/x", "/w/other/.venv/y");
+        f.link(&[x, "/store/x"]);
+        f.link(&[y, "/store/y"]);
+        sync_walking(&mut f, Rewalk::None);
+        assert_eq!(f.may(x, "c1"), access(""), "not reached");
+        sync_walking(&mut f, Rewalk::At(vec!["/w/proj".into()]));
+        assert_eq!(f.may(x, "c1"), access("r"));
+        assert_eq!(f.may(y, "c1"), access(""), "the other folder is not walked");
+        assert_eq!(f.changes, [(PathBuf::from("/w/proj"), true)]);
+        sync_walking(&mut f, Rewalk::Every);
+        assert_eq!(f.may(y, "c1"), access("r"));
+        // Marked once: the next sync walks nothing.
+        sync_walking(&mut f, Rewalk::None);
+        assert!(f.changes.is_empty(), "{:?}", f.changes);
+    }
+
     /// Two pairings whose projects are linked to one store (pnpm's): the
     /// file's list is worked out under the folder of whichever name a walk
     /// came through, which holds only that pairing's entry, yet each reads
@@ -3661,7 +3767,7 @@ mod tests {
                     go: go_rx,
                     gone,
                 };
-                apply_in(&paths, Default::default, &mut f, &mut store)
+                apply_in(&paths, Rewalk::None, Default::default, &mut f, &mut store)
             })
         };
         let wait = std::time::Duration::from_secs(20);
@@ -3673,7 +3779,13 @@ mod tests {
             let (paths, gone) = (paths.clone(), gone.clone());
             std::thread::spawn(move || {
                 let mut store = FakeProfiles::default();
-                let s = apply_in(&paths, Default::default, &mut Fake::default(), &mut store);
+                let s = apply_in(
+                    &paths,
+                    Rewalk::None,
+                    Default::default,
+                    &mut Fake::default(),
+                    &mut store,
+                );
                 done.send(gone.load(Ordering::SeqCst)).unwrap();
                 s
             })
@@ -3714,6 +3826,7 @@ mod tests {
         let both = || vec![lab.clone(), home.clone()];
         apply_in(
             &paths,
+            Rewalk::None,
             || (vec![a.clone()], both(), Shut::default()),
             &mut f,
             &mut store,
@@ -3721,6 +3834,7 @@ mod tests {
         // The last folder goes: the profile stays.
         let s = apply_in(
             &paths,
+            Rewalk::None,
             || (Vec::new(), both(), Shut::default()),
             &mut f,
             &mut store,
@@ -3728,7 +3842,7 @@ mod tests {
         assert_eq!(s.emptied, std::slice::from_ref(&lab));
         assert!(store.removed.is_empty(), "{:?}", store.removed);
         // The pairings go: both profiles go, `home` without a grant ever.
-        let s = apply_in(&paths, Default::default, &mut f, &mut store);
+        let s = apply_in(&paths, Rewalk::None, Default::default, &mut f, &mut store);
         assert!(s.errors.is_empty(), "{s:?}");
         store.removed.sort();
         let mut gone = both();
@@ -3748,16 +3862,17 @@ mod tests {
         }
         apply_in(
             &paths,
+            Rewalk::None,
             || (Vec::new(), vec![lab.clone()], Shut::default()),
             &mut f,
             &mut store,
         );
         let mut failing = Failing(0);
-        let s = apply_in(&paths, Default::default, &mut f, &mut failing);
+        let s = apply_in(&paths, Rewalk::None, Default::default, &mut f, &mut failing);
         assert_eq!(failing.0, 1, "{s:?}");
-        apply_in(&paths, Default::default, &mut f, &mut failing);
+        apply_in(&paths, Rewalk::None, Default::default, &mut f, &mut failing);
         assert_eq!(failing.0, 2);
-        apply_in(&paths, Default::default, &mut f, &mut store);
+        apply_in(&paths, Rewalk::None, Default::default, &mut f, &mut store);
         assert_eq!(store.removed.last(), Some(&lab));
         // The CLI's sync keeps a pairing's profile too.
         f.make("/w/b");
@@ -3805,6 +3920,7 @@ mod tests {
         let mut store = FakeProfiles::default();
         apply_in(
             &paths,
+            Rewalk::None,
             || (current.lock().unwrap().clone(), Vec::new(), Shut::default()),
             &mut f,
             &mut store,
@@ -3822,7 +3938,13 @@ mod tests {
                     let _ = read.send(());
                     (current.lock().unwrap().clone(), Vec::new(), Shut::default())
                 };
-                let s = apply_in(&paths, want, &mut f, &mut FakeProfiles::default());
+                let s = apply_in(
+                    &paths,
+                    Rewalk::None,
+                    want,
+                    &mut f,
+                    &mut FakeProfiles::default(),
+                );
                 (s, f.all())
             })
         };

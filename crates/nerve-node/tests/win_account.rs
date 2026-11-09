@@ -10,6 +10,9 @@
 //! - a project whose files are hard links to a store outside it gets its
 //!   `w` grant, and those files are read but not written, through either
 //!   name; closed with a folder that holds them, under both names;
+//! - a file linked into that project after its grant, yours from a store or
+//!   a command's from its own, gets its entries within the node's bound,
+//!   with no Sync folders;
 //! - a folder in the owner's profile that holds a protected entry gives
 //!   its other entries, and the entry stays closed;
 //! - the owner's Documents folder redirected elsewhere (as by OneDrive's
@@ -39,7 +42,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
@@ -639,6 +642,55 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         assert_eq!(r["exit_code"], 0, "{flags}: {r}");
         assert!(out(&r).contains("stored"), "{flags}: {r}");
     }
+    // Installed into the project after its grant, with no Sync folders and
+    // no change of the config: the node walks the project by itself soon
+    // after the names stop changing (crate::grant_watch). A file you link
+    // from your store becomes readable to a's commands, and one a's command
+    // links from its own store gets the node's entries (among them its
+    // denial of writes for the container), which give you its read where
+    // you could not open it.
+    let late = store.join("late.js");
+    std::fs::write(&late, "late from the store").unwrap();
+    std::fs::hard_link(&late, proj.join("late.js")).unwrap();
+    let r = run_in(
+        &mut conn_a,
+        &proj,
+        "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; Set-Content -Path (Join-Path $s 'g.js') -Value installed; New-Item -ItemType HardLink -Path agent.js -Target (Join-Path $s 'g.js') | Out-Null; exit [int](-not $?)",
+    )
+    .await
+    .expect("a's install from its own store");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    let capped = |p: &Path| {
+        let listed = Command::new("icacls").arg(p).output().unwrap();
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .any(|l| l.contains("S-1-15-2-") && l.contains("(DENY)"))
+    };
+    // The node's quiet time and bound, and the walk.
+    let until = Instant::now() + Duration::from_secs(90);
+    loop {
+        let r = run_in(
+            &mut conn_a,
+            &proj,
+            "Get-Content late.js; exit [int](-not $?)",
+        )
+        .await
+        .expect("a's read of the late file");
+        if out(&r).contains("late from the store") && capped(&proj.join("agent.js")) {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "not walked by itself within 90 s: {r}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(proj.join("agent.js"))
+            .unwrap()
+            .trim(),
+        "installed"
+    );
     // Closing the folder that holds it: the commands go on running, and
     // the file is closed under both names, also after the project's
     // flags change (a change of the folder around it) and the next sync.

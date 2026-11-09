@@ -805,6 +805,10 @@ pub(crate) struct Shared {
     /// failed again ([`ACL_RETRY`]).
     #[cfg(target_os = "linux")]
     pub acl_tried: Mutex<Option<std::time::Instant>>,
+    /// Windows: the watches of the granted folders, which tell where names
+    /// changed, so the node walks those folders by itself
+    /// (crate::grant_watch).
+    pub grant_watch: crate::grant_watch::Watch,
 }
 
 impl Shared {
@@ -1001,6 +1005,14 @@ impl Shared {
     /// On the installed service the folders are the owner's: their entries
     /// are read and changed as the owner (crate::grants::apply).
     pub fn sync_grants(&self) -> crate::grants::Synced {
+        self.sync_grants_walking(crate::grants::Rewalk::None)
+    }
+
+    /// [`Shared::sync_grants`] that also walks the grants `walk` names into
+    /// every folder below them, in the same turn. The granted folders are
+    /// watched for new names from before the sync (what changes while it
+    /// walks is told) and follow what it left (crate::grant_watch).
+    pub fn sync_grants_walking(&self, walk: crate::grants::Rewalk) -> crate::grants::Synced {
         let current = || {
             let cfg = self.config();
             let home = self.rules_home(&cfg);
@@ -1010,9 +1022,21 @@ impl Shared {
             .service
             .then(|| self.owner_account(&self.config()).ok().flatten())
             .flatten();
-        crate::grants::apply(&self.paths, owner.as_ref(), current, &mut |m| {
+        #[cfg(windows)]
+        let watch = || {
+            self.grant_watch
+                .follow(&crate::grants::granted_folders(&self.paths), || {
+                    crate::grants::act_as(owner.as_ref())
+                })
+        };
+        #[cfg(windows)]
+        watch();
+        let synced = crate::grants::apply(&self.paths, owner.as_ref(), current, walk, &mut |m| {
             tracing::info!("folder grants: {m}")
-        })
+        });
+        #[cfg(windows)]
+        watch();
+        synced
     }
 
     /// Brings the pairings' home and temporary folders in line with the
@@ -2293,6 +2317,7 @@ impl Daemon {
             sudo_for: Mutex::default(),
             account_cache: Mutex::default(),
             told_keyring: Default::default(),
+            grant_watch: Default::default(),
             grace: opts.resume_grace,
             program_wait: opts.program_wait,
             providers: Default::default(),
@@ -2607,16 +2632,31 @@ async fn supervise(shared: Arc<Shared>) {
         shared.settle_sudo();
         let cfg = shared.config();
         // The folder grants follow the config as it changes (crate::grants);
-        // a command syncs them as well before it runs.
-        if shared.confinement.appcontainer && granted != Some(cfg.version) {
-            granted = Some(cfg.version);
-            let s = shared.clone();
-            tokio::task::spawn_blocking(move || {
-                let synced = s.sync_grants();
-                for e in synced.errors {
-                    tracing::warn!("folder grants: {e}");
-                }
-            });
+        // a command syncs them as well before it runs. The first sync walks
+        // every grant, as on Linux: what was installed or moved into a
+        // granted folder while the node did not run gets its entries. After
+        // it the node walks a granted folder soon after names in it changed
+        // (crate::grant_watch).
+        if shared.confinement.appcontainer {
+            use crate::grants::Rewalk;
+            let due = shared.grant_watch.due(std::time::Instant::now());
+            let walk = if granted.is_none() {
+                Some(Rewalk::Every)
+            } else if !due.is_empty() {
+                Some(Rewalk::At(due))
+            } else {
+                (granted != Some(cfg.version)).then_some(Rewalk::None)
+            };
+            if let Some(walk) = walk {
+                granted = Some(cfg.version);
+                let s = shared.clone();
+                tokio::task::spawn_blocking(move || {
+                    let synced = s.sync_grants_walking(walk);
+                    for e in synced.errors {
+                        tracing::warn!("folder grants: {e}");
+                    }
+                });
+            }
         }
         // On the installed Linux node the folders' ACLs follow it so
         // (crate::acl); a command of `nerve-run` syncs them as well before

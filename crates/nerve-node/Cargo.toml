@@ -43,7 +43,8 @@ libc.workspace = true
 # command Ctrl+C; WindowsProgramming names the account that runs a command.
 # EventLog writes the installed node's start, stop and failures to the
 # Windows Event Log. WindowsAndMessaging asks a stopped command's windows to
-# close. LibraryLoader keeps DLLs to System32 (src/main.rs).
+# close. LibraryLoader keeps DLLs to System32 (src/main.rs). IO watches the
+# granted folders for new names (src/grant_watch.rs).
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_NetManagement",
@@ -56,6 +57,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Console",
     "Win32_System_Environment",
     "Win32_System_EventLog",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
