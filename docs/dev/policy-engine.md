@@ -531,19 +531,24 @@ center's local name):
     may look at the file then), so that walk changes nothing. A change as any
     file (`Linked::Full`) is the only one worked out under the folder.
 
-  A recorded grant that gave write without read (`Links::unread`) closes a
-  name under it that no wanted grant of the container holds, in the walk
-  that takes it off, so a file a command linked out of such a folder into
-  one it may read stays closed (Linux refuses that link, `Refer`). The
+  A recorded or wanted grant that gives write without read
+  (`Links::unread`, `Links::want`) closes a name under it to every
+  container that has no grant there, in the walk that takes it off (and in
+  the first sync that puts it on), so a file a command linked out of such a
+  folder into one that it, or another pairing, may read stays closed
+  (Linux refuses that link, `Refer`). The
   take-off leaves a mark of the grant in the record (`Grant::off`; no
   folder entry, no effect on `changes`, `walk_every` or `emptied`), which
   `sync_in_turn` keeps apart from the grants and feeds to `Links::unread`
   in every later sync, so **Sync folders** does not open the file. The mark
   follows its folder (found by id; the place is told before a wanted grant
   there is compared) and goes when the folder is gone, when a grant of the
-  container is wanted at the folder's place, or when the pairing is removed
+  container is wanted at the folder's place, or when no pairing is left
   (`live`, the config's pairings, which `apply_in` and `sync_outside_in`
-  pass; the command account's mark stays while any pairing is live).
+  pass): a mark closes the file to the other pairings too, so it does not
+  go with its own. A folder the node cannot look at (the owner's log-on
+  fails) leaves its mark as it is until a sync can look, as a mark dropped
+  cannot be found again.
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
