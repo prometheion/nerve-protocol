@@ -3518,6 +3518,10 @@ mod tests {
     /// file gets the change as any file, which would give it the whole list
     /// of the folder around the closed one, write included: it gets read
     /// and execute at most. Without a closed folder inside, it does.
+    // The fake volume's `/w/...` paths are no paths on Windows, where the
+    // pass resolves them on the real disk (`Judge::new`) and the protected
+    // entries are Windows' own: win_account.rs shows these cases there.
+    #[cfg(unix)]
     #[test]
     fn a_file_linked_across_a_closed_folders_edge_is_capped() {
         let access = |a: &str| Some(Access::parse(a).unwrap());
