@@ -505,14 +505,20 @@ center's local name):
     pairings on one store both read it), and the denial, first in the list,
     survives Explorer or `icacls` passing a folder's entries down; the next
     walk that reaches the file (`folder sync` walks every grant) puts the
-    cap back.
+    cap back. The cap works from the list the file has, not from the list
+    the folder walked would give it: the file keeps what it inherited under
+    its other names (the owner's store, cache or repository) and gets none
+    of the walked folder's entries for other accounts, while the container's
+    inherited entries go with the rest of the node's own. A change as any
+    file (`Linked::Full`) is the only one worked out under the folder.
 
   This rests on Windows letting a sandboxed process link only a file it may
   write (it asks for `FILE_WRITE_ATTRIBUTES`; probed), which read and
   execute does not hold. A grant put directly on a file with a second name
   is refused where commands may write around it (`not_own`); elsewhere (an
-  entry of a split folder) it gets the cap in place of its own entry, which
-  `look` counts as granted (`acl::capped_within`). Not judged again: a file that lost its other
+  entry of a split folder, a list that does not inherit) it gets the cap in
+  place of its own entry, which `look` counts as granted
+  (`acl::capped_within`). Not judged again: a file that lost its other
   names keeps the node's entries; a folder whose inheritance the owner
   turned off by hand counts as any folder (only a closed one closes). Only an
   error marked `acl::Untouched` (refused before a write, nothing at the

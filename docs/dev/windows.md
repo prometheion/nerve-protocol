@@ -577,7 +577,10 @@ runs in the container as well, unless the pairing runs as you.
   one a command moved, or one inside a split folder), in a protected entry
   or in the node's own folders closes the file under every name. A name in
   a folder the node cannot open (another account's) does not count. The
-  node changes the file's entries only as a change reaches it: **Sync
+  node adds its own entries only: what the file's list gives other accounts
+  (the owner's store, cache or repository) stays under both names, and the
+  granted folder's entries for them do not reach it. The node changes the
+  file's entries only as a change reaches it: **Sync
   folders** cuts one you widened back down. So after you or an agent
   install dependencies or clone into a folder that is granted already
   (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:

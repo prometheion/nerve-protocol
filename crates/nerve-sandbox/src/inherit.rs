@@ -69,9 +69,12 @@ pub trait Objects {
     /// that cannot be opened (another account's) is left out: the caller
     /// tells by the count of names that one is missing.
     fn names_of(&mut self, obj: &Self::Obj) -> io::Result<Vec<PathBuf>>;
-    /// What `derived` (the list of `obj`, a file with more than one name,
-    /// under the folder walked) becomes as `linked` says: `Same` where that
-    /// is the list `obj` has now.
+    /// What the list of `obj`, a file with more than one name, becomes as
+    /// `linked` says: `Same` where that is the list `obj` has now. A
+    /// [`Linked::Capped`] works from the list `obj` has, not from `derived`
+    /// (its list under the folder walked), which would give the file that
+    /// folder's entries for every account under all its names; a
+    /// [`Linked::Full`] works from `derived`.
     fn cap(
         &mut self,
         obj: &Self::Obj,

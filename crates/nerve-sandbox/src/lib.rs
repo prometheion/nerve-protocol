@@ -1004,8 +1004,8 @@ pub mod acl {
     /// [`READ_AND_EXECUTE`] for every other AppContainer and capability
     /// (`S-1-15-…`): an entry that allows more is cut down to that, one that
     /// allows nothing then goes. The node's own entries for the SIDs of
-    /// `caps` (its explicit allowing and denying ones) are worked out anew
-    /// from `caps` alone, not from what the list holds now: a SID that
+    /// `caps` (its allowing and denying ones, inherited too) are worked out
+    /// anew from `caps` alone, not from what the list holds now: a SID that
     /// [`Gets::Rights`] gets an allowing entry of those and a denying one of
     /// every other right, a closed one a denying entry of every right, and
     /// one that is [`Gets::Unheld`] none. So it gets the same whichever
@@ -1035,8 +1035,10 @@ pub mod acl {
             let j = a.sid.as_deref().and_then(listed);
             let cap = a.sid.as_deref().and_then(cap_of);
             let entry = match (a.kind, j, cap) {
-                // The node's own, worked out again below.
-                (ALLOWED | DENIED, Some(_), _) if explicit => None,
+                // The node's own, worked out again below: also one the file
+                // inherited, since its list is no longer worked out under a
+                // folder's (see `Volume::cap`).
+                (ALLOWED | DENIED, Some(_), _) => None,
                 (ALLOWED | ALLOWED_CALLBACK, _, Some(cap)) => {
                     let m = mapped(a.mask) & cap;
                     (m != 0).then_some(Capped::Entry(i, m))
@@ -2637,7 +2639,19 @@ pub mod appcontainer {
                 Derived::Same(l) | Derived::Changed(l) => l,
             };
             let now = Sd::of(obj.h)?;
-            let new = capped(&lists.new, linked)?;
+            // A capped file keeps the list it has: the entries it inherited
+            // under its other names' folders (a store's, a cache's, a
+            // source repository's) and those of every account but the
+            // containers stay as they are. The list worked out under the
+            // folder walked would give the file that folder's entries for
+            // everyone, under every name. The node's own entries come from
+            // the grants alone ([`acl::capped`]). A file that changes as any
+            // file gets the folder's list.
+            let base = match linked {
+                Linked::Capped(_) => &now,
+                Linked::Full(_) => &lists.new,
+            };
+            let new = capped(base, linked)?;
             Ok(if new.entries()? == now.entries()? {
                 Derived::Same(Lists {
                     new: now.clone(),
@@ -3180,8 +3194,10 @@ pub mod appcontainer {
             return refuse("its permissions do not inherit from its folder".into());
         }
         // A granted file with more than one name, as one below a folder.
+        // Whether its list inherits does not matter: the cap works on the
+        // entries it has, so a file the owner linked from a protected list
+        // (an SSH key) gets the cap too, not the grant's own entry.
         if !next.is_dir
-            && !next.protected
             && let Some(links) = below.links.as_mut()
         {
             let top = Obj {
@@ -3193,7 +3209,13 @@ pub mod appcontainer {
             let names = volume.kind(&top)?.names;
             if names > 1 {
                 let linked = links(path, names, &volume.names_of(&top)?)?;
-                next.sd = capped(&next.sd, &linked)?;
+                // As below a folder (`Volume::cap`): a cap works from the
+                // list the file has, not the one its folder would give it.
+                let base = match linked {
+                    Linked::Capped(_) => &next.was,
+                    Linked::Full(_) => &next.sd,
+                };
+                next.sd = capped(base, &linked)?;
                 next.changed = next.sd.entries()? != next.was.entries()?;
             }
         }
@@ -3923,10 +3945,11 @@ mod tests {
     /// container: one denied entry, every right, for it and all below it,
     /// a file just itself.
     /// A file with more than one name gets no more than its caps: the
-    /// container's entry, inherited or its own, and with generic rights, is
-    /// cut down to read and execute (to nothing for `w` alone, which then
-    /// goes), and a denying entry of every other right comes first; a
-    /// container closed there gets only a denying entry. Other AppContainers
+    /// entries of the containers the node grants, inherited or its own, go,
+    /// and it has its own allowing entry of no more than read and execute
+    /// (none for `w` alone) after a denying entry of every other right,
+    /// first in the list; a container closed there gets only a denying
+    /// entry, one no grant holds none. Other AppContainers
     /// and capabilities are cut down too, without a denying entry; the
     /// owner's entries and other denials stay. Worked out again from the
     /// list it gave, and from that list widened again by Windows, the same
@@ -3978,11 +4001,8 @@ mod tests {
                 Capped::Entry(1, acl::WRITE_DATA),
                 Capped::Allow(0, r),
                 Capped::Allow(1, file_cap(false, true, false)),
-                Capped::Entry(2, r),
-                Capped::Entry(3, file_cap(false, true, false)),
                 Capped::Entry(5, READ_AND_EXECUTE),
                 Capped::Entry(6, acl::ALL),
-                Capped::Entry(7, r),
             ]
         );
         assert_eq!(r & (acl::WRITE_DATA | acl::DELETE | acl::WRITE_DAC), 0);
@@ -4031,6 +4051,41 @@ mod tests {
         );
         assert_eq!(plain.len(), once.len() - 5);
         assert_eq!(uncapped(&list, &[c.into()]).len(), list.len());
+    }
+
+    /// The cap of a file with more than one name leaves what the list gives
+    /// every other account as it is: a file linked from the owner's store
+    /// into a granted folder keeps the store's entries, and gets none of
+    /// the folder's (#149). Only the containers' entries are the node's.
+    #[test]
+    fn a_cap_leaves_the_entries_of_other_accounts_alone() {
+        use acl::{ALLOWED, Ace, Capped, INHERITED, capped, file_cap};
+        use inherit::Gets;
+        let ace = |flags, mask, sid: &str| Ace {
+            kind: ALLOWED,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let (c, owner, everyone) = ("S-1-15-2-1-2", "S-1-5-21-1-2-3-1001", "S-1-1-0");
+        let rw = acl::masks(true, true, false).file;
+        // As a store's list: the owner's, inherited from the store's folder
+        // (the container's stale entry is there too, from a folder it was
+        // granted before).
+        let list = vec![
+            ace(INHERITED, acl::ALL, owner),
+            ace(INHERITED, rw, c),
+            ace(INHERITED, rw, everyone),
+        ];
+        let caps = vec![(c.to_string(), Gets::Rights(file_cap(true, true, false)))];
+        let out = capped(&list, &caps);
+        assert!(out.contains(&Capped::Entry(0, acl::ALL)), "{out:?}");
+        assert!(out.contains(&Capped::Entry(2, rw)), "{out:?}");
+        assert!(
+            !out.iter().any(|e| matches!(e, Capped::Entry(1, _))),
+            "{out:?}"
+        );
+        assert!(out.contains(&Capped::Allow(0, file_cap(true, true, false))));
     }
 
     /// A granted file with more than one name carries the node's cap in
@@ -5103,6 +5158,18 @@ mod tests {
         let (in_store, linked) = (store.join("x.js"), top.join("a\\x.js"));
         std::fs::write(&in_store, "x").unwrap();
         std::fs::hard_link(&in_store, &linked).unwrap();
+        // The store's list but for the container's lines: the walk below
+        // must not give the file the project's entries (everyone's, here).
+        let others = |p: &Path| -> Vec<String> {
+            let path = p.display().to_string();
+            icacls(&[&path])
+                .lines()
+                .filter(|l| l.contains(":(") && !l.contains("S-1-15-2-"))
+                .map(|l| l.replace(&path, "").trim().to_string())
+                .collect()
+        };
+        let store_list = others(&in_store);
+        assert!(!store_list.is_empty());
 
         let sid = |text: &str| {
             let mut p: PSID = std::ptr::null_mut();
@@ -5197,6 +5264,7 @@ mod tests {
         let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
         assert!(ours.iter().any(|l| l.contains("(DENY)")), "{lines}");
         assert!(ours.iter().any(|l| !l.contains("(DENY)")), "{lines}");
+        assert_eq!(others(&in_store), store_list, "the store's own entries");
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},
@@ -5204,6 +5272,53 @@ mod tests {
         };
         std::fs::remove_file(&linked).unwrap();
         appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+    }
+
+    /// A granted file with more than one name whose list does not inherit
+    /// (the owner made it a link of an SSH key, say) is capped as one that
+    /// does, not given the grant's own entry (#149): a name in a folder
+    /// closed to the container leaves it with a denial and no entry.
+    #[cfg(windows)]
+    #[test]
+    fn a_protected_linked_file_that_is_granted_gets_the_cap() {
+        use std::path::{Path, PathBuf};
+        let base = tempfile::tempdir().unwrap();
+        let (top, other) = (base.path().join("top"), base.path().join("other"));
+        for d in [&top, &other] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let key = top.join("key");
+        std::fs::write(&key, "x").unwrap();
+        std::fs::hard_link(&key, other.join("key")).unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(&key)
+            .arg("/inheritance:d")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        let name = format!("nerve.test.protected.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let mut closed = |_: &Path, _: u32, _: &[PathBuf]| {
+            Ok(inherit::Linked::Capped(inherit::Cap {
+                containers: vec![(name.clone(), inherit::Gets::Closed)],
+            }))
+        };
+        let below = appcontainer::Below {
+            links: Some(&mut closed),
+            progress: &mut |_| {},
+            maker: None,
+        };
+        // Not `own`: the owner put the grant on a file it chose.
+        appcontainer::set_below(&key, &name, Some(m), false, false, None, below).unwrap();
+        let lines = icacls(&[&key.display().to_string()]);
+        let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
+        assert!(!ours.is_empty(), "{lines}");
+        // A denial of every right is listed as "no access".
+        assert!(
+            ours.iter()
+                .all(|l| l.trim_end().ends_with(":(N)") || l.contains("(DENY)")),
+            "{lines}"
+        );
     }
 
     /// A folder on a volume mounted in a folder (no drive letter) is found
