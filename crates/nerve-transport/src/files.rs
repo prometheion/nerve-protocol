@@ -38,6 +38,66 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     result
 }
 
+/// Makes `o` open what is at a path without following a link there, and
+/// without waiting on a pipe: `O_NOFOLLOW` and `O_NONBLOCK` on Unix, and on
+/// Windows the reparse point itself (a symbolic link or a junction), which
+/// [`is_plain`] then refuses. For the files of a folder that another account
+/// owns, where an administrator works: a link its account put in place of a
+/// file must not make the administrator's work reach another file.
+pub fn no_follow(o: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT
+        o.custom_flags(0x0020_0000);
+    }
+    o
+}
+
+/// Whether the opened `f` is a plain file: not a directory, a pipe, or (on
+/// Windows) a link that [`no_follow`] opened itself.
+pub fn is_plain(f: &std::fs::File) -> std::io::Result<bool> {
+    let m = f.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if m.file_attributes() & 0x400 != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(m.is_file())
+}
+
+/// Reads the plain file at `path` ([`no_follow`], [`is_plain`]); a link or
+/// another kind of file is an error.
+pub fn read_plain(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    let mut f = no_follow(&mut o).open(path)?;
+    if !is_plain(&f)? {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let mut b = Vec::new();
+    f.read_to_end(&mut b)?;
+    Ok(b)
+}
+
+/// [`read_plain`] as text.
+pub fn read_plain_string(path: &Path) -> std::io::Result<String> {
+    String::from_utf8(read_plain(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Creates `dir` (and its parents) with mode 0700 on Unix.
 pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     if dir.as_os_str().is_empty() || dir.is_dir() {
@@ -225,6 +285,38 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
+    }
+
+    /// A link in place of a file is not read through (round 1, security 3):
+    /// an administrator's restore works in a folder whose account could put
+    /// one there. A plain file is read, and so is nothing else.
+    #[test]
+    fn a_plain_file_is_read_and_a_link_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let (plain, secret, link) = (
+            d.path().join("plain"),
+            d.path().join("secret"),
+            d.path().join("link"),
+        );
+        std::fs::write(&plain, "text").unwrap();
+        std::fs::write(&secret, "other").unwrap();
+        assert_eq!(read_plain(&plain).unwrap(), b"text");
+        assert_eq!(read_plain_string(&plain).unwrap(), "text");
+        assert_eq!(
+            read_plain(&d.path().join("none")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(read_plain(d.path()).is_err(), "a folder");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&secret, &link);
+        // Making a link takes a privilege (or Developer Mode) on Windows:
+        // the `windows` job runs as an administrator.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&secret, &link);
+        made.unwrap();
+        assert!(read_plain(&link).is_err(), "a link was followed");
+        // The file the link names reads as itself.
+        assert_eq!(read_plain(&secret).unwrap(), b"other");
     }
 
     #[test]

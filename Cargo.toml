@@ -19,7 +19,7 @@ repository = "https://github.com/prometheion/nerve-protocol"
 # The workspace is under the Apache License 2.0 (LICENSE); the desktop app
 # adds Slint's terms (crates/nerve-node-desktop/LICENSE.md).
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
 nerve-proto = { path = "crates/nerve-proto", version = "0.0.8" }

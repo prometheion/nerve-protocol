@@ -8,19 +8,65 @@ use clap::{CommandFactory, FromArgMatches};
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
     let layout = nerve_center::service::Layout::system();
+    let is_service = cfg!(windows) && std::env::args_os().nth(1).is_some_and(|a| a == "service");
+    // The Windows service reads its settings from its own file, as systemd
+    // gives the Linux one its own: before anything reads the environment.
+    #[cfg(windows)]
+    if is_service && let Err(e) = nerve_center::win_host::take_settings(&layout) {
+        return refuse(&layout, is_service, &e.to_string());
+    }
     // A setting given by an old name would be dropped without a word.
     if let Err(e) =
         nerve_center::config::refuse_old_names(|k| std::env::var(k).ok(), &layout.settings())
     {
-        eprintln!("nerve-center: {e}");
-        return std::process::ExitCode::FAILURE;
+        return refuse(&layout, is_service, &e.to_string());
     }
-    let matches = nerve_center::config::Args::command().get_matches();
-    let args = nerve_center::config::Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let matches = match nerve_center::config::Args::command().try_get_matches() {
+        Ok(m) => m,
+        // `--help` and `--version` end here too, with their text.
+        Err(e) if !is_service => e.exit(),
+        Err(e) => return refuse(&layout, is_service, &e.to_string()),
+    };
+    let args = match nerve_center::config::Args::from_arg_matches(&matches) {
+        Ok(a) => a,
+        Err(e) if !is_service => e.exit(),
+        Err(e) => return refuse(&layout, is_service, &e.to_string()),
+    };
+    if args.cmd == Some(Cmd::Service) {
+        #[cfg(windows)]
+        return nerve_center::win_host::serve(args);
+        #[cfg(not(windows))]
+        {
+            eprintln!(
+                "nerve-center: `service` is how Windows starts the installed center; on Linux systemd starts `nerve-center` itself"
+            );
+            return std::process::ExitCode::FAILURE;
+        }
+    }
+    // An administrator's command takes the proxy and the trusted
+    // certificates from the machine, not from the variables of the account
+    // that other programs of it may set (round 7, security 2). No thread
+    // runs yet.
+    #[cfg(windows)]
+    if args.cmd.is_some() {
+        // SAFETY: nothing here has started another thread.
+        unsafe { nerve_service::win::folders::take_machine_environment() };
+    }
     // `backup`, `restore`, `owner-token` and `status` are the owner's, run
     // by hand: no log, no server; on the installed center's folder where it
     // is installed.
     if let Some(cmd) = args.cmd.as_ref().filter(|c| !c.is_service()) {
+        #[cfg(windows)]
+        let elevated = nerve_service::win::sid::is_admin();
+        #[cfg(not(windows))]
+        let elevated = false;
+        if let Err(e) = nerve_center::config::refuse_state_variable(
+            &nerve_center::config::settings_given(&matches),
+            elevated,
+        ) {
+            eprintln!("nerve-center: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
         let state = args.owner_state_dir();
         let settle = nerve_center::service::settle_user;
         let mut out = std::io::stdout();
@@ -69,6 +115,16 @@ fn main() -> std::process::ExitCode {
     if let Some(cmd) = args.cmd.clone() {
         let mut out = std::io::stdout();
         let given = nerve_center::config::settings_given(&matches);
+        #[cfg(windows)]
+        let elevated = nerve_service::win::sid::is_admin();
+        #[cfg(not(windows))]
+        let elevated = false;
+        if matches!(cmd, Cmd::Install)
+            && let Err(e) = nerve_center::config::refuse_install_variables(&given, elevated)
+        {
+            eprintln!("nerve-center: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
         // What `install` writes into the service's settings.
         let set: Vec<(&str, String)> = nerve_center::config::INSTALL_SETTINGS
             .iter()
@@ -107,4 +163,13 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+fn refuse(
+    layout: &nerve_center::service::Layout,
+    is_service: bool,
+    why: &str,
+) -> std::process::ExitCode {
+    nerve_center::service::refuse_start(&layout.state, is_service, why);
+    std::process::ExitCode::FAILURE
 }

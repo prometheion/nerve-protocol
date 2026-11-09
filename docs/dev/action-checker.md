@@ -295,7 +295,8 @@ the file, follows redirects (never https→http), has a per-read idle timeout (s
 a stalled connection ends instead of hanging) and a cancel flag; the download
 is checked against its pinned SHA-256 (and the model against its pinned length)
 before it is renamed into place, so a half or unverified download never counts
-as installed. The archive is unpacked with the system `tar` after a scan that
+as installed. The archive is unpacked with the system `tar` (on Windows
+`%SystemRoot%\System32\tar.exe`, never one found by name) after a scan that
 refuses any entry that would escape the target, into a sibling staging folder
 that is swapped in only once the server binary and a `variant` marker are
 there, so a failed or cancelled reinstall keeps the working build.
@@ -336,7 +337,9 @@ timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
 with `-m <model>`, `-ngl 0` (CPU) or `-ngl 999` (GPU), `-c`, `-b` and `-ub`
 of the model's context and `-np 1`, restarted with backoff, ended with the
-center (`kill_on_drop`, a process group on Unix); its state and the install
+center (`kill_on_drop`, a process group on Unix; on Windows a job object of
+the center's, which ends it also when the center is killed, where on Linux
+only the installed service's cgroup does); its state and the install
 progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
 <path>.sock`) on Unix, so no other account can reach it or bind its address
 after a crash; on Windows, or where that path is over 100 bytes, on a free

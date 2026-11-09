@@ -1,7 +1,8 @@
 //! The center as a service (docs/dev/service.md, "The center as a service"):
 //! `install`, `update` and `uninstall`, on Linux with systemd, as the node
 //! has them: what both do the same way, `update` among it, is
-//! [`nerve_service`]'s. The service runs `nerve-center` with
+//! [`nerve_service`]'s. On Windows the service control manager runs it
+//! ([`crate::winsvc`]). The service runs `nerve-center` with
 //! MCP over HTTP under a user of its own, `nerve-center`, which owns the
 //! center's state folder and nothing else. Its settings are the
 //! `NERVE_CENTER_*` variables in a file of root's that the unit reads, so the
@@ -31,7 +32,22 @@ pub const UNIT_NAME: &str = "nerve-center.service";
 /// The settings file in the settings folder.
 pub const SETTINGS_FILE: &str = "center.env";
 
-const LINUX_ONLY: &str = "works on Linux with systemd only; elsewhere run `nerve-center --mcp http` under your own service manager";
+const LINUX_ONLY: &str = "works on Linux with systemd and on Windows only; elsewhere run `nerve-center --mcp http` under your own service manager";
+
+/// A start that cannot go on: the reason on stderr and, for the Windows
+/// service, which has no terminal, in the log in its state folder, where
+/// `install` points (a value mistyped in `center.env` would otherwise end
+/// the service without a trace).
+pub fn refuse_start(state: &Path, is_service: bool, why: &str) {
+    eprintln!("nerve-center: {why}");
+    if is_service {
+        let _ = nerve_transport::log::Log::append_entry(
+            &nerve_transport::log::file_in(state),
+            Level::Error,
+            &format!("the service cannot start: {}", why.trim()),
+        );
+    }
+}
 
 /// Where an installed center lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,14 +67,38 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The places on this machine.
+    /// The places on this machine. On Windows the program goes to
+    /// `%ProgramFiles%\Nerve` and the folders to `%ProgramData%\nerve-center`
+    /// (not below the node's `%ProgramData%\Nerve`, which its uninstall may
+    /// delete); the service is registered with the service control manager,
+    /// so there is no unit file ([`crate::winsvc`]). Both folders are the
+    /// ones Windows keeps, not what the variables say: an administrator's
+    /// elevated terminal takes `ProgramData` from the account's own
+    /// variables, which its unelevated programs may set, and the commands
+    /// that run there write the center's key into this folder (round 6,
+    /// security 1).
     pub fn system() -> Layout {
-        Layout {
-            unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
-            bin: "/usr/local/bin/nerve-center".into(),
-            state: "/var/lib/nerve-center".into(),
-            settings_dir: "/etc/nerve-center".into(),
-            release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+        #[cfg(windows)]
+        {
+            use nerve_service::win::folders::{program_data, program_files};
+            let data = program_data().join("nerve-center");
+            Layout {
+                unit: PathBuf::new(),
+                bin: program_files().join("Nerve").join("nerve-center.exe"),
+                state: data.join("state"),
+                settings_dir: data.join("settings"),
+                release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Layout {
+                unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
+                bin: "/usr/local/bin/nerve-center".into(),
+                state: "/var/lib/nerve-center".into(),
+                settings_dir: "/etc/nerve-center".into(),
+                release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+            }
         }
     }
 
@@ -67,9 +107,33 @@ impl Layout {
         self.settings_dir.join(SETTINGS_FILE)
     }
 
-    /// Whether `install` put the center here.
+    /// Whether this is the Windows service's layout: the service control
+    /// manager registers it, so it has no unit file.
+    pub fn windows(&self) -> bool {
+        self.unit.as_os_str().is_empty()
+    }
+
+    /// Whether `state` is this layout's state folder: on Windows by any
+    /// spelling of its path (crate::util::same_folder), else as written.
+    pub fn is_state(&self, state: &Path) -> bool {
+        if self.windows() {
+            crate::util::same_folder(state, &self.state)
+        } else {
+            state == self.state
+        }
+    }
+
+    /// Whether `install` put the center here: its unit, or on Windows its
+    /// service.
     pub fn installed(&self) -> bool {
-        cfg!(target_os = "linux") && self.unit.is_file()
+        #[cfg(windows)]
+        {
+            nerve_service::win::service::registered(crate::winsvc::SERVICE_NAME)
+        }
+        #[cfg(not(windows))]
+        {
+            cfg!(target_os = "linux") && self.unit.is_file()
+        }
     }
 
     /// The service unit. The center runs as its own user with MCP over
@@ -143,20 +207,25 @@ WantedBy=multi-user.target
     /// token of the HTTP MCP endpoint, the settings `install` was given
     /// (`set`, by variable), and the others as comments with their
     /// defaults.
-    pub fn settings_text(token: &str, set: &[(&str, String)]) -> String {
+    pub fn settings_text(&self, token: &str, set: &[(&str, String)]) -> String {
         let line = |var: &str, default: &str| match set.iter().find(|(v, _)| *v == var) {
             Some((_, value)) => format!("{var}={value}"),
             None => format!("#{var}={default}"),
         };
+        let restart = match self.windows() {
+            true => "`Restart-Service nerve-center` in an administrator's PowerShell".to_string(),
+            false => format!("`sudo systemctl restart {UNIT_NAME}`"),
+        };
         format!(
             "# The settings of the installed center, read by the service at its start:
-# `sudo systemctl restart {UNIT_NAME}` after a change. `nerve-center install`
-# wrote this file and keeps it; `install --name`, `--public-url` and
-# `--listen` set those here. Each variable is a flag of `nerve-center --help`.
+# {restart} after a change.
+# `nerve-center install` wrote this file and keeps it; `install --name`,
+# `--public-url` and `--listen` set those here. Each variable is a flag of
+# `nerve-center --help`.
 #
 # The harness token: harnesses send it to the HTTP MCP endpoint. It does not
 # log in to the web UI, which asks for the owner token in
-# /var/lib/nerve-center/owner-token. More can be made in the web UI.
+# {owner}. More can be made in the web UI.
 NERVE_CENTER_HARNESS_TOKEN={token}
 {}
 {}
@@ -168,6 +237,7 @@ NERVE_CENTER_HARNESS_TOKEN={token}
             line("NERVE_CENTER_NAME", "nerve-center"),
             line("NERVE_CENTER_LISTEN", "0.0.0.0:7443"),
             line("NERVE_CENTER_PUBLIC_URL", "https://<host name>:7443"),
+            owner = crate::owner::path(&self.state).display(),
         )
     }
 }
@@ -293,9 +363,21 @@ pub fn with_service_stopped(
     out: &mut dyn Write,
     f: &dyn Fn(&mut dyn Write) -> Result<(), String>,
 ) -> Result<(), String> {
+    // An administrator stops and starts the Windows service around the
+    // restore, which writes the folder as an administrator: what it writes
+    // takes the folder's DACL, so the service reads it.
+    #[cfg(windows)]
+    {
+        use crate::winsvc::WinSystem;
+        let sys = crate::win_host::WinHost;
+        let ours = layout.is_state(state) && sys.is_admin() && sys.service()? == Some(true);
+        if ours {
+            return crate::winsvc::stopped_for(&sys, out, f);
+        }
+    }
     let ours = cfg!(target_os = "linux")
         && layout.installed()
-        && state == layout.state
+        && layout.is_state(state)
         && nerve_transport::net::euid() == 0
         && crate::attach::runs(state) == Some(true);
     if !ours {
@@ -358,7 +440,7 @@ pub fn status(
     mcp: &crate::config::McpMode,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let installed = layout.installed() && state == layout.state;
+    let installed = layout.installed() && layout.is_state(state);
     // Root's file: read as root, before anything else.
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
@@ -380,8 +462,10 @@ fn status_lines(
     given_mcp: &crate::config::McpMode,
 ) -> Vec<String> {
     use crate::config::McpMode;
-    let mut lines = vec![run_line(state, crate::attach::runs(state), cfg!(unix))];
-    if installed {
+    let mut lines = vec![run_line(state, crate::attach::runs(state))];
+    if installed && cfg!(windows) {
+        lines.push(windows_service_line());
+    } else if installed {
         let ask = |verb: &str| {
             std::process::Command::new("systemctl")
                 .args([verb, UNIT_NAME])
@@ -431,8 +515,9 @@ fn status_lines(
     }
     if installed && file.is_none() {
         lines.push(format!(
-            "(these are the defaults: {} says more to root, `sudo nerve-center status`)",
-            layout.settings().display()
+            "(these are the defaults: {} says more to an administrator, {})",
+            layout.settings().display(),
+            admin_command("status")
         ));
     }
     // The command that finds this center's token from where it is run.
@@ -441,14 +526,16 @@ fn status_lines(
         false => layout.installed().then_some(layout.state.as_path()),
     };
     lines.push(format!(
-        "owner token: in {}; `{}` shows it",
+        "owner token: in {}; `{}`{} shows it",
         crate::owner::path(state).display(),
         crate::ui::token_command_of(
             state,
             installed_dir,
             &crate::config::default_state_dir(),
-            true
-        )
+            true,
+            layout.windows()
+        ),
+        crate::ui::token_where(state, installed_dir, layout.windows())
     ));
     lines.push(match read_store(state) {
         Ok(Some(s)) if s.nodes.is_empty() => {
@@ -461,11 +548,11 @@ fn status_lines(
         Ok(None) => "machines: none paired yet".into(),
         // Root's `status` names them where the account's cannot.
         Err(_) if crate::owner::not_yours(state) => {
-            "machines: `sudo nerve-center status` names them".into()
+            format!("machines: {} names them", admin_command("status"))
         }
         Err(e) => format!("machines: not shown ({e})"),
     });
-    lines.push(match installed {
+    lines.push(match installed && !cfg!(windows) {
         true => format!(
             "log: `journalctl -u {}`",
             UNIT_NAME.trim_end_matches(".service")
@@ -475,24 +562,46 @@ fn status_lines(
     lines
 }
 
+/// The Windows service's line of `status`: its state from the service
+/// control manager.
+fn windows_service_line() -> String {
+    #[cfg(windows)]
+    {
+        let boot = |automatic: Option<bool>| match automatic {
+            Some(true) => ", starts with the machine",
+            Some(false) => ", does not start with the machine",
+            None => "",
+        };
+        match nerve_service::win::service::state(crate::winsvc::SERVICE_NAME) {
+            Ok(Some(st)) => format!("service: {}{}", st.state, boot(st.automatic)),
+            Ok(None) => "service: not installed".into(),
+            Err(e) => format!("service: unknown ({e})"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "service: unknown".into()
+    }
+}
+
 /// The first line of `status`: whether a center runs in `state`, as
-/// `runs` ([`crate::attach::runs`]) says. Only `unix` has the lock that
-/// tells it; elsewhere a folder that exists says it cannot be told.
-fn run_line(state: &Path, runs: Option<bool>, unix: bool) -> String {
+/// `runs` ([`crate::attach::runs`]) says.
+fn run_line(state: &Path, runs: Option<bool>) -> String {
     match runs {
         Some(true) => format!("center: running, in {}", state.display()),
         Some(false) => format!("center: not running, in {}", state.display()),
         // Root and the center's user may look into its folder, not others:
         // the service line says whether it runs.
         None if crate::owner::not_yours(state) => format!(
-            "center: in {}, which only root and its user may read (`sudo nerve-center status` says more)",
-            state.display()
+            "center: in {}, which only {} may read ({} says more)",
+            state.display(),
+            match cfg!(windows) {
+                true => "the administrators and its service",
+                false => "root and its user",
+            },
+            admin_command("status")
         ),
         None if !state.exists() => format!("center: none has run in {} yet", state.display()),
-        None if !unix => format!(
-            "center: in {}; whether one runs there cannot be told on this system",
-            state.display()
-        ),
         None => format!("center: not running, in {}", state.display()),
     }
 }
@@ -510,17 +619,12 @@ fn read_store(state: &Path) -> Result<Option<crate::store::Store>, String> {
     let path = state.join(crate::store::FILE);
     let mut open = std::fs::OpenOptions::new();
     open.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = match open.open(&path) {
+    let mut file = match nerve_transport::files::no_follow(&mut open).open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+    if !nerve_transport::files::is_plain(&file).map_err(|e| e.to_string())? {
         return Err(format!("{} is not a file", path.display()));
     }
     let mut text = Vec::new();
@@ -555,21 +659,28 @@ pub async fn execute(
     set: &[(&str, String)],
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let node = PathBuf::from(nerve_service::NODE_CTL_SOCKET);
-    execute_on(cmd, given, set, &Layout::system(), &Host, &node, out).await
+    #[cfg(windows)]
+    {
+        let layout = Layout::system();
+        let sys = crate::win_host::WinHost;
+        refuse_given(service_command(&cmd)?, given, &layout)?;
+        // An administrator first: no other account may ask the node's
+        // control pipe. Nothing changes before either check.
+        crate::winsvc::supported(&sys, service_command(&cmd)?)?;
+        nerve_service::owner_check(&[]).await?;
+        let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;
+        crate::winsvc::execute(cmd, set, &layout, &sys, &exe, out).await
+    }
+    #[cfg(not(windows))]
+    {
+        let node = PathBuf::from(nerve_service::NODE_CTL_SOCKET);
+        execute_on(cmd, given, set, &Layout::system(), &Host, &node, out).await
+    }
 }
 
-/// [`execute`] on `layout`, with `node` the installed node's control socket.
-async fn execute_on(
-    cmd: Cmd,
-    given: &[String],
-    set: &[(&str, String)],
-    layout: &Layout,
-    sys: &dyn System,
-    node: &Path,
-    out: &mut dyn Write,
-) -> Result<(), String> {
-    let what = match &cmd {
+/// The name of a service command; the others are refused.
+fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
+    Ok(match cmd {
         Cmd::Install => "install",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
@@ -578,13 +689,20 @@ async fn execute_on(
         | Cmd::Restore { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
+        | Cmd::Service
         | Cmd::ServiceFiles => {
             return Err(
-                "backup, restore, owner-token, status and service-files are not service commands"
+                "backup, restore, owner-token, status, service and service-files are not service commands"
                     .into(),
             );
         }
-    };
+    })
+}
+
+/// Refuses the center's settings `given` with the service command `what`
+/// but those `install` takes: none of them reaches the service, whose
+/// settings are in its file.
+fn refuse_given(what: &str, given: &[String], layout: &Layout) -> Result<(), String> {
     // `install` takes the settings it writes; nothing else reaches the
     // service, whose settings are in its file.
     let takes = |g: &String| {
@@ -609,6 +727,22 @@ async fn execute_on(
             layout.state.display()
         ));
     }
+    Ok(())
+}
+
+/// [`execute`] on `layout`, with `node` the installed node's control socket.
+#[cfg_attr(windows, allow(dead_code))]
+async fn execute_on(
+    cmd: Cmd,
+    given: &[String],
+    set: &[(&str, String)],
+    layout: &Layout,
+    sys: &dyn System,
+    node: &Path,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let what = service_command(&cmd)?;
+    refuse_given(what, given, layout)?;
     // Root first: a caller without it cannot reach the node's control
     // socket either, and would be told about that instead of about sudo.
     // Nothing changes before either check.
@@ -625,6 +759,7 @@ async fn execute_on(
         | Cmd::Restore { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
+        | Cmd::Service
         | Cmd::ServiceFiles => {
             unreachable!("refused above")
         }
@@ -720,7 +855,7 @@ pub fn install_with(
 
 /// The three lines `install` ends with: the web UI, the owner token that
 /// logs in to it, and where harnesses connect; from the settings `file`.
-fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
+pub(crate) fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
     let ui = setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
     let mcp = match setting_in(file, "NERVE_CENTER_MCP").as_deref() {
         None | Some("http") => crate::config::MCP_HTTP.to_string(),
@@ -742,16 +877,26 @@ fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
     [
         format!("Web UI:      {ui_line}"),
         format!(
-            "Owner token: {owner_token} (logs in to the web UI; kept in {}, `sudo nerve-center owner-token` shows it again)",
-            kept.display()
+            "Owner token: {owner_token} (logs in to the web UI; kept in {}, {} shows it again)",
+            kept.display(),
+            admin_command("owner-token")
         ),
         format!("Harnesses:   {mcp_line}"),
     ]
 }
 
+/// `nerve-center <what>` as an administrator runs it: with `sudo` on
+/// Linux, in an administrator's terminal on Windows.
+pub fn admin_command(what: &str) -> String {
+    match cfg!(windows) {
+        true => format!("`nerve-center {what}` in an administrator's terminal"),
+        false => format!("`sudo nerve-center {what}`"),
+    }
+}
+
 /// The value of `var` in a settings file, where it is set (not as a
 /// comment).
-fn setting_in(file: &str, var: &str) -> Option<String> {
+pub(crate) fn setting_in(file: &str, var: &str) -> Option<String> {
     file.lines()
         .find_map(|l| {
             l.trim()
@@ -765,7 +910,7 @@ fn setting_in(file: &str, var: &str) -> Option<String> {
 /// a line break would put another variable there, and systemd reads a
 /// backslash (a trailing one joins the next line), quotes and `$` in an
 /// `EnvironmentFile=` as more than the characters they are.
-fn check_setting(var: &str, value: &str) -> Result<(), String> {
+pub(crate) fn check_setting(var: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.contains(['\n', '\r', '\0']) {
         return Err(format!("{var}: one line, not empty"));
     }
@@ -811,9 +956,8 @@ fn with_settings(text: &str, set: &[(&str, String)]) -> String {
     out.join("\n") + "\n"
 }
 
-/// The settings folder, root's and private, and the settings file in it:
-/// made with a new harness token when there is none, else kept as the
-/// owner left it.
+/// The settings folder, root's and private, and the settings file in it
+/// ([`settings_file`]).
 fn settings(
     layout: &Layout,
     sys: &dyn System,
@@ -832,6 +976,17 @@ fn settings(
     }
     sys.give(dir, 0, 0)?;
     set_mode(dir, 0o700)?;
+    settings_file(layout, set, out)
+}
+
+/// The settings file in the settings folder, which is private already:
+/// made with a new harness token when there is none, else kept as the
+/// owner left it, with `set` in place.
+pub(crate) fn settings_file(
+    layout: &Layout,
+    set: &[(&str, String)],
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let file = layout.settings();
     if std::fs::symlink_metadata(&file).is_ok() {
         if set.is_empty() {
@@ -849,7 +1004,7 @@ fn settings(
         return Ok(());
     }
     let token = format!("nrv_{}", nerve_transport::keys::random_token(40));
-    write_file(&file, Layout::settings_text(&token, set).as_bytes(), 0o600)?;
+    write_file(&file, layout.settings_text(&token, set).as_bytes(), 0o600)?;
     did(
         out,
         format!(
@@ -998,7 +1153,12 @@ pub async fn update(
 /// Writes what `update` did to the center's log, as the state folder's
 /// owner ([`as_owner_of`]): root does not write through a link the center's
 /// user put there.
-fn log_update(layout: &Layout, steps: &[String], r: &Result<bool, String>, out: &mut dyn Write) {
+pub(crate) fn log_update(
+    layout: &Layout,
+    steps: &[String],
+    r: &Result<bool, String>,
+    out: &mut dyn Write,
+) {
     if !layout.state.is_dir() {
         return;
     }
@@ -1025,11 +1185,12 @@ fn log_update(layout: &Layout, steps: &[String], r: &Result<bool, String>, out: 
 }
 
 /// The release file of this machine's program.
-fn asset_name() -> Result<String, String> {
+pub(crate) fn asset_name() -> Result<String, String> {
     match std::env::consts::ARCH {
         arch @ ("x86_64" | "aarch64") if cfg!(target_os = "linux") => {
             Ok(format!("nerve-center-{arch}-linux"))
         }
+        "x86_64" if cfg!(windows) => Ok("nerve-center-x86_64-windows.exe".into()),
         other => Err(format!(
             "the releases have no program of the center for {other}; build one (docs/dev/building.md) and give it with --from"
         )),
@@ -1060,6 +1221,20 @@ mod tests {
                 "/var/lib/nerve-center",
             ))
         }
+    }
+
+    /// A service that cannot start says why in the log of its state
+    /// folder (it has no terminal); a command run by hand does not write
+    /// there (round 2, correctness 2).
+    #[test]
+    fn a_refused_start_of_the_service_goes_to_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = nerve_transport::log::file_in(dir.path());
+        refuse_start(dir.path(), false, "a command's refusal");
+        assert!(!log.exists());
+        refuse_start(dir.path(), true, "invalid value 'htttp' for '--mcp'\n");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("the service cannot start: invalid value 'htttp'"));
     }
 
     fn me() -> Account {
@@ -1303,7 +1478,7 @@ mod tests {
     #[test]
     fn the_settings_hold_a_token_the_center_takes() {
         use clap::Parser;
-        let text = Layout::settings_text("nrv_abc", &[]);
+        let text = layout(Path::new("/")).settings_text("nrv_abc", &[]);
         let vars: Vec<(&str, &str)> = text
             .lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
@@ -1312,7 +1487,7 @@ mod tests {
         assert_eq!(vars, [("NERVE_CENTER_HARNESS_TOKEN", "nrv_abc")]);
         // What install was given is set, the rest stays a comment.
         let set = [("NERVE_CENTER_NAME", "lab".to_string())];
-        let text = Layout::settings_text("nrv_abc", &set);
+        let text = layout(Path::new("/")).settings_text("nrv_abc", &set);
         assert!(text.contains("\nNERVE_CENTER_NAME=lab\n"), "{text}");
         assert!(
             text.contains("\n#NERVE_CENTER_LISTEN=0.0.0.0:7443\n"),
@@ -1612,16 +1787,19 @@ mod tests {
         }
     }
 
-    /// Where no lock tells whether a center runs (Windows), `status` does
-    /// not say a running one does not run (round 1, correctness 7).
+    /// `status` says whether a center runs from its lock, which every
+    /// system has now (#64).
     #[test]
-    fn the_status_says_when_it_cannot_tell_whether_a_center_runs() {
+    fn the_status_says_whether_a_center_runs() {
         let d = tempfile::tempdir().unwrap();
-        let line = run_line(d.path(), None, false);
-        assert!(line.contains("cannot be told"), "{line}");
-        assert!(!line.contains("not running"), "{line}");
+        let lock = crate::attach::try_lock(d.path()).unwrap().unwrap();
+        let line = run_line(d.path(), crate::attach::runs(d.path()));
+        assert!(line.starts_with("center: running"), "{line}");
+        drop(lock);
+        let line = run_line(d.path(), crate::attach::runs(d.path()));
+        assert!(line.starts_with("center: not running"), "{line}");
         let gone = d.path().join("none");
-        assert!(run_line(&gone, None, false).contains("none has run"));
+        assert!(run_line(&gone, None).contains("none has run"));
     }
 
     /// Root's `status` does not wait on a FIFO the center's user put in

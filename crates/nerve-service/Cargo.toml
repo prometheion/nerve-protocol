@@ -22,20 +22,31 @@ libc.workspace = true
 # the pipe's DACL (Security, Authorization), the Event Log and its source
 # (EventLog, Registry), the pipe (Pipes, tokio's named pipes) and the job
 # object with its limits (JobObjects, IO and SystemServices for the memory
-# limit's message, Threading for the CPUs).
+# limit's message, Threading for the CPUs). The center's service asks the
+# session of a process (RemoteDesktop) and which process holds a loopback
+# connection (IpHelper, WinSock), moves its program aside for Windows to
+# delete (FileSystem), and takes the Windows folder and System32 from the
+# kernel (SystemInformation).
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_EventLog",
     "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Registry",
     "Win32_System_Services",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Wdk_System_SystemInformation",
 ] }
 tokio.workspace = true
 

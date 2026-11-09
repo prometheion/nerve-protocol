@@ -26,8 +26,9 @@ Debian 12, Fedora 36 and later) and fontconfig.
 | [Limits per command](#limits-per-command) | A cgroup | The command's job object |
 | [Providers](capabilities.md#capability-providers-in-use) | Yes | Not yet |
 | [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Kept in `node.toml`, offered not yet |
-| Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node |
-| The center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
+| Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node and the [center](#the-center-as-a-windows-service) |
+| A second center on one state folder | Attaches over a socket | Attaches over a [pipe](#a-second-center-attaches) |
+| The center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only |
 | Config folder | `~/.config/nerve` | `C:\ProgramData\Nerve\config` (the installed service) |
 
 ## How Windows differs
@@ -161,7 +162,8 @@ sudo, backups, update and uninstall. No terminal command is needed or
 offered.
 
 For the center, rename `nerve-center-x86_64-windows.exe` to `nerve-center.exe`
-and put it in a folder on your `PATH`.
+and put it in a folder on your `PATH`. A harness starts it from there, or it
+runs as a [service](#the-center-as-a-windows-service).
 
 ### Let the file run (Windows)
 
@@ -319,6 +321,131 @@ sudo is off after a later install. A later install takes them up again.
 own file at once: it moves it aside, and Windows deletes it at its next
 start. Where Windows still holds the profile of `nerve` (Windows Search
 can), the uninstall says where to remove it after a restart.
+
+## The center as a Windows service
+
+As on Linux, the center runs as a service of its own, so an agent's shell
+command, which runs as you or as the node's account, cannot read its owner
+token or its TLS key. In a terminal opened with **Run as administrator**:
+
+```powershell
+nerve-center install --name lab --public-url https://lab.example:7443
+```
+
+The install does this, and says each step:
+
+1. Makes `C:\ProgramData\nerve-center`, open to SYSTEM and the
+   administrators only, with `state` and `settings` in it. The `state`
+   folder is open to the service's account too, the `settings` folder only
+   for reading. The administrators own all three. A folder that is there
+   already is taken only from SYSTEM or the administrators: one another
+   account made, one a program of yours made without **Run as
+   administrator** (an agent's shell command could), and a link in its
+   place are refused; delete it and run the install again. The service
+   checks the `state` and `settings` folders again at each start.
+2. Makes the owner token in the state folder (one made before is kept) and
+   writes `settings\center.env` with a new harness token; `--name`,
+   `--public-url` and `--listen` go into it.
+3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
+4. Registers the service `nerve-center`. It runs as its virtual account
+   `NT SERVICE\nerve-center`, which Windows makes and removes with the
+   service: no password, no user to keep. It starts with the machine and
+   again after a failure: 5 seconds after the first two, then a minute after
+   each, as long as it takes (the manager repeats the last action). A
+   center that finds a lock poisoned ends and starts again, and so does one
+   that stops with an error at its start (an address that is not there yet
+   at boot). What stopped a start is in `log.jsonl` in the state folder,
+   also a value mistyped in `center.env`.
+   It keeps no privilege but passing through folders.
+5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
+   the node port (`--listen`, 7443 by default) of that program, and nothing
+   else. The web UI and MCP stay on loopback.
+6. Starts the service and waits until the center runs, then says the web
+   UI's address, the owner token and where harnesses connect.
+
+The service reads its settings only from `center.env`, the same
+`NERVE_CENTER_*` lines as on Linux; MCP is over HTTP unless the file says
+otherwise, and a file that is missing means the defaults. A center that
+cannot start because the file cannot be read says why in its log. Change them as an administrator, then
+`Restart-Service nerve-center`. After a change of `--listen` run
+`nerve-center install --listen …` again, so the firewall rule follows.
+
+`nerve-center status` in an administrator's terminal says whether the
+center runs, the service's state, where it is reached, where its owner
+token is (`nerve-center owner-token` shows it there) and its log,
+`C:\ProgramData\nerve-center\state\log.jsonl`. A restore into the
+installed center stops the service and starts it again after; its state
+folder must be there as the install left it.
+
+These commands take `C:\ProgramData`, `C:\Program Files` and the system
+folder from Windows, not from the variables `ProgramData`, `ProgramFiles`
+and `SystemRoot`: an administrator's terminal takes those from your
+account's own variables, which any program of yours may set. The same
+goes for the proxy and the trusted certificates (`HTTPS_PROXY`,
+`SSL_CERT_FILE` and the like): `update` takes them from the machine's
+environment, which only the administrators change, so a program of yours
+cannot steer its download. In an administrator's terminal `status`,
+`owner-token`, `backup` and `restore` refuse a state folder given by
+`NERVE_CENTER_STATE_DIR` (give `--state-dir`), `install` refuses
+`NERVE_CENTER_NAME`, `_PUBLIC_URL` and `_LISTEN` from a variable (give the
+flags), and `backup` and `restore` say which folder they used.
+
+`nerve-center update` stops the service, moves the old program aside, puts
+the new one in place and starts the service; a new program that does not
+start is replaced by the old one again. It asks the new program its version
+without the administrators' rights, with an environment of `SystemRoot`
+alone, in the system folder, and in a job object that ends what it starts;
+it still runs as the administrator's own account, so it comes from the
+administrator's own hand (`--from`) or a release asset. `nerve-center
+uninstall` removes the service, its account, the firewall rule and the program; the folders stay,
+open to the administrators only, and `--purge` deletes them. Run from the
+installed program, it moves that aside, and Windows deletes it at its next
+start.
+
+None of `install`, `update` and `uninstall` runs as a command of the
+installed node: the node's control pipe says whether the caller is one. A
+caller's environment cannot hide the node: where the service manager says
+the node's service runs and its pipe cannot be found, the command is
+refused.
+
+### A second center attaches
+
+A second `nerve-center` a harness starts on the same state folder attaches
+to the first, as on Linux, over a named pipe named by a hash of the folder.
+Only the center's account, SYSTEM and the administrators may open it, and
+no other machine. The center checks the account of the process at the other
+end, and the second center checks that the pipe belongs to its own account
+before it sends anything: another account could make a pipe of that name
+first. A center that finds its pipe taken runs without it and says so in
+its log; a second center then says whose the pipe is.
+
+The state folder of a center a harness starts gets an access list of its
+own on Windows: your account, SYSTEM and the administrators, which the owner
+token, the TLS key and the state take. A backup file gets the same from its
+first moment: it is written in a private folder beside it, which is held
+open (nobody can rename it) until the file is moved into place, and given
+its private list through that hold. A backup to a network share
+(`\\nas\backups\center.backup`, a mapped drive) is written there as it
+is, since the share's server knows none of this machine's accounts and its
+own permissions govern, as on Linux over CIFS; the file is encrypted. A
+state folder on a drive without access lists (FAT32, exFAT) is refused: the
+owner token and the TLS key would be open to every account there. Where the
+installed center's path has no service registered (before the first install,
+after `uninstall` without `--purge`) it is open to the administrators only,
+so run a center or a restore there as an administrator (one that is
+not elevated says so, and names `install`). On loopback the center counts the process Windows names for the
+connection: by its account where the center may open the process (a center
+a harness starts runs as your account and opens yours), else by its session.
+The installed service is no administrator, so it cannot open another
+account's process, and the system's list of processes (which any caller may
+read) names its session only: a program of another sign-in cannot take the
+places of your browser or your harness, but two accounts in one session
+(a program started as another account) share their places. Programs of one
+account share theirs, as on Linux.
+
+The action checker's local model runs in a job object of the center's, so
+it ends with the center also when the center is killed. The installed
+service runs it on the CPU only.
 
 ## What a command can reach in `folder` mode (Windows)
 
@@ -777,14 +904,25 @@ The tests that need a Windows machine of their own carry
 job built:
 
 - it checks the runner is Windows Server 2025 (`.github/scripts/windows-runner.ps1`);
-- it makes an administrator account with a random password, and its
-  profile by a logon that loads it, as nobody signs in on a runner;
+- it makes an administrator account and a standard account with random
+  passwords, and their profiles by a logon that loads them, as nobody signs
+  in on a runner;
 - the app installs, starts, stops, restarts, updates and uninstalls Nerve
   (`nerve-node-desktop/tests/real.rs`);
 - the node is installed again with that account for commands, then the
   sudo switch (`nerve-node/tests/win_sudo.rs`), the limits per command
-  (`nerve-node/tests/win_limits.rs`), the account's batch logon and a folder
-  on a virtual disk mounted in a folder run on it.
+  (`nerve-node/tests/win_limits.rs`), the account's batch logon, a folder
+  on a virtual disk mounted in a folder, a backup's folder on a FAT32
+  virtual disk and a folder reached over the machine's own share run on it;
+- the center is installed as a service, its `status`, its restart actions
+  (and a restart after its process is killed), its web UI in Chrome
+  (`.github/scripts/web-ui-smoke.mjs`), what the standard account cannot
+  read or take (the state, the owner's places on a port), what the
+  administrator's other account and a pipe the standard account made get
+  from a second center, a second center that attaches to a first, a backup
+  and a restore into the service (also with the folder spelled another
+  way), `update` (a program that is not the center, another build) and
+  `uninstall --purge` run (`nerve-center/tests/win_service.rs`).
 
 A test that skips fails the job. The `windows` job also keeps the debug
 `nerve-node-desktop.exe` and `nerve-center.exe` as the artifact

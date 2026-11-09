@@ -186,9 +186,9 @@ pub struct Args {
 /// `nerve-center` runs the center.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Cmd {
-    /// Run the center as a service (as root)
+    /// Run the center as a service (as root or an administrator)
     ///
-    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root). --name, --public-url and --listen go into its settings.
+    /// Install the center as a service that starts with the machine and runs under an account of its own, with MCP over HTTP (Linux with systemd, as root; Windows, in an administrator's terminal). --name, --public-url and --listen go into its settings.
     Install,
     /// Show whether the center runs, its URLs and its machines
     ///
@@ -196,7 +196,7 @@ pub enum Cmd {
     Status,
     /// Show the token that logs in to the web UI
     ///
-    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or as root for the installed center.
+    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or for the installed center as root (on Windows, in an administrator's terminal).
     OwnerToken {
         /// Make a new token in place of the old one, which stops at once
         ///
@@ -248,6 +248,11 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
+    /// Run as the Windows service (the service control manager starts it so)
+    ///
+    /// Run the center as the Windows service `install` registered, with the settings of its `center.env`. Only the service control manager starts it so.
+    #[command(hide = true)]
+    Service,
     /// Print the files of the service this program installs, as JSON (for `update`)
     ///
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
@@ -307,6 +312,40 @@ pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
         }
     }
     given
+}
+
+/// Refuses the state folder of an owner command (`status`, `owner-token`,
+/// `backup`, `restore`) when an administrator's terminal took it from the
+/// variable `NERVE_CENTER_STATE_DIR`. An elevated terminal on Windows takes
+/// the account's own variables, which any unelevated program of the account
+/// writes, so a restore or a backup would go to a folder of that program's
+/// instead of the installed center's; `sudo` drops the variable on Linux
+/// (round 7, security 2). `given` is [`settings_given`]; `elevated` is
+/// whether this is Windows and the process an administrator's.
+pub fn refuse_state_variable(given: &[String], elevated: bool) -> Result<(), String> {
+    if elevated && given.iter().any(|g| g == "NERVE_CENTER_STATE_DIR") {
+        return Err("NERVE_CENTER_STATE_DIR is set in this terminal, and an administrator's terminal takes the variables of the account's other programs too; give the folder with --state-dir, or clear the variable".into());
+    }
+    Ok(())
+}
+
+/// An administrator's `install` takes `--name`, `--public-url` and `--listen`
+/// from the flags only: the variables of the account, which its other
+/// programs may set, would go into the settings file the service trusts and
+/// into the firewall rule (round 9, security 1). `given` is
+/// [`settings_given`]; `elevated` as for [`refuse_state_variable`].
+pub fn refuse_install_variables(given: &[String], elevated: bool) -> Result<(), String> {
+    if !elevated {
+        return Ok(());
+    }
+    for (flag, var) in INSTALL_SETTINGS {
+        if given.iter().any(|g| g == var) {
+            return Err(format!(
+                "{var} is set in this terminal, and an administrator's terminal takes the variables of the account's other programs too; give {flag} instead, or clear the variable"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Args {
@@ -375,10 +414,13 @@ pub fn is_loopback(addr: &str) -> bool {
 
 /// What `nerve-center` says when it is started by hand at a terminal with
 /// MCP on stdin: it would seem to hang, waiting for a harness.
-pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<&'static str> {
-    (*mcp == McpMode::Stdio && stdin_is_terminal).then_some(
-        "nerve-center: waiting for MCP on stdin, as a harness starts it. `sudo nerve-center install` runs it as a service; `nerve-center --help` lists the commands.",
-    )
+pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<String> {
+    (*mcp == McpMode::Stdio && stdin_is_terminal).then(|| {
+        format!(
+            "nerve-center: waiting for MCP on stdin, as a harness starts it. {} runs it as a service; `nerve-center --help` lists the commands.",
+            crate::service::admin_command("install")
+        )
+    })
 }
 
 /// The URL a person or a harness reaches the address `a` at: http on
@@ -404,7 +446,10 @@ mod tests {
     fn a_center_at_a_terminal_says_it_waits_for_mcp() {
         let say = terminal_notice(&McpMode::Stdio, true).unwrap();
         assert!(say.contains("waiting for MCP on stdin"), "{say}");
-        assert!(say.contains("sudo nerve-center install"), "{say}");
+        assert!(
+            say.contains(&crate::service::admin_command("install")),
+            "{say}"
+        );
         assert_eq!(terminal_notice(&McpMode::Stdio, false), None);
         assert_eq!(terminal_notice(&McpMode::Off, true), None);
     }
@@ -472,6 +517,36 @@ mod tests {
             }
         }
         assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// An administrator's terminal does not steer the owner's commands to a
+    /// state folder by a variable; the flag works, and an unelevated start
+    /// (a harness's, a person's) takes the variable as ever.
+    #[test]
+    fn an_elevated_command_takes_the_state_folder_from_the_flag_only() {
+        let var = vec!["NERVE_CENTER_STATE_DIR".to_string()];
+        let flag = vec!["--state-dir".to_string()];
+        let e = refuse_state_variable(&var, true).unwrap_err();
+        assert!(
+            e.contains("NERVE_CENTER_STATE_DIR") && e.contains("--state-dir"),
+            "{e}"
+        );
+        assert!(refuse_state_variable(&flag, true).is_ok());
+        assert!(refuse_state_variable(&[], true).is_ok());
+        assert!(refuse_state_variable(&var, false).is_ok());
+    }
+
+    /// An elevated `install` takes its settings from the flags only.
+    #[test]
+    fn an_elevated_install_takes_its_settings_from_the_flags_only() {
+        for (flag, var) in INSTALL_SETTINGS {
+            let v = vec![var.to_string()];
+            let e = refuse_install_variables(&v, true).unwrap_err();
+            assert!(e.contains(var) && e.contains(flag), "{e}");
+            assert!(refuse_install_variables(&v, false).is_ok());
+            assert!(refuse_install_variables(&[flag.to_string()], true).is_ok());
+        }
+        assert!(refuse_install_variables(&[], true).is_ok());
     }
 
     /// The owner's commands take the installed center's folder where there

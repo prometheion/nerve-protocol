@@ -49,10 +49,26 @@ function centerCommands(c) {
   const main = c.options.filter((o) => !o.advanced);
   const adv = c.options.filter((o) => o.advanced);
   return el("div", {},
-    el("p", { class: "lead" }, "Run them on the center's machine; with sudo for the installed center."),
+    el("p", { class: "lead" }, centerOnWindows()
+      ? "Run them on the center's machine; in an administrator's terminal for the installed center."
+      : "Run them on the center's machine; with sudo for the installed center."),
     el("div", { class: "arg-rows" }, c.commands.flatMap(line)),
     more("center:options", `Options (${main.length})`, el("div", { class: "arg-rows" }, main.flatMap(line))),
     more("center:advanced", `Advanced (${adv.length})`, el("div", { class: "arg-rows" }, adv.flatMap(line))));
+}
+
+// Whether this center runs on Windows, where its service commands run in an
+// administrator's terminal, not with sudo.
+function centerOnWindows() {
+  return !!(state.overview && state.overview.center.os === "windows");
+}
+
+// Where the owner gives machine `n` a folder: the nerve-node command, or on a
+// Windows machine, which has none, the Nerve app's place.
+function folderStep(n) {
+  return n && n.platform === "windows"
+    ? { text: "in the Nerve app on that machine, Permissions › Folders, Add a folder", copy: null }
+    : { text: FOLDER_STEP, copy: FOLDER_STEP };
 }
 
 // Get started: three steps for a new center, each with its button; it goes
@@ -66,8 +82,17 @@ function getStarted(o) {
     itile(done ? "ok" : "info", done ? "ok" : "neutral"), el("span", { class: done ? "meta" : "name" }, text), done ? null : action);
   return section("Get started", "Three steps; this goes once they are done.", null, el("div", { class: "card stack" },
     step(paired, "1. Pair a machine", btn("Pair a machine", "primary push", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "start:pair")),
-    step(folder, "2. Give it a folder: nerve-node folder add ~/project rwx", btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder")),
+    getStartedFolder(o, folder, step),
     step(harness, "3. Connect a harness", el("a", { class: "btn ghost push", href: "#help" }, "How"))));
+}
+
+// The second step of Get started: the command where a Linux machine is
+// paired (or none yet), the Nerve app's place where every one is Windows.
+function getStartedFolder(o, done, step) {
+  const windows = o.nodes.length > 0 && o.nodes.every((n) => n.platform === "windows");
+  return windows
+    ? step(done, "2. Give it a folder: in the Nerve app on that machine, Permissions › Folders")
+    : step(done, `2. Give it a folder: ${FOLDER_STEP}`, btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder"));
 }
 
 // ---- Overview ----
@@ -111,7 +136,9 @@ function harnessCard(mcp) {
     return el("div", { class: "card", id: "harness" }, top,
       el("p", { class: "meta" }, "A harness starts this center itself: put this entry in its MCP settings."),
       el("div", { class: "pair-rows" }, row("JSON", entry)),
-      el("p", { class: "meta" }, "It runs as you: an agent with shell tools can read its owner token. `sudo nerve-center install` keeps it out."));
+      el("p", { class: "meta" }, centerOnWindows()
+        ? "It runs as you: an agent with shell tools can read its owner token. `nerve-center install` in an administrator's terminal keeps it out."
+        : "It runs as you: an agent with shell tools can read its owner token. `sudo nerve-center install` keeps it out."));
   }
   const token = state.harnessToken;
   const make = act(async () => {
@@ -178,10 +205,12 @@ function pairedCard(node) {
   return el("div", { class: "card", id: "paired" },
     el("div", { class: "card-top" }, itile("ok", "ok"), el("span", { class: "name" }, `${node.name} is paired`),
       el("button", { type: "button", class: "btn ghost icon sm push", "aria-label": "Dismiss", "data-focus": "paired:dismiss", onclick: () => { state.paired = null; draw(true); } }, icon("x", "sm"))),
-    el("p", { class: "meta" }, "Next: give it a folder, on that machine:"),
-    el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
-      el("code", { class: "pair-value mono" }, FOLDER_STEP),
-      btn("Copy", "ghost", () => copy(FOLDER_STEP), "copy", "paired:copy"))));
+    folderStep(node).copy
+      ? [el("p", { class: "meta" }, "Next: give it a folder, on that machine:"),
+        el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
+          el("code", { class: "pair-value mono" }, FOLDER_STEP),
+          btn("Copy", "ghost", () => copy(FOLDER_STEP), "copy", "paired:copy")))]
+      : el("p", { class: "meta" }, `Next: give it a folder, ${folderStep(node).text}.`));
 }
 
 function nodeCard(n) {
@@ -1252,7 +1281,9 @@ function pageCaps() {
   return [head_, el("div", { class: "picker-row" }, capsPicker.root),
     !d.online ? banner("warn", "alert", "This machine is offline: the list is what it offered when it was last linked.") : null,
     !d.settings_write ? banner("info", "info", "Read only: this machine has not let this center change its settings.") : null,
-    !d.settings_write ? more(`settings-grant:${d.id}`, "How", el("p", { class: "meta" }, "Its owner lets it with nerve-node center settings on, on that machine.")) : null,
+    !d.settings_write ? more(`settings-grant:${d.id}`, "How", el("p", { class: "meta" }, d.node && d.node.platform === "windows"
+      ? "Its owner lets it in the Nerve app on that machine: Centers, Settings grant."
+      : "Its owner lets it with nerve-node center settings on, on that machine.")) : null,
     section("Offered", "Each unit the agent may be offered here, with what it does and where it comes from.", null,
       d.units.length ? el("div", { class: "list" }, d.units.map(capUnitRow)) : empty("This machine offers no capability to the agent now.", "plug")),
     d.broken.length ? section("Left out", "Units the center does not offer the agent, with the reason.", null,
@@ -1307,7 +1338,9 @@ function addedSection(d) {
 function notOffered(d, e) {
   if (e.left_out || d.units.some((u) => u.name === e.name)) return null;
   const why = e.effect === "sense" || e.effect === "actuate"
-    ? `only the machine's owner turns it on, with nerve-node cap set ${e.name} on --center and this center's name on that machine.`
+    ? (d.node && d.node.platform === "windows"
+      ? `only the machine's owner turns it on, in the Nerve app on that machine: Capabilities, ${e.name}.`
+      : `only the machine's owner turns it on, with nerve-node cap set ${e.name} on --center and this center's name on that machine.`)
     : null;
   if (why) return el("p", { class: "meta" }, `Not offered now: ${why}`);
   return el("p", { class: "meta" }, "Not offered: the machine's policy does not allow it yet.",
@@ -1674,12 +1707,14 @@ async function sealSudo(offer, password) {
 // The machine's sudo switch: on only with a password its `sudo -v` accepts.
 function sudoSwitch(n) {
   const label = el("span", { class: "meta" }, "Sudo: …");
-  const pw = el("input", { type: "password", class: "input", autocomplete: "off", placeholder: "sudo password", "aria-label": `Sudo password of ${n.name}` });
+  // On Windows sudo takes the password of the account commands run as.
+  const what = n.platform === "windows" ? "password of the account commands run as" : "sudo password";
+  const pw = el("input", { type: "password", class: "input", autocomplete: "off", placeholder: what, "aria-label": `Sudo password of ${n.name}` });
   const show = (on) => { label.textContent = on === "on" ? "Sudo: on" : "Sudo: off"; };
   const on = btn("Turn sudo on", "", act(async () => {
     const password = pw.value;
     pw.value = "";
-    if (!password) { notify("Enter the machine's sudo password first.", "error"); return; }
+    if (!password) { notify(`Enter the machine's ${what} first.`, "error"); return; }
     const offer = await api("POST", "/api/nodes/sudo/offer", { id: n.id });
     const sealed = await sealSudo(offer, password);
     const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: true, sealed });
@@ -1703,7 +1738,9 @@ function nodeSettings(n) {
       pill(n.online ? "up" : "down", n.online ? "online" : "offline"), icon("chev", "sm chev")),
     body);
   if (!n.settings_write) {
-    body.append(el("p", { class: "meta" }, "This machine keeps its settings to itself (settings grant off). Change them with nerve-node on the machine."));
+    body.append(el("p", { class: "meta" }, n.platform === "windows"
+      ? "This machine keeps its settings to itself (settings grant off). Change them in the Nerve app on the machine."
+      : "This machine keeps its settings to itself (settings grant off). Change them with nerve-node on the machine."));
     return card;
   }
   if (!n.online) {

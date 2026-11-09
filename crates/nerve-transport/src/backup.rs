@@ -323,14 +323,12 @@ pub fn read_open(file: std::fs::File, name: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Writes a backup file, readable by its owner only (mode 0600 on Unix).
-/// Without `overwrite` an existing file, a link included, is never touched.
-pub fn write_file(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
-    let name = path.display();
-    // A folder that is not there is a typo more often than a wish. One that
-    // this process may not search is there all the same, and is said so:
-    // the caller may be another user than whoever typed the path (root's
-    // command on a service's folders runs as the service's user).
+/// Checks the folder `path` is to be written in. A folder that is not there
+/// is a typo more often than a wish. One that this process may not search is
+/// there all the same, and is said so: the caller may be another user than
+/// whoever typed the path (root's command on a service's folders runs as the
+/// service's user).
+pub fn check_folder(path: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         match std::fs::metadata(dir) {
             Ok(m) if m.is_dir() => {}
@@ -341,6 +339,14 @@ pub fn write_file(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), Stri
             Err(e) => return Err(format!("cannot use the folder {}: {e}", dir.display())),
         }
     }
+    Ok(())
+}
+
+/// Writes a backup file, readable by its owner only (mode 0600 on Unix).
+/// Without `overwrite` an existing file, a link included, is never touched.
+pub fn write_file(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
+    let name = path.display();
+    check_folder(path)?;
     if overwrite {
         // Through a temporary file and a rename: the old backup stays whole
         // until the new one is complete.

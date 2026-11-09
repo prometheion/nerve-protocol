@@ -4,7 +4,10 @@
 //! state folder ([`super::install`]) and runs it from there, on the CPU or
 //! (the Vulkan build) the GPU. The center checks `/v1/models` says
 //! `decisions` and refuses a non-decision model. A server that dies is
-//! restarted with backoff; it ends with the center, with no orphan.
+//! restarted with backoff; it ends with the center. On Windows a job object
+//! ends it also when the center is ended hard ([`with_the_center`]); on
+//! Linux the installed service's cgroup does, while a center a harness
+//! started and that is killed leaves it running.
 //!
 //! Only the center reaches it. On Unix it listens on a socket in the state
 //! folder, which no other account may enter, so no other process can take
@@ -426,6 +429,23 @@ async fn kill_and_wait(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// Puts the server `child` in a job object of the center's own, which ends
+/// every process in it once the center's last handle of it closes: when the
+/// center ends, also by a hard kill that runs no Drop (Task Manager, a
+/// harness that ends it), the server with its model in memory goes too.
+#[cfg(windows)]
+fn with_the_center(
+    child: &tokio::process::Child,
+) -> Result<nerve_service::win::job_object::Job, String> {
+    let at = |e: std::io::Error| format!("cannot hold llama-server to the center: {e}");
+    let job = nerve_service::win::job_object::Job::new().map_err(at)?;
+    let h = child
+        .raw_handle()
+        .ok_or("cannot hold llama-server to the center: it ended already")?;
+    job.assign(h).map_err(at)?;
+    Ok(job)
+}
+
 async fn run_once(
     program: &PathBuf,
     args: &[String],
@@ -454,6 +474,14 @@ async fn run_once(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunEnd::StartFailed(e.to_string()),
+    };
+    #[cfg(windows)]
+    let _job = match with_the_center(&child) {
+        Ok(job) => job,
+        Err(e) => {
+            kill_and_wait(&mut child).await;
+            return RunEnd::StartFailed(e);
+        }
     };
     // Follow stderr into the ring buffer, flagging a download and noting
     // when the server says it listens.
@@ -712,6 +740,24 @@ PY
 
 #[cfg(test)]
 mod tests {
+    /// The job a server runs in ends it once the center lets it go, as a
+    /// hard kill of the center lets it go: no orphan keeps the model in
+    /// memory.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_server_ends_with_the_center_s_job() {
+        let cmd = crate::win_host::system_program("ping.exe");
+        let mut child = tokio::process::Command::new(cmd)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let job = with_the_center(&child).unwrap();
+        drop(job);
+        let ended = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
+        assert!(ended.is_ok(), "the server outlived the center's job");
+    }
+
     use super::*;
 
     #[test]
