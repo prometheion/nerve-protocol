@@ -329,6 +329,32 @@ impl StalePassword {
     }
 }
 
+/// What a sudo command's refused logon tells the owner to do.
+pub const SUDO_AGAIN: &str = "turn sudo off and on again with the password you have now";
+
+/// [`StalePassword::attempt`] for the password `sudo on` kept, which is a
+/// second copy of the owner's and goes stale when that changes (saving the
+/// new one under Account for commands renews the other copy only). It is
+/// keyed on the account and a hash of the password, so the memory holds
+/// no password and `sudo on` with another one is tried anew.
+pub fn sudo_attempt<T>(
+    stale: &mut StalePassword,
+    name: &str,
+    password: &str,
+    logon: impl FnOnce() -> Result<T, (String, bool)>,
+) -> Result<T, String> {
+    let key = nerve_transport::keys::sha256_hex(&secret(name, password));
+    stale.attempt(key.as_bytes(), || {
+        logon().map_err(|(why, wrong)| {
+            if wrong {
+                (format!("{why}; {SUDO_AGAIN}"), true)
+            } else {
+                (why, false)
+            }
+        })
+    })
+}
+
 /// A new password for `nerve`, which nobody types: the service control
 /// manager keeps it. It has the four kinds of characters a complexity
 /// rule asks for.
@@ -966,6 +992,41 @@ pub(crate) mod tests {
     use nerve_policy::audit::AuditLog;
     use nerve_policy::settings::SettingsStore;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn a_stale_sudo_password_is_tried_once_until_sudo_is_turned_on_again() {
+        let mut stale = StalePassword::default();
+        let tries = Cell::new(0);
+        let wrong = || {
+            tries.set(tries.get() + 1);
+            Err::<(), _>(("the password of alice is wrong".to_string(), true))
+        };
+        for _ in 0..10 {
+            let e = sudo_attempt(&mut stale, "alice", "old", wrong).unwrap_err();
+            assert!(e.ends_with(SUDO_AGAIN), "{e}");
+        }
+        assert_eq!(tries.get(), 1, "ten sudo commands, one wrong password");
+        // `sudo on` kept another password: tried once.
+        for _ in 0..3 {
+            assert!(sudo_attempt(&mut stale, "alice", "new", wrong).is_err());
+        }
+        assert_eq!(tries.get(), 2);
+        // The password that works is used at every command.
+        assert!(sudo_attempt(&mut stale, "alice", "right", || Ok(())).is_ok());
+        assert!(sudo_attempt(&mut stale, "alice", "right", || Ok(())).is_ok());
+        // A failure that is not the password's is tried again.
+        for _ in 0..3 {
+            let busy = || {
+                tries.set(tries.get() + 1);
+                Err::<(), _>(("busy".to_string(), false))
+            };
+            assert_eq!(
+                sudo_attempt(&mut stale, "alice", "right", busy),
+                Err("busy".to_string())
+            );
+        }
+        assert_eq!(tries.get(), 5);
+    }
 
     #[test]
     fn a_stale_password_is_tried_once_per_file() {

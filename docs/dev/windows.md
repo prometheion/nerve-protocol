@@ -319,8 +319,11 @@ folder you add gives the commands no access, and one you remove or close
 stops the pairing's commands, until the node can log on as you again (the
 log says so). The node tries a stored password that failed once only, until
 you save a new one (or the service restarts), so its calls cannot run up the
-wrong-password count that locks your account. A Microsoft account works with
-its Microsoft password, which can change outside the machine.
+wrong-password count that locks your account. [Sudo](#sudo-on-windows) keeps
+a copy of your password of its own, which saving the new one does not renew:
+the node tries it once too, and sudo commands fail until you turn sudo off
+and on again. A Microsoft account works with its Microsoft password, which
+can change outside the machine.
 
 To start a process as another account, the service keeps two privileges,
 `SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows
@@ -764,6 +767,9 @@ of `nerve-run`, which is no administrator, never get them. So:
   Unlike on Linux, sudo stays on when the service restarts. Turning it off
   removes the file, and uninstalling removes it too. Neither takes you out
   of Administrators. Turning it off reminds you.
+- If your password changes, turn sudo off and on again: the node tries the
+  password it kept once, not at every command, and a sudo command fails
+  until then.
 - No sudo command runs while the pairing's network is off.
 
 In the [desktop app](desktop.md), the **Sudo** section of **Permissions**

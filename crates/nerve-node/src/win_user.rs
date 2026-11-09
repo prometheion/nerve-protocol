@@ -541,10 +541,22 @@ pub fn has_admins(t: &Token) -> io::Result<bool> {
     }
 }
 
+/// The sudo password of the owner that did not work, so that every sudo
+/// command does not log on with it again (see [`crate::winsvc::sudo_attempt`]).
+static STALE_SUDO: Mutex<crate::winsvc::StalePassword> =
+    Mutex::new(crate::winsvc::StalePassword::default_const());
+
 /// The token a sudo command of `name` starts with: its batch logon with
-/// `password`, which must hold the Administrators group.
+/// `password`, which must hold the Administrators group. A password that
+/// Windows refused is not tried again until `sudo on` keeps another: every
+/// wrong one counts toward locking the account.
 pub fn sudo_token(name: &str, password: &str) -> Result<Token, String> {
-    let t = batch_logon(name, password)?;
+    let t = crate::winsvc::sudo_attempt(
+        &mut nerve_transport::sync::lock(&STALE_SUDO),
+        name,
+        password,
+        || logon_as(name, password, LOGON32_LOGON_BATCH),
+    )?;
     match has_admins(&t) {
         Ok(true) => Ok(t),
         Ok(false) => Err(crate::winsudo::not_admin(name)),
