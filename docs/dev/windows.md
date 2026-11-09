@@ -587,10 +587,14 @@ runs in the container as well, unless the pairing runs as you.
   not exist, and the container reaches no network folder by its grants.
 - A folder without a flag inside a granted folder (a folder a pairing has
   with `w`, and one inside it it has with none) is closed to that pairing's
-  container: the node gives it a denying entry, which counts before what it
-  inherits from the folder around it. Without it, it would inherit the
-  entry of the folder around. Where the node cannot close it, that
-  pairing's commands do not run. A file in it with another name elsewhere
+  container. Windows does not hold a container to an entry that denies
+  it, only to the entries that allow it something, so the node takes the
+  entry the folder inherits from the folder around it off, there and below
+  it, and keeps a denying entry of the container's as the mark of the
+  closed folder. A tool that passes the list of the folder around it down
+  again (Explorer, `icacls`) puts the inherited entry back: the node's next
+  sync (with the pairing's next call) takes it off again. Where the node
+  cannot close it, that pairing's commands do not run. A file in it with another name elsewhere
   (a hard link) is closed under every name (see hard links below).
   A command may rename a closed folder through the rights of the folder
   around it: it stays closed where it went. Where it went to a place the
