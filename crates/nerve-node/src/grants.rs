@@ -684,26 +684,48 @@ struct Judge<'a> {
     /// The place the names are compared with; one that cannot be resolved
     /// holds no name, so none gets the change as any file.
     real_dir: Option<PathBuf>,
+    /// Whether a folder closed to any container lies inside the folder
+    /// ([`Judge::verdict`]).
+    closed_inside: bool,
     links: Links<'a>,
 }
 
 #[cfg(any(windows, test))]
 impl<'a> Judge<'a> {
     fn new(dir: &Path, links: Links<'a>) -> Judge<'a> {
+        let real_dir = nerve_policy::paths::resolve(dir).ok();
+        let inside = |p: &Path| {
+            [Some(dir), real_dir.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|d| within(p, d) && !within(d, p))
+        };
+        let closed_inside = links
+            .want
+            .iter()
+            .chain(links.moved)
+            .any(|g| g.access == Access::NONE && inside(&g.path));
         Judge {
-            real_dir: nerve_policy::paths::resolve(dir).ok(),
+            real_dir,
+            closed_inside,
             links,
         }
     }
 
     /// What a file with `n` names, `all` of them listed, owned by `owner`
-    /// (a SID), gets.
+    /// (a SID), gets. Where a folder closed to a container lies inside the
+    /// folder, no file gets the change as any file: a command may rename
+    /// that closed folder (through the rights of the folder around it)
+    /// while the walk goes on, and a file linked across its edge would be
+    /// judged by names the folder no longer has, and take the whole list of
+    /// a folder around it (write included). Capped, it gets read and run at
+    /// most.
     fn verdict(&self, n: u64, all: &[PathBuf], owner: Option<&str>) -> Linked {
         let containers = self.links.containers;
         let shut = all
             .iter()
             .any(|name| containers.iter().any(|c| self.links.shut.closes(c, name)));
-        if !shut && self.holds(n, all) {
+        if !shut && !self.closed_inside && self.holds(n, all) {
             return Linked::Full(containers.to_vec());
         }
         Linked::Capped(Cap {
@@ -915,6 +937,61 @@ pub fn sync(file: &Path, want: &[Grant], folders: &mut impl Folders) -> Synced {
     sync_shut(file, want, &Shut::default(), folders)
 }
 
+/// Whether the object with the recorded grant `old` is still at its path,
+/// `here` being what a look there saw. A record without the object's id
+/// takes the one there; one that cannot be told counts as there (a change
+/// there fails in turn and keeps it).
+fn at_path(old: &Grant, here: &io::Result<Option<Look>>) -> bool {
+    match here {
+        Ok(Some(l)) => old.id.is_none() || l.id.is_none() || old.id == l.id,
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+/// Whether every grant the record of the node at `paths` holds is still on
+/// its object at the path recorded, looked at as a sync does but without
+/// changing or walking anything (so while another sync walks): a granted
+/// or closed folder that was moved, removed or made again since is not. A
+/// command that would wait for a long walk may go on with the answer of the
+/// last sync only while this holds; what moved on the disk is for a sync in
+/// its turn (a take-off of the moved grant, the refusal for a closed folder
+/// a command moved). `owner` as in [`apply`]. Not on Windows, no grant is
+/// on a folder.
+pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>) -> bool {
+    #[cfg(windows)]
+    {
+        // Logged on once for all the looks.
+        let owner = owner.filter(|_| run_sid(paths).is_some());
+        let Ok(_as) = act_as(owner) else {
+            return false;
+        };
+        in_place_with(
+            &record_file(paths),
+            &mut Acls {
+                report: &mut |_| {},
+                owner: None,
+            },
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (paths, owner);
+        true
+    }
+}
+
+/// [`in_place`] for the record `file`, on `folders`.
+#[cfg(any(windows, test))]
+fn in_place_with(file: &Path, folders: &mut impl Folders) -> bool {
+    let Ok(record) = read_record(file) else {
+        return false;
+    };
+    record
+        .iter()
+        .all(|old| at_path(old, &folders.look(&old.path, &old.container, old.access)))
+}
+
 /// [`sync`], with what closes a name of a file with more than one name
 /// besides the grants (`shut`).
 fn sync_shut(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Folders) -> Synced {
@@ -944,14 +1021,6 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
         Err(e) => return out.not_known(e),
     };
     let mut out = out;
-    // Whether the object with a recorded grant is still at its path. A
-    // record without the object's id takes the one there; one that cannot
-    // be told counts as there (a change there fails in turn and keeps it).
-    let at_path = |old: &Grant, here: &io::Result<Option<Look>>| match here {
-        Ok(Some(l)) => old.id.is_none() || l.id.is_none() || old.id == l.id,
-        Ok(None) => false,
-        Err(_) => true,
-    };
     // Each recorded grant's object, looked up before anything changes: and
     // where one is not at its path, where it is now.
     let mut seen = Vec::with_capacity(record.len());
@@ -3309,6 +3378,75 @@ mod tests {
                 assert_eq!(f.may(n, "c1"), None, "{flags}: {n}");
             }
         }
+    }
+
+    /// A file linked across the edge of a closed folder is judged by the
+    /// names it has when the walk reaches it, and a command may rename the
+    /// closed folder meanwhile (through the rights of the folder around
+    /// it). So where a closed folder lies inside the walked one, no such
+    /// file gets the change as any file, which would give it the whole list
+    /// of the folder around the closed one, write included: it gets read
+    /// and execute at most. Without a closed folder inside, it does.
+    #[test]
+    fn a_file_linked_across_a_closed_folders_edge_is_capped() {
+        let access = |a: &str| Some(Access::parse(a).unwrap());
+        for (closed, rights) in [("/w/proj/vault", "r"), ("/w/other/vault", "rw")] {
+            let d = tempfile::tempdir().unwrap();
+            let file = d.path().join("grants.json");
+            let mut f = Fake::default();
+            for p in ["/w/proj", "/w/proj/vault", "/w/other", "/w/other/vault"] {
+                f.make(p);
+            }
+            // The closed folder was renamed after the sync looked at it.
+            let names = ["/w/proj/v2/repo/obj", "/w/proj/work/obj"];
+            f.link(&names);
+            let want = [grant("c1", "/w/proj", "rw"), grant("c1", closed, "")];
+            let s = sync(&file, &want, &mut f);
+            assert!(s.errors.is_empty() && s.unclosed.is_empty(), "{s:?}");
+            for n in names {
+                assert_eq!(f.may(n, "c1"), access(rights), "{closed}: {n}");
+            }
+        }
+    }
+
+    /// A command goes on with the last sync's answer during a walk only
+    /// while every recorded grant is where it was: a granted or closed
+    /// folder moved, or removed and made again, is for a sync to react to.
+    #[test]
+    fn grants_are_in_place_until_a_folder_moved_or_was_made_again() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        for p in ["/w/proj", "/w/proj/vault", "/w/other"] {
+            f.make(p);
+        }
+        assert!(in_place_with(&file, &mut f), "no record: nothing to move");
+        let want = [
+            grant("c1", "/w/proj", "rw"),
+            grant("c1", "/w/proj/vault", ""),
+            grant("c1", "/w/other", "r"),
+        ];
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert!(in_place_with(&file, &mut f));
+        // A closed folder renamed.
+        f.mv("/w/proj/vault", "/w/proj/v2");
+        assert!(!in_place_with(&file, &mut f));
+        f.mv("/w/proj/v2", "/w/proj/vault");
+        assert!(in_place_with(&file, &mut f));
+        // A closed folder removed and made again.
+        f.rm("/w/proj/vault");
+        f.make("/w/proj/vault");
+        assert!(!in_place_with(&file, &mut f));
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert!(in_place_with(&file, &mut f));
+        // A granted folder moved away.
+        f.mv("/w/other", "/w/elsewhere");
+        assert!(!in_place_with(&file, &mut f));
+        // A record that cannot be read tells nothing.
+        std::fs::write(&file, "not json").unwrap();
+        assert!(!in_place_with(&file, &mut f));
     }
 
     /// A name in the pairing's protected list, or in a folder of it

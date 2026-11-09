@@ -536,12 +536,16 @@ runs in the container as well, unless the pairing runs as you.
   it.
 - The running node watches each granted folder for new names and walks it
   again a few seconds after they stop changing (at most 30 seconds while
-  they go on), and walks every granted folder when it starts: what you or
-  an agent move, install or clone into a granted folder gets its entry by
-  itself. It runs one such walk at a time and leaves a pause after it twice
-  as long as the walk took, so a command that makes new names all the time
-  gets a walk every few minutes at most on a big folder; a command of a
-  pairing does not wait for the walk. A walk that fails part way is
+  they go on), and walks every granted folder once after it starts: what
+  you or an agent move, install or clone into a granted folder gets its
+  entry by itself. It runs one such walk at a time and leaves a pause after
+  it twice as long as the walk took, so a command that makes new names all
+  the time gets a walk every few minutes at most on a big folder. A command
+  of a pairing does not wait for such a walk (the start walk too) as long
+  as the config is unchanged and every granted and closed folder is still
+  where the node recorded it; when one was moved or made again meanwhile,
+  the command waits for the walk and the sync that reacts to it. A walk
+  that fails part way is
   finished by the next sync (the grant stays marked), and one that could
   not even be marked (the record could not be written) is walked at the
   next start or by **Sync folders**.
@@ -761,13 +765,19 @@ runs in the container as well, unless the pairing runs as you.
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)
     instead.
-  - A closed folder that a command renames while the node changes the
-    folders' entries may leave a file linked across its edge (by you)
-    readable through the other name until the node walks that folder again.
-    A command's own renames start such a walk (a new name in the granted
-    folder wakes the watch), so it can time the window. Keep a repository
-    you hard-link across a closed folder's edge (`git clone --local`) out
-    of the folders a pairing writes.
+  - Inside a granted folder that holds a closed folder, a file with more
+    than one name gets read and run at most for the pairing, not write,
+    whatever the folder around gives: a command may rename the closed
+    folder while a walk goes on, and the walk judges a file by the names it
+    has when it gets there. For the same reason a closed folder that a
+    command renames during a walk may leave a file linked across its edge
+    (by you) readable through the other name until the node walks that
+    folder again, which comes no sooner than twice the walk's length
+    later. A command's own renames start such a walk (a new name in the
+    granted folder wakes the watch), and one rename a few seconds after a
+    new name is enough, so it can time the window. Keep a repository you
+    hard-link across a closed folder's edge (`git clone --local`) out of
+    the folders a pairing writes.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it

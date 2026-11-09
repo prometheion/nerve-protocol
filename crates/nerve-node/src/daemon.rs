@@ -1021,16 +1021,13 @@ impl Shared {
             let home = self.rules_home(&cfg);
             (cfg, home)
         };
-        let owner = self
-            .service
-            .then(|| self.owner_account(&self.config()).ok().flatten())
-            .flatten();
+        let owner = self.grants_owner();
         #[cfg(windows)]
         let watch = || {
-            self.grant_watch
-                .follow(&crate::grants::granted_folders(&self.paths), || {
-                    crate::grants::act_as(owner.as_ref())
-                })
+            self.grant_watch.follow(
+                || crate::grants::granted_folders(&self.paths),
+                || crate::grants::act_as(owner.as_ref()),
+            )
         };
         #[cfg(windows)]
         watch();
@@ -1045,14 +1042,26 @@ impl Shared {
         synced
     }
 
+    /// The installed service's owner, as whom the folders' entries are read
+    /// and changed (crate::grants::apply); none on a node run by hand.
+    fn grants_owner(&self) -> Option<crate::service::Account> {
+        self.service
+            .then(|| self.owner_account(&self.config()).ok().flatten())
+            .flatten()
+    }
+
     /// [`Shared::sync_grants`] for a command or a file call of a pairing: it
-    /// does not wait for a walk of the folders where names changed
-    /// (crate::grant_watch) when the config is the one the last sync saw,
-    /// and takes that sync's answer.
+    /// does not wait for a walk of the watch (crate::grant_watch) when the
+    /// config is the one the last sync saw and every recorded grant is still
+    /// where it was (crate::grants::in_place), and takes that sync's answer.
+    /// A folder moved or made again meanwhile is for the sync to react to,
+    /// which the command waits for.
     pub fn sync_grants_for_call(&self) -> crate::grants::Synced {
         match self.grant_watch.walking(self.config().version) {
-            Some(synced) => synced,
-            None => self.sync_grants(),
+            Some(synced) if crate::grants::in_place(&self.paths, self.grants_owner().as_ref()) => {
+                synced
+            }
+            _ => self.sync_grants(),
         }
     }
 

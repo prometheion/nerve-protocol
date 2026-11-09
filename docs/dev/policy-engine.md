@@ -458,20 +458,28 @@ center's local name):
   `grants::Rewalk::At`), which marks their grants unfinished inside its turn
   (`mark_walks`, as `folder sync` does for every grant) and so walks each into
   every folder below it, after any change of the config before it. The first
-  sync after the start walks every grant (`Rewalk::Every`), as on Linux. The
+  sync after the start is a plain one (`Rewalk::None`, so a command finds its
+  answer at once); the walk of every grant (`Rewalk::Every`, as on Linux)
+  follows it as a walk of the watch (`Pending::start_walk`). The
   watches follow the record before and after each sync; a folder that cannot
   be watched is logged once and left to the other syncs while it stays
-  granted, and one whose watch ended or failed to start is opened again at
-  the next follow. What the watch holds stays bounded: the supervisor starts
+  granted, and one whose watch ended is opened again at the next follow (one
+  that failed to start twice in a row is left alone, `Starts`). The folders
+  to follow are read from the record under the watches' lock, so the last
+  follow sees the newest record. What the watch holds stays bounded: the supervisor starts
   one grant sync at a time (`Watch::next_sync`, the guard `Began`), the
-  changes meanwhile join the next walk, and a pause follows each sync, twice
-  as long as it took (`Pending::end`), so a command that makes names all the
-  time cannot keep the sync's turn for more than a third of the time. A
-  command of a pairing (`Shared::sync_grants_for_call`) does not wait for a
-  walk the watch started when the config is the one the last finished sync
-  saw (`Watch::walking`): it takes that sync's answer (`Synced::kept`, what
-  decides a refusal), since the walk only caps files linked in and adds
-  inherited entries; with a newer config it waits for the turn. A walk that
+  changes meanwhile join the next walk, and a pause follows each walk, twice
+  as long as it took (`Pending::end`; a sync that walks nothing leaves none),
+  so a command that makes names all the time cannot keep the sync's turn for
+  more than a third of the time. A command of a pairing
+  (`Shared::sync_grants_for_call`) does not wait for a walk of the watch when
+  the config is the one the last finished sync saw (`Watch::walking`) and
+  every recorded grant is still at its path with its object
+  (`grants::in_place`, a look at each, no change): it takes that sync's
+  answer (`Synced::kept`, what decides a refusal), since the walk only caps
+  files linked in and adds inherited entries. A newer config, or a folder
+  moved or made again since (which the sync in its turn takes off or
+  refuses), waits for the turn. A walk that
   fails part way leaves its grant `unfinished`, which the next sync walks.
   NTFS refuses to rename or move a folder with an open handle below it, so
   the handle on a granted folder (and a walk's frames) holds the folders
@@ -513,7 +521,9 @@ center's local name):
     node's own entries of an earlier cap go (`acl::uncapped`). That compares
     grant paths, while a grant's entry goes with its folder, so a sync in
     which a recorded grant is not at its path (moved, or it cannot be told)
-    gives no `Full` at all. A command that may make a folder there sets its
+    gives no `Full` at all, and neither does a changed folder with a closed
+    grant inside it (`Judge::closed_inside`): a command may rename that
+    folder while the walk goes on, and the names compared would be stale. A command that may make a folder there sets its
     security descriptor at creation, without `WRITE_DAC`, and the change
     passes an entry of its own there (read for its container) down to a
     file it linked into that folder; every container that may write there
