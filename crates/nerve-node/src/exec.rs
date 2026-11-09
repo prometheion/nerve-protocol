@@ -1032,7 +1032,9 @@ fn settle_by(
             );
         }
     }
-    let path = &long_names(path);
+    // The path is taken as given: the walk writes out an 8.3 short name as
+    // it gets to it, behind the owner's links it judged, so nothing looks
+    // through a link to another machine before the walk stops there.
     // A link to nothing could point anywhere once something is made there.
     if let Err(e @ nerve_policy::paths::PathError::DanglingSymlink(_)) = resolve(path) {
         return Settled::Refused(e.to_string());
@@ -1355,36 +1357,6 @@ fn subst_target(top: &Path) -> Option<PathBuf> {
     let target = String::from_utf16_lossy(first);
     let path = target.strip_prefix("\\??\\")?;
     (path.as_bytes().get(1) == Some(&b':')).then(|| PathBuf::from(path))
-}
-
-/// `p` with the short (8.3) names in it written out, as the final path of
-/// what it names has them (Windows; the existing part of `p`, links stay as
-/// they are); `p` as it is elsewhere, for a relative path, and where that
-/// fails.
-fn long_names(p: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if !p.is_absolute() {
-            return p.to_path_buf();
-        }
-        // The longest part that exists is expanded, the rest follows as it is.
-        let mut head = p;
-        let mut tail = Vec::new();
-        while std::fs::symlink_metadata(head).is_err() {
-            let (Some(parent), Some(name)) = (head.parent(), head.file_name()) else {
-                return p.to_path_buf();
-            };
-            tail.push(name);
-            head = parent;
-        }
-        let mut out = nerve_sandbox::appcontainer::long_path(head);
-        out.extend(tail.iter().rev());
-        out
-    }
-    #[cfg(not(windows))]
-    {
-        p.to_path_buf()
-    }
 }
 
 /// The first place the resolution of `path` lands at that `wanted` accepts,
@@ -5146,6 +5118,32 @@ mod windows_tests {
         };
         assert_ne!(next.0, taken.0);
         assert!(Path::new(&format!("{}\\", next.0)).exists());
+    }
+
+    /// `folder add` through an owner's link to another machine is refused
+    /// where the walk gets to the link, before anything looks through it:
+    /// writing out the path's short names first would follow the link and
+    /// connect there (an address that answers nothing makes that take as
+    /// long as the connection's timeout).
+    #[test]
+    fn a_folder_behind_a_link_to_another_machine_is_refused_without_a_connection() {
+        let d = tempfile::tempdir().unwrap();
+        let root = canonical_tmp(&d);
+        let link = root.join("links").join("far");
+        let Some(()) = symlink_to(&link, "\\\\192.0.2.1\\share") else {
+            return;
+        };
+        let start = std::time::Instant::now();
+        let settled = settle(&NodeConfig::default(), &root, &link.join("inner"));
+        let Settled::Refused(why) = settled else {
+            panic!("{settled:?}")
+        };
+        assert!(why.contains("another machine"), "{why}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "it took {:?}",
+            start.elapsed()
+        );
     }
 
     /// A symlink to a volume root (`\\?\Volume{guid}\…`) is walked as the

@@ -705,7 +705,8 @@ pub(crate) struct Shared {
     pub config_caps: bool,
     pub exe: Option<PathBuf>,
     pub home: PathBuf,
-    /// Which protected list applies, and where its system folders are.
+    /// Which protected list applies, and where its system folders are
+    /// ([`Shared::platform`]).
     pub platform: nerve_policy::protected::Platform,
     pub confinement: Confinement,
     /// Whether the node can keep a command off the network with its filter
@@ -1283,6 +1284,18 @@ impl Shared {
             crate::account::can_switch(),
             cached,
         )
+    }
+
+    /// Which protected list applies, and where its system folders are: on
+    /// the installed Windows service the owner's, read anew each time
+    /// (crate::paths::platform_for), as the owner's Documents folder can be
+    /// read only while the owner's registry is loaded.
+    pub fn platform(&self) -> nerve_policy::protected::Platform {
+        if cfg!(windows) && self.service {
+            crate::paths::platform_for(&self.paths)
+        } else {
+            self.platform.clone()
+        }
     }
 
     /// The `~` of the folders, the rules and the protected list: the

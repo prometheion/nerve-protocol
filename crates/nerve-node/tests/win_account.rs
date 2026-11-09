@@ -7,8 +7,13 @@
 //!   processes, nor `nerve-run`'s own profile, nor the node's pipes, by a
 //!   command or by the node's file calls (read as its container, Q4);
 //! - a folder without flags inside a `w` folder is closed;
+//! - a project whose files are hard links to a store outside it gets its
+//!   `w` grant, and those files are read but not written, through either
+//!   name; closed with a folder that holds them, under both names;
 //! - a folder in the owner's profile that holds a protected entry gives
 //!   its other entries, and the entry stays closed;
+//! - the owner's Documents folder redirected elsewhere (as by OneDrive's
+//!   backup) keeps PowerShell's profiles there protected;
 //! - allowlist mode runs as `nerve-run` in its container, and `--as-owner`
 //!   as the owner;
 //! - a folder outside the owner's profile whose files `nerve-run` made
@@ -518,45 +523,174 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         }
     }
 
-    // A folder taken from a pairing whose entry a hard link holds on (the
-    // take-off would reach the file's other name): the pairing's commands
-    // stop, and so do the node's reads as its container, which the entry
-    // would still let through, until the link is gone.
-    let held = base.join("held");
-    std::fs::create_dir_all(&held).unwrap();
-    std::fs::write(held.join("f.txt"), "held").unwrap();
+    // A project whose files are linked to a store outside it, as pnpm's
+    // `node_modules`: its `rw` grant goes on, and the commands run. The
+    // linked file reads, but is written through neither name, and the store
+    // gets no write entry for the container; the project's own files are
+    // written. A command cannot link a file it may not write.
+    let (proj, store) = (base.join("proj"), base.join("store"));
+    let (in_proj, in_store) = (
+        proj.join("node_modules").join("pkg").join("index.js"),
+        store.join("pkg").join("index.js"),
+    );
+    for f in [&in_proj, &in_store] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    }
+    std::fs::write(&in_store, "from the store").unwrap();
+    std::fs::hard_link(&in_store, &in_proj).unwrap();
     nerve_node::cli::edit(&paths, |cfg| {
         let ea = cfg.center_mut(A).expect("paired");
-        ea.policy.folders.push(folder(&held, "rw"));
+        ea.policy.folders.push(folder(&proj, "rw"));
         Ok(())
     })
     .await
     .expect("the owner's edit");
-    let r = run_in(&mut conn_a, &held, "Get-Content f.txt")
-        .await
-        .expect("a's command in the folder");
-    assert!(out(&r).contains("held"), "{r}");
-    let other_name = base.join("other-name.txt");
-    std::fs::hard_link(held.join("f.txt"), &other_name).unwrap();
-    nerve_node::cli::edit(&paths, |cfg| {
-        let ea = cfg.center_mut(A).expect("paired");
-        ea.policy.folders.retain(|f| Path::new(&f.path) != held);
-        Ok(())
-    })
+    let r = run_in(
+        &mut conn_a,
+        &proj,
+        "Get-Content node_modules\\pkg\\index.js; Set-Content -Path own.txt -Value mine; Get-Content own.txt",
+    )
     .await
-    .expect("the owner's edit");
-    let read = json!({"path": nerve_policy::paths::to_wire(&held.join("f.txt"))});
-    let e = call(&mut conn_a, "fs", "read", read)
-        .await
-        .expect_err("a's read of the folder taken from it");
-    assert_eq!(e.kind(), ErrorCode::Unavailable, "{}", e.message);
-    let e = run_in(&mut conn_a, &a, "exit 0").await.unwrap_err();
-    assert_eq!(e.kind(), ErrorCode::Unavailable, "{}", e.message);
-    std::fs::remove_file(&other_name).unwrap();
-    let r = run_in(&mut conn_a, &a, "exit 0")
-        .await
-        .expect("a's command once the link is gone");
+    .expect("a's command in the linked project");
     assert_eq!(r["exit_code"], 0, "{r}");
+    assert!(
+        out(&r).contains("from the store") && out(&r).contains("mine"),
+        "{r}"
+    );
+    for (what, script) in [
+        (
+            "a write through the project's name",
+            format!("Add-Content -Path '{}' -Value x", in_proj.display()),
+        ),
+        (
+            "a write through the store's name",
+            format!("Add-Content -Path '{}' -Value x", in_store.display()),
+        ),
+        (
+            "a link to the store's file",
+            format!(
+                "New-Item -ItemType HardLink -Path '{}' -Target '{}'",
+                proj.join("again.js").display(),
+                in_store.display()
+            ),
+        ),
+    ] {
+        let r = run_in(
+            &mut conn_a,
+            &proj,
+            &format!("{script}; exit [int](-not $?)"),
+        )
+        .await
+        .expect(what);
+        assert_ne!(r["exit_code"], 0, "{what}: {r}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&in_store).unwrap(),
+        "from the store"
+    );
+    assert!(!proj.join("again.js").exists());
+    // The container's entries on the file: none allows a write.
+    let listed = Command::new("icacls").arg(&in_store).output().unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let allows: Vec<&str> = listed
+        .lines()
+        .filter(|l| l.contains("S-1-15-2-") && !l.contains("(DENY)"))
+        .collect();
+    assert!(!allows.is_empty(), "{listed}");
+    for l in &allows {
+        assert!(
+            !["(W", ",W", "(M)", "(F)"].iter().any(|w| l.contains(w)),
+            "{listed}"
+        );
+    }
+    // A file a command links from a store of its own: pnpm and uv keep
+    // theirs in LOCALAPPDATA, which for a command is a folder below
+    // `nerve-run`'s profile that the owner, as whom the node changes the
+    // folders, may not open. A later change of the project's flags walks it
+    // all the same (the node finds that name as `nerve-run`), and the
+    // commands go on running.
+    let r = run_in(
+        &mut conn_a,
+        &proj,
+        "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; New-Item -ItemType Directory -Force -Path $s | Out-Null; Set-Content -Path (Join-Path $s 'f.js') -Value stored; New-Item -ItemType HardLink -Path linked.js -Target (Join-Path $s 'f.js') | Out-Null; exit [int](-not $?)",
+    )
+    .await
+    .expect("a's link from its own store");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    for flags in ["rwx", "rw"] {
+        nerve_node::cli::edit(&paths, |cfg| {
+            let ea = cfg.center_mut(A).expect("paired");
+            for f in &mut ea.policy.folders {
+                if Path::new(&f.path) == proj {
+                    f.access = Access::parse(flags).unwrap();
+                }
+            }
+            Ok(())
+        })
+        .await
+        .expect("the owner's edit");
+        let r = run_in(
+            &mut conn_a,
+            &proj,
+            "Get-Content linked.js; exit [int](-not $?)",
+        )
+        .await
+        .expect(flags);
+        assert_eq!(r["exit_code"], 0, "{flags}: {r}");
+        assert!(out(&r).contains("stored"), "{flags}: {r}");
+    }
+    // Closing the folder that holds it: the commands go on running, and
+    // the file is closed under both names, also after the project's
+    // flags change (a change of the folder around it) and the next sync.
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy
+            .folders
+            .push(folder(&proj.join("node_modules"), ""));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    for round in ["closed", "changed around it"] {
+        let r = run_in(&mut conn_a, &proj, "Get-Content own.txt")
+            .await
+            .expect(round);
+        assert!(out(&r).contains("mine"), "{round}: {r}");
+        for name in [&in_proj, &in_store] {
+            let r = run_in(
+                &mut conn_a,
+                &proj,
+                &format!("Get-Content '{}'; exit [int](-not $?)", name.display()),
+            )
+            .await
+            .expect(round);
+            assert_ne!(r["exit_code"], 0, "{round}: {name:?}: {r}");
+            assert!(
+                !out(&r).contains("from the store"),
+                "{round}: {name:?}: {r}"
+            );
+        }
+        nerve_node::cli::edit(&paths, |cfg| {
+            let ea = cfg.center_mut(A).expect("paired");
+            for f in &mut ea.policy.folders {
+                if Path::new(&f.path) == proj {
+                    f.access = Access::parse("rwx").unwrap();
+                }
+            }
+            Ok(())
+        })
+        .await
+        .expect("the owner's edit");
+    }
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy
+            .folders
+            .retain(|f| !Path::new(&f.path).starts_with(&proj));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
 
     // A folder in the owner's profile that holds a protected entry: the
     // service's account may not list it, so the node splits it around the
@@ -594,6 +728,105 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     .expect("a's read of the protected entry");
     assert_ne!(r["exit_code"], 0, "{r}");
     assert!(!out(&r).contains("kept"), "{r}");
+
+    // The owner's Documents folder redirected (as OneDrive's backup does):
+    // PowerShell's profiles there are protected as in the usual place, read
+    // from the owner's registry by the service. A granted folder there is
+    // given as its other entries.
+    let docs =
+        PathBuf::from(std::env::var("SystemDrive").unwrap_or("C:".into()) + "\\nerve-w2-docs");
+    let _ = std::fs::remove_dir_all(&docs);
+    owners_folder(&docs, &owner_sid);
+    std::fs::create_dir(docs.join("WindowsPowerShell")).unwrap();
+    std::fs::write(docs.join("WindowsPowerShell").join("profile.ps1"), "# mine").unwrap();
+    std::fs::write(docs.join("beside.txt"), "before").unwrap();
+    load_profile(logon(&owner, &owner_password, 2), &owner);
+    let folders_key = format!(
+        "HKU\\{owner_sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+    );
+    let reg = |args: &[&str]| {
+        let o = Command::new("reg").args(args).output().unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let (_, before) = reg(&["query", &folders_key, "/v", "Personal"]);
+    let before = before
+        .lines()
+        .find(|l| l.contains("Personal"))
+        .and_then(|l| l.split("REG_EXPAND_SZ").nth(1).or(l.split("REG_SZ").nth(1)))
+        .map(|v| v.trim().to_string())
+        .unwrap_or("%USERPROFILE%\\Documents".into());
+    let set = |value: &str| {
+        let (ok, _) = reg(&[
+            "add",
+            &folders_key,
+            "/v",
+            "Personal",
+            "/t",
+            "REG_EXPAND_SZ",
+            "/d",
+            value,
+            "/f",
+        ]);
+        assert!(ok, "reg add {value}");
+    };
+    set(&docs.display().to_string());
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.push(folder(&docs, "rw"));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let beside = run_in(
+        &mut conn_a,
+        &a,
+        &format!(
+            "Set-Content -Path '{}' -Value beside",
+            docs.join("beside.txt").display()
+        ),
+    )
+    .await;
+    let profile = run_in(
+        &mut conn_a,
+        &a,
+        &format!(
+            "Set-Content -Path '{}' -Value taken; exit [int](-not $?)",
+            docs.join("WindowsPowerShell").join("profile.ps1").display()
+        ),
+    )
+    .await;
+    // Remembered for when the owner's registry is not loaded, in the
+    // node's state folder, which the owner the sync acts as may not write.
+    let seen = std::fs::read_to_string(paths.state_dir.join("owner-documents.json"))
+        .expect("the owner's Documents folder remembered");
+    set(&before);
+    assert!(seen.contains("nerve-w2-docs"), "{seen}");
+    // Refused by the guard, or by the folder's missing entry.
+    if let Ok(r) = &profile {
+        assert_ne!(r["exit_code"], 0, "{r}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(docs.join("WindowsPowerShell").join("profile.ps1")).unwrap(),
+        "# mine"
+    );
+    let beside = beside.expect("a's write beside the profiles");
+    assert_eq!(beside["exit_code"], 0, "{beside}");
+    assert!(
+        std::fs::read_to_string(docs.join("beside.txt"))
+            .unwrap()
+            .contains("beside")
+    );
+    nerve_node::cli::edit(&paths, |cfg| {
+        let ea = cfg.center_mut(A).expect("paired");
+        ea.policy.folders.retain(|f| Path::new(&f.path) != docs);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let _ = std::fs::remove_dir_all(&docs);
 
     // Nor the node's pipes from a container.
     let pipe_names: Vec<String> = std::fs::read_dir(r"\\.\pipe\")

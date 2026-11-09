@@ -548,9 +548,8 @@ runs in the container as well, unless the pairing runs as you.
   container: the node gives it a denying entry, which counts before what it
   inherits from the folder around it. Without it, it would inherit the
   entry of the folder around. Where the node cannot close it, that
-  pairing's commands do not run: also where a file below it has a second
-  name elsewhere (a hard link, as in pnpm's `node_modules` or a local `git
-  clone`), which the change would reach as well (see hard links below).
+  pairing's commands do not run. A file in it with another name elsewhere
+  (a hard link) is closed under every name (see hard links below).
   A command may rename a closed folder through the rights of the folder
   around it: it stays closed where it went. Where it went to a place the
   same pairing is granted, or above one, that place gets no entry, and the
@@ -580,8 +579,7 @@ runs in the container as well, unless the pairing runs as you.
   node makes these changes itself, over its
   [control pipe](#the-control-pipe), and has changed the entries when the
   app says so.
-- Uninstalling takes off the node's entries (not those of a folder that
-  holds hard links the check refuses, see below). The record of the entries
+- Uninstalling takes off the node's entries. The record of the entries
   is in the node's state folder: uninstall with the app, never by deleting
   the folders.
 - Each pairing's container has a profile in the account its commands run
@@ -617,9 +615,9 @@ runs in the container as well, unless the pairing runs as you.
   the entry it inherited. `icacls <path> /reset` gives it the permissions of
   its new place.
 - The flags stay independent: `w` without `r` writes but neither reads nor
-  lists, `x` runs programs and reads files by name but does not list. Hard
-  links and the permissions a command gives what it makes are the
-  exceptions, see the bullets on permission entries and hard links below.
+  lists, `x` runs programs and reads files by name but does not list. The
+  permissions a command gives what it makes are the exception, see the
+  bullet on permission entries below.
 - Deleting and renaming need `r` and `w`, since Windows allows a move with
   the same right as a delete: a command must not move what it cannot read
   to a folder where it can. So in a folder with `w` but not `r`, a command
@@ -693,47 +691,87 @@ runs in the container as well, unless the pairing runs as you.
   remove each with `icacls <folder> /remove *<SID> /T`: every `S-1-15-2-…`
   and `S-1-15-3-…` entry, and `ALL APPLICATION PACKAGES` as `*S-1-15-2-1`.
 - A hard link is one file under two names, and both share one access list.
-  When the node grants, closes, changes or moves a folder that commands may
-  write in, or a folder that holds one, the change passes to the files below it
-  whose permissions it changes, and that would include hard links. Before
-  such a change the node checks those files and refuses if one has more
-  than one name, and it checks each file again right before it changes it,
-  by the names the file has then: a link a command makes in between stops
-  the change there. What it changed by then stays changed, and the folder
-  itself keeps its old entry; only a link made in the folder itself while
-  the change was below it is found after the folder got its new entry, and
-  the message says so. The node goes through the whole folder again at its
-  next sync, and refuses the change until the link is gone. A file whose permissions the change leaves as they are
-  is not reached, so a link to it stops nothing. Hard links only
-  work within one drive. So put a
-  write-only folder whose files commands must not read on a drive where the
-  pairing can write nowhere that it can also read or run programs, also
-  through a folder above.
-- Build tools make hard links of their own. cargo builds each program
-  under two names in `target`, so a file in a folder named exactly `target`
-  inside the folder passes the check when every one of its names lies in
-  such a folder of the same granted folder, under the same grants, no
-  pairing has `w` without `r` on that folder, one above it or one inside
-  it, and the node finds no granted folder moved or renamed in that sync.
-  (A command may give a folder it makes permissions of its own, and the
-  change would pass them to a file it linked there; the check keeps a file
-  it may only write from getting them this way.) So a built
-  Rust project you rename or move needs `cargo clean` before its entry can
-  come off at its new place; until then the record of the entry stays stale
-  and that pairing's commands stop. Any other
-  second name is still refused, also a `target` file whose other name lies
-  outside the folder or under another grant, and one whose names Windows
-  cannot list. Other tools' links are refused too: pnpm links
-  `node_modules` to its store, uv links a `.venv` to its cache, and a local
-  `git clone` links its objects. A folder that holds such links does not get
-  its entry, and its entry is not changed or taken off. A refused removal
-  stops that pairing's commands, and the node's own file calls for it
-  (read, list, grep, find, which outside its folders go by its container's
-  entries), and uninstalling leaves the entry on, until the links are
-  gone. Keep them out of granted folders: pnpm's
-  `package-import-method=copy`, `UV_LINK_MODE=copy`, `git clone
-  --no-hardlinks`. Or remove them (delete `node_modules` or `.venv`) before
-  you add, change or remove the folder.
+  pnpm links `node_modules` to its store, uv links a `.venv` to its cache,
+  and a local `git clone` links its objects. Such files are readable but not
+  writable for commands: a pairing whose folder holds one of the names gets
+  read and run, and no more than each of its names' folders gives (none
+  under a `w`-only name), by entries of the node's own, with a denying
+  entry of every other right. So two pairings whose projects link to one
+  store both read it, and the denial stays when Explorer or `icacls` passes
+  a folder's permissions down to the file. A file whose names all lie in
+  the granted folder under the same grants (cargo's `target`, links within
+  a project) gets the grant as any file. A name in a closed folder (also
+  one a command moved, or one inside a split folder), in a protected entry
+  or in the node's own folders closes the file under every name. A name in
+  a folder the node cannot open (another account's) does not count. The
+  node adds its own entries only: what the file's list gives other accounts
+  (the owner's store, cache or repository) stays under both names, and the
+  granted folder's entries for them do not reach it. The node changes the
+  file's entries only as a change reaches it: **Sync
+  folders** cuts one you widened back down. So after you or an agent
+  install dependencies or clone into a folder that is granted already
+  (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:
+  until then the new files keep the store's permissions, so commands may
+  not read what you installed, and you may not open what the agent
+  installed. After it you may read and run what the agent installed from
+  its own store. On the installed service its commands keep reading their
+  store also once the folder is no longer granted: a file its commands made
+  there belongs to `nerve-run`. A file of yours that a command linked into
+  its own folder does not: once the folder's grant goes, the pairing reads
+  it no more. A command can make a hard link
+  only to a file it may write (Windows asks that of a sandboxed process
+  since 2015; checked), so it cannot read a file of yours through one. From
+  a folder it may write but not read, it can link a file it knows the name
+  of into a folder it may read; the walk keeps that file closed to it, and to
+  every pairing that has no grant on the write-only folder, while the grant
+  is on and after it is taken off (Linux refuses such a link), for as long
+  as the folder is there; the node keeps a
+  mark of the grant for that in `grants.json`. The walk cannot tell which
+  way such a link was made, so it closes a file of a shared project that a
+  command linked *into* its write-only folder the same way, to every other
+  pairing without a grant on that folder (Linux lets that link be made, and
+  the other pairing keeps its rights there). Delete the name in the
+  write-only folder to open it. Hard links only work within one drive. A grant on a single file with a second
+  name is refused where commands may write around it, and capped as above
+  elsewhere. Limits:
+  - `icacls /reset` and Explorer's "Replace all child object permission
+    entries" take the node's own entries off too: the file is widened until
+    **Sync folders**.
+  - A file that lost its other names keeps the node's entries; a pairing
+    whose folder goes keeps read on it until `icacls <file> /reset`.
+  - On a node you run yourself, commands run as you, so the node cannot
+    tell the store's files from yours: once no granted folder holds a store
+    file's other name, the pairing's commands may not read it in their
+    store either. pnpm or uv then fails on that package until you delete
+    the store or cache (in the container's `AC` folder).
+  - A file another pairing's command made in a folder both pairings share
+    also belongs to `nerve-run`: a pairing that linked it into its own
+    folder keeps reading it once the folder's grant goes, as on Linux.
+  - A file linked out of a write-only folder is closed to every pairing
+    that has no grant on that folder, not only the one that linked it, and
+    stays closed through every later walk (**Sync folders** too) until its
+    mark goes: when the folder is gone, when the folder is granted to the
+    pairing again (the new grant decides), or at uninstall. Moving the
+    folder takes the mark along, so a new folder made at its old path and
+    granted does not end it, and neither does a sync that cannot look at the
+    folder. A pairing that has no folder left, is removed, or is the last
+    one and is paired again, leaves its marks, so a pairing made later is
+    held back too. Delete the file, or grant the folder again, to open it
+    sooner.
+  - The closing holds while one of the file's names lies in the write-only
+    folder. If you move your file out of that folder (a rename on the same
+    drive) while a command's link to it is in a granted folder, the next walk
+    that reaches the link (**Sync folders**, or a change of a grant there)
+    gives the pairing read on it. Before you file away something from a
+    folder you gave write only, look for links to it
+    (`fsutil hardlink list <file>`) and delete the ones in a granted folder.
+  - A folder whose permission inheritance you turned off by hand is not
+    looked at: a file linked from it into a granted folder gets that
+    folder's grant. Close such a folder in Nerve (a folder without flags)
+    instead.
+  - A closed folder that a command renames while the node changes the
+    folders' entries may leave a file linked across its edge (by you)
+    readable through the other name until the next **Sync folders**.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it
@@ -861,7 +899,7 @@ container and `nerve-run` may open.
   script, a build file, a Git hook, an install script of a package. The
   container holds the command, not the files it writes. Links: a command
   made a hard link to a file in its own folder and was refused one to a file
-  outside (checked). It made a junction to a folder inside its own folder and
+  it may only read (checked). It made a junction to a folder inside its own folder and
   was refused one to `C:\Windows`, `C:\Program Files` and `C:\Users`
   (checked), and a symbolic link needs a privilege it does not have
   (checked). What that means for a folder inside another granted folder, for

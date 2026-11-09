@@ -162,6 +162,54 @@ pub fn name_of_sid(text: &str) -> Result<String, String> {
     sid_name(&bytes).map_err(|e| format!("no account has the SID {text}: {e}"))
 }
 
+/// Runs `f` on this thread as this process, also where the thread acts as
+/// another account ([`FsAs`]), and then as that account again: the node's
+/// own state folder is open to the node, not to the owner it acts as. An
+/// error where the thread cannot act as that account again; it is then
+/// itself, which [`FsAs`]'s end leaves it as anyway.
+pub fn as_process<T>(f: impl FnOnce() -> T) -> io::Result<T> {
+    use windows_sys::Win32::Foundation::ERROR_NO_TOKEN;
+    use windows_sys::Win32::Security::TOKEN_IMPERSONATE;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, OpenThreadToken, SetThreadToken,
+    };
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: the thread's own token, opened as the process, owned below.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut h) } == 0 {
+        let e = last();
+        if e.raw_os_error() == Some(ERROR_NO_TOKEN as i32) {
+            return Ok(f());
+        }
+        return Err(e);
+    }
+    // SAFETY: OpenThreadToken returned a handle this code now owns.
+    let was = Token(unsafe { OwnedHandle::from_raw_handle(h as _) });
+    // SAFETY: plain call; the thread is itself until the token goes back.
+    unsafe { RevertToSelf() };
+    let r = f();
+    // SAFETY: the thread's own token, opened above.
+    if unsafe { SetThreadToken(std::ptr::null(), was.raw()) } == 0 {
+        return Err(failed("SetThreadToken"));
+    }
+    Ok(r)
+}
+
+/// The profile folder of the account whose SID is `text`, where Windows
+/// keeps it; `None` before its first logon, and for a text that is no SID.
+pub fn profile_of_sid(text: &str) -> Option<PathBuf> {
+    let mut sid: PSID = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated string; the SID Windows allocates is freed
+    // once it was read.
+    unsafe {
+        if ConvertStringSidToSidW(wide(text).as_ptr(), &mut sid) == 0 {
+            return None;
+        }
+        let dir = profile_dir(sid);
+        LocalFree(sid as _);
+        dir
+    }
+}
+
 /// The name an account or group has on this machine, by its SID.
 fn sid_name(sid: &[u8]) -> io::Result<String> {
     let mut name = vec![0u16; 256];
