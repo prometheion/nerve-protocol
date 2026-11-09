@@ -466,16 +466,23 @@ center's local name):
   granted, and one whose watch ended is opened again at the next follow (one
   that failed to start twice in a row is left alone, `Starts`). The folders
   to follow are read from the record under the watches' lock, so the last
-  follow sees the newest record. What the watch holds stays bounded: the supervisor starts
+  follow sees the newest record. A watch is of the object the record names at
+  the path (`grant_watch::Folder`, the handle's file ID against the grants'
+  ids, `reconcile`), so a granted folder renamed away and made again at its
+  path (the handle goes along with the old folder) is closed and opened on the
+  new one once the sync moved the grant. What the watch holds stays bounded: the supervisor starts
   one grant sync at a time (`Watch::next_sync`, the guard `Began`), the
   changes meanwhile join the next walk, and a pause follows each walk, twice
-  as long as it took (`Pending::end`; a sync that walks nothing leaves none),
+  as long as it took (`Pending::end`; a sync that walks nothing leaves none,
+  nor does the start walk, which is the longest and no name made it),
   so a command that makes names all the time cannot keep the sync's turn for
   more than a third of the time. A command of a pairing
   (`Shared::sync_grants_for_call`) does not wait for a walk of the watch when
   the config is the one the last finished sync saw (`Watch::walking`) and
-  every recorded grant is still at its path with its object
-  (`grants::in_place`, a look at each, no change): it takes that sync's
+  every recorded grant is still at its path with its object, and nothing is
+  at the path of a closed folder the sync found missing or of a grant it
+  kept on a volume that was away (`Synced::absent`, `Synced::away`; both in
+  `Synced::kept`; `grants::in_place`, a look at each, no change): it takes that sync's
   answer (`Synced::kept`, what decides a refusal), since the walk only caps
   files linked in and adds inherited entries. A newer config, or a folder
   moved or made again since (which the sync in its turn takes off or
@@ -523,7 +530,12 @@ center's local name):
     which a recorded grant is not at its path (moved, or it cannot be told)
     gives no `Full` at all, and neither does a changed folder with a closed
     grant inside it (`Judge::closed_inside`): a command may rename that
-    folder while the walk goes on, and the names compared would be stale. A command that may make a folder there sets its
+    folder while the walk goes on, and the names compared would be stale. A closed
+    folder outside the walked folder, in another folder a container writes,
+    can be moved into it in the same way; `closed_inside` does not look for
+    that (it would cap every project under a writable folder that holds a
+    closed one), so a file linked across such a folder's edge may get the
+    walked folder's list until the next walk. A command that may make a folder there sets its
     security descriptor at creation, without `WRITE_DAC`, and the change
     passes an entry of its own there (read for its container) down to a
     file it linked into that folder; every container that may write there

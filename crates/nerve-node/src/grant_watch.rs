@@ -23,16 +23,23 @@
 //! one grant sync at a time ([`Watch::next_sync`]) and leaves a pause after
 //! a walk, twice as long as the walk took, so a command that makes new names
 //! all the time cannot keep the turn: the walk covers the changes of the
-//! whole time it ran, and the next one waits. The first sync after the
+//! whole time it ran, and the next one waits. The start walk leaves none:
+//! no name made it, and a pause as long as the longest walk there is would
+//! hold back the first changes after every start. The first sync after the
 //! node's start is a plain one; the walk of every grant (what was installed
 //! or moved in while the node did not run) follows it as a walk of the
 //! watch. A command of a pairing does not wait for a walk of the watch when
 //! the config is the one the last sync saw and every recorded grant is
-//! still where it was ([`Watch::walking`], crate::grants::in_place): the
+//! still where it was, and nothing is at the place of a closed folder the
+//! last sync found missing ([`Watch::walking`], crate::grants::in_place): the
 //! walk only caps the files linked in and adds inherited entries, so what
 //! the command sees is as good as the last sync's answer; a folder that
 //! moved since is something the sync in its turn reacts to, and the command
 //! waits for it.
+//!
+//! A watch is of the object the record names at the folder's path, not of
+//! the path: the handle goes along with a folder renamed away, so one made
+//! again at the path is watched anew ([`Folder`]).
 //!
 //! The handle on a granted folder has a cost NTFS sets: while it is open,
 //! the folders above the granted folder cannot be renamed or moved, only
@@ -112,6 +119,9 @@ pub struct Pending {
     /// The first sync is done and the start walk of every grant is still to
     /// come: the next sync is it.
     start_walk: bool,
+    /// Whether the sync that runs leaves a pause when it ends: every walk
+    /// of the watch but the start walk.
+    pause: bool,
     /// No walk of the watch before this: the pause after a walk.
     not_before: Option<Instant>,
     /// The config version the last finished sync saw, and what it left.
@@ -170,10 +180,11 @@ impl Pending {
     }
 
     /// A grant sync of the supervisor begins at `now`; `by_watch` when it
-    /// is a walk of the watch.
-    fn begin(&mut self, now: Instant, by_watch: bool) {
+    /// is a walk of the watch, `pause` when it leaves a pause.
+    fn begin(&mut self, now: Instant, by_watch: bool, pause: bool) {
         self.running = Some(now);
         self.watch_walk = by_watch;
+        self.pause = by_watch && pause;
     }
 
     /// The sync ended at `now`. After a walk of the watch the next one
@@ -181,13 +192,17 @@ impl Pending {
     /// sync's turn for a third of the time at most, however fast names
     /// come. A sync of a new config is no walk and leaves no pause: the
     /// names that changed meanwhile are walked as soon as they are quiet.
+    /// The start walk leaves none either: no name made it, it goes through
+    /// every grant and so is the longest walk there is, and a pause as long
+    /// as that would hold back the first changes after every start.
     fn end(&mut self, now: Instant) {
         if let Some(began) = self.running.take()
-            && self.watch_walk
+            && self.pause
         {
             self.not_before = Some(now + now.saturating_duration_since(began) * 2);
         }
         self.watch_walk = false;
+        self.pause = false;
     }
 }
 
@@ -241,6 +256,7 @@ impl Watch {
         if p.running.is_some() {
             return None;
         }
+        let mut pause = true;
         let walk = if granted.is_none() {
             p.start_walk = true;
             Rewalk::None
@@ -248,6 +264,7 @@ impl Watch {
             // It goes through every folder, the changed ones too.
             p.start_walk = false;
             p.folders.clear();
+            pause = false;
             Rewalk::Every
         } else {
             let due = p.due(now);
@@ -259,7 +276,7 @@ impl Watch {
                 return None;
             }
         };
-        p.begin(now, walk != Rewalk::None);
+        p.begin(now, walk != Rewalk::None, pause);
         Some((walk, Began(self.pending.clone())))
     }
 
@@ -287,18 +304,71 @@ impl Watch {
     /// `act` acts (the owner, whose folders they are, on the installed
     /// service), one no longer granted is closed. `folders` is asked once
     /// the watches are held, so of two syncs that follow, the last to hold
-    /// them follows the newest record. A folder that could not be started
+    /// them follows the newest record. A watch on an object the record no
+    /// longer names at its path is closed and opened again there. A folder that could not be started
     /// twice is not tried again while it stays granted; the log says why.
     #[cfg(windows)]
     pub fn follow<G>(
         &self,
-        folders: impl FnOnce() -> Vec<PathBuf>,
+        folders: impl FnOnce() -> Vec<Folder>,
         act: impl FnOnce() -> std::io::Result<G>,
     ) {
         let mut win = lock(&self.win);
         let folders = folders();
         win.follow(&folders, &self.pending, act);
     }
+}
+
+/// A granted folder to watch: its path, and the objects the record names
+/// there (one, unless grants of two containers disagree; none where the
+/// volume names no object).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub path: PathBuf,
+    pub ids: Vec<String>,
+}
+
+#[cfg(any(windows, test))]
+impl Folder {
+    /// Whether a watch on the object `id` (`None`: the system named none)
+    /// is the folder's: the record names no object, or names that one.
+    fn holds(&self, id: Option<&str>) -> bool {
+        self.ids.is_empty() || id.is_none_or(|i| self.ids.iter().any(|x| x == i))
+    }
+}
+
+/// A watch held: the folder, and the object its handle is on.
+#[cfg(any(windows, test))]
+type Held = (PathBuf, Option<String>);
+
+/// What a follow changes about the watches held for the folders granted
+/// now: the watches to close (the folder is not granted any more, or the
+/// handle is on another object than the record names at that path), and
+/// the folders to open (not held, and not in `left`). A granted folder
+/// renamed away and made again at its path keeps its handle on the object
+/// that moved, so a watch by path alone would go on telling the old folder's
+/// names and none of the new one's.
+#[cfg(any(windows, test))]
+fn reconcile<'a>(
+    held: &[Held],
+    folders: &'a [Folder],
+    left: impl Fn(&Path) -> bool,
+) -> (Vec<PathBuf>, Vec<&'a Folder>) {
+    let right = |(path, id): &Held| {
+        folders
+            .iter()
+            .any(|f| f.path == *path && f.holds(id.as_deref()))
+    };
+    let close = held
+        .iter()
+        .filter(|h| !right(h))
+        .map(|h| h.0.clone())
+        .collect();
+    let open = folders
+        .iter()
+        .filter(|f| !held.iter().any(|h| h.0 == f.path && right(h)) && !left(&f.path))
+        .collect();
+    (close, open)
 }
 
 /// How many times in a row a folder's watch may fail to start before it is
@@ -365,7 +435,7 @@ mod win {
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::WindowsProgramming::{DRIVE_REMOTE, DRIVE_REMOVABLE};
 
-    use super::{NOTIFY, Pending, Starts, lock, wakes};
+    use super::{Folder, Held, NOTIFY, Pending, Starts, lock, reconcile, wakes};
 
     /// The size of each folder's buffer: the most one notification over the
     /// network may carry; a burst beyond it runs over, which walks the
@@ -384,8 +454,8 @@ mod win {
     #[derive(Default)]
     pub struct Watches {
         running: Option<Running>,
-        /// The folders watched now.
-        watched: Vec<PathBuf>,
+        /// The folders watched now, and the object each handle is on.
+        watched: Vec<Held>,
         /// The folders that could not be opened, or not started twice in a
         /// row, and are not tried again while they stay granted.
         failed: HashSet<PathBuf>,
@@ -429,7 +499,7 @@ mod win {
     impl Watches {
         pub fn follow<G>(
             &mut self,
-            folders: &[PathBuf],
+            folders: &[Folder],
             pending: &Arc<Mutex<Pending>>,
             act: impl FnOnce() -> std::io::Result<G>,
         ) {
@@ -444,7 +514,7 @@ mod win {
             }
             let ended: Vec<Ended> = std::mem::take(&mut *lock(&self.ended));
             for (folder, started) in &ended {
-                self.watched.retain(|w| w != folder);
+                self.watched.retain(|(w, _)| w != folder);
                 if self.starts.ended(folder, *started) {
                     tracing::warn!(
                         "folder grants: {} could not be watched twice and is left alone; what is installed or moved into it gets its entries at the next start, change or Sync folders",
@@ -453,19 +523,11 @@ mod win {
                     self.failed.insert(folder.clone());
                 }
             }
-            self.starts.keep(folders);
-            self.failed.retain(|f| folders.contains(f));
-            let gone: Vec<PathBuf> = self
-                .watched
-                .iter()
-                .filter(|w| !folders.contains(w))
-                .cloned()
-                .collect();
-            self.watched.retain(|w| folders.contains(w));
-            let new: Vec<&PathBuf> = folders
-                .iter()
-                .filter(|f| !self.watched.contains(f) && !self.failed.contains(*f))
-                .collect();
+            let paths: Vec<PathBuf> = folders.iter().map(|f| f.path.clone()).collect();
+            self.starts.keep(&paths);
+            self.failed.retain(|f| paths.contains(f));
+            let (gone, new) = reconcile(&self.watched, folders, |f| self.failed.contains(f));
+            self.watched.retain(|(w, _)| !gone.contains(w));
             if let Some(r) = &self.running {
                 for g in gone {
                     r.send(Msg::Close(g));
@@ -481,7 +543,7 @@ mod win {
                         tracing::warn!(
                             "folder grants: the granted folders are not watched ({e}); what is installed or moved into one gets its entries at the next start, change or Sync folders"
                         );
-                        self.failed.extend(new.into_iter().cloned());
+                        self.failed.extend(new.into_iter().map(|f| f.path.clone()));
                         return;
                     }
                 }
@@ -492,19 +554,19 @@ mod win {
                 .inspect_err(|e| tracing::warn!("folder grants: {e}"))
                 .ok();
             for f in new {
-                match open(f) {
-                    Ok(h) => {
-                        self.watched.push(f.clone());
+                match open(&f.path) {
+                    Ok((h, id)) => {
+                        self.watched.push((f.path.clone(), id));
                         if let Some(r) = &self.running {
-                            r.send(Msg::Open(f.clone(), h));
+                            r.send(Msg::Open(f.path.clone(), h));
                         }
                     }
                     Err(e) => {
                         tracing::warn!(
                             "folder grants: {} is not watched ({e}); what is installed or moved into it gets its entries at the next start, change or Sync folders",
-                            f.display()
+                            f.path.display()
                         );
-                        self.failed.insert(f.clone());
+                        self.failed.insert(f.path.clone());
                     }
                 }
             }
@@ -517,8 +579,9 @@ mod win {
 
     /// The folder `path` opened to read its changes: not through a link
     /// (a granted folder is one of its own), not one on another machine,
-    /// and not one on a removable drive.
-    fn open(path: &Path) -> std::io::Result<OwnedHandle> {
+    /// and not one on a removable drive; and the object it is on, as the
+    /// record names it ([`Folder::ids`]), when the system names one.
+    fn open(path: &Path) -> std::io::Result<(OwnedHandle, Option<String>)> {
         use std::io::{Error, ErrorKind};
         if let Some(link) = nerve_policy::paths::remote_link(path) {
             return Err(Error::new(
@@ -579,7 +642,10 @@ mod win {
                 "it is not a folder of its own",
             ));
         }
-        Ok(h)
+        let id = nerve_sandbox::appcontainer::handle_id(&h)
+            .ok()
+            .map(|id| id.to_string());
+        Ok((h, id))
     }
 
     fn start(
@@ -1018,7 +1084,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let mut p = Pending::default();
-        p.begin(at(0), true);
+        p.begin(at(0), true, true);
         p.changed(proj, at(5));
         p.end(at(20));
         p.changed(proj, at(21));
@@ -1026,7 +1092,7 @@ mod tests {
         assert!(p.due(at(59)).is_empty());
         assert_eq!(p.due(at(60)), [proj]);
         // A short walk leaves a short pause.
-        p.begin(at(100), true);
+        p.begin(at(100), true, true);
         p.end(at(100));
         p.changed(proj, at(101));
         assert_eq!(p.due(at(101) + QUIET), [proj]);
@@ -1093,6 +1159,36 @@ mod tests {
         assert!(w.walking(1).is_none());
     }
 
+    /// The start walk goes through every grant, so it is the longest walk
+    /// the node makes; the pause that follows walks would hold back the
+    /// first changes after each start for as long again. It is a walk of
+    /// the watch (commands do not wait) and leaves no pause.
+    #[test]
+    fn the_start_walk_leaves_no_pause() {
+        let proj = Path::new("/w/proj");
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let w = Watch::default();
+        let (_, first) = w.next_sync(None, 1, t0).unwrap();
+        drop(first);
+        let (walk, began) = w.next_sync(Some(1), 1, t0).unwrap();
+        assert_eq!(walk, Rewalk::Every);
+        assert!(lock(&w.pending).watch_walk, "commands do not wait for it");
+        assert!(!lock(&w.pending).pause, "the start walk leaves no pause");
+        drop(began);
+        // A walk for changed names does.
+        lock(&w.pending).changed(proj, t0);
+        let (walk, _began) = w.next_sync(Some(1), 1, at(60)).unwrap();
+        assert_eq!(walk, Rewalk::At(vec![proj.to_path_buf()]));
+        assert!(lock(&w.pending).pause);
+        // Whatever the walk took, its end leaves nothing.
+        let mut p = Pending::default();
+        p.begin(at(0), true, false);
+        p.changed(proj, at(301));
+        p.end(at(300));
+        assert_eq!(p.due(at(301) + QUIET), [proj]);
+    }
+
     /// Only a walk leaves the pause: a sync for a new config, which walks
     /// nothing, does not hold back the walk of names that changed
     /// meanwhile.
@@ -1102,10 +1198,47 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let mut p = Pending::default();
-        p.begin(at(0), false);
+        p.begin(at(0), false, true);
         p.changed(proj, at(5));
         p.end(at(60));
         assert_eq!(p.due(at(60) + QUIET), [proj]);
+    }
+
+    /// A watch is of the object the record names at the folder's path, not
+    /// of the path: a folder renamed away and another made at its path (a
+    /// fresh clone) is watched again, and one no longer granted is closed.
+    #[test]
+    fn a_watch_on_another_object_is_closed_and_opened_again() {
+        let folder = |p: &str, ids: &[&str]| Folder {
+            path: p.into(),
+            ids: ids.iter().map(|i| i.to_string()).collect(),
+        };
+        let held = |p: &str, id: Option<&str>| -> Held { (p.into(), id.map(str::to_string)) };
+        let never = |_: &Path| false;
+        let proj = [folder("/w/proj", &["a"])];
+        let (close, open) = reconcile(&[held("/w/proj", Some("a"))], &proj, never);
+        assert!(close.is_empty() && open.is_empty(), "the same object");
+        // Another folder at the path now: closed, and opened again.
+        let (close, open) = reconcile(&[held("/w/proj", Some("old"))], &proj, never);
+        assert_eq!(close, [PathBuf::from("/w/proj")]);
+        assert_eq!(open, [&proj[0]]);
+        // The record names no object, or the system named none: the path
+        // counts.
+        let unnamed = [folder("/w/proj", &[])];
+        let (close, open) = reconcile(&[held("/w/proj", Some("old"))], &unnamed, never);
+        assert!(close.is_empty() && open.is_empty());
+        let (close, open) = reconcile(&[held("/w/proj", None)], &proj, never);
+        assert!(close.is_empty() && open.is_empty());
+        // Grants of two containers that disagree: either object is right.
+        let two = [folder("/w/proj", &["a", "b"])];
+        let (close, _) = reconcile(&[held("/w/proj", Some("b"))], &two, never);
+        assert!(close.is_empty());
+        // No longer granted: closed; a new one opens unless left alone.
+        let (close, open) = reconcile(&[held("/w/gone", Some("a"))], &proj, never);
+        assert_eq!(close, [PathBuf::from("/w/gone")]);
+        assert_eq!(open, [&proj[0]]);
+        let (_, open) = reconcile(&[], &proj, |p| p == Path::new("/w/proj"));
+        assert!(open.is_empty(), "a folder left alone is not opened");
     }
 
     /// A folder whose watch could not be started twice in a row is left
@@ -1159,7 +1292,13 @@ mod tests {
         let store = d.path().join("store.js");
         std::fs::write(&store, "stored").unwrap();
         let w = Watch::default();
-        w.follow(|| vec![root.clone()], || Ok(()));
+        let granted = |p: &Path| {
+            vec![Folder {
+                path: p.to_path_buf(),
+                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+            }]
+        };
+        w.follow(|| granted(&root), || Ok(()));
         let quiet = |w: &Watch| -> bool {
             std::thread::sleep(Duration::from_millis(500));
             w.due(Instant::now() + AT_MOST).is_empty()
@@ -1191,5 +1330,45 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         std::fs::remove_dir_all(&root).unwrap();
         assert!(quiet(&w));
+    }
+
+    /// On Windows: a granted folder renamed away (the handle goes along
+    /// with it) and another made at its path is watched again once the
+    /// record names the new object: its names are told, those of the old
+    /// folder no more.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_made_again_at_a_watched_path_is_watched_again() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("app");
+        let old = d.path().join("app-old");
+        std::fs::create_dir(&app).unwrap();
+        let store = d.path().join("store.js");
+        std::fs::write(&store, "stored").unwrap();
+        let granted = |p: &Path| {
+            vec![Folder {
+                path: p.to_path_buf(),
+                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+            }]
+        };
+        let told = |w: &Watch| -> bool {
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                if !w.due(Instant::now() + AT_MOST).is_empty() {
+                    return true;
+                }
+            }
+            false
+        };
+        let w = Watch::default();
+        w.follow(|| granted(&app), || Ok(()));
+        std::fs::rename(&app, &old).unwrap();
+        std::fs::create_dir(&app).unwrap();
+        // The sync moved the grant: the record names the new folder.
+        w.follow(|| granted(&app), || Ok(()));
+        std::fs::hard_link(&store, app.join("linked.js")).unwrap();
+        assert!(told(&w), "a name in the new folder is told");
+        std::fs::hard_link(&store, old.join("linked.js")).unwrap();
+        assert!(!told(&w), "the old folder is not watched any more");
     }
 }

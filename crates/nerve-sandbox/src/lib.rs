@@ -1689,6 +1689,11 @@ pub mod appcontainer {
         id_of(&open(path, FILE_READ_ATTRIBUTES)?)
     }
 
+    /// Which object the open handle `h` is on.
+    pub fn handle_id(h: &impl AsRawHandle) -> io::Result<FileId> {
+        id_by(h.as_raw_handle())
+    }
+
     /// `path` opened for `access` alone, as [`open`] does, but a link or
     /// junction at `path` as itself, not followed.
     fn open_itself(path: &Path, access: u32) -> io::Result<std::fs::File> {

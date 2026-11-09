@@ -264,6 +264,10 @@ pub struct Synced {
     /// Grants on a volume that is not on the machine now: nothing reaches
     /// them while it is away, and the record keeps them until it is back.
     pub away: Vec<Grant>,
+    /// Folders closed to a container (a grant of no flag) that have nothing
+    /// at their path: no grant is recorded for them, so a folder made there
+    /// later is not seen as moved ([`in_place`]).
+    pub absent: Vec<Grant>,
     /// Containers that had grants and have none now.
     pub emptied: Vec<String>,
     /// How many grants were taken off.
@@ -288,6 +292,8 @@ impl Synced {
             stale: self.stale.clone(),
             unclosed: self.unclosed.clone(),
             unknown: self.unknown.clone(),
+            away: self.away.clone(),
+            absent: self.absent.clone(),
             ..Synced::default()
         }
     }
@@ -389,25 +395,33 @@ fn mark_walks(file: &Path, walk: &Rewalk) -> Result<usize, String> {
 }
 
 /// The folders the record of the node at `paths` holds a grant with flags
-/// on, where the last sync found them, each once: those the node watches
-/// for new names (crate::grant_watch). A closed folder lies inside one of
-/// them. A granted file (also a split home's files) is no folder to watch:
-/// its folder is not granted, or is watched itself. Nothing where the
-/// record cannot be read.
-pub fn granted_folders(paths: &NodePaths) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = read_record(&record_file(paths))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|g| g.access != Access::NONE)
-        .map(|g| g.path)
-        .filter(|p| {
-            // A link or junction is kept: the watch says why it is not
-            // watched, which a plain file needs no word for.
-            std::fs::symlink_metadata(p).is_ok_and(|m| !m.is_file())
-        })
-        .collect();
-    out.sort();
-    out.dedup();
+/// on, where the last sync found them, each once with the objects the
+/// record names there: those the node watches for new names
+/// (crate::grant_watch). A closed folder lies inside one of them. A granted
+/// file (also a split home's files) is no folder to watch: its folder is not
+/// granted, or is watched itself. Nothing where the record cannot be read.
+pub fn granted_folders(paths: &NodePaths) -> Vec<crate::grant_watch::Folder> {
+    let mut out: Vec<crate::grant_watch::Folder> = Vec::new();
+    let grants = read_record(&record_file(paths)).unwrap_or_default();
+    for g in grants.into_iter().filter(|g| g.access != Access::NONE) {
+        // A link or junction is kept: the watch says why it is not
+        // watched, which a plain file needs no word for.
+        if !std::fs::symlink_metadata(&g.path).is_ok_and(|m| !m.is_file()) {
+            continue;
+        }
+        match out.iter_mut().find(|f| f.path == g.path) {
+            Some(f) => {
+                if let Some(id) = g.id.filter(|id| !f.ids.contains(id)) {
+                    f.ids.push(id);
+                }
+            }
+            None => out.push(crate::grant_watch::Folder {
+                path: g.path,
+                ids: g.id.into_iter().collect(),
+            }),
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     out
 }
 
@@ -719,7 +733,10 @@ impl<'a> Judge<'a> {
     /// while the walk goes on, and a file linked across its edge would be
     /// judged by names the folder no longer has, and take the whole list of
     /// a folder around it (write included). Capped, it gets read and run at
-    /// most.
+    /// most. A closed folder from outside the walked folder (inside another
+    /// folder a container writes) that a command moves in during the walk is
+    /// not looked for: that would cap every project under a writable folder
+    /// that holds any closed one. The next walk sees it and closes the file.
     fn verdict(&self, n: u64, all: &[PathBuf], owner: Option<&str>) -> Linked {
         let containers = self.links.containers;
         let shut = all
@@ -950,15 +967,17 @@ fn at_path(old: &Grant, here: &io::Result<Option<Look>>) -> bool {
 }
 
 /// Whether every grant the record of the node at `paths` holds is still on
-/// its object at the path recorded, looked at as a sync does but without
-/// changing or walking anything (so while another sync walks): a granted
-/// or closed folder that was moved, removed or made again since is not. A
-/// command that would wait for a long walk may go on with the answer of the
-/// last sync only while this holds; what moved on the disk is for a sync in
-/// its turn (a take-off of the moved grant, the refusal for a closed folder
-/// a command moved). `owner` as in [`apply`]. Not on Windows, no grant is
-/// on a folder.
-pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>) -> bool {
+/// its object at the path recorded, and nothing is at the path of a grant
+/// the last sync (`last`) found nothing for (a closed folder that was not
+/// there, or on a volume that was away), looked at as a sync does but
+/// without changing or walking anything (so while another sync walks): a
+/// granted or closed folder that was moved, removed or made again since is
+/// not. A command that would wait for a long walk may go on with the answer
+/// of the last sync only while this holds; what moved on the disk is for a
+/// sync in its turn (a take-off of the moved grant, the refusal for a closed
+/// folder a command moved or made). `owner` as in [`apply`]. Not on
+/// Windows, no grant is on a folder.
+pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last: &Synced) -> bool {
     #[cfg(windows)]
     {
         // Logged on once for all the looks.
@@ -968,6 +987,7 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>) -> b
         };
         in_place_with(
             &record_file(paths),
+            last,
             &mut Acls {
                 report: &mut |_| {},
                 owner: None,
@@ -976,20 +996,25 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>) -> b
     }
     #[cfg(not(windows))]
     {
-        let _ = (paths, owner);
+        let _ = (paths, owner, last);
         true
     }
 }
 
 /// [`in_place`] for the record `file`, on `folders`.
 #[cfg(any(windows, test))]
-fn in_place_with(file: &Path, folders: &mut impl Folders) -> bool {
+fn in_place_with(file: &Path, last: &Synced, folders: &mut impl Folders) -> bool {
     let Ok(record) = read_record(file) else {
         return false;
     };
     record
         .iter()
         .all(|old| at_path(old, &folders.look(&old.path, &old.container, old.access)))
+        && last
+            .absent
+            .iter()
+            .chain(&last.away)
+            .all(|g| !matches!(folders.look(&g.path, &g.container, g.access), Ok(Some(_))))
 }
 
 /// [`sync`], with what closes a name of a file with more than one name
@@ -1424,6 +1449,9 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                         Err(e) if gone(&e) => {
                             if let Some(i) = index(w) {
                                 shut[i] = true;
+                            }
+                            if w.access == Access::NONE {
+                                out.absent.push(w.clone());
                             }
                         }
                         // Refused before anything changed: what was there
@@ -3249,17 +3277,38 @@ mod tests {
         let paths = NodePaths::new(d.path().join("cfg"), d.path().join("state"));
         let (proj, notes) = (d.path().join("proj"), d.path().join("notes.txt"));
         std::fs::create_dir(&proj).unwrap();
+        let lib = d.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
         std::fs::write(&notes, "n").unwrap();
         let gone = d.path().join("gone");
+        let with_id = |mut g: Grant, id: &str| {
+            g.id = Some(id.to_string());
+            g
+        };
         let grants = [
-            grant("c1", proj.to_str().unwrap(), "rw"),
-            grant("c2", proj.to_str().unwrap(), "r"),
+            with_id(grant("c1", proj.to_str().unwrap(), "rw"), "v:1"),
+            with_id(grant("c2", proj.to_str().unwrap(), "r"), "v:1"),
+            with_id(grant("c3", proj.to_str().unwrap(), "r"), "v:2"),
+            with_id(grant("c1", lib.to_str().unwrap(), "r"), "v:3"),
             grant("c1", notes.to_str().unwrap(), "r"),
             grant("c1", gone.to_str().unwrap(), "r"),
             grant("c1", d.path().join("closed").to_str().unwrap(), ""),
         ];
         write_record(&record_file(&paths), &grants).unwrap();
-        assert_eq!(granted_folders(&paths), [proj]);
+        // Each folder once, with the objects the record names there.
+        assert_eq!(
+            granted_folders(&paths),
+            [
+                crate::grant_watch::Folder {
+                    path: lib,
+                    ids: vec!["v:3".into()]
+                },
+                crate::grant_watch::Folder {
+                    path: proj,
+                    ids: vec!["v:1".into(), "v:2".into()]
+                }
+            ]
+        );
     }
 
     /// Two pairings whose projects are linked to one store (pnpm's): the
@@ -3416,11 +3465,15 @@ mod tests {
     fn grants_are_in_place_until_a_folder_moved_or_was_made_again() {
         let d = tempfile::tempdir().unwrap();
         let file = d.path().join("grants.json");
+        let none = Synced::default();
         let mut f = Fake::default();
         for p in ["/w/proj", "/w/proj/vault", "/w/other"] {
             f.make(p);
         }
-        assert!(in_place_with(&file, &mut f), "no record: nothing to move");
+        assert!(
+            in_place_with(&file, &none, &mut f),
+            "no record: nothing to move"
+        );
         let want = [
             grant("c1", "/w/proj", "rw"),
             grant("c1", "/w/proj/vault", ""),
@@ -3428,25 +3481,76 @@ mod tests {
         ];
         let s = sync(&file, &want, &mut f);
         assert!(s.errors.is_empty(), "{s:?}");
-        assert!(in_place_with(&file, &mut f));
+        assert!(in_place_with(&file, &none, &mut f));
         // A closed folder renamed.
         f.mv("/w/proj/vault", "/w/proj/v2");
-        assert!(!in_place_with(&file, &mut f));
+        assert!(!in_place_with(&file, &none, &mut f));
         f.mv("/w/proj/v2", "/w/proj/vault");
-        assert!(in_place_with(&file, &mut f));
+        assert!(in_place_with(&file, &none, &mut f));
         // A closed folder removed and made again.
         f.rm("/w/proj/vault");
         f.make("/w/proj/vault");
-        assert!(!in_place_with(&file, &mut f));
+        assert!(!in_place_with(&file, &none, &mut f));
         let s = sync(&file, &want, &mut f);
         assert!(s.errors.is_empty(), "{s:?}");
-        assert!(in_place_with(&file, &mut f));
+        assert!(in_place_with(&file, &none, &mut f));
         // A granted folder moved away.
         f.mv("/w/other", "/w/elsewhere");
-        assert!(!in_place_with(&file, &mut f));
+        assert!(!in_place_with(&file, &none, &mut f));
         // A record that cannot be read tells nothing.
         std::fs::write(&file, "not json").unwrap();
-        assert!(!in_place_with(&file, &mut f));
+        assert!(!in_place_with(&file, &none, &mut f));
+    }
+
+    /// A closed folder that was not there at the last sync has no record,
+    /// and neither has a grant on a volume that was away; the sync names
+    /// them, so a command does not take the last answer once something is
+    /// at their path.
+    #[test]
+    fn a_folder_that_was_not_there_at_the_last_sync_is_not_in_place_once_it_is() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let none = Synced::default();
+        let mut f = Fake::default();
+        for p in ["/w/proj", "/w/other"] {
+            f.make(p);
+        }
+        let mut want = vec![
+            grant("c1", "/w/proj", "rw"),
+            grant("c1", "/w/proj/vault", ""),
+            grant("c1", "/w/other", "r"),
+        ];
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(
+            s.absent.iter().map(plain).collect::<Vec<_>>(),
+            [want[1].clone()]
+        );
+        let last = s.kept();
+        assert!(in_place_with(&file, &last, &mut f));
+        // The record tells nothing of the closed folder made now.
+        f.make("/w/proj/vault");
+        assert!(in_place_with(&file, &none, &mut f));
+        assert!(!in_place_with(&file, &last, &mut f));
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.absent.is_empty(), "{s:?}");
+        assert!(in_place_with(&file, &s.kept(), &mut f));
+        // A grant the config dropped while its volume was away: the record
+        // keeps it, and it is at its path again when the volume is back.
+        f.mv("/w/other", "/archive/other");
+        f.away = true;
+        want.pop();
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.away.len() == 1, "{s:?}");
+        let last = s.kept();
+        assert!(!in_place_with(&file, &last, &mut f), "not at its path");
+        f.mv("/archive/other", "/w/other");
+        f.away = false;
+        assert!(in_place_with(&file, &none, &mut f));
+        assert!(
+            !in_place_with(&file, &last, &mut f),
+            "back, and to be taken off"
+        );
     }
 
     /// A name in the pairing's protected list, or in a folder of it

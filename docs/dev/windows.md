@@ -539,12 +539,15 @@ runs in the container as well, unless the pairing runs as you.
   they go on), and walks every granted folder once after it starts: what
   you or an agent move, install or clone into a granted folder gets its
   entry by itself. It runs one such walk at a time and leaves a pause after
-  it twice as long as the walk took, so a command that makes new names all
-  the time gets a walk every few minutes at most on a big folder. A command
-  of a pairing does not wait for such a walk (the start walk too) as long
-  as the config is unchanged and every granted and closed folder is still
-  where the node recorded it; when one was moved or made again meanwhile,
-  the command waits for the walk and the sync that reacts to it. A walk
+  it twice as long as the walk took (none after the start walk, which goes
+  through every grant and so is the longest), so a command that makes new
+  names all the time gets a walk every few minutes at most on a big folder.
+  A command of a pairing does not wait for such a walk (the start walk too)
+  as long as the config is unchanged, every granted and closed folder is
+  still where the node recorded it, and nothing is at the place of a closed
+  folder or of a grant on a volume that was away when the last sync found
+  it missing; when a folder was moved or made again meanwhile, the command
+  waits for the walk and the sync that reacts to it. A walk
   that fails part way is
   finished by the next sync (the grant stays marked), and one that could
   not even be marked (the record could not be written) is walked at the
@@ -565,6 +568,10 @@ runs in the container as well, unless the pairing runs as you.
     external hard disk or SSD is a fixed disk to Windows and is watched: it
     cannot be removed safely while a folder on it is granted. Remove the
     grant first.
+  - A watch is of the folder object, not of its path: a granted folder you
+    rename away (the watch goes along with it) and make again at its path,
+    with `git clone` or a tool that swaps a folder into place, is watched
+    again at the next sync, which moves the grant onto the new folder.
   - A folder whose watch ended (the folder went, or a read failed) is
     watched again at the next sync; one that could not be opened (a link,
     a drive that is not watched, an error) is not tried again while it stays
@@ -769,7 +776,13 @@ runs in the container as well, unless the pairing runs as you.
     than one name gets read and run at most for the pairing, not write,
     whatever the folder around gives: a command may rename the closed
     folder while a walk goes on, and the walk judges a file by the names it
-    has when it gets there. For the same reason a closed folder that a
+    has when it gets there. A closed folder elsewhere in a folder the
+    pairing writes can be moved into the walked folder just as well, and
+    the node does not look for it (that would cap the linked files of
+    every project under a writable folder that holds any closed folder): a
+    file linked across such a closed folder's edge can then be read and
+    written through the walked folder's name until the next walk, which
+    sees the moved folder and closes it again. For the same reason a closed folder that a
     command renames during a walk may leave a file linked across its edge
     (by you) readable through the other name until the node walks that
     folder again, which comes no sooner than twice the walk's length

@@ -1058,7 +1058,9 @@ impl Shared {
     /// which the command waits for.
     pub fn sync_grants_for_call(&self) -> crate::grants::Synced {
         match self.grant_watch.walking(self.config().version) {
-            Some(synced) if crate::grants::in_place(&self.paths, self.grants_owner().as_ref()) => {
+            Some(synced)
+                if crate::grants::in_place(&self.paths, self.grants_owner().as_ref(), &synced) =>
+            {
                 synced
             }
             _ => self.sync_grants(),
