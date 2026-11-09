@@ -3061,6 +3061,7 @@ mod tests {
         lab.policy.protected.extra = vec![
             home.join("keys").display().to_string(),
             home.join("open/key").display().to_string(),
+            home.join("dotfiles/private").display().to_string(),
         ];
         let mut cfg = NodeConfig::default();
         cfg.centers.push(lab);
@@ -3075,6 +3076,8 @@ mod tests {
         f.link(&["/w/home/dotfiles/id", "/w/home/keys/id"]);
         f.link(&["/w/home/proj/src/obj", "/w/home/proj/secret/obj"]);
         f.link(&["/w/home/dotfiles/k", "/w/home/open/key/k"]);
+        // Both names in the granted folder, one in a protected entry there.
+        f.link(&["/w/home/dotfiles/x", "/w/home/dotfiles/private/x"]);
         // The split gives `proj`'s entries, not `secret`.
         let want = [
             grant(&c, "/w/home/dotfiles", "rw"),
@@ -3088,6 +3091,7 @@ mod tests {
         assert_eq!(f.may("/w/home/dotfiles/id", &c), None);
         assert_eq!(f.may("/w/home/proj/src/obj", &c), None);
         assert_eq!(f.may("/w/home/dotfiles/k", &c), access("r"));
+        assert_eq!(f.may("/w/home/dotfiles/x", &c), None);
         // Without the lists, they would be read through the granted name.
         let s = sync_shut(&file, &want, &Shut::default(), &mut f);
         assert!(s.errors.is_empty(), "{s:?}");
