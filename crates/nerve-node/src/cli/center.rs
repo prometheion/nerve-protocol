@@ -510,20 +510,17 @@ mod tests {
             rm_with_node(&d, &paths, &profile);
         }
 
+        // A pairing that never had a folder: the running node removes its
+        // profile with the pairing too, as the profile goes with the pairing.
         let (d, paths) = setup(&["home"]);
         let name = crate::grants::container(&paths, "n");
         let profile = profile_of(&name);
         with_node(d.path(), &paths, |_| {
             let out = run(&paths, &["center", "rm"]).unwrap();
-            assert!(
-                out.contains(&format!(
-                    "the AppContainer profile {name} of home stays, since the node at"
-                )),
-                "{out}"
-            );
+            assert!(out.contains("unpaired home"), "{out}");
+            assert!(!out.contains("stays"), "{out}");
         });
-        assert!(profile.exists(), "{}", profile.display());
-        nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
+        assert!(!profile.exists(), "{}", profile.display());
 
         let (_d, paths, name, profile) = granted_home();
         let out = run(&paths, &["center", "rm"]).unwrap();
@@ -545,12 +542,19 @@ mod tests {
         let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        let o = std::process::Command::new("icacls")
-            .arg(&work)
-            .args(["/deny", "*S-1-1-0:(WDAC)"])
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{o:?}");
+        // Its owner is SYSTEM, so the test's account has no implicit right
+        // to change its permissions, and the denial holds for everyone.
+        for args in [
+            &["/setowner", "*S-1-5-18"][..],
+            &["/deny", "*S-1-1-0:(WDAC)"],
+        ] {
+            let o = std::process::Command::new("icacls")
+                .arg(&work)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{o:?}");
+        }
         let real = nerve_policy::paths::resolve(&work).unwrap();
         let mut cfg = NodeConfig::default();
         let mut home = entry("home");

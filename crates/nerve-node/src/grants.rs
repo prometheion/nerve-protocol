@@ -3034,6 +3034,10 @@ mod tests {
     /// or where a pairing writes but does not read: a command may have given
     /// a folder it made an entry of its own, which a file linked into it
     /// would get.
+    // The fake volume's `/w/...` paths are no paths on Windows, where the
+    // pass resolves them on the real disk (`Judge::new`) and the protected
+    // entries are Windows' own: win_account.rs shows these cases there.
+    #[cfg(unix)]
     #[test]
     fn a_file_whose_names_lie_under_the_same_grants_gets_the_change() {
         let access = |a: &str| Some(Access::parse(a).unwrap());
@@ -3356,6 +3360,10 @@ mod tests {
     /// holds that name, so it would not restrict, and a granted name would
     /// give the file's read. A protected entry its folders release for a
     /// read does not close it.
+    // The fake volume's `/w/...` paths are no paths on Windows, where the
+    // pass resolves them on the real disk (`Judge::new`) and the protected
+    // entries are Windows' own: win_account.rs shows these cases there.
+    #[cfg(unix)]
     #[test]
     fn a_protected_or_closed_name_without_a_grant_closes_a_linked_file() {
         let access = |a: &str| Some(Access::parse(a).unwrap());
@@ -3975,6 +3983,10 @@ mod tests {
     /// name now lies in the same folder under the same grants) loses the
     /// node's own entries: it gets what the folder gives, and a grant taken
     /// off leaves it nothing of the node's.
+    // The fake volume's `/w/...` paths are no paths on Windows, where the
+    // pass resolves them on the real disk (`Judge::new`) and the protected
+    // entries are Windows' own: win_account.rs shows these cases there.
+    #[cfg(unix)]
     #[test]
     fn a_linked_file_that_changes_as_any_file_loses_the_nodes_entries() {
         let access = |a: &str| Some(Access::parse(a).unwrap());
