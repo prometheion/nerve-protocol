@@ -2,8 +2,8 @@
 
 ## Build
 
-Needs Rust 1.88 or newer (`rust-version` in `Cargo.toml`). Only 1.99.0, the
-toolchain of CI and the release, is tested; nothing checks 1.88.
+Needs Rust 1.89 or newer (`rust-version` in `Cargo.toml`). Only 1.99.0, the
+toolchain of CI and the release, is tested; nothing checks 1.89.
 
 ```sh
 cargo build --release

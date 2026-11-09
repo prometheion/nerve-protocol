@@ -14,8 +14,8 @@
 # The Windows job runs the same `cargo test --workspace`, so the tests that are
 # compiled only on Windows run there: grants, the integrity level, the service
 # steps, the job object, the AppContainer, Windows paths and rules. The tests
-# that need a machine of their own (the node installed as a service, an
-# administrator account with a password, a virtual disk) carry
+# that need a machine of their own (the node or the center installed as a
+# service, an administrator account with a password, a virtual disk) carry
 # `#[ignore = "<reason>"]`, so every run lists them as ignored with the
 # reason; the `windows-installed` job runs them on a runner of its own
 # (.github/workflows/installed-windows.yml). Its programs, the debug
@@ -395,8 +395,10 @@ jobs:
           cp "$(exe -p nerve-node --test win_sudo)" dist/tests/win_sudo.exe
           cp "$(exe -p nerve-node --test win_limits)" dist/tests/win_limits.exe
           cp "$(exe -p nerve-node --test win_account)" dist/tests/win_account.exe
+          cp "$(exe -p nerve-center --test win_service)" dist/tests/win_service.exe
           cp "$(exe -p nerve-node --lib)" dist/tests/nerve_node_lib.exe
           cp "$(exe -p nerve-sandbox --lib)" dist/tests/nerve_sandbox_lib.exe
+          cp "$(exe -p nerve-service --lib)" dist/tests/nerve_service_lib.exe
           ls -l dist dist/tests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -413,8 +415,8 @@ jobs:
 
   # The Windows programs on a runner of their own, installed: the app's own
   # install, the sudo switch and the limits per command on the installed
-  # service, an administrator's batch logon and a virtual disk. A test that
-  # skips fails the job.
+  # service, an administrator's batch logon, a virtual disk, and the center
+  # as a Windows service. A test that skips fails the job.
   windows-installed:
     name: Installed on Windows
     needs: windows

@@ -45,8 +45,14 @@ impl Center {
             Outcome::Open => json!({"open": true, "node": null}),
             Outcome::Gone => json!({"open": false, "node": null}),
             Outcome::Paired(id) => {
-                let name = self.read(|s| s.nodes.get(&id).map(|n| n.name.clone()));
-                json!({"open": false, "node": name.map(|name| json!({"id": id, "name": name}))})
+                // Its platform names the next step: a command, or a place of
+                // the Nerve app on Windows.
+                let node = self.read(|s| {
+                    s.nodes
+                        .get(&id)
+                        .map(|n| json!({"id": id, "name": n.name, "platform": n.platform}))
+                });
+                json!({"open": false, "node": node})
             }
         }
     }

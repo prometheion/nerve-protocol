@@ -47,10 +47,12 @@ pub fn generate() -> String {
 /// The token the file holds, or none when there is no file. A file that
 /// holds no token (empty, more than one line, too short or too long) is an
 /// error, not a missing token: the center must not make a new one over what
-/// the owner wrote there.
+/// the owner wrote there. A link in the file's place is refused: the center's
+/// account can make one in its own folder, and an administrator who runs
+/// `owner-token` would read its target with their rights.
 pub fn read(state: &Path) -> Result<Option<String>, String> {
     let p = path(state);
-    let text = match std::fs::read_to_string(&p) {
+    let text = match nerve_transport::files::read_plain_string(&p) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
@@ -107,14 +109,16 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     // token that opens nothing.
     if not_yours(state) {
         return Err(format!(
-            "{} is not yours to read: run it as the center's user, or `sudo nerve-center owner-token` for the installed center",
-            state.display()
+            "{} is not yours to read: run it as the center's user, or {} for the installed center",
+            state.display(),
+            crate::service::admin_command("owner-token")
         ));
     }
     if !state.join(crate::store::FILE).exists() && !path(state).exists() {
         return Err(format!(
-            "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first (`sudo nerve-center install`)",
-            state.display()
+            "no center has run in {} yet, and it makes its owner token at its first start; give its state folder with --state-dir, or install the center first ({})",
+            state.display(),
+            crate::service::admin_command("install")
         ));
     }
     let (token, made) = if new {
@@ -255,6 +259,33 @@ mod tests {
         assert_eq!(
             read(d.path()).unwrap().as_deref(),
             Some("my-own-secret-of-20-chars")
+        );
+    }
+
+    /// The center's account may put a link where the token is; the
+    /// administrator who runs `owner-token` or `install` must not be handed
+    /// the link's target as the token (round 2, security 1).
+    #[test]
+    fn a_link_is_not_read_as_the_token() {
+        let d = tempfile::tempdir().unwrap();
+        let secret = d.path().join("elsewhere");
+        std::fs::write(&secret, "an-administrators-only-secret-1\n").unwrap();
+        let state = d.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, path(&state)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, path(&state)).unwrap();
+        let e = read(&state).unwrap_err();
+        assert!(!e.contains("administrators-only-secret"), "{e}");
+        assert!(ensure(&state).is_err());
+        assert!(!OwnerToken::new(&state).ok("an-administrators-only-secret-1"));
+        // A new token replaces the link and leaves its target alone.
+        let new = renew(&state).unwrap();
+        assert_eq!(read(&state).unwrap(), Some(new));
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "an-administrators-only-secret-1\n"
         );
     }
 

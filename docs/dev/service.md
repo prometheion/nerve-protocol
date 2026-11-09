@@ -486,7 +486,9 @@ runs under a user of its own, `nerve-center`, with MCP over HTTP: harnesses
 connect to it with a [harness token](mcp-surface.md#tokens) instead of starting
 it. `install`, `update` and `uninstall` need root and take none of the
 center's flags: the service's settings are in its
-[settings file](#settings-of-the-service). Windows is not supported yet.
+[settings file](#settings-of-the-service). On Windows the same commands run
+in an administrator's terminal
+([Windows](windows.md#the-center-as-a-windows-service)).
 
 ### Install
 

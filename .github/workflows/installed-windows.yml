@@ -5,8 +5,9 @@
 # node"); it grows with each part of the Windows node that needs a machine of
 # its own.
 #
-# The job makes an administrator account of its own, with a random password
-# and its profile loaded (nobody signs in on a runner), then runs:
+# The job makes an administrator account and a standard account of its own,
+# with random passwords and their profiles loaded (nobody signs in on a
+# runner), then runs:
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
 # - with the node installed again by that account, its owner: the sudo
@@ -25,7 +26,14 @@
 # - the administrator's batch logon (nerve-node's
 #   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
 #   folder on a virtual disk mounted in a folder (nerve-sandbox's
-#   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again).
+#   tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again), and a
+#   backup's folder on a FAT32 virtual disk (nerve-service's
+#   win::dacl::tests::a_folder_on_a_volume_without_lists_is_held);
+# - the center as a Windows service: its install, `status`, its restart
+#   actions, its web UI in Chrome, what a standard account and the
+#   administrator's other account can and cannot do to it and to its pipe, a
+#   second center that attaches to a first, backup and restore, update (also
+#   to another build) and uninstall (crates/nerve-center/tests/win_service.rs).
 # A test that skips fails the job. The account's password is masked in the
 # log and goes nowhere but the tests of this job.
 name: Installed on Windows
@@ -38,7 +46,7 @@ on:
         type: string
         required: true
       tests:
-        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_account.exe, nerve_node_lib.exe and nerve_sandbox_lib.exe"
+        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_account.exe, win_service.exe, nerve_node_lib.exe, nerve_sandbox_lib.exe and nerve_service_lib.exe"
         type: string
         required: true
       ref:
@@ -106,6 +114,23 @@ jobs:
           "NERVE_WIN_SUDO_ACCOUNT=$name" >> $env:GITHUB_ENV
           "NERVE_WIN_SUDO_PASSWORD=$pw" >> $env:GITHUB_ENV
           "NERVE_TEST_SID=$sid" >> $env:GITHUB_ENV
+      # A standard account, for what an account without the administrators'
+      # rights must not do: read the center's state, take the owner's
+      # places on its ports, or make a pipe a harness trusts.
+      - name: A standard account with its profile
+        run: |
+          $name = 'nervestd'
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $pw = [Convert]::ToBase64String($bytes) + 'a1!'
+          "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member $name -ErrorAction SilentlyContinue
+          $cred = New-Object System.Management.Automation.PSCredential(".\$name", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
+            -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
+          "NERVE_WIN_STD_ACCOUNT=$name" >> $env:GITHUB_ENV
+          "NERVE_WIN_STD_PASSWORD=$pw" >> $env:GITHUB_ENV
       - name: The app installs, controls, updates and uninstalls Nerve
         run: |
           $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path
@@ -139,7 +164,9 @@ jobs:
             @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
             @('win_account.exe', 'folder_and_allowlist_mode_run_as_nerve_run_in_their_containers'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
-            @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again')
+            @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
+            @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),
+            @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_over_a_share_is_remote')
           )
           $failed = 0
           foreach ($r in $runs) {
@@ -155,6 +182,24 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # Chrome and a Node.js with WebSocket come with the image; the web UI
+      # smoke test drives the one with the other.
+      - name: The center as a Windows service
+        run: |
+          $chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $chrome)) { throw "no Chrome at $chrome" }
+          $node = (Get-Command node).Source
+          & $node -e 'if (typeof WebSocket !== "function") { console.error("this Node.js " + process.version + " has no WebSocket"); process.exit(1); }'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:NERVE_CENTER_PROGRAM = (Resolve-Path dist/nerve-center.exe).Path
+          $env:NERVE_UI_SMOKE_CHROME = $chrome
+          $env:NERVE_UI_SMOKE_NODE = $node
+          $env:NERVE_UI_SMOKE_SCRIPT = (Resolve-Path .github/scripts/web-ui-smoke.mjs).Path
+          $said = & dist/tests/win_service.exe --ignored --exact --nocapture --test-threads=1 the_center_runs_as_a_windows_service 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/center.log" | Out-String
+          Write-Host $said
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the center service test did not run' }
       - name: Uninstall
         if: success() || failure()
         run: |
@@ -173,6 +218,6 @@ jobs:
       - name: No test skipped
         if: success() || failure()
         run: |
-          $logs = Get-ChildItem "$env:RUNNER_TEMP" -Filter *.log | Where-Object Name -in 'real.log', 'installed.log'
+          $logs = Get-ChildItem "$env:RUNNER_TEMP" -Filter *.log | Where-Object Name -in 'real.log', 'installed.log', 'center.log'
           $skipped = $logs | Select-String -Pattern '(^|\.\.\. )skipped'
           if ($skipped) { $skipped; throw 'a test skipped' }

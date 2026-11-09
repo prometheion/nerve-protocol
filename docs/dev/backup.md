@@ -26,8 +26,7 @@ restore does is `crates/nerve-node/src/backup.rs` and
   center than the one here is refused without `--replace`.
 - **A restore never goes under a running node or center.** It holds the
   node's `keys.lock` (a node holds it for its life) or the center's lock
-  (`center.lock`; on Windows, where the center takes none, a share-less open
-  of the same file).
+  (`center.lock`, on Linux and Windows alike).
 
 ## The file
 
@@ -328,7 +327,7 @@ On a node that has config here already:
 | `--replace` | Restore over a node that is not the one the backup is of |
 | `--secret-storage file\|keyring` | Keep the keys here in files or in the keyring, whatever the backup's config says. Needed when the backup was made on a machine with a keyring and this one has none |
 | `--without-proxy` | Leave the proxy out of the restored config, with its pin, password and header values, and set it again on this machine with `proxy set`: the address, the `--pin=<pin>` of an `https://` proxy and its login (for a relay, `relay token <name>` on the relay prints the whole command, with a new token and the pin). Nothing of it is kept or needed, so no keyring is asked and nothing can go to the wrong proxy |
-| `--passphrase-file <file>` | Read the passphrase from the first line of a file instead of asking. On Linux the file must not be readable by others; Windows does not check |
+| `--passphrase-file <file>` | Read the passphrase from the first line of a file instead of asking. On Linux the file must not be readable by others; Windows does not check. On Windows the center's backup file gets an access list of its own: your account, SYSTEM and the administrators |
 
 If the backup has no key for a pairing, `restore` says so and names the
 pairing. When this machine still holds a key that fits the pairing, in the

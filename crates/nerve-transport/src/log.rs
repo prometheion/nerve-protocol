@@ -280,12 +280,11 @@ impl Log {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            // No wait on a pipe, no link followed.
-            o.mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            o.mode(0o600);
         }
-        let mut f = o.open(path)?;
-        if !f.metadata()?.is_file() {
+        // No wait on a pipe, no link followed.
+        let mut f = crate::files::no_follow(&mut o).open(path)?;
+        if !crate::files::is_plain(&f)? {
             return Err(std::io::Error::other(format!(
                 "{} is not a regular file",
                 path.display()
@@ -1099,6 +1098,25 @@ pub fn file_in(dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// An entry is appended to a plain file and to no link (round 1,
+    /// security 3): the updater and an administrator's restore log into the
+    /// center's folder, where its account may put one.
+    #[test]
+    fn an_entry_is_not_appended_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let (log, target) = (d.path().join("center.log"), d.path().join("target"));
+        Log::append_entry(&log, Level::Info, "one").unwrap();
+        Log::append_entry(&log, Level::Info, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+        std::fs::remove_file(&log).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &log).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &log).unwrap();
+        assert!(Log::append_entry(&log, Level::Info, "x").is_err());
+        assert!(!target.exists(), "the link's target was made");
+    }
+
     use super::*;
 
     fn msgs(log: &Log, q: &Query) -> Vec<String> {

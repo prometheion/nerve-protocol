@@ -1,17 +1,25 @@
 //! The `nerve-center` binary as a harness starts it: MCP over stdio, and a
-//! second instance on the same state folder that attaches to the first.
+//! second instance on the same state folder that attaches to the first, on
+//! Unix over its socket and on Windows over its pipe (#64).
 
-#![cfg(unix)]
-
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+/// A command with no environment but what a program needs to start:
+/// Windows' sockets need `SystemRoot`.
+fn bare(c: &mut Command) -> &mut Command {
+    c.env_clear();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        c.env("SystemRoot", root);
+    }
+    c
+}
+
 fn spawn(state: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_nerve-center"))
-        .env_clear()
+    bare(&mut Command::new(env!("CARGO_BIN_EXE_nerve-center")))
         .env("NERVE_CENTER_STATE_DIR", state)
         .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
         .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
@@ -111,6 +119,7 @@ fn stdio_and_a_second_instance_that_attaches() {
 
 /// The first start says the owner token on stderr at once, whatever the
 /// level, and where it is kept; a later start says nothing of it.
+#[cfg(unix)]
 #[test]
 fn the_first_start_says_the_owner_token_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
@@ -182,6 +191,7 @@ fn under_systemd_the_owner_token_stays_off_stderr() {
 
 /// A token file that holds no token stops a center with a web UI, and only
 /// warns one without.
+#[cfg(unix)]
 #[test]
 fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
     let dir = tempfile::tempdir().unwrap();
@@ -215,6 +225,7 @@ fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
 /// An owner token that is also the harness token of the settings stops a
 /// center with a web UI: one secret for both would let the agent's own token
 /// into the UI (review round 7 of the center's sign-in).
+#[cfg(unix)]
 #[test]
 fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
     let dir = tempfile::tempdir().unwrap();
@@ -251,6 +262,7 @@ fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
 
 /// Starts a center with the level in `NERVE_LOG`, lets one harness session
 /// come and go, and gives back what the center put on stderr.
+#[cfg(unix)]
 fn one_session(state: &std::path::Path, level: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
         .env_clear()
@@ -270,15 +282,11 @@ fn one_session(state: &std::path::Path, level: &str) -> String {
     drop(child.stdin.take());
     assert!(wait(&mut child, Duration::from_secs(10)));
     let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
     err
 }
 
+#[cfg(unix)]
 #[test]
 fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     let lines = |dir: &std::path::Path| -> Vec<Value> {
@@ -330,14 +338,49 @@ fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("error, warn, info or debug"));
 }
 
-/// `nerve-center backup` or `restore` as the owner runs them.
+/// `nerve-center backup` or `restore` as the owner runs them. The state
+/// folder is given by `--state-dir`: an administrator's command refuses it
+/// from the variable (and the Windows CI runner is one), which the test
+/// `an_administrators_command_does_not_take_the_state_variable` checks.
 fn owner(args: &[&str], state: Option<&std::path::Path>) -> std::process::Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
-    c.env_clear().args(args).stdin(Stdio::null());
+    bare(&mut c).args(args).stdin(Stdio::null());
     if let Some(s) = state {
-        c.env("NERVE_CENTER_STATE_DIR", s);
+        c.arg("--state-dir").arg(s);
     }
     c.output().unwrap()
+}
+
+/// On Windows, an elevated `backup` (the hosted runners run the tests so)
+/// refuses a state folder that came from `NERVE_CENTER_STATE_DIR` and writes
+/// nothing; the same command from a terminal that is not elevated takes it
+/// (round 8, correctness 1).
+#[cfg(windows)]
+#[test]
+fn an_administrators_command_does_not_take_the_state_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let pass = dir.path().join("pass");
+    nerve_transport::files::write_private(&pass, b"correct horse battery\n").unwrap();
+    let file = dir.path().join("v.bak");
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    bare(&mut c)
+        .args(["backup"])
+        .arg(&file)
+        .arg("--passphrase-file")
+        .arg(&pass)
+        .env("NERVE_CENTER_STATE_DIR", dir.path().join("state"))
+        .stdin(Stdio::null());
+    let out = c.output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    if nerve_service::win::sid::is_admin() {
+        assert!(!out.status.success(), "{out:?}");
+        assert!(said.contains("NERVE_CENTER_STATE_DIR"), "{said}");
+    } else {
+        // Taken: it fails for want of a center in that folder, not for the
+        // variable.
+        assert!(!said.contains("administrator's terminal"), "{said}");
+    }
+    assert!(!file.exists());
 }
 
 #[test]
@@ -425,6 +468,6 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     assert_eq!(id(&old), id(&new));
 
     // A harness still starts it without a subcommand, and nothing else is one.
-    let bad = owner(&["pair"], Some(&new));
+    let bad = owner(&["pair"], None);
     assert!(!bad.status.success());
 }

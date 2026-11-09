@@ -125,7 +125,7 @@ impl Center {
                         bin,
                         model,
                         &self.dir,
-                        cfg.model.local_gpu,
+                        checker::install::on_gpu(cfg.model.local_gpu, checker::install::cpu_only()),
                         cfg.model.timeout_ms,
                         checker::install::model_pin(cfg.model.local_model),
                     )
@@ -151,7 +151,13 @@ impl Center {
                         None,
                         &format!(
                             "the action checker is starting its local decision model on the {}",
-                            if cfg.model.local_gpu { "GPU" } else { "CPU" }
+                            match checker::install::on_gpu(
+                                cfg.model.local_gpu,
+                                checker::install::cpu_only(),
+                            ) {
+                                true => "GPU",
+                                false => "CPU",
+                            }
                         ),
                     );
                 }

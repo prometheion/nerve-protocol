@@ -53,7 +53,7 @@ pub fn backup(
 ) -> Result<BackupReport, String> {
     pass.check_new()?;
     let read = |name: &str| {
-        std::fs::read_to_string(state.join(name)).map_err(|e| {
+        nerve_transport::files::read_plain_string(&state.join(name)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "{} is not there: no center has run in {}",
@@ -71,7 +71,7 @@ pub fn backup(
     // second try.
     let mut files = BTreeMap::new();
     for _ in 0..3 {
-        let next = std::fs::read_to_string(state.join(NEXT_IDENTITY_FILE)).ok();
+        let next = nerve_transport::files::read_plain_string(&state.join(NEXT_IDENTITY_FILE)).ok();
         let identity = read(IDENTITY_FILE)?;
         let state_text = read(store::FILE)?;
         let rotating = Store::parse(state_text.as_bytes())
@@ -101,7 +101,7 @@ pub fn backup(
     // not written.
     let parsed = parse(contents.clone())?;
     let bytes = backup::seal_with(&contents, pass, rounds)?;
-    backup::write_file(file, &bytes, overwrite)?;
+    crate::util::write_backup_file(file, &bytes, overwrite)?;
     Ok(BackupReport {
         name: parsed.store.center_name.clone(),
         id: parsed.store.center_id.clone(),
@@ -137,7 +137,7 @@ impl Parsed {
 pub fn parse(contents: Contents) -> Result<Parsed, String> {
     if contents.kind != Kind::Center {
         return Err(format!(
-            "this is the backup of a {}, not of a center: restore it with `nerve-node restore`",
+            "this is the backup of a {}, not of a center: restore it with `nerve-node restore`, or in the Nerve app",
             contents.kind.word()
         ));
     }
@@ -228,7 +228,7 @@ fn inspect(state: &Path) -> Target {
 /// one that starts meanwhile finds the state folder taken. Both files are
 /// written whole; when the second cannot be, the first goes back.
 pub fn restore(state: &Path, b: &Parsed, replace: bool) -> Result<RestoreReport, String> {
-    let _lock = crate::attach::claim(state)?.ok_or_else(|| {
+    let _lock = crate::attach::try_lock(state)?.ok_or_else(|| {
         format!(
             "a nerve-center runs on {}: a restore never goes under a running center. Stop it (end the harness that started it, or the process that runs it), then restore",
             state.display()
@@ -255,9 +255,9 @@ pub fn restore(state: &Path, b: &Parsed, replace: bool) -> Result<RestoreReport,
     }
 
     // What is here now: put back when a write fails.
-    let old = std::fs::read_to_string(&id_path).ok();
+    let old = nerve_transport::files::read_plain_string(&id_path).ok();
     let next_path = state.join(NEXT_IDENTITY_FILE);
-    let old_next = std::fs::read_to_string(&next_path).ok();
+    let old_next = nerve_transport::files::read_plain_string(&next_path).ok();
 
     // What goes in: the backup's, unless the center here is further along.
     // Its key rotated since the backup was made: its nodes were told the new
@@ -565,6 +565,9 @@ pub fn run(
             let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
             print_backup(&r, file, out);
+            // Which center it is, since an owner command may take another
+            // folder than the installed one (round 7, security 2).
+            let _ = writeln!(out, "The state folder: {}", state.display());
         }
         Cmd::Restore {
             file,
@@ -575,7 +578,7 @@ pub fn run(
             let kind = backup::kind_of(&bytes)?;
             if kind != Kind::Center {
                 return Err(format!(
-                    "this is the backup of a {}, not of a center: restore it with `nerve-node restore`",
+                    "this is the backup of a {}, not of a center: restore it with `nerve-node restore`, or in the Nerve app",
                     kind.word()
                 ));
             }
@@ -584,6 +587,7 @@ pub fn run(
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
             print_restore(&r, &parsed, out);
+            let _ = writeln!(out, "The state folder: {}", state.display());
         }
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.
@@ -592,6 +596,7 @@ pub fn run(
         | Cmd::Uninstall { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
+        | Cmd::Service
         | Cmd::ServiceFiles => {
             return Err(
                 "install, update, uninstall, owner-token, status and service-files are not backup commands"
@@ -895,6 +900,32 @@ mod tests {
         }
     }
 
+    /// A restore reads what is in the folder to put it back when a write
+    /// fails, and reads no link for that (round 1, security 3): the account
+    /// whose folder an administrator restores into could point the
+    /// identity file at a file only administrators read, and have its text
+    /// written back into the folder as a file it reads.
+    #[test]
+    fn a_failed_restore_puts_back_no_file_a_link_named() {
+        let a = tempfile::tempdir().unwrap();
+        center(a.path(), "c1");
+        let (_f, parsed, _) = backup_of(a.path());
+        let b = tempfile::tempdir().unwrap();
+        let state = b.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let secret = b.path().join("secret");
+        std::fs::write(&secret, "ADMINISTRATORS-ONLY").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, state.join(IDENTITY_FILE)).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, state.join(IDENTITY_FILE)).unwrap();
+        // The state cannot be written: a folder is where the file goes.
+        std::fs::create_dir(state.join(store::FILE)).unwrap();
+        assert!(restore(&state, &parsed, true).is_err());
+        let now = std::fs::read_to_string(state.join(IDENTITY_FILE)).unwrap_or_default();
+        assert!(!now.contains("ADMINISTRATORS-ONLY"), "{now}");
+    }
+
     #[test]
     fn the_backup_holds_no_key_in_the_clear() {
         let a = tempfile::tempdir().unwrap();
@@ -934,7 +965,7 @@ mod tests {
         center(b.path(), "c1");
         let before = std::fs::read(b.path().join("state.json")).unwrap();
         // A running center holds the lock.
-        let lock = crate::attach::claim(b.path()).unwrap().unwrap();
+        let lock = crate::attach::try_lock(b.path()).unwrap().unwrap();
         let err = restore(b.path(), &parsed, true).err().unwrap();
         assert!(err.contains("runs on"), "{err}");
         assert_eq!(std::fs::read(b.path().join("state.json")).unwrap(), before);
