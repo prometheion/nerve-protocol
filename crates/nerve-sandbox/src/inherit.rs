@@ -65,16 +65,18 @@ pub trait Objects {
     /// Writes `list` as the list of `obj`, and nothing below it.
     fn write(&mut self, obj: &Self::Obj, list: &Self::List) -> io::Result<()>;
     /// Every name of `obj` (its hard links) as a whole path, as the object
-    /// itself gives them, not as a path leads to it.
+    /// itself gives them, not as a path leads to it. A name in a folder
+    /// that cannot be opened (another account's) is left out: the caller
+    /// tells by the count of names that one is missing.
     fn names_of(&mut self, obj: &Self::Obj) -> io::Result<Vec<PathBuf>>;
     /// What `derived` (the list of `obj`, a file with more than one name,
-    /// under the folder walked) becomes with no more than `cap` allows:
-    /// `Same` where that is the list `obj` has now.
+    /// under the folder walked) becomes as `linked` says: `Same` where that
+    /// is the list `obj` has now.
     fn cap(
         &mut self,
         obj: &Self::Obj,
         derived: Derived<Self::List>,
-        cap: &Cap,
+        linked: &Linked,
     ) -> io::Result<Derived<Self::List>>;
 }
 
@@ -120,8 +122,10 @@ pub struct Walked {
 /// What a file with more than one name (hard links) gets ([`Walk::links`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Linked {
-    /// Every name gets the same from the grants: it changes as any file.
-    Full,
+    /// Every name gets the same from the grants: it changes as any file,
+    /// and the entries of the node's own for these containers (by name,
+    /// or an account's SID) that an earlier [`Linked::Capped`] gave it go.
+    Full(Vec<String>),
     /// No more than this.
     Capped(Cap),
 }
@@ -129,12 +133,26 @@ pub enum Linked {
 /// The most the AppContainers may have on a file with more than one name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cap {
-    /// Each container the node grants (by its name) and the rights its
-    /// commands may have on the file (`crate::acl` file rights, read and
-    /// execute at most), or `None`: none at all, as one of the names lies in
-    /// a folder closed to it. Every other AppContainer gets read and execute
-    /// at most.
-    pub containers: Vec<(String, Option<u32>)>,
+    /// Each container the node grants (by its name, or an account's SID)
+    /// and what it gets on the file. Every other AppContainer gets read and
+    /// execute at most.
+    pub containers: Vec<(String, Gets)>,
+}
+
+/// What a container gets on a file with more than one name ([`Cap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gets {
+    /// Nothing at all: one of the names lies in a folder closed to it.
+    Closed,
+    /// These rights (`crate::acl` file rights, read and execute at most),
+    /// by entries of the node's own, whatever the folder walked gives: a
+    /// grant of it holds one of the names. The list is one for every name,
+    /// so what it gets through one name's folder must not hang on which
+    /// name the last walk came through.
+    Rights(u32),
+    /// No entry of the node's own: no grant of it holds a name. What it
+    /// inherits is cut to read and execute, as for any other AppContainer.
+    Unheld,
 }
 
 /// What a file with more than one name gets: its path by the names walked,
@@ -283,10 +301,8 @@ pub fn pass_down<O: Objects>(
                 if kind.names > 1 && !kind.walked() && !matches!(derived, Derived::Kept) =>
             {
                 let capped = objects.names_of(&obj).and_then(|names| {
-                    match links(&path, kind.names, &names)? {
-                        Linked::Full => Ok(derived),
-                        Linked::Capped(cap) => objects.cap(&obj, derived, &cap),
-                    }
+                    let linked = links(&path, kind.names, &names)?;
+                    objects.cap(&obj, derived, &linked)
                 });
                 match capped {
                     Ok(d) => d,
@@ -578,25 +594,35 @@ mod tests {
             Ok(all)
         }
 
-        /// An entry of a container in `cap` becomes `<entry>:r` (some
-        /// rights) or `<entry>:closed`.
+        /// An entry of a container in a cap becomes `<entry>:r` (some
+        /// rights) or `<entry>:closed`, as the node's own entries do; `Full`
+        /// drops such an own entry of its containers.
         fn cap(
             &mut self,
             obj: &usize,
             derived: Derived<List>,
-            cap: &Cap,
+            linked: &Linked,
         ) -> io::Result<Derived<List>> {
             let now = self.list(*obj);
-            let list = match derived {
+            let mut list = match derived {
                 Derived::Kept => return Ok(Derived::Kept),
                 Derived::Same(l) | Derived::Changed(l) => l,
             };
+            if let Linked::Full(listed) = linked {
+                list.own.retain(|e| {
+                    !e.split_once(':')
+                        .is_some_and(|(c, _)| listed.iter().any(|l| l == c))
+                });
+            }
             let capped = |set: &BTreeSet<String>| -> BTreeSet<String> {
                 set.iter()
-                    .map(|e| match cap.containers.iter().find(|(c, _)| c == e) {
-                        Some((_, Some(_))) => format!("{e}:r"),
-                        Some((_, None)) => format!("{e}:closed"),
-                        None => e.clone(),
+                    .map(|e| match linked {
+                        Linked::Capped(cap) => match cap.containers.iter().find(|(c, _)| c == e) {
+                            Some((_, Gets::Rights(_))) => format!("{e}:r"),
+                            Some((_, Gets::Closed)) => format!("{e}:closed"),
+                            _ => e.clone(),
+                        },
+                        Linked::Full(_) => e.clone(),
                     })
                     .collect()
             };
@@ -758,7 +784,7 @@ mod tests {
         let tree = &["a/", "a/x", "a/y=", "a/z", "b/", "b/l="];
         let asked = std::cell::RefCell::new(Vec::new());
         let cap = Cap {
-            containers: vec![("g".into(), Some(1)), ("h".into(), None)],
+            containers: vec![("g".into(), Gets::Rights(1)), ("h".into(), Gets::Closed)],
         };
         let mut capped = |p: &Path, n: u32, names: &[PathBuf]| {
             asked.borrow_mut().push((p.to_path_buf(), n));
@@ -786,11 +812,20 @@ mod tests {
         // Full, and without `links`: as any file.
         for full in [true, false] {
             let mut f = Fake::new(tree);
-            let mut pass = |_: &Path, _: u32, _: &[PathBuf]| Ok(Linked::Full);
+            let mut pass = |_: &Path, _: u32, _: &[PathBuf]| Ok(Linked::Full(Vec::new()));
             let links: Option<Links> = if full { Some(&mut pass) } else { None };
             f.grant_with(&["g"], false, true, links, &mut |_| {});
             assert_eq!(f.has("a/y"), ["g"]);
         }
+        // Full after a cap: the node's own entries for the containers it
+        // names go, also where the folders' lists stay as they are.
+        let mut f = Fake::new(tree);
+        f.grant_with(&["g"], false, true, None, &mut |_| {});
+        f.node("a/y").own = ["g:r", "h:closed", "mine"].map(String::from).into();
+        let mut full = |_: &Path, _: u32, _: &[PathBuf]| Ok(Linked::Full(vec!["g".into()]));
+        f.grant_with(&["g"], true, true, Some(&mut full), &mut |_| {});
+        let own: Vec<&String> = f.node("a/y").own.iter().collect();
+        assert_eq!(own, ["h:closed", "mine"]);
 
         // Widened again behind the node's back: a walk that leaves the
         // folders as they are does not reach it, one into every folder caps
@@ -850,7 +885,7 @@ mod tests {
         let mut f = Fake::new(&["a/", "a/x"]);
         f.made = vec![("a/x".into(), "l=".into())];
         let cap = Cap {
-            containers: vec![("g".into(), Some(1))],
+            containers: vec![("g".into(), Gets::Rights(1))],
         };
         f.grant_with(
             &["g"],
