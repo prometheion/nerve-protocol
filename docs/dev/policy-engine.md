@@ -480,13 +480,17 @@ center's local name):
   (`Shared::sync_grants_for_call`) does not wait for a walk of the watch when
   the config is the one the last finished sync saw (`Watch::walking`) and
   every recorded grant is still at its path with its object, and nothing is
-  at the path of a closed folder the sync found missing or of a grant it
-  kept on a volume that was away (`Synced::absent`, `Synced::away`; both in
+  at the path of a granted or closed folder the sync found missing or of a
+  grant it kept on a volume that was away (`Synced::absent`, `Synced::away`; both in
   `Synced::kept`; `grants::in_place`, a look at each, no change): it takes that sync's
   answer (`Synced::kept`, what decides a refusal), since the walk only caps
   files linked in and adds inherited entries. A newer config, or a folder
   moved or made again since (which the sync in its turn takes off or
-  refuses), waits for the turn. A walk that
+  refuses), waits for the turn. A folder made in a granted folder that is
+  split around a protected entry (your home) has no grant and no record
+  at the last sync, so `in_place` cannot see it: a command in it is
+  refused by the container until that walk ends, and the next command's
+  sync puts the grant on. A walk that
   fails part way leaves its grant `unfinished`, which the next sync walks.
   NTFS refuses to rename or move a folder with an open handle below it, so
   the handle on a granted folder (and a walk's frames) holds the folders

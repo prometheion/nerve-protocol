@@ -264,9 +264,9 @@ pub struct Synced {
     /// Grants on a volume that is not on the machine now: nothing reaches
     /// them while it is away, and the record keeps them until it is back.
     pub away: Vec<Grant>,
-    /// Folders closed to a container (a grant of no flag) that have nothing
-    /// at their path: no grant is recorded for them, so a folder made there
-    /// later is not seen as moved ([`in_place`]).
+    /// Folders granted or closed to a container that have nothing at their
+    /// path: no grant is recorded for them, so a folder made there later is
+    /// not seen as moved ([`in_place`]).
     pub absent: Vec<Grant>,
     /// Containers that had grants and have none now.
     pub emptied: Vec<String>,
@@ -968,8 +968,8 @@ fn at_path(old: &Grant, here: &io::Result<Option<Look>>) -> bool {
 
 /// Whether every grant the record of the node at `paths` holds is still on
 /// its object at the path recorded, and nothing is at the path of a grant
-/// the last sync (`last`) found nothing for (a closed folder that was not
-/// there, or on a volume that was away), looked at as a sync does but
+/// the last sync (`last`) found nothing for (a granted or closed folder that
+/// was not there, or on a volume that was away), looked at as a sync does but
 /// without changing or walking anything (so while another sync walks): a
 /// granted or closed folder that was moved, removed or made again since is
 /// not. A command that would wait for a long walk may go on with the answer
@@ -1464,9 +1464,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                             if let Some(i) = index(w) {
                                 shut[i] = true;
                             }
-                            if w.access == Access::NONE {
-                                out.absent.push(w.clone());
-                            }
+                            out.absent.push(w.clone());
                         }
                         // Refused before anything changed: what was there
                         // stays.
@@ -3549,8 +3547,8 @@ mod tests {
         ));
     }
 
-    /// A closed folder that was not there at the last sync has no record,
-    /// and neither has a grant on a volume that was away; the sync names
+    /// A granted or closed folder that was not there at the last sync has no
+    /// record, and neither has a grant on a volume that was away; the sync names
     /// them, so a command does not take the last answer once something is
     /// at their path.
     #[test]
@@ -3582,6 +3580,23 @@ mod tests {
         let s = sync(&file, &want, &mut f);
         assert!(s.errors.is_empty() && s.absent.is_empty(), "{s:?}");
         assert!(in_place_with(&file, &s.kept(), &mut f));
+        // The same for a granted folder with flags that was not there.
+        want.push(grant("c1", "/w/new", "rw"));
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(
+            s.absent.iter().map(plain).collect::<Vec<_>>(),
+            [want[3].clone()]
+        );
+        let last = s.kept();
+        assert!(in_place_with(&file, &last, &mut f));
+        f.make("/w/new");
+        assert!(in_place_with(&file, &none, &mut f));
+        assert!(!in_place_with(&file, &last, &mut f), "made after the sync");
+        let s = sync(&file, &want, &mut f);
+        assert!(s.errors.is_empty() && s.absent.is_empty(), "{s:?}");
+        assert!(in_place_with(&file, &s.kept(), &mut f));
+        want.pop();
         // A grant the config dropped while its volume was away: the record
         // keeps it, and it is at its path again when the volume is back.
         f.mv("/w/other", "/archive/other");
