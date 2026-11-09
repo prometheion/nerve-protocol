@@ -376,6 +376,10 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     nerve_node::pair::pair(&paths, &cc.link(), Some(C))
         .await
         .expect("pair c");
+    let allowlisted = format!(
+        "whoami; $env:USERPROFILE; Get-Content '{}'",
+        b.join("secret.txt").display()
+    );
     nerve_node::cli::edit(&paths, |cfg| {
         let ea = cfg.center_mut(A).expect("paired");
         ea.policy.mode = nerve_policy::Mode::Folder;
@@ -386,7 +390,11 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         let ec = cfg.center_mut(C).expect("paired");
         ec.policy.mode = nerve_policy::Mode::Allowlist;
         ec.policy.folders = vec![folder(&c, "rwx")];
-        ec.policy.allow = vec!["exec.run:*".into()];
+        // A command that chains others runs by a rule that names it whole.
+        ec.policy.allow = vec![
+            "exec.run:*".into(),
+            nerve_policy::rules::rule_for("exec", "run", &allowlisted, false, None)?,
+        ];
         Ok(())
     })
     .await
@@ -401,9 +409,10 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         .expect("nerve-run")
         .home;
     let packages = run_profile.join(r"AppData\Local\Packages");
+    // b and c are linked where their commands run: the node drops a link
+    // that sends it no frame for 45 s, and a fake center answers nothing
+    // while the test is busy with another.
     let mut conn_a = linked(&mut ca).await;
-    let mut conn_b = linked(&mut cb).await;
-    let mut conn_c = linked(&mut cc).await;
 
     // In its folder a command runs, as nerve-run, in its container, with
     // its home there.
@@ -559,10 +568,18 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     })
     .await
     .expect("the owner's edit");
+    // The commands run in a's folder `a`: one in the project would need its
+    // `x`, and the project's flags change below. They name its files by
+    // their whole paths.
+    let at = |name: &str| proj.join(name).display().to_string();
     let r = run_in(
         &mut conn_a,
-        &proj,
-        "Get-Content node_modules\\pkg\\index.js; Set-Content -Path own.txt -Value mine; Get-Content own.txt",
+        &a,
+        &format!(
+            "Get-Content '{}'; Set-Content -Path '{own}' -Value mine; Get-Content '{own}'",
+            in_proj.display(),
+            own = at("own.txt")
+        ),
     )
     .await
     .expect("a's command in the linked project");
@@ -589,13 +606,9 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
             ),
         ),
     ] {
-        let r = run_in(
-            &mut conn_a,
-            &proj,
-            &format!("{script}; exit [int](-not $?)"),
-        )
-        .await
-        .expect(what);
+        let r = run_in(&mut conn_a, &a, &format!("{script}; exit [int](-not $?)"))
+            .await
+            .expect(what);
         assert_ne!(r["exit_code"], 0, "{what}: {r}");
     }
     assert_eq!(
@@ -625,8 +638,11 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     // commands go on running.
     let r = run_in(
         &mut conn_a,
-        &proj,
-        "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; New-Item -ItemType Directory -Force -Path $s | Out-Null; Set-Content -Path (Join-Path $s 'f.js') -Value stored; New-Item -ItemType HardLink -Path linked.js -Target (Join-Path $s 'f.js') | Out-Null; exit [int](-not $?)",
+        &a,
+        &format!(
+            "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; New-Item -ItemType Directory -Force -Path $s | Out-Null; Set-Content -Path (Join-Path $s 'f.js') -Value stored; New-Item -ItemType HardLink -Path '{}' -Target (Join-Path $s 'f.js') | Out-Null; exit [int](-not $?)",
+            at("linked.js")
+        ),
     )
     .await
     .expect("a's link from its own store");
@@ -645,8 +661,8 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         .expect("the owner's edit");
         let r = run_in(
             &mut conn_a,
-            &proj,
-            "Get-Content linked.js; exit [int](-not $?)",
+            &a,
+            &format!("Get-Content '{}'; exit [int](-not $?)", at("linked.js")),
         )
         .await
         .expect(flags);
@@ -665,8 +681,11 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     std::fs::hard_link(&late, proj.join("late.js")).unwrap();
     let r = run_in(
         &mut conn_a,
-        &proj,
-        "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; Set-Content -Path (Join-Path $s 'g.js') -Value installed; New-Item -ItemType HardLink -Path agent.js -Target (Join-Path $s 'g.js') | Out-Null; exit [int](-not $?)",
+        &a,
+        &format!(
+            "$s = Join-Path $env:LOCALAPPDATA 'nrv-store'; Set-Content -Path (Join-Path $s 'g.js') -Value installed; New-Item -ItemType HardLink -Path '{}' -Target (Join-Path $s 'g.js') | Out-Null; exit [int](-not $?)",
+            at("agent.js")
+        ),
     )
     .await
     .expect("a's install from its own store");
@@ -682,8 +701,8 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     loop {
         let r = run_in(
             &mut conn_a,
-            &proj,
-            "Get-Content late.js; exit [int](-not $?)",
+            &a,
+            &format!("Get-Content '{}'; exit [int](-not $?)", at("late.js")),
         )
         .await
         .expect("a's read of the late file");
@@ -715,14 +734,14 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     .await
     .expect("the owner's edit");
     for round in ["closed", "changed around it"] {
-        let r = run_in(&mut conn_a, &proj, "Get-Content own.txt")
+        let r = run_in(&mut conn_a, &a, &format!("Get-Content '{}'", at("own.txt")))
             .await
             .expect(round);
         assert!(out(&r).contains("mine"), "{round}: {r}");
         for name in [&in_proj, &in_store] {
             let r = run_in(
                 &mut conn_a,
-                &proj,
+                &a,
                 &format!("Get-Content '{}'; exit [int](-not $?)", name.display()),
             )
             .await
@@ -917,16 +936,10 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
 
     // Allowlist mode runs as nerve-run too, in its own container, with its
     // home there, and reaches no other pairing's folder.
-    let r = run_in(
-        &mut conn_c,
-        &c,
-        &format!(
-            "whoami; $env:USERPROFILE; Get-Content '{}'",
-            b.join("secret.txt").display()
-        ),
-    )
-    .await
-    .expect("an allowlist command");
+    let mut conn_c = linked(&mut cc).await;
+    let r = run_in(&mut conn_c, &c, &allowlisted)
+        .await
+        .expect("an allowlist command");
     let said = out(&r);
     assert!(said.to_lowercase().contains("nerve-run"), "{r}");
     assert!(said.contains("\\AC\\home") && !said.contains("b's"), "{r}");
@@ -967,10 +980,17 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     })
     .await
     .expect("the owner's edit");
+    // Without its `x` the folder is no place to run in: the command runs
+    // in `a` and names the files by their whole paths.
+    let made_in = |name: &str| open.join("made").join(name).display().to_string();
     let r = run_in(
         &mut conn_a,
-        &open,
-        "Get-Content made\\f.txt; Set-Content -Path made\\g.txt -Value x; exit [int](-not $?)",
+        &a,
+        &format!(
+            "Get-Content '{}'; Set-Content -Path '{}' -Value x; exit [int](-not $?)",
+            made_in("f.txt"),
+            made_in("g.txt")
+        ),
     )
     .await
     .expect("a's command after its folder became read-only");
@@ -989,8 +1009,8 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     .expect("the owner's edit");
     let r = run_in(
         &mut conn_a,
-        &open,
-        "Get-Content made\\f.txt; exit [int](-not $?)",
+        &a,
+        &format!("Get-Content '{}'; exit [int](-not $?)", made_in("f.txt")),
     )
     .await
     .expect("a's command after the owner closed what it made");
@@ -1001,6 +1021,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     );
 
     // Nor its processes: b's command waits, a's does not see or open it.
+    let mut conn_b = linked(&mut cb).await;
     let b_dir = b.clone();
     let waiting = tokio::spawn(async move {
         let r = run_in(
@@ -1135,8 +1156,20 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     })
     .await
     .expect("the owner's edit");
-    // The node's next sync removes it: one comes with a's next command.
-    let _ = run_in(&mut conn_a, &a, "exit 0").await;
+    // The node's next sync removes it: one comes with a's next command, on
+    // a new link where the node dropped a's while b's ran (see above).
+    let ran = conn_a
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {
+                "command": "exit 0", "cwd": nerve_policy::paths::to_wire(&a)}}),
+            WAIT,
+        )
+        .await;
+    if ran.is_err() {
+        let mut again = linked(&mut ca).await;
+        let _ = run_in(&mut again, &a, "exit 0").await;
+    }
     wait_for("b's container profile is still there", || {
         !packages.join(&container_b).exists()
     })
