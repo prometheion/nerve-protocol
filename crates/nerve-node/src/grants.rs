@@ -40,8 +40,11 @@
 //! which a change reaches through any of them. Unless all its names lie
 //! under the same grants, it gets no more than read and execute for the
 //! commands, and no more than any of its names' folders gives; closed where
-//! one of them lies in a closed folder ([`Links`]). As on Linux, where such
-//! a file gets no entry and keeps its own rights.
+//! one of them lies in a closed folder or a protected entry ([`Links`],
+//! [`Shut`]). On Linux such a file gets no entry and keeps its own, usually
+//! readable, rights; Windows has no such rights for a container, so the
+//! node gives each container whose grant holds a name read and execute of
+//! its own, the same whichever name a change reaches it through.
 
 use std::io;
 use std::path::{Path, PathBuf};

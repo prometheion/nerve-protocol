@@ -566,18 +566,32 @@ runs in the container as well, unless the pairing runs as you.
 - A hard link is one file under two names, and both share one access list.
   pnpm links `node_modules` to its store, uv links a `.venv` to its cache,
   and a local `git clone` links its objects. Such files are readable but not
-  writable for commands, as on Linux: a change of a grant that reaches one
-  gives the pairing's container no more than read and run, and no more than
-  each of its names' folders gives (none under a `w`-only name), with a
-  denying entry of every other right, which stays when Explorer or `icacls`
-  passes a folder's permissions down to the file. A file whose names all lie
-  in the granted folder under the same grants (cargo's `target`, links
-  within a project) gets the grant as any file. Closing a folder closes
-  such a file under every name. The node changes the file's entries only as
-  a change reaches it: **Sync folders** cuts one you widened back down. A
-  command can make a hard link only to a file it may write (Windows asks
-  that of a sandboxed process since 2015; checked), so it cannot read a file
-  of yours through one. Hard links only work within one drive.
+  writable for commands: a pairing whose folder holds one of the names gets
+  read and run, and no more than each of its names' folders gives (none
+  under a `w`-only name), by entries of the node's own, with a denying
+  entry of every other right. So two pairings whose projects link to one
+  store both read it, and the denial stays when Explorer or `icacls` passes
+  a folder's permissions down to the file. A file whose names all lie in
+  the granted folder under the same grants (cargo's `target`, links within
+  a project) gets the grant as any file. A name in a closed folder (also
+  one a command moved, or one inside a split folder), in a protected entry
+  or in the node's own folders closes the file under every name. A name in
+  a folder the node cannot open (another account's) does not count. The
+  node changes the file's entries only as a change reaches it: **Sync
+  folders** cuts one you widened back down. A command can make a hard link
+  only to a file it may write (Windows asks that of a sandboxed process
+  since 2015; checked), so it cannot read a file of yours through one. Hard
+  links only work within one drive. A grant on a single file with a second
+  name is refused. Limits:
+  - `icacls /reset` and Explorer's "Replace all child object permission
+    entries" take the node's own entries off too: the file is widened until
+    **Sync folders**.
+  - A file that lost its other names keeps the node's entries; a pairing
+    whose folder goes keeps read on it until `icacls <file> /reset`.
+  - A folder whose permission inheritance you turned off by hand is not
+    looked at: a file linked from it into a granted folder gets that
+    folder's grant. Close such a folder in Nerve (a folder without flags)
+    instead.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it
