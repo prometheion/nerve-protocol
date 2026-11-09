@@ -625,7 +625,8 @@ impl<'a> Judge<'a> {
     /// folder closed to it (the closed grant nearest to the name, as a grant
     /// inside a closed folder opens its own; also one a command moved, or
     /// one [`Shut`] closes), otherwise read and execute at most, and no more
-    /// than the grants of the container that hold a name give there. A name
+    /// than the grants of the container that hold a name give there (inside
+    /// the deepest closed folder that holds it, where one does). A name
     /// under none of its grants does not restrict: such a file outside the
     /// folders (pnpm's store, uv's cache, the repository a clone came from)
     /// is read through the granted name, as on Linux, where it keeps its
@@ -656,7 +657,23 @@ impl<'a> Judge<'a> {
             if held.iter().any(|g| g.access == Access::NONE && !opened(g)) {
                 return Gets::Closed;
             }
-            let opening: Vec<&&Grant> = held.iter().filter(|g| g.access != Access::NONE).collect();
+            // Only the grants inside the deepest folder closed to it that
+            // holds the name count: that folder's denial comes after their
+            // entries and before those of the grants around it, so a `w`
+            // folder inside a closed one gives no read from an `rw` around.
+            let depth = |p: &Path| p.components().count();
+            let fence = held
+                .iter()
+                .filter(|g| g.access == Access::NONE)
+                .map(|g| g.path.as_path())
+                .max_by_key(|p| depth(p));
+            let opening: Vec<&&Grant> = held
+                .iter()
+                .filter(|g| {
+                    g.access != Access::NONE
+                        && fence.is_none_or(|f| within(&g.path, f) && !within(f, &g.path))
+                })
+                .collect();
             if opening.is_empty() {
                 continue;
             }
@@ -2283,7 +2300,8 @@ mod tests {
 
         /// What the grants on now give `container` at `name`, as Windows
         /// passes them down: `None` where the nearest of its grants that
-        /// closes a folder holds the name and no grant inside that one does.
+        /// closes a folder holds the name and no grant inside that one does;
+        /// otherwise only the grants inside that one give it anything.
         fn given(&self, container: &str, name: &Path) -> Option<Access> {
             let held: Vec<(PathBuf, Access)> = self
                 .on
@@ -2294,16 +2312,22 @@ mod tests {
                     within(name, p).then(|| (p.clone(), *a))
                 })
                 .collect();
-            let closed = held.iter().any(|(p, a)| {
-                *a == Access::NONE
-                    && !held
-                        .iter()
-                        .any(|(q, b)| *b != Access::NONE && within(q, p) && !within(p, q))
-            });
-            if closed {
+            // The deepest closing one denies what the ones around it give.
+            let fence = held
+                .iter()
+                .filter(|(_, a)| *a == Access::NONE)
+                .map(|(p, _)| p)
+                .max_by_key(|p| p.components().count());
+            let inside: Vec<&(PathBuf, Access)> = held
+                .iter()
+                .filter(|(q, b)| {
+                    *b != Access::NONE && fence.is_none_or(|p| within(q, p) && !within(p, q))
+                })
+                .collect();
+            if fence.is_some() && inside.is_empty() {
                 return None;
             }
-            Some(held.iter().fold(Access::NONE, |a, (_, b)| Access {
+            Some(inside.iter().fold(Access::NONE, |a, (_, b)| Access {
                 read: a.read || b.read,
                 write: a.write || b.write,
                 execute: a.execute || b.execute,
@@ -3003,6 +3027,37 @@ mod tests {
         assert!(s.errors.is_empty() && s.stale.is_empty(), "{s:?}");
         reads(&f, &["c1", run]);
         assert_eq!(f.may(x2, "c2"), access(""));
+    }
+
+    /// A folder opened again inside a closed one gives a file with a name
+    /// in it only its own flags, as Windows does: the closed folder's
+    /// denial comes before the entries of the grants around it. So a `w`
+    /// drop box inside a closed folder of an `rw` project gives no read of a
+    /// file a command linked from it into the project, and an `rw` one
+    /// inside `rwx` no execute.
+    #[test]
+    fn a_folder_opened_inside_a_closed_one_gives_a_linked_file_only_its_own_flags() {
+        let access = |a: &str| Some(Access::parse(a).unwrap());
+        let (report, l) = ("/w/proj/vault/inbox/report", "/w/proj/src/l");
+        for (outer, inner, may) in [("rw", "w", ""), ("rwx", "rw", "r"), ("rwx", "r", "r")] {
+            let d = tempfile::tempdir().unwrap();
+            let file = d.path().join("grants.json");
+            let mut f = Fake::default();
+            for p in ["/w/proj", "/w/proj/vault", "/w/proj/vault/inbox"] {
+                f.make(p);
+            }
+            f.link(&[report, l]);
+            let want = [
+                grant("c1", "/w/proj", outer),
+                grant("c1", "/w/proj/vault", ""),
+                grant("c1", "/w/proj/vault/inbox", inner),
+            ];
+            let s = sync(&file, &want, &mut f);
+            assert!(s.errors.is_empty() && s.unclosed.is_empty(), "{s:?}");
+            for n in [report, l] {
+                assert_eq!(f.may(n, "c1"), access(may), "{outer} {inner}: {n}");
+            }
+        }
     }
 
     /// A closed folder that a command renamed keeps its deny where it went
