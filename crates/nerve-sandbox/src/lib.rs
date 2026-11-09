@@ -4880,7 +4880,23 @@ mod tests {
         grant(&wo, false, true, false);
         grant(&xo, false, false, true);
         let (w, x) = (wo.display(), xo.display());
-        let run = |c: String| in_container(&name, &work, &c);
+        let ps = |c: String| {
+            run_in_container(
+                &name,
+                &work,
+                "powershell.exe",
+                &["-NoProfile", "-Command", &c],
+            )
+        };
+        // Whether `op` went through; cmd would take a quoted path as a
+        // wrong name, which looks like a refusal.
+        let tried = |op: String| {
+            let (code, log) = ps(format!(
+                "{POWERSHELL_START}try {{ {op}; exit 0 }} catch {{ $_; exit 3 }}"
+            ));
+            assert!(code == 0 || code == 3, "{op}: {log}");
+            code == 0
+        };
 
         // cmd opens a file it redirects to for reading as well, so the
         // write goes through .NET, which opens it for writing only.
@@ -4896,18 +4912,14 @@ mod tests {
             std::fs::read_to_string(wo.join("new.txt")).unwrap().trim(),
             "x"
         );
-        assert_eq!(run(format!(r#"type "{w}\old.txt" > got.txt"#)), 0);
-        assert_eq!(run(format!(r#"dir "{w}" > list.txt"#)), 0);
+        assert!(tried(format!(
+            r"Get-Content -ErrorAction Stop '{w}\old.txt' | Set-Content got.txt"
+        )));
+        assert!(tried(format!(
+            r"Get-ChildItem -ErrorAction Stop '{w}' | Out-Null"
+        )));
 
         let out = work.join("ran.txt");
-        let ps = |c: String| {
-            run_in_container(
-                &name,
-                &work,
-                "powershell.exe",
-                &["-NoProfile", "-Command", &c],
-            )
-        };
         let (code, log) = ps(format!(
             "{POWERSHELL_START}& '{x}\\tool.cmd' '{}'; & '{x}\\hostname.exe' > host.txt; \
              exit $LASTEXITCODE",
@@ -4921,8 +4933,12 @@ mod tests {
             "tool ran"
         );
         assert!(work.join("host.txt").exists(), "{log}");
-        assert_ne!(run(format!(r#"dir "{x}" > list2.txt"#)), 0);
-        assert_ne!(run(format!(r#"echo x> "{x}\no.txt""#)), 0);
+        assert!(!tried(format!(
+            r"Get-ChildItem -ErrorAction Stop '{x}' | Out-Null"
+        )));
+        assert!(!tried(format!(
+            r"Set-Content -ErrorAction Stop -Path '{x}\no.txt' -Value x"
+        )));
         assert!(!xo.join("no.txt").exists());
 
         for d in [&work, &wo, &xo] {
