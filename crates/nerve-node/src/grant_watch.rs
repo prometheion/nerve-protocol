@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nerve_policy::paths::within;
+use nerve_transport::sync::lock;
 
 /// How long the names in a granted folder stay as they are before the node
 /// walks it: an install or a clone is a burst of new names, walked once.
@@ -153,10 +154,6 @@ impl Watch {
     pub fn follow<G>(&self, folders: &[PathBuf], act: impl FnOnce() -> std::io::Result<G>) {
         lock(&self.win).follow(folders, &self.pending, act);
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(windows)]
@@ -420,7 +417,7 @@ mod win {
 
     impl Slot {
         /// Hands the buffer to the system for the next changes.
-        fn read(&mut self) -> std::io::Result<()> {
+        fn arm(&mut self) -> std::io::Result<()> {
             *self.ov = OVERLAPPED::default();
             // SAFETY: the buffer and the overlapped structure are boxed and
             // live in the slot until the read completes ([`run`]).
@@ -490,7 +487,7 @@ mod win {
                                 buf: vec![0u32; BUF / 4].into_boxed_slice(),
                                 closing: false,
                             };
-                            match slot.read() {
+                            match slot.arm() {
                                 Ok(()) => {
                                     slots.insert(k, slot);
                                 }
@@ -549,7 +546,7 @@ mod win {
             if wakes(got) {
                 lock(pending).changed(&slot.path, Instant::now());
             }
-            if slot.read().is_err() {
+            if slot.arm().is_err() {
                 end(slot);
                 slots.remove(&key);
             }
