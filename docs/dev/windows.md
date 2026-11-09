@@ -534,11 +534,14 @@ runs in the container as well, unless the pairing runs as you.
   refused, the pairing's commands do not run. A change that takes more than a few seconds says
   how far it is: the node writes it to its log, and a command waits for
   it.
-- A file or folder moved into a granted folder keeps the access list it
-  had, without the entry. **Sync folders** under **Permissions ›
-  Folders** walks every grant again into every folder below it, which gives
-  it the entry (`folder sync`; the running node does it, or the app's
-  command when none runs).
+- The running node watches each granted folder for new names and walks it
+  again a few seconds after they stop changing (at most 30 seconds while
+  they go on), and walks every granted folder when it starts: what you or
+  an agent move, install or clone into a granted folder gets its entry by
+  itself. A folder on a removable drive is not watched (the log says so).
+  **Sync folders** under **Permissions › Folders** walks every grant at
+  once (`folder sync`; the running node does it, or the app's command when
+  none runs).
 - A network folder (`\\server\share`) or a folder on a network drive is
   refused when it is added, in the app's folder picker too: the service
   runs in a session of its own, where a drive mapped at your sign-in does
@@ -704,13 +707,11 @@ runs in the container as well, unless the pairing runs as you.
   (the owner's store, cache or repository) stays under both names, and the
   granted folder's entries for them do not reach it. The node changes the
   file's entries only as a change reaches it: **Sync
-  folders** cuts one you widened back down. So after you or an agent
-  install dependencies or clone into a folder that is granted already
-  (`pnpm install`, `uv sync`, `git clone --local`), press **Sync folders**:
-  until then the new files keep the store's permissions, so commands may
-  not read what you installed, and you may not open what the agent
-  installed. After it you may read and run what the agent installed from
-  its own store. On the installed service its commands keep reading their
+  folders** cuts one you widened back down. What you or an agent install or
+  clone into a granted folder (`pnpm install`, `uv sync`,
+  `git clone --local`) keeps the store's permissions until the node walks
+  the folder by itself, seconds later (above). After that you may read and
+  run what the agent installed from its own store. On the installed service its commands keep reading their
   store also once the folder is no longer granted: a file its commands made
   there belongs to `nerve-run`. A file of yours that a command linked into
   its own folder does not: once the folder's grant goes, the pairing reads
@@ -739,7 +740,7 @@ runs in the container as well, unless the pairing runs as you.
     instead.
   - A closed folder that a command renames while the node changes the
     folders' entries may leave a file linked across its edge (by you)
-    readable through the other name until the next **Sync folders**.
+    readable through the other name until the node walks that folder again.
 
 The app's **Overview** shows a running node's confinement, which it asks the
 node over its [control pipe](#the-control-pipe). The node also names it when it

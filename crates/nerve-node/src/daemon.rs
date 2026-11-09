@@ -2617,6 +2617,26 @@ pub fn notify(at: &std::ffi::OsStr, state: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The grant sync the supervisor starts now, if any (`granted`: the config
+/// version it last synced, none before the first; `due`: the granted
+/// folders whose names changed, crate::grant_watch): the first walks every
+/// grant, one for folders that changed walks those (and follows the config
+/// as it is), one for a new config walks only what changes.
+fn grant_walk(
+    granted: Option<u64>,
+    version: u64,
+    due: Vec<PathBuf>,
+) -> Option<crate::grants::Rewalk> {
+    use crate::grants::Rewalk;
+    if granted.is_none() {
+        Some(Rewalk::Every)
+    } else if !due.is_empty() {
+        Some(Rewalk::At(due))
+    } else {
+        (granted != Some(version)).then_some(Rewalk::None)
+    }
+}
+
 /// Keeps one link task per center that should be linked. It works from the
 /// config in memory: the file is not reread here, so a file changed behind
 /// the node's back changes nothing (only the owner's reload reads it).
@@ -2638,16 +2658,8 @@ async fn supervise(shared: Arc<Shared>) {
         // it the node walks a granted folder soon after names in it changed
         // (crate::grant_watch).
         if shared.confinement.appcontainer {
-            use crate::grants::Rewalk;
             let due = shared.grant_watch.due(std::time::Instant::now());
-            let walk = if granted.is_none() {
-                Some(Rewalk::Every)
-            } else if !due.is_empty() {
-                Some(Rewalk::At(due))
-            } else {
-                (granted != Some(cfg.version)).then_some(Rewalk::None)
-            };
-            if let Some(walk) = walk {
+            if let Some(walk) = grant_walk(granted, cfg.version, due) {
                 granted = Some(cfg.version);
                 let s = shared.clone();
                 tokio::task::spawn_blocking(move || {
@@ -4167,6 +4179,24 @@ mod tests {
         assert_eq!(grants_walk(&json!({"every": true})), AclWalk::Every);
         assert_eq!(grants_walk(&json!({"every": false})), AclWalk::Now);
         assert_eq!(grants_walk(&json!({})), AclWalk::Now);
+    }
+
+    /// Windows' grant syncs: the first walks every grant, one where names
+    /// changed walks those folders (also with a new config), one for a new
+    /// config only what changes, and none while nothing changed.
+    #[test]
+    fn the_grant_sync_chooses_its_walk() {
+        use crate::grants::Rewalk;
+        let proj = vec![PathBuf::from("/w/proj")];
+        assert_eq!(grant_walk(None, 1, Vec::new()), Some(Rewalk::Every));
+        assert_eq!(grant_walk(None, 1, proj.clone()), Some(Rewalk::Every));
+        assert_eq!(
+            grant_walk(Some(1), 1, proj.clone()),
+            Some(Rewalk::At(proj.clone()))
+        );
+        assert_eq!(grant_walk(Some(1), 2, proj.clone()), Some(Rewalk::At(proj)));
+        assert_eq!(grant_walk(Some(1), 2, Vec::new()), Some(Rewalk::None));
+        assert_eq!(grant_walk(Some(2), 2, Vec::new()), None);
     }
 
     fn warnings(log: &Log) -> Vec<String> {

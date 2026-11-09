@@ -439,6 +439,30 @@ center's local name):
   object it is about. A change that takes long tells how far it is
   (`grants::paced`: after 3 s, then every 15 s, and how it ended), on stderr
   in the CLI and in the log of a running node.
+- The running node walks a granted folder again by itself once names in it
+  changed (`grant_watch`): a file a change never reaches keeps its list, and
+  an install or a clone links files in with their store's list, so commands
+  could not read what the owner installed, nor the owner what a command
+  installed from its own store, until a walk. Each folder the record holds a
+  grant with flags on (`grants::granted_folders`) gets one handle, opened as
+  the owner on the service, not through a link, not on a removable drive (a
+  held handle keeps it from being ejected) or another machine, and read with
+  `ReadDirectoryChangesW` over its subtree, overlapped, on one completion
+  port and one thread, into a buffer of its own (64 KiB). It asks for names
+  only (`FILE_NOTIFY_CHANGE_FILE_NAME | DIR_NAME`), never security, so the
+  walk's own writes do not wake it; a name added or renamed to marks the
+  folder (`Pending`, one entry per folder), and so does a notification that
+  ran over or a read that failed (the folder went). The supervisor takes the
+  folders quiet for 3 s, or waiting 30 s (`QUIET`, `AT_MOST`), the outermost
+  of nested ones, and hands them to the grant sync (`Shared::sync_grants_walking`,
+  `grants::Rewalk::At`), which marks their grants unfinished inside its turn
+  (`mark_walks`, as `folder sync` does for every grant) and so walks each into
+  every folder below it, after any change of the config before it. The first
+  sync after the start walks every grant (`Rewalk::Every`), as on Linux. The
+  watches follow the record before and after each sync; a folder that cannot
+  be watched is logged once and left to the other syncs while it stays
+  granted. On Linux a new file gets its entries from the default ACL and a
+  file with a second name keeps its own rights, so nothing waits for a walk.
 - A record in the state folder (`grants.json`) finds them again. It holds the
   file ID of each grant's object, since the grant is in that object's own
   access list and goes with it: a grant on a moved or renamed folder comes off
