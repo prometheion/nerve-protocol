@@ -480,7 +480,8 @@ center's local name):
     and the change passes an entry of its own there (read for its
     container) down to a file it linked into that folder. Where every
     container that may write there may read too, that entry gives nothing
-    new while the grant is on.
+    new. A taken-off grant's mark (below) counts like the grant: the entry
+    stays after the take-off, which the node never removes.
   - Otherwise `Linked::Capped`, for every container of the wanted and
     recorded grants and the command account (`Judge::cap`): `Gets::Closed`
     where a name lies under a closed grant of it that no grant inside
@@ -543,10 +544,12 @@ center's local name):
   in every later sync, so **Sync folders** does not open the file. The mark
   follows its folder (found by id; the place is told before a wanted grant
   there is compared) and goes when the folder is gone, when a grant of the
-  container is wanted at the folder's place, or when no pairing is left
-  (`live`, the config's pairings, which `apply_in` and `sync_outside_in`
-  pass): a mark closes the file to the other pairings too, so it does not
-  go with its own. A folder the node cannot look at (the owner's log-on
+  container is wanted at the folder's place, or at uninstall (`keep`:
+  `remove_all` is the only caller that wants no grant and passes
+  `false`): a mark closes the file to the other pairings too and to one
+  paired later, so it does not go with its own pairing, nor with the last
+  one. A walk of a folder where a mark lies (at, above or inside it) gives
+  no `Linked::Full` either (`grants::pass`). A folder the node cannot look at (the owner's log-on
   fails) leaves its mark as it is until a sync can look, as a mark dropped
   cannot be found again.
 

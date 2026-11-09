@@ -598,8 +598,13 @@ runs in the container as well, unless the pairing runs as you.
   of into a folder it may read; the walk keeps that file closed to it, and to
   every pairing that has no grant on the write-only folder, while the grant
   is on and after it is taken off (Linux refuses such a link), for as long
-  as the folder is there and a pairing is left; the node keeps a
-  mark of the grant for that in `grants.json`. Hard links only work within one drive. A grant on a single file with a second
+  as the folder is there; the node keeps a
+  mark of the grant for that in `grants.json`. The walk cannot tell which
+  way such a link was made, so it closes a file of a shared project that a
+  command linked *into* its write-only folder the same way, to every other
+  pairing without a grant on that folder (Linux lets that link be made, and
+  the other pairing keeps its rights there). Delete the name in the
+  write-only folder to open it. Hard links only work within one drive. A grant on a single file with a second
   name is refused where commands may write around it, and capped as above
   elsewhere. Limits:
   - `icacls /reset` and Explorer's "Replace all child object permission
@@ -619,12 +624,20 @@ runs in the container as well, unless the pairing runs as you.
     that has no grant on that folder, not only the one that linked it, and
     stays closed through every later walk (**Sync folders** too) until its
     mark goes: when the folder is gone, when the folder is granted to the
-    pairing again (the new grant decides), or when the last pairing is
-    removed. Moving the folder takes the mark along, so a new folder made at
-    its old path and granted does not end it, and neither does a sync that
-    cannot look at the folder. A pairing that has no folder left, or is
-    removed, leaves its marks. Delete the file, or grant the folder
-    again, to open it sooner.
+    pairing again (the new grant decides), or at uninstall. Moving the
+    folder takes the mark along, so a new folder made at its old path and
+    granted does not end it, and neither does a sync that cannot look at the
+    folder. A pairing that has no folder left, is removed, or is the last
+    one and is paired again, leaves its marks, so a pairing made later is
+    held back too. Delete the file, or grant the folder again, to open it
+    sooner.
+  - The closing holds while one of the file's names lies in the write-only
+    folder. If you move your file out of that folder (a rename on the same
+    drive) while a command's link to it is in a granted folder, the next walk
+    that reaches the link (**Sync folders**, or a change of a grant there)
+    gives the pairing read on it. Before you file away something from a
+    folder you gave write only, look for links to it
+    (`fsutil hardlink list <file>`) and delete the ones in a granted folder.
   - A folder whose permission inheritance you turned off by hand is not
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)
