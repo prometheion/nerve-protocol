@@ -537,10 +537,13 @@ mod tests {
         assert!(!profile.exists(), "{}", profile.display());
     }
 
-    /// On Windows: when the grants of the pairings that stay do not follow
-    /// (a folder whose permissions nobody may change), `center rm` still removes
-    /// the pairing's profile, as nothing names it once the pairing is gone,
-    /// and then says what failed.
+    /// On Windows: when the grants of the pairings that stay do not follow,
+    /// `center rm` still removes the pairing's profile, as nothing names it
+    /// once the pairing is gone, and then says what failed. They fail here
+    /// by a record of the grants that cannot be read: a folder's denial of
+    /// WRITE_DAC does not hold for the elevated administrator the tests run
+    /// as in CI, whose SeRestorePrivilege is on and lets the sync's open
+    /// (with backup semantics) change any folder's list.
     #[cfg(windows)]
     #[test]
     fn center_rm_removes_the_profile_when_the_other_grants_do_not_follow() {
@@ -548,19 +551,8 @@ mod tests {
         let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        // Its owner is SYSTEM, so the test's account has no implicit right
-        // to change its permissions, and the denial holds for everyone.
-        for args in [
-            &["/setowner", "*S-1-5-18"][..],
-            &["/deny", "*S-1-1-0:(WDAC)"],
-        ] {
-            let o = std::process::Command::new("icacls")
-                .arg(&work)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{o:?}");
-        }
+        nerve_transport::files::create_private_dir(&paths.state_dir).unwrap();
+        std::fs::write(crate::grants::record_file(&paths), "{").unwrap();
         let real = nerve_policy::paths::resolve(&work).unwrap();
         let mut cfg = NodeConfig::default();
         let mut home = entry("home");
