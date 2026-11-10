@@ -3919,6 +3919,51 @@ mod tests {
         (d, Daemon::start(opts).await.unwrap())
     }
 
+    /// A center is refused the sudo switch for a root owner before its
+    /// password is looked at, as on Windows (where the same line comes
+    /// first): an empty password would answer `Invalid` if the refusal
+    /// came later. Otherwise a center could try the owner's password.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_center_is_refused_the_sudo_switch_before_its_password_counts() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let mut opts = NodeOptions::new(paths);
+        opts.home = d.path().to_path_buf();
+        opts.owner = Some(crate::service::ROOT.into());
+        let daemon = Daemon::start(opts).await.unwrap();
+        let s = daemon.shared.clone();
+        lock(&s.store)
+            .update(|c| {
+                c.centers.push(nerve_policy::CenterEntry {
+                    name: "home".into(),
+                    url: "http://127.0.0.1:1".into(),
+                    pin: None,
+                    center_id: "id-home".into(),
+                    node_id: "n".into(),
+                    settings: nerve_policy::config::SettingsGrant::Write,
+                    paused: true,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: Default::default(),
+                    capabilities: Vec::new(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let r = s
+            .sudo_switch_on(nerve_policy::Writer::Center("home"), String::new())
+            .await;
+        assert!(
+            matches!(r, Err(nerve_policy::SetError::Forbidden(_))),
+            "{r:?}"
+        );
+    }
+
     /// Once `stop` returns, the stopped node holds no control endpoint. On
     /// Windows the control pipe lives as long as an instance the endpoint's
     /// task holds, so a CLI started right after `stop` could open it and be
@@ -5583,10 +5628,21 @@ mod tests {
             ("sudo.off", json!({})),
             ("sudo.status", json!({})),
             ("owner.check", json!({})),
+            // The node's keys and the owner's password: a command's job
+            // gets neither, and nothing is staged for the next start.
+            (
+                "vault.get",
+                json!({"account": crate::secrets::Entry::proxy(&s.paths).account()}),
+            ),
+            ("vault.set", json!({"account": "x", "value": "x"})),
+            ("vault.delete", json!({"account": "x"})),
+            ("vault.stage", json!({})),
+            ("owner.password", json!({"password": "x"})),
         ] {
             let e = call(4242, method, params).await.unwrap_err();
-            assert_eq!(e, FROM_A_COMMAND);
+            assert_eq!(e, FROM_A_COMMAND, "{method}");
         }
+        assert!(!crate::secrets::vault::pending_file(&s.paths).exists());
         assert_eq!(s.config().version, before);
         // From the owner's CLI: made, saved and answered.
         let v = call(1000, add.method(), add.params(Some("home")))

@@ -243,6 +243,15 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     );
     assert!(e.contains("sudo is off"), "{e}");
 
+    // A center is refused before any password is checked, so a wrong one
+    // learns nothing and cannot count towards locking the owner's account.
+    let e = refused(
+        on(&mut conn, "not-the-password").await,
+        ErrorCode::Forbidden,
+    );
+    assert!(e.contains("in the Nerve app on this machine"), "{e}");
+    assert!(!e.contains("is wrong"), "{e}");
+
     // A center may not turn it on, not even with the right password: it
     // is the owner's Windows password, which only the app takes.
     let e = refused(on(&mut conn, &password).await, ErrorCode::Forbidden);
