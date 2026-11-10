@@ -3069,7 +3069,7 @@ mod tests {
         let all = vec![
             g.clone(),
             grant("S-1-5-21-9", "/w/a", "rw"),
-            grant("S-1-5-21-1", "/w/b", "rwx"),
+            grant("S-1-5-21-1", "/w/b", "r"),
             grant("S-1-5-21-1", "/w/a", "rwx"),
         ];
         let never = |_: &Path, _: &str, _: Access| -> io::Result<bool> { panic!("looked") };
