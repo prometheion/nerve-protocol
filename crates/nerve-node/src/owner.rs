@@ -3,8 +3,10 @@
 //!
 //! The owner is the account that ran `install` (on Linux through sudo or
 //! pkexec): the unit names it ([`OWNER_VAR`]), and only `install` writes
-//! the unit. Root is always let in as well. On Windows the owners are the
-//! SIDs in the service's registry value [`OWNERS_VALUE`].
+//! the unit. Root is always let in as well. On Windows the owner is the
+//! account that installed the node through the app: its SID is the
+//! service's registry value [`OWNER_VALUE`], and the administrators are let
+//! in as well.
 //!
 //! The running node serves an owner endpoint beside its control socket: on
 //! Linux [`socket`] (open to everyone, in the unit's runtime folder), on
@@ -93,9 +95,9 @@ pub const RUNTIME_DIR: &str = "/run/nerve-node";
 /// The owner socket's file name in [`RUNTIME_DIR`].
 pub const SOCKET_NAME: &str = "owner.sock";
 
-/// The registry value under the service's key that lists the owners' SIDs
-/// on Windows (`Parameters`, REG_MULTI_SZ). It goes with the service.
-pub const OWNERS_VALUE: &str = "Owners";
+/// The registry value under the service's key that names the owner's SID
+/// on Windows (`Parameters`, REG_SZ). It goes with the service.
+pub const OWNER_VALUE: &str = "Owner";
 
 /// The owner socket of the installed node on Linux.
 pub fn socket() -> PathBuf {
@@ -114,12 +116,7 @@ pub fn pipe_name() -> String {
 /// The settings that decide which account and which programs a command
 /// runs as. Through them an owner would get the rights of another account
 /// or of root, so they stay root's: the node refuses them from an owner.
-pub const ROOT_ONLY: [&str; 4] = [
-    "machine.user",
-    "machine.allow_root",
-    "machine.sudo_path",
-    "machine.shell",
-];
+pub const ROOT_ONLY: [&str; 3] = ["machine.allow_root", "machine.sudo_path", "machine.shell"];
 
 /// The first of [`ROOT_ONLY`] that differs between `old` and `new`.
 pub fn root_only_change(
@@ -128,7 +125,6 @@ pub fn root_only_change(
 ) -> Option<&'static str> {
     let (o, n) = (&old.machine, &new.machine);
     [
-        o.user != n.user,
         o.allow_root != n.allow_root,
         o.sudo_path != n.sudo_path,
         o.shell != n.shell,
@@ -307,12 +303,19 @@ pub fn args_need_admin(args: &[String]) -> bool {
 }
 
 /// The owner of the node on `paths`, as its unit names it in the running
-/// service's environment ([`OWNER_VAR`]); `None` for a node run by hand,
-/// which belongs to whoever runs it, and on Windows.
+/// service's environment ([`OWNER_VAR`]), on Windows as the service's key
+/// names it ([`OWNER_VALUE`]); `None` for a node run by hand, which belongs
+/// to whoever runs it.
 pub fn of_service(paths: &NodePaths) -> Option<String> {
-    if cfg!(windows) || !crate::service::is_service_node(paths) {
+    if !crate::service::is_service_node(paths) {
         return None;
     }
+    #[cfg(windows)]
+    return crate::win_host::owner()
+        .ok()
+        .flatten()
+        .and_then(|sid| crate::win_user::name_of_sid(&sid).ok());
+    #[cfg(not(windows))]
     std::env::var(OWNER_VAR)
         .ok()
         .filter(|n| nerve_policy::config::valid_account_name(n))
@@ -328,22 +331,22 @@ pub fn is_root(owner: Option<&str>) -> bool {
 /// What `status` and the app say of root as the owner.
 pub const ROOT_OWNER_NOTE: &str = "root is the owner: commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included";
 
-/// The Windows twin of root as the owner: the account commands run as there
-/// (`machine.user`) when it is an administrator, or in another group whose
-/// members can read every file (crate::win_user::admin_groups). Its
+/// The Windows twin of root as the owner: the `owner` (the installing
+/// account, [`of_service`]) when it is an administrator, or in another group
+/// whose members can read every file (crate::win_user::admin_groups). Its
 /// commands can take those rights (UAC is no security boundary), so what
 /// runs as the owner can do everything on the machine, as root's can on
 /// Linux. None elsewhere.
-pub fn admin_owner(cfg: &nerve_policy::NodeConfig) -> Option<String> {
+pub fn admin_owner(owner: Option<&str>) -> Option<String> {
     #[cfg(windows)]
     {
-        let name = cfg.machine.user.as_deref()?;
+        let name = owner?;
         let a = crate::win_user::lookup(name).ok().flatten()?;
         (!crate::win_user::admin_groups(&a).is_empty()).then(|| name.to_string())
     }
     #[cfg(not(windows))]
     {
-        let _ = cfg;
+        let _ = owner;
         None
     }
 }
@@ -357,7 +360,7 @@ pub fn admin_owner_note(name: &str) -> String {
 }
 
 /// Whether the account running this is the owner of the installed node: the
-/// one its unit names on Linux, one of the service's owners on Windows.
+/// one its unit names on Linux, the one the service's key names on Windows.
 pub fn is_owner_here() -> bool {
     #[cfg(unix)]
     {
@@ -371,7 +374,7 @@ pub fn is_owner_here() -> bool {
         let me = crate::win_user::own_sid()
             .ok()
             .and_then(|s| crate::win_host::sid_text(&s).ok());
-        me.is_some_and(|me| crate::win_host::owners().is_ok_and(|o| o.contains(&me)))
+        me.is_some_and(|me| crate::win_host::owner().is_ok_and(|o| o.as_ref() == Some(&me)))
     }
 }
 
@@ -1183,13 +1186,10 @@ impl Endpoint {
         }
         #[cfg(windows)]
         {
-            let sids = crate::win_host::owners().ok()?;
-            if sids.is_empty() {
-                return None;
-            }
+            let sid = crate::win_host::owner().ok()??;
             Some(Endpoint {
                 at: pipe_name().into(),
-                owners: Owners::Sids(sids),
+                owners: Owners::Sids(vec![sid]),
                 program: std::env::current_exe().ok()?,
             })
         }
@@ -2466,7 +2466,7 @@ mod tests {
             &["sudo", "on"][..],
             &["update"],
             &["uninstall"],
-            &["config", "set", "machine.user", "bob"],
+            &["config", "set", "machine.allow_root", "true"],
             &["config", "unset", "machine.shell"],
         ] {
             assert!(needs_admin(&cli(args).cmd), "{args:?}");
@@ -2493,10 +2493,6 @@ mod tests {
             f(&mut new);
             root_only_change(&old, &new)
         };
-        assert_eq!(
-            changed(&|c| c.machine.user = Some("bob".into())),
-            Some("machine.user")
-        );
         assert_eq!(
             changed(&|c| c.machine.allow_root = !c.machine.allow_root),
             Some("machine.allow_root")
@@ -2879,7 +2875,7 @@ mod tests {
         match nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &args,
-            &var("NERVE_TEST_CONTAINER"),
+            &nerve_sandbox::ContainerSpec::new(var("NERVE_TEST_CONTAINER")),
         ) {
             Ok(code) => println!("exit code: {code}"),
             Err(e) => println!("exit code: {}\n{e}", u32::MAX),

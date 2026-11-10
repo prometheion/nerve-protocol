@@ -139,12 +139,16 @@ pub(super) fn apart_by_hand_here() -> bool {
     )
 }
 
-/// Whether this machine's kernel can keep a command off the network (the
-/// node's seccomp filter, nerve_sandbox::net_filter); never on Windows.
+/// Whether this machine can keep a command off the network: the node's
+/// seccomp filter (nerve_sandbox::net_filter), on Windows the container
+/// without network capabilities while the Windows Firewall service runs
+/// (crate::daemon::container_holds_network).
 fn network_rules_here() -> bool {
     #[cfg(target_os = "linux")]
     return nerve_sandbox::net_filter::available();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    return crate::win_host::firewall_runs();
+    #[cfg(not(any(target_os = "linux", windows)))]
     false
 }
 

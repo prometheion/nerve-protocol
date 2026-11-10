@@ -10,9 +10,22 @@
 # runner), then runs:
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
-# - with the node installed again, its commands run as that account: the
-#   sudo switch end to end (crates/nerve-node/tests/win_sudo.rs) and the
-#   limits per command on the service (crates/nerve-node/tests/win_limits.rs);
+# - with the node installed again by that account, its owner: the sudo
+#   switch end to end (crates/nerve-node/tests/win_sudo.rs), the limits per
+#   command on the service (crates/nerve-node/tests/win_limits.rs), and
+#   folder and allowlist mode as the command account nerve-run, each pairing
+#   in its AppContainer: folders, a closed folder, another pairing's folders,
+#   home and processes (by a command and by the node's file calls), nerve-run's
+#   profile and the node's pipes from a container, allowlist mode and
+#   --as-owner, a folder in the owner's profile split around a protected
+#   entry, a folder outside the owner's profile, what nerve-run opens, the
+#   network switch, a pairing's home and container profile
+#   (crates/nerve-node/tests/win_account.rs), and in smaller tests of
+#   it, a command the folder sync refuses in the audit log and a granted
+#   folder that becomes a link to another machine (also where the node
+#   cannot log on as the owner). The install makes
+#   nerve-run and its profile itself, by a logon that loads it, as nobody
+#   signs in on a runner;
 # - the administrator's batch logon (nerve-node's
 #   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
 #   folder on a virtual disk mounted in a folder (nerve-sandbox's
@@ -36,7 +49,7 @@ on:
         type: string
         required: true
       tests:
-        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_service.exe, nerve_node_lib.exe, nerve_sandbox_lib.exe and nerve_service_lib.exe"
+        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_account.exe, win_service.exe, nerve_node_lib.exe, nerve_sandbox_lib.exe and nerve_service_lib.exe"
         type: string
         required: true
       ref:
@@ -132,20 +145,30 @@ jobs:
           if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the install test did not run' }
       # As the app's install runs for that account's owner: the broker names
       # the owner by SID, and the password goes on stdin.
-      - name: The node installed, its commands as the account
+      - name: The node installed by the account, nerve-run for commands
         run: |
           $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
           $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/install.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          if (-not (Select-String -Quiet -Path "$env:RUNNER_TEMP/install.log" -Pattern "commands run as $env:NERVE_WIN_SUDO_ACCOUNT")) {
-            throw "the install did not take $env:NERVE_WIN_SUDO_ACCOUNT for commands"
+          foreach ($said in "run commands as $env:NERVE_WIN_SUDO_ACCOUNT", 'made the user nerve-run',
+            'nerve-run cannot open the node''s folders', 'the service nerve-run-profile') {
+            if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install.log" -Pattern $said)) {
+              throw "the install did not say: $said"
+            }
           }
-      - name: Sudo, limits, the batch logon, a virtual disk
+          $run = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\nerve-run' }
+          if (-not $run) { throw 'nerve-run has no profile' }
+          if ((Get-Service nerve-run-profile).Status -ne 'Running') { throw 'nerve-run-profile does not run' }
+      - name: Sudo, limits, the command account, the batch logon, a virtual disk
         run: |
           $runs = @(
             @('win_sudo.exe', 'sudo_runs_a_listed_command_elevated_on_the_installed_service'),
             @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
+            @('win_account.exe', 'folder_and_allowlist_mode_run_as_nerve_run_in_their_containers'),
+            @('win_account.exe', 'a_command_the_folder_sync_refuses_is_in_the_audit_log'),
+            @('win_account.exe', 'a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync'),
+            @('win_account.exe', 'a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_the_owner'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
             @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
             @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),
@@ -165,6 +188,36 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # What the node and the runner say when an installed test failed: what
+      # passes on a test machine may meet another Windows here.
+      - name: The node's log and the test folders, after a failure
+        if: failure()
+        run: |
+          $ErrorActionPreference = 'Continue'
+          [Environment]::OSVersion.VersionString
+          $nt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          "$($nt.ProductName) $($nt.DisplayVersion) build $($nt.CurrentBuild).$($nt.UBR)"
+          'EnableLUA: ' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA
+          whoami /all
+          # Who may pass through folders they may not open (a command's
+          # container passes C:\ and the owner's folders so) and log on.
+          secedit /export /areas USER_RIGHTS /cfg "$env:RUNNER_TEMP/rights.inf" | Out-Null
+          Get-Content "$env:RUNNER_TEMP/rights.inf" | Select-String 'SeChangeNotifyPrivilege|SeBatchLogonRight|SeImpersonatePrivilege'
+          $log = 'C:\ProgramData\Nerve\state\log.jsonl'
+          if (Test-Path $log) { Get-Content $log -Tail 300 }
+          # The node's record of the folder grants it put on.
+          Get-Content 'C:\ProgramData\Nerve\state\grants.json' -ErrorAction SilentlyContinue
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'nerve-node' } -MaxEvents 50 |
+            Format-List TimeCreated, Message
+          icacls C:\
+          Get-ChildItem C:\ -Directory -Filter 'nerve-w2-*' | ForEach-Object {
+            @($_) + @(Get-ChildItem $_.FullName -Directory -Recurse -Depth 1) | ForEach-Object {
+              icacls $_.FullName
+              $acl = Get-Acl -LiteralPath $_.FullName
+              "owner $($acl.Owner): $($acl.Sddl)"
+            }
+          }
+          exit 0
       # Chrome and a Node.js with WebSocket come with the image; the web UI
       # smoke test drives the one with the other.
       - name: The center as a Windows service
@@ -192,6 +245,9 @@ jobs:
           if (Test-Path $bin) {
             & $bin uninstall --purge 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { exit 1 }
+            # nerve-run, its service and its entries go with it.
+            if (Get-LocalUser nerve-run -ErrorAction SilentlyContinue) { throw 'nerve-run stays' }
+            if (Get-Service nerve-run-profile -ErrorAction SilentlyContinue) { throw 'nerve-run-profile stays' }
           }
       # A test that returns early says so with `skipped` at the start of a
       # line, or behind `test <name> ... ` with one test thread.

@@ -362,10 +362,216 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
     Ok(out)
 }
 
+/// Whether a link's `target`, as the link holds it, may be a place on
+/// another machine: anything but a path on a drive or volume of this one
+/// (`C:\…`, `\\?\C:\…`, `\??\Volume{…}\…`) or one relative to the link.
+/// So a share (`\\host\share`, `\\?\UNC\…`, `\??\UNC\…`) is, and so is
+/// every device path, which may name one (`\\?\GLOBALROOT\Device\Mup\…`,
+/// `\Device\Mup\…`), and every other path from a root (`\…`): Windows may
+/// read that from the root of all its object names, which hold more ways
+/// to a share. Windows connects to a share as whoever follows the link,
+/// and sends that account's NTLM answer to whatever host it names (#149's
+/// probe).
+pub fn remote_target(target: &str) -> bool {
+    let lower = target.replace('/', "\\").to_ascii_lowercase();
+    let rest = match ["\\\\?\\", "\\\\.\\", "\\??\\"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+    {
+        Some(r) => r,
+        // Only a path relative to the link, or on a drive, is this
+        // machine's; one from a root (`\\host\…`, `\x`) may not be.
+        None => return lower.starts_with('\\'),
+    };
+    let b = rest.as_bytes();
+    let drive = b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b.get(2).is_none_or(|c| *c == b'\\');
+    !(drive || rest.starts_with("volume{"))
+}
+
+/// The first link on the way of `p` (absolute), and on the way of where each
+/// link leads, that leads to another machine ([`remote_target`]), found
+/// without following any: a symbolic link to a share is followed by a
+/// connection to it. Windows only; elsewhere a network mount is a path.
+///
+/// A part of the way that cannot be looked at (the caller has no right on
+/// it) ends the look at the way, or at the place a link leads to, with no
+/// link found; [`remote_link_checked`] tells those apart. Fit for a caller
+/// that acts as an account which can look at the whole way.
+pub fn remote_link(p: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        remote_link_by(p, 0, false, &link_target).unwrap_or(None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// [`remote_link`], but an error where a part of the way cannot be looked
+/// at: the caller cannot tell there is no link, and Windows follows a link in
+/// a folder its caller may not look into (traversing is not checked), so
+/// whoever follows the path next would connect to a share it names.
+pub fn remote_link_checked(p: &Path) -> io::Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        remote_link_by(p, 0, true, &link_target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        Ok(None)
+    }
+}
+
+thread_local! {
+    /// How many [`Acting`] this thread holds.
+    static ACTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Held while this thread acts as another account (the installed Windows
+/// node as the owner, or in a pairing's container): [`resolve`] then takes
+/// a part of a path that account cannot look at as no link, since the
+/// account may be able to open the path past it. A thread that does not act
+/// as anyone is the node's own account, which may not look into the owner's
+/// folders and is refused a path it cannot see to the end, since Windows
+/// follows a link there all the same ([`remote_link_checked`]). Not `Send`:
+/// it ends on the thread that began it, as the impersonation does.
+pub struct Acting(std::marker::PhantomData<*const ()>);
+
+impl Acting {
+    pub fn begin() -> Acting {
+        ACTING.with(|n| n.set(n.get() + 1));
+        Acting(std::marker::PhantomData)
+    }
+}
+
+impl Drop for Acting {
+    fn drop(&mut self) {
+        ACTING.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// How the Windows node asks for the full name of a path that the account
+/// this thread acts as may open, but whose name Windows does not give it
+/// ([`set_name_as_self`]).
+#[cfg(windows)]
+static NAME_AS_SELF: std::sync::OnceLock<fn(&Path) -> io::Result<PathBuf>> =
+    std::sync::OnceLock::new();
+
+/// Sets how [`canonical`] gets the full name of a path when the account
+/// this thread acts as ([`Acting`]) is refused it: Windows Server refuses a
+/// pairing's AppContainer the name of a folder it may open (os error 5).
+/// `name` opens the path as that account, so what it cannot open stays
+/// refused, and asks for the name as the node itself.
+#[cfg(windows)]
+pub fn set_name_as_self(name: fn(&Path) -> io::Result<PathBuf>) {
+    let _ = NAME_AS_SELF.set(name);
+}
+
+/// [`remote_link_by`] as [`canonical`] needs it: strict unless this thread
+/// holds an [`Acting`].
+#[cfg(any(windows, test))]
+fn remote_link_here(
+    p: &Path,
+    target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
+) -> io::Result<Option<PathBuf>> {
+    remote_link_by(p, 0, ACTING.with(|n| n.get()) == 0, target)
+}
+
+/// Where the link at `at` leads, or `None` when `at` is not a link.
+#[cfg(windows)]
+fn link_target(at: &Path) -> io::Result<Option<PathBuf>> {
+    if !fs::symlink_metadata(at)?.file_type().is_symlink() {
+        return Ok(None);
+    }
+    fs::read_link(at).map(Some)
+}
+
+/// [`remote_link_checked`] with the file system behind `target`: the place
+/// the link at a path leads to (`Ok(None)` for a path that is none), or why
+/// it cannot be told. A path that is not there ends the way (nothing
+/// below it is a link). `strict`: a place that cannot be told is an error;
+/// else it ends the look at its path (or at the place a link leads to) with
+/// no link found.
+#[cfg(any(windows, test))]
+fn remote_link_by(
+    p: &Path,
+    depth: usize,
+    strict: bool,
+    target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
+) -> io::Result<Option<PathBuf>> {
+    // Windows follows no more than 63 links on a path.
+    if depth > 63 {
+        return Ok(None);
+    }
+    let mut at = PathBuf::new();
+    for c in p.components() {
+        at.push(c.as_os_str());
+        // A drive or volume before its root (`\\?\C:`) names the device,
+        // which cannot be opened as a file (os error 1), whoever asks; the
+        // root after it is the first place to look at.
+        if matches!(c, Component::Prefix(_)) {
+            continue;
+        }
+        let to = match target(&at) {
+            Ok(Some(to)) => to,
+            Ok(None) => continue,
+            Err(e) if !strict || e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if remote_target(&to.to_string_lossy()) {
+            return Ok(Some(at));
+        }
+        let next = match at.parent() {
+            Some(dir) if to.is_relative() => dir.join(&to),
+            _ => to,
+        };
+        if remote_link_by(&next, depth + 1, strict, target)?.is_some() {
+            return Ok(Some(at));
+        }
+    }
+    Ok(None)
+}
+
 /// `realpath`, on Windows without the `\\?\` prefix so resolved paths compare with
-/// configured ones.
+/// configured ones. A path whose links lead to another machine is refused
+/// before anything follows them, and so is one the thread cannot look at to
+/// its end unless it acts as another account ([`Acting`]).
 fn canonical(p: &Path) -> io::Result<PathBuf> {
-    let c = fs::canonicalize(p)?;
+    #[cfg(windows)]
+    {
+        match remote_link_here(p, &link_target) {
+            Ok(None) => {}
+            Ok(Some(link)) => {
+                return Err(io::Error::other(format!(
+                    "{} is a link to another machine, which is not followed",
+                    link.display()
+                )));
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{} cannot be looked at to its end: {e}", p.display()),
+                ));
+            }
+        }
+    }
+    let c = match fs::canonicalize(p) {
+        Ok(c) => c,
+        #[cfg(windows)]
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied && ACTING.with(|n| n.get()) > 0 => {
+            match NAME_AS_SELF.get() {
+                Some(name) => name(p)?,
+                None => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
     #[cfg(windows)]
     {
         let s = c.to_string_lossy();
@@ -570,5 +776,213 @@ mod unix_tests {
             resolve(&root.join("granted/dangling/y")),
             Err(PathError::DanglingSymlink(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn a_link_to_another_machine_is_told_by_its_target() {
+        for t in [
+            r"\\host\share",
+            r"\\host\share\sub",
+            "//host/share",
+            r"\\?\UNC\host\share",
+            r"\??\UNC\host\share",
+            r"\\?\unc\host\share",
+            r"\\.\UNC\host\share",
+            r"\\?\GLOBALROOT\Device\Mup\host\share",
+            r"\??\GLOBALROOT\Device\Mup\host\share",
+            r"\Device\Mup\host\share",
+            r"\GLOBALROOT\Device\Mup\host\share",
+            // Another root of Windows' object names that leads to shares.
+            r"\GLOBAL??\UNC\host\share",
+            // From a root: the node cannot tell where Windows reads it from.
+            r"\x\y",
+            "/home/x",
+            // Only drives and volumes count as this machine's.
+            r"\\.\pipe\x",
+            r"\\?\Device\HarddiskVolume1\x",
+        ] {
+            assert!(remote_target(t), "{t}");
+        }
+        for t in [
+            r"C:\Users\x",
+            "C:",
+            r"\\?\C:\Users\x",
+            r"\\.\C:\x",
+            r"\??\C:\x",
+            r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\x",
+            r"..\x",
+            "x",
+            "C:x",
+        ] {
+            assert!(!remote_target(t), "{t}");
+        }
+    }
+
+    /// The links of a made-up file system: `links` maps a path to where it
+    /// leads, `hidden` are paths the caller may not look at, anything else
+    /// is a plain folder, and `/gone` is not there.
+    fn fake_fs<'a>(
+        links: &'a [(&'a str, &'a str)],
+        hidden: &'a [&'a str],
+    ) -> impl Fn(&Path) -> io::Result<Option<PathBuf>> + 'a {
+        move |at| {
+            // The paths are spelled with `/`, also where the test runs on Windows.
+            let s = at.to_string_lossy().replace('\\', "/");
+            if hidden.iter().any(|h| *h == s) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            if s == "/gone" {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            Ok(links
+                .iter()
+                .find(|(l, _)| *l == s)
+                .map(|(_, to)| PathBuf::from(to)))
+        }
+    }
+
+    /// The walk names a link to a share, also behind a local link, and goes
+    /// on past a plain folder and a path that is not there.
+    #[test]
+    fn the_link_walk_finds_a_link_to_another_machine() {
+        let fs = fake_fs(
+            &[
+                ("/a/share", r"\\192.0.2.1\share"),
+                ("/b/hop", "/a/share"),
+                ("/b/rel", "hop"),
+            ],
+            &[],
+        );
+        for (path, want) in [
+            ("/a/share/x", Some("/a/share")),
+            ("/b/hop", Some("/b/hop")),
+            ("/b/rel", Some("/b/rel")),
+            ("/a/plain/x", None),
+            ("/gone/x", None),
+        ] {
+            let got = remote_link_by(Path::new(path), 0, true, &fs).unwrap();
+            assert_eq!(got, want.map(PathBuf::from), "{path}");
+        }
+    }
+
+    /// A part of the way the caller may not look at is an error, not "no
+    /// link": Windows follows a link in a folder its caller may not look
+    /// into, by a connection to the share, so a caller that went on would
+    /// send its NTLM answer there (the installed node's own account, in the
+    /// owner's folders). A link it did see before that is still named.
+    #[test]
+    fn the_link_walk_does_not_call_a_path_plain_that_it_cannot_look_at() {
+        let fs = fake_fs(&[("/open/share", r"\\192.0.2.1\share")], &["/owner/g"]);
+        let e = remote_link_by(Path::new("/owner/g/sub"), 0, true, &fs).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            remote_link_by(Path::new("/open/share/owner/g"), 0, true, &fs).unwrap(),
+            Some(PathBuf::from("/open/share"))
+        );
+        // A link that leads to a place it cannot look at is no better.
+        let fs = fake_fs(&[("/open/l", "d")], &["/open/d"]);
+        assert!(remote_link_by(Path::new("/open/l"), 0, true, &fs).is_err());
+    }
+
+    /// The lenient look (a caller that acts as an account that can look at
+    /// the way) gives up on a place it cannot look at only for the place a
+    /// link leads to, and goes on with the rest of its path: a link to
+    /// another machine below it is still found. The strict one errs.
+    #[test]
+    fn the_lenient_link_walk_gives_up_on_a_link_target_it_cannot_look_at_alone() {
+        let fs = fake_fs(
+            &[("/a/l", "hid"), ("/a/l/sub/share", r"\\192.0.2.1\share")],
+            &["/a/hid"],
+        );
+        let p = Path::new("/a/l/sub/share/x");
+        assert_eq!(
+            remote_link_by(p, 0, false, &fs).unwrap(),
+            Some(PathBuf::from("/a/l/sub/share"))
+        );
+        let e = remote_link_by(p, 0, true, &fs).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        // Nor does the lenient one err on a part of the path itself.
+        let fs = fake_fs(&[], &["/owner"]);
+        assert_eq!(
+            remote_link_by(Path::new("/owner/g"), 0, false, &fs).unwrap(),
+            None
+        );
+    }
+
+    /// Whether a part of a path that cannot be looked at ends the walk in an
+    /// error follows the account the thread acts as: the node's own account
+    /// (no [`Acting`]) must not canonicalize a path it cannot see to the
+    /// end, but an account it acts as may open the path past that part.
+    #[test]
+    fn a_path_that_cannot_be_looked_at_is_refused_unless_the_thread_acts_as_an_account() {
+        let fs = fake_fs(&[], &["/owner"]);
+        let p = Path::new("/owner/g");
+        let refused =
+            |fs: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>| remote_link_here(p, fs).is_err();
+        assert!(refused(&fs));
+        let owner = Acting::begin();
+        {
+            let _container = Acting::begin();
+            assert!(!refused(&fs));
+        }
+        // The container's end leaves the thread acting as the owner.
+        assert!(!refused(&fs));
+        drop(owner);
+        assert!(refused(&fs));
+        // And another thread does not act because this one does.
+        let _owner = Acting::begin();
+        std::thread::scope(|s| {
+            assert!(s.spawn(|| refused(&fs)).join().unwrap());
+        });
+    }
+
+    /// A verbatim path (`\\?\C:\…`, a volume GUID) is walked from its root: the
+    /// drive or volume before it cannot be opened as a file (os error 1), and
+    /// the walk refused every such path whole. Only a Windows run shows it.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_path_is_walked() {
+        let root = std::env::var("SystemRoot").unwrap();
+        let p = PathBuf::from(format!(r"\\?\{root}\System32"));
+        assert_eq!(remote_link_checked(&p).unwrap(), None);
+        assert_eq!(remote_link(&p), None);
+    }
+
+    /// A symbolic link to a share is refused by its target, before
+    /// anything follows it: following it would connect to the share as the
+    /// account the node acts as (#149's probe). An address of TEST-NET
+    /// would hold a connection for half a minute. Needs the right to make
+    /// symbolic links (an administrator, as CI).
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_another_machine_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("w");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("share");
+        if let Err(e) = std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", &link) {
+            panic!("cannot make a symbolic link (an administrator makes one): {e}");
+        }
+        // And one that leads to it through another, local, link.
+        let hop = d.path().join("hop");
+        std::os::windows::fs::symlink_dir(&dir, &hop).unwrap();
+        let t = std::time::Instant::now();
+        let verbatim = |p: PathBuf| PathBuf::from(format!(r"\\?\{}", p.display()));
+        for p in [
+            link.join("x"),
+            hop.join("share").join("x"),
+            verbatim(link.join("x")),
+        ] {
+            assert!(remote_link(&p).is_some(), "{p:?}");
+            let e = resolve(&p).unwrap_err().to_string();
+            assert!(e.contains("link to another machine"), "{e}");
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(remote_link(&dir.join("x")), None);
     }
 }

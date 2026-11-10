@@ -2330,6 +2330,10 @@ impl Link {
             let known = account.as_ref().ok().cloned().flatten();
             if !marked.is_empty() && self.shared.separate(&entry.policy) {
                 self.acls_ready(&cfg).await?;
+                // On Windows its paths outside the folders are judged by
+                // the container's entries (Q4), as an `fs` call's are.
+                #[cfg(windows)]
+                self.grants_ready(&entry).await?;
             }
             let (args, targets, named, target) =
                 self.marked_paths(&inv, &action.params, &marked, known.as_ref())?;
@@ -2430,9 +2434,15 @@ impl Link {
         // account stops the call once it is decided and audited.
         let account = self.shared.command_account(&cfg, &entry.policy);
         let known = account.as_ref().ok().cloned().flatten();
+        let boxed = self.boxed();
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) {
             self.acls_ready(&cfg).await?;
+            // On Windows the reads go by the container's entries (Q4): one
+            // that should be off and is not stops them, as it stops the
+            // pairing's commands.
+            #[cfg(windows)]
+            self.grants_ready(&entry).await?;
         }
         // The pairing's own home and temporary folder are the ones the
         // node made for it: those an earlier pairing under its name
@@ -2448,14 +2458,17 @@ impl Link {
         // A path that does not resolve is in the audit once the
         // switch is over, as for a provider's.
         let parsed = {
-            let _as = act_as(known.as_ref())?;
+            let _as = act_as(known.as_ref(), boxed.as_deref())?;
             FsCall::parse(a, &inv.args)
         };
-        let call = parsed.inspect_err(|e| {
-            if let Some(Value::String(given)) = inv.args.get("path") {
-                self.audit_bad_path(inv, given, e);
-            }
-        })?;
+        let path = inv.args.get("path").and_then(Value::as_str);
+        let call = parsed
+            .map_err(|e| self.why_refused(&entry, known.as_ref(), path, e))
+            .inspect_err(|e| {
+                if let Some(given) = path {
+                    self.audit_bad_path(inv, given, e);
+                }
+            })?;
         // Taken before the gate: whenever the gate judged by the
         // folders, the walk below does too, even if `until` passes
         // in between. Where the node reads as the command account,
@@ -2496,12 +2509,13 @@ impl Link {
         // The account's home, where every pairing's own folders lie,
         // is walked only as far as this pairing's own.
         let name = entry.name.clone();
+        let container = crate::grants::container(&self.shared.paths, &entry.node_id);
         let run_home = known
             .clone()
             .filter(|_| self.shared.separate(&entry.policy))
             .map(|a| a.home);
         tokio::task::spawn_blocking(move || {
-            let _as = act_as(known.as_ref())?;
+            let _as = act_as(known.as_ref(), boxed.as_deref())?;
             // An entry the direct read would refuse stays out of the
             // walk, so a folder without `r` inside one with `r` is
             // sealed to grep, find and list too. A walk still passes
@@ -2530,7 +2544,7 @@ impl Link {
             };
             let pairings = run_home
                 .as_ref()
-                .map(|h| crate::account::pairing_view(h, &name));
+                .map(|h| crate::account::pairing_view(h, &name, &container));
             let skip = |p: &std::path::Path, through: bool| {
                 pairings
                     .as_ref()
@@ -2583,7 +2597,7 @@ impl Link {
         // as any refusal, with the path given. The entry is written once
         // the switch is over: the account may not write the node's log.
         let resolved = {
-            let _as = act_as(known)?;
+            let _as = act_as(known, self.boxed().as_deref())?;
             marked.iter().try_for_each(|(field, mark)| {
                 // Left out (or null, which its schema may allow): no path.
                 let Some(Value::String(given)) = inv.args.get(field) else {
@@ -2676,6 +2690,14 @@ impl Link {
         self.shared.rules_home(&self.shared.config())
     }
 
+    /// The AppContainer of this link's pairing (crate::grants::container),
+    /// in which the node acts as the command account on Windows. Not called
+    /// while the store is locked: it reads the config.
+    fn boxed(&self) -> Option<String> {
+        self.entry()
+            .map(|(_, e)| crate::grants::container(&self.shared.paths, &e.node_id))
+    }
+
     /// The owner's account, whose view of the files the protected list
     /// is made with, when there is one to use. Not called while the store
     /// is locked: it reads the config.
@@ -2713,8 +2735,8 @@ impl Link {
         let home = account.map_or(&self.shared.home, |a| &a.home);
         // Without the switch the entries are still there as written; only
         // the places they lead to through links are not found.
-        let _as = act_as(account).ok().flatten();
-        Protected::new(&self.shared.platform, home, own, opts)
+        let _as = act_as(account, None).ok().flatten();
+        Protected::new(&self.shared.platform(), home, own, opts)
     }
 
     /// The shell a command line runs in, which the guard reads it by: the
@@ -2788,8 +2810,9 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again.
+        let boxed = self.boxed();
         let (decision, fence) = {
-            let _as = act_as(account)?;
+            let _as = act_as(account, boxed.as_deref())?;
             let decision = judged.with(|env| nerve_policy::decide(&entry.policy, env, &call));
             // Whatever the mode and the rules say, a call of a pairing whose
             // commands run as `nerve-run`, made as that account, gets no
@@ -2797,7 +2820,10 @@ impl Link {
             // account, which owns them all.
             let fence = account
                 .filter(|_| self.shared.separate(&entry.policy))
-                .and_then(|run| crate::account::fence(run, &entry.name));
+                .and_then(|run| {
+                    let c = crate::grants::container(&self.shared.paths, &entry.node_id);
+                    crate::account::fence(run, &entry.name, &c)
+                });
             let decision = match (decision, &fence) {
                 (Decision::Allow, Some((run_home, mine))) => {
                     crate::account::other_pairings(targets, run_home, mine, program.is_some())
@@ -2841,7 +2867,7 @@ impl Link {
                         now_ms,
                         args: Some(&args),
                     };
-                    let _as = act_as(account.as_ref())?;
+                    let _as = act_as(account.as_ref(), boxed.as_deref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
                         let check = nerve_policy::LinkCheck::new(&policy, env, &call);
                         // The policy does not know the other pairings'
@@ -2913,6 +2939,130 @@ impl Link {
                 given
             };
             self.audit(inv, target, "forbidden", Some("bad_path"), Some(&e.message));
+        }
+    }
+
+    /// `e`, the refusal of a path of this pairing's call (`given`, as the
+    /// center wrote it) that did not resolve as the command account in its
+    /// container on Windows, with why (crate::grants::explained): which
+    /// account could not open which path, whether the folder grants hold it
+    /// and are on, and what the owner can do. "Access is denied" alone
+    /// does not tell a folder outside the pairing's from a grant that is
+    /// not on. Any other error stays as it is.
+    fn why_refused(
+        &self,
+        entry: &CenterEntry,
+        account: Option<&crate::service::Account>,
+        given: Option<&str>,
+        e: RpcError,
+    ) -> RpcError {
+        #[cfg(windows)]
+        {
+            let run = account.filter(|a| a.name.eq_ignore_ascii_case(crate::account::RUN_USER));
+            let (Some(run), Some(container), Some(given)) = (run, self.boxed(), given) else {
+                return e;
+            };
+            let Ok(path) = nerve_policy::paths::parse_device_path(given) else {
+                return e;
+            };
+            let owner = self.account();
+            let boxed = container.clone();
+            // Its folders as the owner wrote them (whether the sync could
+            // resolve them or not), and what their grants leave out; looked
+            // up once, when a refusal needs them.
+            let known = std::cell::LazyCell::new(|| {
+                let home = self.shared.rules_home(&self.shared.config());
+                (
+                    crate::grants::spelled(&entry.policy.folders, &home),
+                    self.protected(entry),
+                    self.own(),
+                )
+            });
+            let left_out = |p: &std::path::Path| {
+                let (_, protected, own) = &*known;
+                crate::grants::left_out_of(p, own, protected)
+            };
+            // Where a path leads, as the owner sees it (who may look at the
+            // whole way, as the sync does); a path that does not resolve
+            // there stays as it is, and so does one whose way the owner
+            // cannot look at to its end or that leads to another machine:
+            // resolving it would follow that link.
+            let real = |p: &std::path::Path| {
+                let _acting = crate::grants::act_as(owner.as_ref()).ok().flatten();
+                crate::grants::placed(
+                    p,
+                    |p| crate::grants::remote_here(p, false),
+                    |p| nerve_policy::paths::resolve(p).ok(),
+                )
+            };
+            let probe =
+                |p: &std::path::Path| crate::grants::probeable(p, &known.0, &real, left_out);
+            // The links on the way are looked at as the owner, who may look
+            // at the whole way (as the sync does), before anything opens
+            // the path.
+            let remote = || {
+                let acting = crate::grants::act_as(owner.as_ref()).ok().flatten();
+                !matches!(
+                    crate::grants::remote_here(&path, acting.is_some()),
+                    Ok(None)
+                )
+            };
+            // Opened as the resolve opens it, without asking its name: no
+            // right asked for, a folder too. (`fs::metadata` would read it
+            // from its folder's listing where the open is refused.) The
+            // container's token is held until the look is done.
+            let mut acting = None;
+            let open = move |p: &std::path::Path| -> std::io::Result<()> {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+                if acting.is_none() {
+                    let acted = act_as(Some(run), Some(&container))
+                        .map_err(|e| std::io::Error::other(e.message))?;
+                    acting = Some(acted);
+                }
+                std::fs::OpenOptions::new()
+                    .access_mode(0)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(p)
+                    .map(drop)
+            };
+            let why = |at: &std::path::Path, opened: &Result<(), String>| {
+                let who = crate::grants::Refused {
+                    center: &entry.name,
+                    container: &boxed,
+                    account: &run.name,
+                    real: &real,
+                };
+                crate::grants::refused(
+                    &self.shared.paths,
+                    owner.as_ref(),
+                    &who,
+                    at,
+                    opened,
+                    &known.0,
+                    left_out,
+                )
+            };
+            let kind = e.kind();
+            let message = crate::grants::explained(
+                kind.as_str(),
+                &e.message,
+                given,
+                &path,
+                probe,
+                remote,
+                open,
+                why,
+            );
+            match message {
+                Some(message) => RpcError { message, ..e },
+                None => e,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (entry, account, given);
+            e
         }
     }
 
@@ -3298,9 +3448,13 @@ impl Link {
         };
         let pairing = match &ready {
             Ok(own) => own.clone(),
-            Err(_) => known
-                .as_ref()
-                .map(|a| crate::account::Own::of(&a.home, &entry.name)),
+            Err(_) => known.as_ref().map(|a| {
+                crate::account::own_for(
+                    &a.home,
+                    &entry.name,
+                    &crate::grants::container(&self.shared.paths, &entry.node_id),
+                )
+            }),
         };
         let start_in = match &pairing {
             Some(o) => o.home.clone(),
@@ -3313,7 +3467,30 @@ impl Link {
         let home = self.shared.rules_home(cfg);
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) && !sudo_call {
-            self.acls_ready(cfg).await?;
+            let synced = async {
+                self.acls_ready(cfg).await?;
+                // On Windows its folder is looked at below as the pairing's
+                // container, which sees it once the container's entries are
+                // on: the owner may have granted it just before the call.
+                #[cfg(windows)]
+                self.grants_ready(entry).await?;
+                Ok::<(), RpcError>(())
+            }
+            .await;
+            // A refusal comes before the gate, which writes the other
+            // decisions down: it is in the audit log here, as any command
+            // the node does not run.
+            if let Err(e) = synced {
+                let command = inv.args.get("command").and_then(Value::as_str);
+                self.audit(
+                    inv,
+                    command.unwrap_or_default(),
+                    "forbidden",
+                    Some("unavailable"),
+                    Some(&e.message),
+                );
+                return Err(e);
+            }
         }
         // Where the pairing's home cannot be had and the call names no other
         // folder, the command has nowhere to start: it says why, and is in
@@ -3333,9 +3510,19 @@ impl Link {
         }
         // The paths are looked at as the account (crate::account::FsAs).
         let rc = {
-            let _as = act_as(looks_as.as_ref())?;
-            RunCall::parse(&inv.args, &start_in)?
+            let _as = act_as(looks_as.as_ref(), self.boxed().as_deref())?;
+            RunCall::parse(&inv.args, &start_in)
         };
+        let cwd = inv.args.get("cwd").and_then(Value::as_str);
+        let rc = rc.map_err(|e| self.why_refused(entry, looks_as.as_ref(), cwd, e));
+        // A folder that does not resolve as the account (on Windows one the
+        // pairing's container may not look into, another pairing's) is
+        // refused and in the audit, as a file call's path is, once the
+        // switch is over.
+        let rc = rc.inspect_err(|e| {
+            let command = inv.args.get("command").and_then(Value::as_str);
+            self.audit_bad_path(inv, command.unwrap_or_default(), e);
+        })?;
         // A call may ask for less than the owner's most, never for more.
         let granted = cfg
             .limits
@@ -3412,15 +3599,34 @@ impl Link {
             rc.command = exec::sudo_line(&self.shared.sudo_path(), args, &prompt);
             sudo = Some(exec::SudoInput { password, prompt });
         }
+        // The account and `separate` come from two readings of the clock: a
+        // timed mode that ended between them would run `nerve-run` without
+        // its confinement, or the owner as a pairing of its own.
+        if mode_turned(separate, known.as_ref()) {
+            return Err(RpcError::new(ErrorCode::Unavailable, MODE_TURNED));
+        }
         // Folder mode confines: Landlock on Linux, the pairing's AppContainer
         // on Windows, by the answer the gate went by; `nerve-run` is
-        // confined in allowlist mode too, where Landlock is there.
+        // confined in allowlist mode too: by Landlock where it is there, and
+        // always in the pairing's container on Windows, as the account's
+        // entries on the folders are every pairing's (#149).
         let folder = sudo.is_none() && !as_root && by_folders && unconfined.is_none();
-        let container = if folder && self.shared.confinement.appcontainer {
-            Some(self.container(entry).await?)
-        } else {
-            None
-        };
+        let container =
+            if (folder || cfg!(windows) && separate) && self.shared.confinement.appcontainer {
+                Some(
+                    self.container(entry, entry.policy.no_network, separate.then_some(cfg))
+                        .await?,
+                )
+            } else {
+                None
+            };
+        // No command runs as `nerve-run` on Windows outside its container.
+        if cfg!(windows) && separate && container.is_none() {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                crate::daemon::NOT_CONFINED,
+            ));
+        }
         // Its pairing's folders are there before it starts.
         let pairing = ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let separate = pairing.filter(|_| separate);
@@ -3431,7 +3637,9 @@ impl Link {
         let confine = folder || separate.is_some() && self.shared.exe.is_some();
         let landlock = (confine && self.shared.confinement.landlock_abi.is_some()).then(|| {
             // The folders' entries are listed as the account.
-            let _as = act_as(known.as_ref()).ok().flatten();
+            let _as = act_as(known.as_ref(), self.boxed().as_deref())
+                .ok()
+                .flatten();
             // The folders a command of any center may write: a link it puts
             // in place of a folder inside one leads nowhere the next
             // command gets rules for.
@@ -3621,9 +3829,9 @@ impl Link {
         .map_err(|e| as_given(e, &named))?;
         // A missing account stops the call once it is decided and audited.
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-        // Only the installed Linux node has `nerve-run`, and only it offers
-        // what runs as that account (crate::config_cap::offered); a test's
-        // node by hand stands for it with its own user
+        // Only the installed node has `nerve-run`, and only it offers what
+        // runs as that account (crate::config_cap::offered); a test's node
+        // by hand stands for it with its own user
         // (crate::daemon::NodeOptions::config_caps_by_hand).
         if account.is_none() && !self.shared.config_caps {
             return Err(RpcError::new(
@@ -3654,7 +3862,9 @@ impl Link {
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
             // The folders' entries are listed as the account.
-            let _as = act_as(account.as_ref()).ok().flatten();
+            let _as = act_as(account.as_ref(), self.boxed().as_deref())
+                .ok()
+                .flatten();
             let writable = exec::write_folders(cfg, &home);
             exec::config_spec(
                 &entry.policy,
@@ -3679,6 +3889,15 @@ impl Link {
             start_in,
             decl.timeout_secs.map(Duration::from_secs),
         );
+        // On Windows it runs in the pairing's container, as the pairing's
+        // commands of `nerve-run` do, with its home there (#149). It is made
+        // before the last look, as `exec_run` makes it: the grants' sync
+        // that makes it may take long.
+        let container = if cfg!(windows) && account.is_some() {
+            Some(self.container(&entry, no_network, Some(cfg)).await?)
+        } else {
+            None
+        };
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         let timeouts = exec::Timeouts::from_limits(&cfg.limits);
         // The owner's switch may be on since the call was decided
@@ -3694,7 +3913,7 @@ impl Link {
         let opts = RunOptions {
             shell: None,
             landlock,
-            container: None,
+            container,
             exe: self.shared.exe.clone().unwrap_or_default(),
             output_cap: (cfg.limits.output_cap_bytes as usize).min(exec::OUTPUT_HARD_CAP),
             timeouts,
@@ -3735,6 +3954,18 @@ impl Link {
         })?;
         crate::config_cap::result(&decl, &run)
     }
+}
+
+/// Why a command did not run whose pairing's mode changed between the
+/// readings of it ([`mode_turned`]).
+const MODE_TURNED: &str =
+    "the command was not run: its pairing's mode changed while it started; run it again";
+
+/// Whether the account a command runs as (`account`) and whether it runs
+/// apart from the owner (`separate`) disagree: one says `nerve-run`, the
+/// other not.
+fn mode_turned(separate: bool, account: Option<&crate::service::Account>) -> bool {
+    account.is_some_and(|a| (a.name == crate::account::RUN_USER) != separate)
 }
 
 /// The account an allowed sudo command of `nerve-run` runs as
@@ -3784,25 +4015,66 @@ impl Link {
     /// where it changed since the gate let the command through. A grant of
     /// this pairing's container that its folders no longer give and that
     /// could not be taken off stops the command, and so does a record of the
-    /// grants that cannot be read (`Synced::refusal`).
+    /// grants that cannot be read (`Synced::refusal`). `no_network`: the
+    /// owner's switch is off for the pairing. `separate`: the command runs as
+    /// `nerve-run`, with its home in the container and the variables the
+    /// owner passes on (`machine.command_env`).
     async fn container(
         &self,
         entry: &CenterEntry,
+        no_network: bool,
+        separate: Option<&NodeConfig>,
     ) -> Result<nerve_sandbox::ContainerSpec, RpcError> {
+        let name = self.grants_ready(entry).await?;
+        let env = separate
+            .map(|cfg| {
+                cfg.machine
+                    .command_env
+                    .iter()
+                    .filter_map(|k| Some((k.clone(), std::env::var(k).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(nerve_sandbox::ContainerSpec {
+            no_network,
+            home: separate.is_some(),
+            env,
+            ..nerve_sandbox::ContainerSpec::new(name)
+        })
+    }
+
+    /// Brings the folder grants in line with the config as it is now
+    /// (crate::grants) and answers with the AppContainer of this pairing
+    /// (`entry`), or says why the pairing's calls do not run: a grant of its
+    /// container that its folders no longer give could not be taken off, a
+    /// folder closed to it could not be closed, or the record of the grants
+    /// cannot be read ([`grants_refusal`]). A command waits for it
+    /// ([`Link::container`]), and so does the node's own file work as the
+    /// container on Windows, whose reads its entries decide (Q4). A change
+    /// that takes long holds the call; the log says how far it is. A walk
+    /// the node started because names changed does not
+    /// ([`crate::daemon::Shared::sync_grants_for_call`]).
+    async fn grants_ready(&self, entry: &CenterEntry) -> Result<String, RpcError> {
         let s = self.shared.clone();
-        // A change that takes long holds the command; the log says how far
-        // it is.
-        let synced = tokio::task::spawn_blocking(move || s.sync_grants())
+        let synced = tokio::task::spawn_blocking(move || s.sync_grants_for_call())
             .await
             .map_err(|e| RpcError::internal(e.to_string()))?;
-        for e in &synced.errors {
-            tracing::warn!("folder grants: {e}");
-        }
         let name = crate::grants::container(&self.shared.paths, &entry.node_id);
-        if let Some(why) = synced.refusal(&name) {
-            return Err(RpcError::new(ErrorCode::Unavailable, why));
-        }
-        Ok(nerve_sandbox::ContainerSpec { name })
+        grants_refusal(&synced, &name)?;
+        Ok(name)
+    }
+}
+
+/// [`Link::grants_ready`]'s answer once the grants are synced: the sync's
+/// errors go to the log, and a refusal of `container`
+/// ([`crate::grants::Synced::refusal`]) stops the call.
+fn grants_refusal(synced: &crate::grants::Synced, container: &str) -> Result<(), RpcError> {
+    for e in &synced.errors {
+        tracing::warn!("folder grants: {e}");
+    }
+    match synced.refusal(container) {
+        Some(why) => Err(RpcError::new(ErrorCode::Unavailable, why)),
+        None => Ok(()),
     }
 }
 
@@ -3923,7 +4195,7 @@ pub(crate) fn may_take(
     }
     let home = shared.rules_home(cfg);
     let judged = Judged {
-        protected: Protected::new(&shared.platform, &home, &[], &entry.policy.protected),
+        protected: Protected::new(&shared.platform(), &home, &[], &entry.policy.protected),
         home,
         unconfined: None,
         sudo: false,
@@ -3987,11 +4259,15 @@ impl Judged {
 }
 
 /// The node's file access as `account` on this thread while the result
-/// lives ([`crate::account::FsAs`]); nothing for the node's own user.
+/// lives ([`crate::account::FsAs`]); nothing for the node's own user. On
+/// Windows the command account acts in the pairing's container
+/// (`container`), as its commands do.
 #[cfg(target_os = "linux")]
 pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
+    container: Option<&str>,
 ) -> Result<Option<crate::account::FsAs>, RpcError> {
+    let _ = container;
     account
         .map(|a| {
             crate::account::FsAs::new(a).map_err(|e| {
@@ -4005,14 +4281,25 @@ pub(crate) fn act_as(
 }
 
 /// [`act_as`] on Windows: the thread impersonates the account, logged on
-/// with its stored password ([`crate::win_user::FsAs`]).
+/// with its stored password ([`crate::win_user::FsAs`]). The command
+/// account acts only in the pairing's `container`, never as itself: its
+/// own rights reach every pairing's folders (#149).
 #[cfg(windows)]
 pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
+    container: Option<&str>,
 ) -> Result<Option<crate::win_user::FsAs>, RpcError> {
     account
         .map(|a| {
-            crate::win_user::FsAs::new(a).map_err(|e| {
+            let run = a.name.eq_ignore_ascii_case(crate::account::RUN_USER);
+            match (run, container) {
+                (true, Some(c)) => crate::win_user::FsAs::in_container(a, c),
+                (true, None) => Err(std::io::Error::other(
+                    "the command account acts only in a pairing's AppContainer",
+                )),
+                (false, _) => crate::win_user::FsAs::new(a),
+            }
+            .map_err(|e| {
                 RpcError::new(
                     ErrorCode::Unavailable,
                     format!("cannot act as {}: {e}", a.name),
@@ -4023,7 +4310,10 @@ pub(crate) fn act_as(
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn act_as(account: Option<&crate::service::Account>) -> Result<Option<()>, RpcError> {
+pub(crate) fn act_as(
+    account: Option<&crate::service::Account>,
+    _container: Option<&str>,
+) -> Result<Option<()>, RpcError> {
     match account {
         Some(a) => Err(RpcError::new(
             ErrorCode::Unavailable,
@@ -4286,6 +4576,71 @@ fn shell_of(configured: Option<&str>, command: Option<&str>) -> Shell {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// A pairing's calls stop where a grant of its container should be off
+    /// and is not, or a folder closed to it is not closed, or the grants
+    /// are not known; another pairing's go on. On Windows the node's own
+    /// file work waits for this too, not only the commands.
+    #[test]
+    fn a_grant_left_on_stops_its_pairings_calls() {
+        use crate::grants::{Grant, Synced};
+        let grant = |container: &str| Grant {
+            container: container.into(),
+            path: "/w/app".into(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+            id: None,
+            unfinished: false,
+            toward: Vec::new(),
+            closed_at: None,
+        };
+        assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());
+        let stale = Synced {
+            stale: vec![grant("c1")],
+            ..Default::default()
+        };
+        let e = super::grants_refusal(&stale, "c1").unwrap_err();
+        assert_eq!(
+            e.kind(),
+            nerve_proto::ErrorCode::Unavailable,
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("/w/app"), "{}", e.message);
+        assert!(super::grants_refusal(&stale, "c2").is_ok());
+        let unclosed = Synced {
+            unclosed: vec![grant("c1")],
+            ..Default::default()
+        };
+        assert!(super::grants_refusal(&unclosed, "c1").is_err());
+        let unknown = Synced {
+            unknown: Some("unreadable".into()),
+            ..Default::default()
+        };
+        assert!(super::grants_refusal(&unknown, "c2").is_err());
+    }
+
+    /// A command whose account says `nerve-run` and whose pairing does not
+    /// run apart, or the other way round, does not run: a timed mode ended
+    /// between the two readings. Where both agree, or no account is known
+    /// (a node by hand), it runs.
+    #[test]
+    fn a_command_whose_mode_turned_while_it_started_does_not_run() {
+        let account = |name: &str| crate::service::Account {
+            name: name.into(),
+            uid: 1,
+            gid: 1,
+            comment: String::new(),
+            home: "/h".into(),
+            groups: Vec::new(),
+        };
+        let run = account(crate::account::RUN_USER);
+        let owner = account("alice");
+        assert!(super::mode_turned(false, Some(&run)));
+        assert!(super::mode_turned(true, Some(&owner)));
+        assert!(!super::mode_turned(true, Some(&run)));
+        assert!(!super::mode_turned(false, Some(&owner)));
+        assert!(!super::mode_turned(false, None));
+    }
 
     /// Dropped when its flag says so.
     struct Held(std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>);

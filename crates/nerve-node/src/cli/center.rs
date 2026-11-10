@@ -131,13 +131,15 @@ pub(super) async fn rm(
     // So is the profile of its container on Windows (crate::grants):
     // with its last grant when the record names it, else found by
     // the pairing. A node that runs took the change, and takes the
-    // grants off and the profile of a container left without grants
-    // itself, in its own time: asked to do that now, it is done before
-    // the profiles are looked at here, so none it removes is said to
-    // stay. Its own sync of the change may have taken the grants off
-    // first: the sync asked for here waits until that one removed the
-    // profile too (crate::grants::apply). Any other profile stays while
-    // it runs, as a command of the pairing may still run in it.
+    // grants off and the profile of each pairing it had itself, in its
+    // own time: also of one removed before its first sync, as it noted
+    // its pairings at its start (crate::grants::note_pairings). Asked to
+    // do that now, it is done before the profiles are looked at here,
+    // so none it removes is said to stay. Its own sync of the change may
+    // have taken the grants off first: the sync asked for here waits
+    // until that one removed the profile too (crate::grants::apply). Any
+    // other profile stays while it runs, as a command of the pairing may
+    // still run in it.
     #[cfg(windows)]
     match node_call(&paths, "folder.grants", json!({})).await {
         Ok(_) => {}
@@ -260,9 +262,9 @@ pub(super) async fn settings(
         w(out, settings_off_text(&name));
         return Ok(());
     }
-    let root = crate::owner::is_root(crate::service::owner_of(&paths).as_deref());
-    let (cfg, _) = read_config(&paths).await?;
-    let admin = crate::owner::admin_owner(&cfg);
+    let owner = crate::service::owner_of(&paths);
+    let root = crate::owner::is_root(owner.as_deref());
+    let admin = crate::owner::admin_owner(owner.as_deref());
     if let Some(warning) = settings_grant_warning(&name, g, root, admin.as_deref()) {
         w(out, warning);
     }
@@ -385,7 +387,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            &name,
+            &nerve_sandbox::ContainerSpec::new(name.clone()),
         );
         assert!(profile.exists(), "{}", profile.display());
         assert!(!crate::grants::record_file(&paths).exists());
@@ -418,7 +420,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            &name,
+            &nerve_sandbox::ContainerSpec::new(name.clone()),
         );
         assert!(profile.exists(), "{}", profile.display());
         let ls = run(&paths, &["center"]).unwrap();
@@ -435,7 +437,7 @@ mod tests {
         let _ = nerve_sandbox::appcontainer::run(
             Path::new("cmd.exe"),
             &["/C".into(), "exit 0".into()],
-            name,
+            &nerve_sandbox::ContainerSpec::new(name),
         );
         let profile = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
             .join("Packages")
@@ -478,8 +480,9 @@ mod tests {
 
     /// On Windows: the profile of a pairing with folder entries goes with
     /// their grants at `center rm`, which says so where no node runs. A
-    /// running node takes the change and that profile itself; a profile
-    /// without grants stays while it runs, which `center rm` says. A node
+    /// running node takes the change and that profile itself, also the
+    /// profile of a pairing that never had a folder, right after its start
+    /// (before its first sync), and `center rm` says none stays. A node
     /// that runs without its pipe is no node to write behind: nothing
     /// changes.
     #[cfg(windows)]
@@ -510,20 +513,20 @@ mod tests {
             rm_with_node(&d, &paths, &profile);
         }
 
-        let (d, paths) = setup(&["home"]);
-        let name = crate::grants::container(&paths, "n");
-        let profile = profile_of(&name);
-        with_node(d.path(), &paths, |_| {
-            let out = run(&paths, &["center", "rm"]).unwrap();
-            assert!(
-                out.contains(&format!(
-                    "the AppContainer profile {name} of home stays, since the node at"
-                )),
-                "{out}"
-            );
-        });
-        assert!(profile.exists(), "{}", profile.display());
-        nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
+        // A pairing that never had a folder: the running node removes its
+        // profile with the pairing too, as the profile goes with the pairing,
+        // whether or not its first sync came before `center rm`: a few rounds.
+        for _ in 0..3 {
+            let (d, paths) = setup(&["home"]);
+            let name = crate::grants::container(&paths, "n");
+            let profile = profile_of(&name);
+            with_node(d.path(), &paths, |_| {
+                let out = run(&paths, &["center", "rm"]).unwrap();
+                assert!(out.contains("unpaired home"), "{out}");
+                assert!(!out.contains("stays"), "{out}");
+                assert!(!profile.exists(), "{}", profile.display());
+            });
+        }
 
         let (_d, paths, name, profile) = granted_home();
         let out = run(&paths, &["center", "rm"]).unwrap();
@@ -534,10 +537,13 @@ mod tests {
         assert!(!profile.exists(), "{}", profile.display());
     }
 
-    /// On Windows: when the grants of the pairings that stay do not follow
-    /// (a hard link below a folder they write), `center rm` still removes
-    /// the pairing's profile, as nothing names it once the pairing is gone,
-    /// and then says what failed.
+    /// On Windows: when the grants of the pairings that stay do not follow,
+    /// `center rm` still removes the pairing's profile, as nothing names it
+    /// once the pairing is gone, and then says what failed. They fail here
+    /// by a record of the grants that cannot be read: a folder's denial of
+    /// WRITE_DAC does not hold for the elevated administrator the tests run
+    /// as in CI, whose SeRestorePrivilege is on and lets the sync's open
+    /// (with backup semantics) change any folder's list.
     #[cfg(windows)]
     #[test]
     fn center_rm_removes_the_profile_when_the_other_grants_do_not_follow() {
@@ -545,8 +551,8 @@ mod tests {
         let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
         let work = d.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        std::fs::write(work.join("a.txt"), "x").unwrap();
-        std::fs::hard_link(work.join("a.txt"), work.join("b.txt")).unwrap();
+        nerve_transport::files::create_private_dir(&paths.state_dir).unwrap();
+        std::fs::write(crate::grants::record_file(&paths), "{").unwrap();
         let real = nerve_policy::paths::resolve(&work).unwrap();
         let mut cfg = NodeConfig::default();
         let mut home = entry("home");

@@ -146,17 +146,11 @@ pub struct Machine {
     pub sudo_path: Option<String>,
     #[serde(default)]
     pub secret_storage: SecretStorage,
-    /// Windows: the account the installed node runs commands as, which
-    /// `install` takes with its password. Unset, they run as the node's own
-    /// user; the installed service then runs none. Linux does not read it:
-    /// there commands run as `nerve-run` or as the owner, the account that
-    /// ran `install`, and `nerve-node config set` refuses it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    /// Linux, the installed node: the variables of the service's environment
-    /// a command of `nerve-run` gets besides the few it always gets (`PATH`,
-    /// `LANG`, `TERM`, `TMPDIR`, and what the node sets itself). Names only:
-    /// the values are the service's.
+    /// The installed node: the variables of the service's environment a
+    /// command of `nerve-run` gets besides the few it always gets (`PATH`,
+    /// `LANG`, `TERM`, `TMPDIR`, and what the node sets itself; on Windows
+    /// the system's own and its home in the pairing's container). Names
+    /// only: the values are the service's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_env: Vec<String>,
 }
@@ -850,18 +844,17 @@ impl Mode {
     }
 }
 
-/// What a center may do with a folder: three independent flags, every
-/// combination allowed. In the config it is the string of the letters that
-/// are set, `"rx"` (`""` for none).
+/// What a center may do with a folder: three flags. In the config it is
+/// the string of the letters that are set, `"rx"` (`""` for none).
 ///
 /// - `read`: read the files and list the directories (fs read actions).
-/// - `write`: create, change and delete (fs write actions).
+/// - `write`: create, change and delete (fs write actions). It reads too: a
+///   folder that may be written but not read makes no sense (a command could
+///   not look at what it is changing), so `w` alone is read as `rw`, and
+///   [`Access::parse`] and [`Access::change`] keep `read` set wherever
+///   `write` is.
 /// - `execute`: run commands with a working directory in it, and run the
 ///   programs it holds.
-///
-/// A write-only folder is legal: the sandbox grants the write rights without
-/// the read rights, so a command can put files there but not read them back
-/// or list the folder.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Access {
@@ -882,8 +875,15 @@ impl Access {
         execute: true,
     };
 
-    /// `r`, `w` or `x`, each at most once, in any order; `""` is none.
+    /// `r`, `w` or `x`, each at most once, in any order; `""` is none. `w`
+    /// brings `r` along.
     pub fn parse(s: &str) -> Result<Access, String> {
+        Access::letters(s).map(Access::reading)
+    }
+
+    /// The flags `s` names, as [`Access::parse`] reads them, without `r`
+    /// for `w`: a change takes away only the flags named.
+    fn letters(s: &str) -> Result<Access, String> {
         let mut a = Access::NONE;
         for c in s.chars() {
             let flag = match c {
@@ -901,9 +901,18 @@ impl Access {
         Ok(a)
     }
 
+    /// The same flags with `read` set where `write` is.
+    fn reading(self) -> Access {
+        Access {
+            read: self.read || self.write,
+            ..self
+        }
+    }
+
     /// One chmod-style change: `=rwx` replaces all three flags with the
     /// letters after it (`=` alone clears them), `+x` sets the flags named and
-    /// `-w` clears them; the others stay.
+    /// `-w` clears them; the others stay. As `w` reads too, `+w` sets `r` and
+    /// `-r` clears `w`.
     pub fn change(self, spec: &str) -> Result<Access, String> {
         let (op, letters) = match spec.chars().next() {
             Some(op @ ('=' | '+' | '-')) => (op, &spec[1..]),
@@ -912,7 +921,7 @@ impl Access {
         if letters.is_empty() && op != '=' {
             return Err(format!("{spec:?}: name at least one of r, w, x after {op}"));
         }
-        let named = Access::parse(letters).map_err(|e| format!("{spec:?}: {e}"))?;
+        let named = Access::letters(letters).map_err(|e| format!("{spec:?}: {e}"))?;
         Ok(match op {
             '=' => named,
             '+' => Access {
@@ -922,10 +931,11 @@ impl Access {
             },
             _ => Access {
                 read: self.read && !named.read,
-                write: self.write && !named.write,
+                write: self.write && !named.write && !named.read,
                 execute: self.execute && !named.execute,
             },
-        })
+        }
+        .reading())
     }
 
     pub fn is_none(self) -> bool {
@@ -1260,13 +1270,6 @@ impl NodeConfig {
         {
             return Err(format!(
                 "node.name {n:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit"
-            ));
-        }
-        if let Some(u) = &self.machine.user
-            && !valid_account_name(u)
-        {
-            return Err(format!(
-                "machine.user {u:?}: an account name, 1 to 32 characters of a-z, A-Z, 0-9, ., _ and -"
             ));
         }
         if let Some(n) = self.machine.command_env.iter().find(|n| !valid_env_name(n)) {
@@ -2216,16 +2219,12 @@ sudo_allow = ["sudo apt update"]
         assert!(e.contains("proxy set") && !e.contains("s3cret"), "{e}");
     }
 
+    /// The node chooses no account for the commands on any platform (#149):
+    /// `machine.user` is no setting.
     #[test]
-    fn the_account_of_the_commands_on_windows_is_an_account_name() {
-        let c = NodeConfig::parse("[machine]\nuser = \"alice.b\"\n").unwrap();
-        assert_eq!(c.machine.user.as_deref(), Some("alice.b"));
-        assert_eq!(NodeConfig::parse(&c.to_toml()).unwrap(), c);
-        assert_eq!(NodeConfig::default().machine.user, None);
-        for bad in ["", "-x", "a b", "a:b", "a/b"] {
-            let e = NodeConfig::parse(&format!("[machine]\nuser = {bad:?}\n")).unwrap_err();
-            assert!(e.contains("machine.user"), "{bad}: {e}");
-        }
+    fn no_account_is_chosen_for_the_commands() {
+        let e = NodeConfig::parse("[machine]\nuser = \"alice\"\n").unwrap_err();
+        assert!(e.contains("user"), "{e}");
     }
 
     /// The owner names the variables a command of nerve-run gets; a name
@@ -2310,9 +2309,9 @@ sudo_allow = ["sudo apt update"]
     }
 
     #[test]
-    fn folder_access_is_three_independent_flags() {
+    fn folder_access_is_three_flags_and_w_reads_too() {
         // Every combination parses, prints back as the letters in rwx order
-        // and survives the config file.
+        // and survives the config file; `w` without `r` is read as `rw`.
         for bits in 0..8u8 {
             let a = Access {
                 read: bits & 1 != 0,
@@ -2320,24 +2319,33 @@ sudo_allow = ["sudo apt update"]
                 execute: bits & 4 != 0,
             };
             let text = a.to_string();
-            assert_eq!(Access::parse(&text).unwrap(), a, "{text:?}");
+            let read = Access {
+                read: a.read || a.write,
+                ..a
+            };
+            assert_eq!(Access::parse(&text).unwrap(), read, "{text:?}");
             let policy = CenterPolicy {
                 folders: vec![Folder {
                     path: FOLDER.into(),
-                    access: a,
+                    access: Access::parse(&text).unwrap(),
                 }],
                 ..Default::default()
             };
             let toml = toml::to_string(&policy).unwrap();
-            assert!(toml.contains(&format!("access = \"{text}\"")), "{toml}");
+            assert!(toml.contains(&format!("access = \"{read}\"")), "{toml}");
             assert_eq!(toml::from_str::<CenterPolicy>(&toml).unwrap(), policy);
         }
         // Any order is read; the letters come back in rwx order.
         assert_eq!(Access::parse("xr").unwrap().to_string(), "rx");
         assert_eq!(Access::parse("").unwrap(), Access::NONE);
         assert_eq!(Access::ALL.to_chmod(), "rwx");
-        assert_eq!(Access::parse("wx").unwrap().to_chmod(), "-wx");
+        assert_eq!(Access::parse("wx").unwrap().to_chmod(), "rwx");
+        assert_eq!(Access::parse("w").unwrap().to_string(), "rw");
         assert_eq!(Access::NONE.to_chmod(), "---");
+        // A config file that still says `w` alone reads it as `rw`.
+        let old = format!("folders = [{{ path = \"{FOLDER}\", access = \"w\" }}]");
+        let p: CenterPolicy = toml::from_str(&old).unwrap();
+        assert_eq!(p.folders[0].access, Access::parse("rw").unwrap());
         // A folder without the key grants nothing.
         let bare = format!("folders = [{{ path = \"{FOLDER}\" }}]");
         let p: CenterPolicy = toml::from_str(&bare).unwrap();
@@ -2443,9 +2451,12 @@ sudo_allow = ["sudo apt update"]
         assert_eq!(steps(&["="]).unwrap(), "");
         // Left to right: the later change sees the earlier one.
         assert_eq!(steps(&["=rwx", "-w"]).unwrap(), "rx");
-        assert_eq!(steps(&["-w", "=w", "+x"]).unwrap(), "wx");
+        assert_eq!(steps(&["-w", "=w", "+x"]).unwrap(), "rwx");
         assert_eq!(steps(&["+w", "-w"]).unwrap(), "r");
         assert_eq!(steps(&["=x", "+w", "-x", "+r"]).unwrap(), "rw");
+        // `w` reads too: setting it sets `r`, taking `r` away takes `w`.
+        assert_eq!(steps(&["-r", "+w"]).unwrap(), "rw");
+        assert_eq!(steps(&["=rwx", "-r"]).unwrap(), "x");
         for bad in ["rw", "+", "-", "+q", "-rr", "*r", ""] {
             assert!(start.change(bad).is_err(), "{bad:?}");
         }

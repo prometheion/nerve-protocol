@@ -623,13 +623,12 @@ pub struct FolderSets {
     pub exec: Vec<PathBuf>,
 }
 
-/// The folders of a center in `folders` mode by flag. The three flags are
-/// independent, so each set takes the folders with its own flag and nothing
-/// else: a folder with only `w` is in `write` alone, and the write rule
-/// carries no read right (the command can put files there but not list or
-/// read them), and a folder with only `x` can run its programs but not be
-/// listed: Landlock refuses to run a file it may not read, so the `exec`
-/// rule carries ReadFile and the files there can be read by name.
+/// The folders of a center in `folders` mode by flag: each set takes the
+/// folders with its flag. `w` reads too, so a folder with it is in `read`
+/// as well (and the write rule carries the read rights). A folder with only
+/// `x` can run its programs but not be listed: Landlock refuses to run a
+/// file it may not read, so the `exec` rule carries ReadFile and the files
+/// there can be read by name.
 ///
 /// Each folder is resolved again here, since it may have become a link
 /// after it was added and Landlock (like a Windows grant) follows a link in
@@ -655,6 +654,20 @@ pub fn folder_sets(
     home: &Path,
     protected: &Protected,
     writable: &[PathBuf],
+) -> FolderSets {
+    folder_sets_closing(policy, home, protected, writable, &[])
+}
+
+/// [`folder_sets`] where a folder split around a protected entry gives
+/// nothing at or inside `closed` (the places of the folders closed to the
+/// container, [`container_grants`]): an entry of the split would carry the
+/// granted folder's flags.
+fn folder_sets_closing(
+    policy: &CenterPolicy,
+    home: &Path,
+    protected: &Protected,
+    writable: &[PathBuf],
+    closed: &[PathBuf],
 ) -> FolderSets {
     // The boundary is judged by resolved places, so a writable folder
     // reached by one spelling catches a folder configured by another.
@@ -712,7 +725,7 @@ pub fn folder_sets(
             .filter(|(a, _)| f(*a))
             .map(|(_, p)| p.clone())
             .collect();
-        leave_protected_out(&granted, protected, write)
+        leave_protected_out_closing(&granted, protected, write, closed)
     };
     FolderSets {
         read: folders(&|a| a.read, false),
@@ -788,10 +801,35 @@ pub fn container_grants(
     writable: &[PathBuf],
 ) -> Vec<(PathBuf, Access)> {
     let protected = Protected::new(platform, home, own, &policy.protected);
-    let f = folder_sets(policy, home, &protected, writable);
+    let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
+    // A folder without a flag inside a granted one is closed to the
+    // container, whatever it inherits from the folder around (#149). Its
+    // place is found first: a granted folder split around a protected entry
+    // or an own folder hands its flags to its entries, and none of them may
+    // be a closed one.
+    let closed: Vec<(PathBuf, PathBuf, bool)> = policy
+        .folders
+        .iter()
+        .filter(|f| f.access == Access::NONE)
+        .filter_map(|f| {
+            let spelled = expand(home, &f.path)?;
+            let (path, placed) = closed_place(policy, &f.path, &spelled, &bounds, real, far)?;
+            Some((path, spelled, placed))
+        })
+        .collect();
+    // Where the place is not sure, where the folder resolves now is left
+    // out of a split too.
+    let mut skip: Vec<PathBuf> = closed.iter().map(|(p, _, _)| p.clone()).collect();
+    skip.extend(
+        closed
+            .iter()
+            .filter(|(_, _, placed)| !placed)
+            .map(|(_, s, _)| real(s)),
+    );
+    let f = folder_sets_closing(policy, home, &protected, writable, &skip);
     let mut out: Vec<(PathBuf, Access)> = Vec::new();
     for (set, flag) in [(f.read, 'r'), (f.write, 'w'), (f.exec, 'x')] {
-        for p in leave_out(&set, own) {
+        for p in leave_out_closing(&set, own, &skip) {
             let i = match out.iter().position(|(q, _)| within(q, &p) && within(&p, q)) {
                 Some(i) => i,
                 None => {
@@ -800,14 +838,89 @@ pub fn container_grants(
                 }
             };
             let a = &mut out[i].1;
+            // `w` reads too. The write set is split finer than the read set
+            // (around the entries protected for writes), so a place of it
+            // may be one the read set holds only through a folder around it.
             match flag {
                 'r' => a.read = true,
-                'w' => a.write = true,
+                'w' => (a.read, a.write) = (true, true),
                 _ => a.execute = true,
             }
         }
     }
+    // A closed folder gets an entry of no flag, which denies every right.
+    // Where its place is not sure (the walk could not judge it, or it was
+    // replaced), whether it lies inside a granted folder is also asked of
+    // where it resolves now: one entry too many stops the pairing's
+    // commands at worst (`crate::grants::Synced::unclosed`), one too few
+    // takes the denying entry off a folder a command renamed.
+    for (path, spelled, placed) in closed {
+        let granted = |p: &Path| {
+            out.iter()
+                .any(|(q, a)| *a != Access::NONE && within(p, q) && !within(q, p))
+        };
+        let inside = granted(&path) || (!placed && granted(&real(&spelled)));
+        match out
+            .iter()
+            .position(|(q, _)| within(q, &path) && within(&path, q))
+        {
+            // The same place granted by another spelling: closed wins.
+            Some(i) => out[i].1 = Access::NONE,
+            None if inside => out.push((path, Access::NONE)),
+            None => {}
+        }
+    }
     out
+}
+
+/// Where the closed folder `spelled` (configured as `given`, `~` expanded)
+/// gets its denying entry, and whether that is the place the walk found;
+/// `None` where it gets none. `real` resolves the folder that holds a link
+/// for the walk, `remote` tells a link's target on another machine
+/// ([`far`]); the tests replace both.
+///
+/// A closed folder lies inside a granted one, so commands may have put a
+/// link at its path or above it, as for the granted folders ([`led_away`],
+/// [`replaced`]). Followed, it would move the entry to where the link
+/// leads, and the folder the owner closed, which a command may have renamed
+/// meanwhile, would lose its own (crate::grants::sync). So the place is
+/// the walk's ([`walk_to`]), the only look at the path: a link inside a `w`
+/// folder keeps the entry at the path as spelled from that link on, where
+/// the sync finds the link and refuses it, and the pairing's commands stop
+/// until the link is gone; whatever that link's target, also one on another
+/// machine. Otherwise the owner's links are followed, also where the folder
+/// itself is gone (renamed), so it stays the place the granted folder
+/// around it resolves to. Only where the walk itself stops at an owner's
+/// link to another machine, outside every `w` folder, does it get none: no
+/// container reaches a share (#149's probe), and the sync would follow it
+/// to put the entry on. No look before or after the walk decides that: a
+/// command could change the path between two looks.
+fn closed_place(
+    policy: &CenterPolicy,
+    given: &str,
+    spelled: &Path,
+    bounds: &[PathBuf],
+    real: impl Fn(&Path) -> PathBuf,
+    remote: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, bool)> {
+    match walk_to(spelled, bounds, &real, &remote) {
+        Err((why, Stop::At(at))) => {
+            tracing::warn!("folder {given} is closed at its path as given: {why}");
+            Some((at, true))
+        }
+        Err((_, Stop::Remote)) => None,
+        Ok(walked) => match replaced(policy, given, &walked) {
+            Some(why) => {
+                tracing::warn!("folder {given} is closed at its path as given: {why}");
+                Some((spelled.to_path_buf(), false))
+            }
+            None => Some((walked, true)),
+        },
+        Err((why, Stop::Unsure)) => {
+            tracing::warn!("folder {given} is closed at its path as given: {why}");
+            Some((spelled.to_path_buf(), false))
+        }
+    }
 }
 
 /// `p` resolved, as the policy compares paths (on Windows without the
@@ -816,8 +929,18 @@ fn real(p: &Path) -> PathBuf {
     real_checked(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// [`real`] with the reason it could not resolve.
+/// [`real`] with the reason it could not resolve. A path whose links lead
+/// to another machine is not followed (nerve_policy::paths::remote_link),
+/// nor one whose links this process cannot look at to the end: the installed
+/// node's own account may not look into the owner's folders, and Windows
+/// follows a link there all the same, by a connection to the share it names.
 fn real_checked(p: &Path) -> std::io::Result<PathBuf> {
+    if let Some(link) = nerve_policy::paths::remote_link_checked(p)? {
+        return Err(std::io::Error::other(format!(
+            "{} is a link to another machine, which is not followed",
+            link.display()
+        )));
+    }
     let c = std::fs::canonicalize(p)?;
     #[cfg(windows)]
     {
@@ -914,7 +1037,9 @@ fn settle_by(
             );
         }
     }
-    let path = &long_names(path);
+    // The path is taken as given: the walk writes out an 8.3 short name as
+    // it gets to it, behind the owner's links it judged, so nothing looks
+    // through a link to another machine before the walk stops there.
     // A link to nothing could point anywhere once something is made there.
     if let Err(e @ nerve_policy::paths::PathError::DanglingSymlink(_)) = resolve(path) {
         return Settled::Refused(e.to_string());
@@ -980,6 +1105,34 @@ fn walk_by(
     writable: &[PathBuf],
     real: impl Fn(&Path) -> PathBuf,
 ) -> Result<PathBuf, String> {
+    walk_to(path, writable, real, far).map_err(|(why, _)| why)
+}
+
+/// Where [`walk_to`] stopped before the end of the path.
+#[derive(Debug, PartialEq)]
+enum Stop {
+    /// Nothing tells where the path leads.
+    Unsure,
+    /// At a link inside a `w` folder: the path as spelled from that link on,
+    /// the place up to it, with the owner's own links above it followed, and
+    /// the names after it.
+    At(PathBuf),
+    /// At a link of the owner's whose target is on another machine
+    /// (`remote`): it is not followed, nor is a name of the target looked at.
+    Remote,
+}
+
+/// [`walk_by`], and why it stopped ([`Stop`]). `remote` tells a link's
+/// target, as the link holds it, on another machine ([`far`]; the tests
+/// replace it). Short names (`PROGRA~1`) are written out as the walk goes,
+/// a name at a time, so the walk looks at nothing through a link it has
+/// not judged.
+fn walk_to(
+    path: &Path,
+    writable: &[PathBuf],
+    real: impl Fn(&Path) -> PathBuf,
+    remote: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, (String, Stop)> {
     // The most links one resolution may cross, as the kernel's limit.
     const LINKS: usize = 40;
     let inside = |p: &Path| writable.iter().any(|w| within(p, w));
@@ -998,14 +1151,27 @@ fn walk_by(
                     Root::Subst(mapped) => {
                         crossed += 1;
                         if crossed > LINKS {
-                            return Err(format!(
-                                "it cannot be resolved through the drive {}",
-                                top.display()
+                            return Err((
+                                format!(
+                                    "it cannot be resolved through the drive {}",
+                                    top.display()
+                                ),
+                                Stop::Unsure,
+                            ));
+                        }
+                        if remote(&mapped) {
+                            return Err((
+                                format!(
+                                    "the drive {} names {}, which is not on this machine",
+                                    top.display(),
+                                    mapped.display()
+                                ),
+                                Stop::Remote,
                             ));
                         }
                         // `subst` keeps the folder as it was typed, short
-                        // names too.
-                        todo.extend(steps(&long_names(&mapped)));
+                        // names too; the steps write them out as they go.
+                        todo.extend(steps(&mapped));
                         continue;
                     }
                     // A volume root is the place its mount point names, and
@@ -1016,9 +1182,12 @@ fn walk_by(
                     }
                     Root::Drive => {}
                     Root::Other => {
-                        return Err(format!(
-                            "it passes through a link to {}, which is not a path on a drive",
-                            top.display()
+                        return Err((
+                            format!(
+                                "it passes through a link to {}, which is not a path on a drive",
+                                top.display()
+                            ),
+                            Stop::Unsure,
                         ));
                     }
                 }
@@ -1032,43 +1201,83 @@ fn walk_by(
                 // leave the path being walked.
                 #[cfg(windows)]
                 if name.to_string_lossy().contains(':') {
-                    return Err(format!(
-                        "it passes through the name {}, which is not a folder name",
-                        name.to_string_lossy()
+                    return Err((
+                        format!(
+                            "it passes through the name {}, which is not a folder name",
+                            name.to_string_lossy()
+                        ),
+                        Stop::Unsure,
                     ));
                 }
                 let at = here.join(&name);
                 // A name that cannot be looked at (missing, or behind a
                 // folder that cannot be searched) is no link; `real_folder`
                 // has judged whether the path resolves at all.
-                let link = std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_symlink());
+                let look = std::fs::symlink_metadata(&at);
+                let link = look.as_ref().is_ok_and(|m| m.is_symlink());
                 if !link {
+                    // `here` holds no link, so writing out a short name
+                    // looks at nothing the walk has not judged.
+                    #[cfg(windows)]
+                    if look.is_ok() && name.to_string_lossy().contains('~') {
+                        here = nerve_sandbox::appcontainer::long_path(&at);
+                        continue;
+                    }
                     here = at;
                     continue;
                 }
                 let holder = real(&here);
                 if inside(&here) || inside(&holder) {
-                    return Err(format!(
-                        "it passes through the link {} inside a folder where commands may write",
-                        at.display()
+                    let mut spelled = at.clone();
+                    for step in todo.iter().rev() {
+                        match step {
+                            Step::Top(top) => spelled = top.clone(),
+                            Step::Up => {
+                                spelled.pop();
+                            }
+                            Step::Name(name) => spelled.push(name),
+                        }
+                    }
+                    return Err((
+                        format!(
+                            "it passes through the link {} inside a folder where commands may write",
+                            at.display()
+                        ),
+                        Stop::At(spelled),
                     ));
                 }
                 if !(within(&holder, &here) && within(&here, &holder)) {
-                    return Err(format!(
-                        "it passes through the link {}, and {} leads to {} where it was looked at as itself: a link was put there meanwhile",
-                        at.display(),
-                        here.display(),
-                        holder.display()
+                    return Err((
+                        format!(
+                            "it passes through the link {}, and {} leads to {} where it was looked at as itself: a link was put there meanwhile",
+                            at.display(),
+                            here.display(),
+                            holder.display()
+                        ),
+                        Stop::Unsure,
                     ));
                 }
                 crossed += 1;
                 let target = std::fs::read_link(&at).ok().filter(|_| crossed <= LINKS);
                 match target {
-                    Some(t) => todo.extend(steps(&long_names(&t))),
+                    // Neither followed nor looked at: a look at a share
+                    // connects to it as whoever looks.
+                    Some(t) if remote(&t) => {
+                        return Err((
+                            format!(
+                                "it passes through the link {} to another machine, which is not followed",
+                                at.display()
+                            ),
+                            Stop::Remote,
+                        ));
+                    }
+                    // Its names are written out a step at a time, each after
+                    // the link before it was judged.
+                    Some(t) => todo.extend(steps(&t)),
                     None => {
-                        return Err(format!(
-                            "it cannot be resolved through the link {}",
-                            at.display()
+                        return Err((
+                            format!("it cannot be resolved through the link {}", at.display()),
+                            Stop::Unsure,
                         ));
                     }
                 }
@@ -1076,6 +1285,13 @@ fn walk_by(
         }
     }
     Ok(here)
+}
+
+/// Whether a link's target `t`, as the link holds it, may be on another
+/// machine (nerve_policy::paths::remote_target): the walk stops there.
+/// Windows only; elsewhere a network mount is a path.
+fn far(t: &Path) -> bool {
+    cfg!(windows) && nerve_policy::paths::remote_target(&t.to_string_lossy())
 }
 
 /// What the root `top` of a path is, for the walk (Windows).
@@ -1146,36 +1362,6 @@ fn subst_target(top: &Path) -> Option<PathBuf> {
     let target = String::from_utf16_lossy(first);
     let path = target.strip_prefix("\\??\\")?;
     (path.as_bytes().get(1) == Some(&b':')).then(|| PathBuf::from(path))
-}
-
-/// `p` with the short (8.3) names in it written out, as the final path of
-/// what it names has them (Windows; the existing part of `p`, links stay as
-/// they are); `p` as it is elsewhere, for a relative path, and where that
-/// fails.
-fn long_names(p: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if !p.is_absolute() {
-            return p.to_path_buf();
-        }
-        // The longest part that exists is expanded, the rest follows as it is.
-        let mut head = p;
-        let mut tail = Vec::new();
-        while std::fs::symlink_metadata(head).is_err() {
-            let (Some(parent), Some(name)) = (head.parent(), head.file_name()) else {
-                return p.to_path_buf();
-            };
-            tail.push(name);
-            head = parent;
-        }
-        let mut out = nerve_sandbox::appcontainer::long_path(head);
-        out.extend(tail.iter().rev());
-        out
-    }
-    #[cfg(not(windows))]
-    {
-        p.to_path_buf()
-    }
 }
 
 /// The first place the resolution of `path` lands at that `wanted` accepts,
@@ -1255,6 +1441,11 @@ fn steps(p: &Path) -> Vec<Step> {
 /// rule's path; an entry that is a symlink to or around an own folder is
 /// dropped as well.
 pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
+    leave_out_closing(paths, own, &[])
+}
+
+/// [`leave_out`], whose split gives nothing at or inside `closed`.
+fn leave_out_closing(paths: &[PathBuf], own: &[PathBuf], closed: &[PathBuf]) -> Vec<PathBuf> {
     let own: Vec<PathBuf> = own.iter().map(|o| real(o)).collect();
     let mut out = Vec::new();
     for p in paths {
@@ -1265,7 +1456,7 @@ pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
         if own.iter().any(|o| within(o, &r)) {
             let inside = |p: &Path| own.iter().any(|o| within(p, o));
             let holds = |p: &Path| own.iter().any(|o| within(o, p));
-            split(&r, &inside, &holds, &mut out);
+            split(&r, &inside, &holds, closed, &mut out);
         } else {
             out.push(p.clone());
         }
@@ -1280,13 +1471,23 @@ pub fn leave_out(paths: &[PathBuf], own: &[PathBuf]) -> Vec<PathBuf> {
 /// stays whole: it is a folder the owner released there, and
 /// `Protected::real_folder` has judged it for its flags.
 pub fn leave_protected_out(paths: &[PathBuf], protected: &Protected, write: bool) -> Vec<PathBuf> {
+    leave_protected_out_closing(paths, protected, write, &[])
+}
+
+/// [`leave_protected_out`], whose split gives nothing at or inside `closed`.
+fn leave_protected_out_closing(
+    paths: &[PathBuf],
+    protected: &Protected,
+    write: bool,
+    closed: &[PathBuf],
+) -> Vec<PathBuf> {
     let inside = |p: &Path| protected.in_entry(p, write);
     let holds = |p: &Path| protected.holds_entry(p, write);
     let mut out = Vec::new();
     for p in paths {
         let r = real(p);
         if !inside(&r) && holds(&r) {
-            split(&r, &inside, &holds, &mut out);
+            split(&r, &inside, &holds, closed, &mut out);
         } else {
             out.push(p.clone());
         }
@@ -1297,26 +1498,39 @@ pub fn leave_protected_out(paths: &[PathBuf], protected: &Protected, write: bool
 /// Pushes the entries of `dir` (which holds a folder to leave out) that hold
 /// none, and goes down into the ones that do. `inside` says whether a
 /// resolved path is such a folder or inside one, `holds` whether one lies
-/// below it.
+/// below it. An entry at or inside a `closed` folder, as named or resolved,
+/// is left out as well: it is closed to the container, and pushed it would
+/// carry the flags of the folder split.
 fn split(
     dir: &Path,
     inside: &dyn Fn(&Path) -> bool,
     holds: &dyn Fn(&Path) -> bool,
+    closed: &[PathBuf],
     out: &mut Vec<PathBuf>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // Nothing of it is given then, which no command can tell from a
+        // folder that holds nothing.
+        Err(e) => {
+            tracing::warn!(
+                "{} cannot be listed ({e}): none of its entries gets the flags of the folder around it",
+                dir.display()
+            );
+            return;
+        }
     };
     for e in entries.flatten() {
         let path = e.path();
         let link = e.file_type().is_ok_and(|t| t.is_symlink());
         let r = real(&path);
         let held = holds(&r);
-        if inside(&r) || (held && link) {
+        let shut = closed.iter().any(|c| within(&r, c) || within(&path, c));
+        if inside(&r) || shut || (held && link) {
             continue;
         }
         if held {
-            split(&r, inside, holds, out);
+            split(&r, inside, holds, closed, out);
         } else {
             out.push(path);
         }
@@ -1913,10 +2127,11 @@ pub async fn run(
     opts: &RunOptions,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
-    // Only Linux has the filter that keeps a command off the network; a
-    // command the switch holds runs nowhere else.
+    // Only Linux has the filter that keeps a command off the network, and
+    // Windows a container without network capabilities; a command the
+    // switch holds runs nowhere else.
     #[cfg(not(target_os = "linux"))]
-    if opts.no_network {
+    if opts.no_network && !opts.container.as_ref().is_some_and(|c| c.no_network) {
         return Err(RpcError::new(ErrorCode::Unavailable, NO_FILTER));
     }
     // Root's command runs in /bin/sh, whatever shell the others use.
@@ -1955,25 +2170,15 @@ pub async fn run(
             landlock: opts.landlock.clone(),
             container: opts.container.clone(),
             own_proc,
+            cwd: None,
         });
-    // The shim makes the container's profile and window station for the
-    // user it runs as, which is not wired for another account yet; such a
-    // command would run without its container (crate::daemon, which gives
-    // the installed Windows node none).
-    if opts.container.is_some()
-        && let Some(a) = &opts.account
-    {
-        return Err(RpcError::new(
-            ErrorCode::Unavailable,
-            format!(
-                "the command was not run: folder mode cannot run a command in its AppContainer as {}",
-                a.name
-            ),
-        ));
-    }
+    // The shim of another account makes the container's profile in that
+    // account's profile, which its service keeps loaded
+    // (crate::winsvc::PROFILE_SERVICE), and its desktop on that account's
+    // own window station.
     #[cfg(windows)]
     if let Some(a) = &opts.account {
-        return run_as(call, opts, a, &program, &args, started).await;
+        return run_as(call, opts, a, &program, &args, shim.as_ref(), started).await;
     }
     // Only the installed node can start a command with the administrator
     // token of the account commands run as (crate::winsudo).
@@ -2321,9 +2526,33 @@ fn memory_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u64> 
     job.filter(|j| j.out_of_memory()).map(|_| granted.memory_mb)
 }
 
-/// [`run`] as another account on Windows (crate::win_user): the shell
-/// starts suspended with the account's token in the call's folder, is put
-/// in a job of its own and runs only then. It does not start when its
+/// What [`run_as`] starts: the shim, with `shim`'s confinement where there
+/// is one and otherwise none, which enters the call's folder `cwd` as the
+/// account before it starts `program` (nerve_sandbox::ShimSpec::cwd).
+/// Windows checks the folder a process starts in as the process that
+/// starts it, and the node's own account may not look into a pairing's
+/// home in its container's folder, nor into the owner's folders: a start
+/// there fails with "the directory name is invalid".
+#[cfg(any(windows, test))]
+fn entering(shim: Option<&ShimSpec>, program: &str, args: &[String], cwd: &Path) -> ShimSpec {
+    let mut spec = shim.cloned().unwrap_or_else(|| ShimSpec {
+        program: program.into(),
+        args: args.to_vec(),
+        parent: std::process::id(),
+        landlock: None,
+        container: None,
+        own_proc: false,
+        cwd: None,
+    });
+    spec.cwd = Some(cwd.to_path_buf());
+    spec
+}
+
+/// [`run`] as another account on Windows (crate::win_user): the shim
+/// ([`entering`]), with the command's container where `shim` has one, its
+/// spec on its stdin, starts suspended with the account's token in the
+/// program's own folder, which every account that runs it may enter, is
+/// put in a job of its own and runs only then. It does not start when its
 /// account can open the node's own folders, nor without a job: the node
 /// may not end another account's processes one by one, only the job. A
 /// sudo command starts with the account's administrator token instead
@@ -2335,6 +2564,7 @@ async fn run_as(
     account: &crate::service::Account,
     program: &str,
     args: &[String],
+    shim: Option<&ShimSpec>,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
     let unavailable = |m: String| RpcError::new(ErrorCode::Unavailable, m);
@@ -2376,21 +2606,18 @@ async fn run_as(
         ))
     })?;
     if let Some((_, granted)) = &opts.limits {
-        hold_to_limits(Some(&job), granted, false)?;
+        hold_to_limits(Some(&job), granted, true)?;
     }
-    let line = windows_command_line(program, args);
+    let line = windows_command_line(&opts.exe.display().to_string(), &[SHIM_ARG.to_string()]);
+    let input = serde_json::to_vec(&entering(shim, program, args, &call.cwd))
+        .map_err(|e| RpcError::internal(format!("the shim's spec: {e}")))?;
+    let start_in = opts.exe.parent().filter(|p| !p.as_os_str().is_empty());
     // The command's own token also starts the helper that asks it to end
     // (crate::win_stop).
     let token = elevated.unwrap_or(token);
     crate::win_stop::hear_ctrl_c();
-    let child = crate::win_user::spawn(&token, &line, Some(&call.cwd), Some(&account.home))
-        .map_err(|e| {
-            unavailable(format!(
-                "cannot start as {} in {}: {e}",
-                account.name,
-                to_wire(&call.cwd)
-            ))
-        })?;
+    let child = crate::win_user::spawn(&token, &line, start_in, Some(&account.home), Some(input))
+        .map_err(|e| unavailable(format!("cannot start as {}: {e}", account.name)))?;
     if let Err(e) = job.assign(child.process()) {
         child.kill();
         return Err(unavailable(crate::job::assign_error(
@@ -2528,6 +2755,32 @@ mod command_line_tests {
         );
         let own = args(&[r"HOMEPATH=\x", r"USERPROFILE=C:\Users\bob"]);
         assert_eq!(super::rehome_env(own.clone(), r"C:\Users\bob"), own);
+    }
+
+    /// A command of another account starts through the shim, which enters
+    /// the call's folder as that account (#149's first run on the service:
+    /// "the directory name is invalid"), with its container where it has
+    /// one and with no confinement otherwise.
+    #[test]
+    fn a_command_of_another_account_enters_its_folder_in_the_shim() {
+        let cwd =
+            std::path::Path::new(r"C:\Users\nerve-run\AppData\Local\Packages\nerve.x\AC\home");
+        let plain = super::entering(None, "powershell.exe", &args(&["-Command", "whoami"]), cwd);
+        assert_eq!(plain.program, std::path::Path::new("powershell.exe"));
+        assert_eq!(plain.args, args(&["-Command", "whoami"]));
+        assert_eq!(plain.cwd.as_deref(), Some(cwd));
+        assert_eq!(plain.parent, std::process::id());
+        assert!(plain.container.is_none() && plain.landlock.is_none() && !plain.own_proc);
+        let boxed = nerve_sandbox::ShimSpec {
+            container: Some(nerve_sandbox::ContainerSpec::new("nerve.x")),
+            ..plain.clone()
+        };
+        let mine = nerve_sandbox::ShimSpec {
+            cwd: None,
+            ..boxed.clone()
+        };
+        let entered = super::entering(Some(&mine), "ignored.exe", &[], cwd);
+        assert_eq!(entered, boxed);
     }
 }
 
@@ -3059,37 +3312,6 @@ mod tests {
             ),
         );
         sudo.display().to_string()
-    }
-
-    /// A folder-mode command of another account is not started at all
-    /// while the AppContainer is not wired for that account: it would run
-    /// without its container.
-    #[tokio::test]
-    async fn a_container_command_of_another_account_does_not_run() {
-        let d = tempfile::tempdir().unwrap();
-        let mark = d.path().join("ran");
-        let mut o = opts(1024);
-        o.container = Some(ContainerSpec {
-            name: "nerve.test".into(),
-        });
-        o.account = Some(crate::service::Account {
-            name: "chosen".into(),
-            uid: 4242,
-            gid: 4242,
-            comment: String::new(),
-            home: d.path().to_path_buf(),
-            groups: vec![4242],
-        });
-        let e = run(&call(&format!("touch '{}'", mark.display())), &o, |_| {})
-            .await
-            .unwrap_err();
-        assert_eq!(e.kind(), ErrorCode::Unavailable, "{e:?}");
-        assert!(
-            e.message
-                .contains("cannot run a command in its AppContainer as chosen"),
-            "{e:?}"
-        );
-        assert!(!mark.exists());
     }
 
     /// `sudo on` checks the password of the account the commands run as:
@@ -3780,19 +4002,15 @@ mod tests {
     }
 
     /// Every combination of the three flags puts a folder in exactly the
-    /// sets of its flags: `w` without `r` is in `write` only.
+    /// sets of its flags; `w` reads too, so a folder with it is in `read`.
     #[test]
     fn each_folder_flag_puts_it_in_its_own_set() {
         // A home beside the folder, so that the folder holds none of its
         // protected entries.
         let (d, h) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let w = std::fs::canonicalize(d.path()).unwrap();
-        for bits in 0..8u8 {
-            let access = Access {
-                read: bits & 1 != 0,
-                write: bits & 2 != 0,
-                execute: bits & 4 != 0,
-            };
+        for letters in ["", "r", "w", "x", "rw", "rx", "wx", "rwx"] {
+            let access = Access::parse(letters).unwrap();
             let policy = CenterPolicy {
                 folders: vec![nerve_policy::config::Folder {
                     path: w.display().to_string(),
@@ -3802,7 +4020,11 @@ mod tests {
             };
             let spec = landlock_spec(&policy, h.path(), &[], &[]);
             let label = access.to_chmod();
-            assert_eq!(spec.read.contains(&w), access.read, "read set of {label}");
+            assert_eq!(
+                spec.read.contains(&w),
+                letters.contains(['r', 'w']),
+                "read set of {label}"
+            );
             assert_eq!(
                 spec.write.contains(&w),
                 access.write,
@@ -4323,6 +4545,80 @@ mod tests {
         // the one inside is not.
         assert_eq!(walk_by(&outside.join("name"), &w, real), Ok(docs.clone()));
         assert!(walk_by(&x.join("name"), &w, real).is_err());
+    }
+
+    /// A closed folder's place is the walk's, its only look at the path: a
+    /// link inside a `w` folder keeps the entry at the link's path whatever
+    /// that link's target, also one on another machine; a resolution that
+    /// leads elsewhere than the walk (a link put at the path between two
+    /// looks, played here) does not move it; and only an owner's link to
+    /// another machine that the walk itself stops at leaves it out, not a
+    /// look that saw one where the walk finds none (a command's link put
+    /// there and taken away again, played by a `remote` that says yes to
+    /// everything).
+    #[test]
+    fn a_closed_folder_is_closed_where_the_walk_finds_it() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        let (secret, decoy) = (work.join("secret"), work.join("decoy"));
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        let policy = CenterPolicy::default();
+        let given = secret.display().to_string();
+        let w = [work.clone()];
+        let never: fn(&Path) -> bool = |_| false;
+        let always: fn(&Path) -> bool = |_| true;
+
+        // No link: the walk's place.
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, real, never),
+            Some((secret.clone(), true))
+        );
+        // A resolution that leads elsewhere does not move it.
+        let elsewhere = |p: &Path| {
+            if p == secret.as_path() {
+                decoy.clone()
+            } else {
+                real(p)
+            }
+        };
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, elsewhere, never),
+            Some((secret.clone(), true))
+        );
+        // No link on the way: the walk's place, whatever `remote` says.
+        assert_eq!(
+            closed_place(&policy, &given, &secret, &w, real, always),
+            Some((secret.clone(), true))
+        );
+        // An owner's link to another machine above it, outside the `w`
+        // folder: none, and the walk stops at the link without going
+        // through it.
+        let share = |t: &Path| nerve_policy::paths::remote_target(&t.to_string_lossy());
+        let nas = root.join("nas");
+        std::os::unix::fs::symlink(r"\\host\share", &nas).unwrap();
+        let keys = nas.join("app").join("keys");
+        let far_given = keys.display().to_string();
+        assert_eq!(
+            closed_place(&policy, &far_given, &keys, &w, real, share),
+            None
+        );
+        assert!(matches!(
+            walk_to(&keys, &w, real, share),
+            Err((_, Stop::Remote))
+        ));
+        assert!(walk_to(&keys, &w, real, never).is_ok());
+        // A command's link at the path, inside the `w` folder: kept at the
+        // link, also where its target counts as another machine's.
+        std::fs::rename(&secret, work.join("renamed")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &secret).unwrap();
+        for remote in [never, always] {
+            assert_eq!(
+                closed_place(&policy, &given, &secret, &w, real, remote),
+                Some((secret.clone(), true))
+            );
+        }
     }
 
     /// `lands_at` follows a path a link at a time and answers with the first
@@ -4865,6 +5161,32 @@ mod windows_tests {
         };
         assert_ne!(next.0, taken.0);
         assert!(Path::new(&format!("{}\\", next.0)).exists());
+    }
+
+    /// `folder add` through an owner's link to another machine is refused
+    /// where the walk gets to the link, before anything looks through it:
+    /// writing out the path's short names first would follow the link and
+    /// connect there (an address that answers nothing makes that take as
+    /// long as the connection's timeout).
+    #[test]
+    fn a_folder_behind_a_link_to_another_machine_is_refused_without_a_connection() {
+        let d = tempfile::tempdir().unwrap();
+        let root = canonical_tmp(&d);
+        let link = root.join("links").join("far");
+        let Some(()) = symlink_to(&link, "\\\\192.0.2.1\\share") else {
+            return;
+        };
+        let start = std::time::Instant::now();
+        let settled = settle(&NodeConfig::default(), &root, &link.join("inner"));
+        let Settled::Refused(why) = settled else {
+            panic!("{settled:?}")
+        };
+        assert!(why.contains("another machine"), "{why}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "it took {:?}",
+            start.elapsed()
+        );
     }
 
     /// A symlink to a volume root (`\\?\Volume{guid}\…`) is walked as the

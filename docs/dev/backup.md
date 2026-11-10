@@ -64,9 +64,9 @@ not backed up) and without its MAC line. The MAC key
 so the node that restores makes its own and signs the restored config with it.
 
 A backup is trusted as far as its passphrase: it carries every setting of
-`node.toml`, `providers.allowed`, `machine.sudo_path` and (Windows)
-`machine.user` among them. The Linux node's owner is the unit's, not in the
-file. The user page tells the owner to restore only a file they made;
+`node.toml`, `providers.allowed` and `machine.sudo_path` among them. The
+node's owner is the unit's (Linux) or the service's key's (Windows), not in
+the file. The user page tells the owner to restore only a file they made;
 the program cannot tell it from one that someone else made with a passphrase
 they know.
 
@@ -467,8 +467,7 @@ center, a relayed node holds the pin of its relay, and a node behind an
 2. Copy the file, install `nerve-node` on the new machine
    ([install](service.md#download-and-install)), and `nerve-node restore file`.
 3. Check what belongs to the machine and not to the node: the folders in
-   `center.<name>.policy.folders`, the account commands run as on Windows
-   (`machine.user`), the paths of providers, the programs of your own
+   `center.<name>.policy.folders`, the paths of providers, the programs of your own
    capabilities (`nerve-node cap`), and the address of the relay.
    On Linux the installed node's owner is whoever installed it there, not
    part of the backup.
@@ -521,7 +520,7 @@ node never opens a path in your folders itself. It asks the passphrase here
 too, or reads `--passphrase-file` as you. A backup is put in place once it is
 complete. For a restore the node stops, restores and starts again by itself,
 so it must run when you start it. A backup that would change
-`machine.user`, `machine.allow_root`, `machine.sudo_path` or `machine.shell`
+`machine.allow_root`, `machine.sudo_path` or `machine.shell`
 is refused to the owner: restore it with `sudo` (on Windows the app asks
 Windows for an administrator's rights for it).
 

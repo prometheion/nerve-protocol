@@ -48,7 +48,7 @@ pub(crate) use nerve_service::win::sid::{sid_of, sid_text};
 use crate::eventlog::{SOURCE, SOURCE_KEY};
 use crate::service::{Account, Layout, ServiceState, USER, USER_MARK};
 use crate::win_user::{self, wide};
-use crate::winsvc::{SERVICE_NAME, WinSystem};
+use crate::winsvc::{Kind, PROFILE_SERVICE, SERVICE_NAME, WinSystem};
 
 /// The rights `nerve` gets: to run as a service, and to start a process
 /// with another account's token (the two privileges the service keeps).
@@ -65,6 +65,24 @@ const DENIED: &[&str] = &[
     "SeDenyNetworkLogonRight",
     "SeDenyBatchLogonRight",
 ];
+
+/// The rights `nerve-run` gets: the batch logon its commands start with,
+/// and the service logon of [`crate::winsvc::PROFILE_SERVICE`]. A service
+/// logon's token would carry SeImpersonatePrivilege, so no command starts
+/// with one.
+const RUN_GRANTED: &[&str] = &["SeBatchLogonRight", "SeServiceLogonRight"];
+
+/// The logons `nerve-run` may not make: no person signs in as it, here or
+/// over the network.
+const RUN_DENIED: &[&str] = &[
+    "SeDenyInteractiveLogonRight",
+    "SeDenyRemoteInteractiveLogonRight",
+    "SeDenyNetworkLogonRight",
+];
+
+/// The privileges [`crate::winsvc::PROFILE_SERVICE`] keeps: none but the one
+/// every process has.
+const PROFILE_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// The privileges the service keeps; Windows takes every other from its
 /// token, SeImpersonatePrivilege included.
@@ -93,6 +111,18 @@ pub fn service_registered() -> bool {
         .is_ok_and(|s| s.is_some())
 }
 
+/// Whether the Windows Firewall service (MpsSvc) runs, whose filters keep an
+/// AppContainer without network capabilities off the network (#149); not
+/// known counts as not.
+pub fn firewall_runs() -> bool {
+    Scm::open(SC_MANAGER_CONNECT)
+        .and_then(|m| m.service("MpsSvc", SERVICE_QUERY_STATUS))
+        .ok()
+        .flatten()
+        .and_then(|s| s.status().ok())
+        .is_some_and(|st| st.dwCurrentState == SERVICE_RUNNING)
+}
+
 /// The node's service with every right; an error when it is not there.
 fn the_service() -> Result<Scm, String> {
     the_service_for(SERVICE_ALL_ACCESS)
@@ -106,19 +136,19 @@ fn the_service_for(access: u32) -> Result<Scm, String> {
         .ok_or_else(|| format!("the service {SERVICE_NAME} is not registered"))
 }
 
-/// The service's registry key, where its owners are listed.
+/// The service's registry key, where its owner is named.
 fn parameters_key() -> String {
     format!("SYSTEM\\CurrentControlSet\\Services\\{SERVICE_NAME}\\Parameters")
 }
 
-/// The owners' SIDs the service's key lists (crate::owner): none when the
+/// The owner's SID the service's key names (crate::owner): none when the
 /// value or the service is not there.
-pub fn owners() -> Result<Vec<String>, String> {
+pub fn owner() -> Result<Option<String>, String> {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA};
-    use windows_sys::Win32::System::Registry::{RRF_RT_REG_MULTI_SZ, RegGetValueW};
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
     let key = wide(parameters_key());
-    let value = wide(crate::owner::OWNERS_VALUE);
-    let mut buf = vec![0u16; 1024];
+    let value = wide(crate::owner::OWNER_VALUE);
+    let mut buf = vec![0u16; 256];
     loop {
         let mut len = (buf.len() * 2) as u32;
         // SAFETY: NUL-terminated names and a buffer of the size given.
@@ -127,7 +157,7 @@ pub fn owners() -> Result<Vec<String>, String> {
                 HKEY_LOCAL_MACHINE,
                 key.as_ptr(),
                 value.as_ptr(),
-                RRF_RT_REG_MULTI_SZ,
+                RRF_RT_REG_SZ,
                 std::ptr::null_mut(),
                 buf.as_mut_ptr().cast(),
                 &mut len,
@@ -136,15 +166,14 @@ pub fn owners() -> Result<Vec<String>, String> {
         match r {
             0 => {
                 let n = (len as usize / 2).min(buf.len());
-                return Ok(String::from_utf16_lossy(&buf[..n])
-                    .split('\0')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect());
+                let sid = String::from_utf16_lossy(&buf[..n])
+                    .trim_end_matches('\0')
+                    .to_string();
+                return Ok((!sid.is_empty()).then_some(sid));
             }
-            ERROR_FILE_NOT_FOUND => return Ok(Vec::new()),
+            ERROR_FILE_NOT_FOUND => return Ok(None),
             ERROR_MORE_DATA => buf.resize(len as usize / 2 + 1, 0),
-            e => return Err(format!("cannot read the owners of the service: {}", os(e))),
+            e => return Err(format!("cannot read the owner of the service: {}", os(e))),
         }
     }
 }
@@ -201,16 +230,21 @@ fn rights(sid: &[u8], names: &[&str], add: bool) -> Result<(), String> {
         if !add && code == ERROR_FILE_NOT_FOUND {
             return Ok(());
         }
-        return Err(format!("cannot change the rights of {USER}: {}", os(code)));
+        return Err(format!("cannot change an account's rights: {}", os(code)));
     }
     Ok(())
 }
 
-/// Gives `nerve` its rights and keeps it off the sign-in screen.
-fn settle(name: &str) -> Result<(), String> {
+/// Gives one of the node's accounts the rights of its `kind` and keeps it
+/// off the sign-in screen.
+fn settle(name: &str, kind: Kind) -> Result<(), String> {
     let sid = sid_of(name)?;
-    rights(&sid, GRANTED, true)?;
-    rights(&sid, DENIED, true)?;
+    let (granted, denied) = match kind {
+        Kind::Node => (GRANTED, DENIED),
+        Kind::Commands => (RUN_GRANTED, RUN_DENIED),
+    };
+    rights(&sid, granted, true)?;
+    rights(&sid, denied, true)?;
     let zero = 0u32;
     // SAFETY: NUL-terminated key and value names, a DWORD of 4 bytes.
     let r = unsafe {
@@ -244,8 +278,12 @@ impl WinSystem for WinHost {
         win_user::lookup(name)
     }
 
-    fn add_account(&self, name: &str, password: &str) -> Result<(), String> {
-        let (mut n, mut p, mut c) = (wide(name), wide(password), wide(USER_MARK));
+    fn add_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String> {
+        let mark = match kind {
+            Kind::Node => USER_MARK,
+            Kind::Commands => crate::account::RUN_MARK,
+        };
+        let (mut n, mut p, mut c) = (wide(name), wide(password), wide(mark));
         let info = USER_INFO_1 {
             usri1_name: n.as_mut_ptr(),
             usri1_password: p.as_mut_ptr(),
@@ -262,10 +300,10 @@ impl WinSystem for WinHost {
         if r != 0 {
             return Err(format!("cannot make the user {name}: {}", os(r)));
         }
-        settle(name)
+        settle(name, kind)
     }
 
-    fn reset_account(&self, name: &str, password: &str) -> Result<(), String> {
+    fn reset_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String> {
         let mut p = wide(password);
         let info = USER_INFO_1003 {
             usri1003_password: p.as_mut_ptr(),
@@ -284,7 +322,87 @@ impl WinSystem for WinHost {
         if r != 0 {
             return Err(format!("cannot give {name} a new password: {}", os(r)));
         }
-        settle(name)
+        settle(name, kind)
+    }
+
+    fn make_profile(&self, name: &str, password: &str) -> Result<PathBuf, String> {
+        let t = win_user::batch_logon(name, password)?;
+        win_user::make_profile(&t, name)
+            .map_err(|e| format!("cannot make the profile of {name}: {e}"))
+    }
+
+    fn put_profile_service(
+        &self,
+        layout: &Layout,
+        name: &str,
+        password: &str,
+    ) -> Result<(), String> {
+        let s = put(&Spec {
+            name: PROFILE_SERVICE,
+            shown: "Nerve commands' profile",
+            line: format!(
+                "\"{}\" {}",
+                layout.bin.display(),
+                crate::win_profile::PROFILE_ARG
+            ),
+            account: name,
+            password,
+            about: "Keeps the profile of nerve-run loaded, where the AppContainers of Nerve's commands keep theirs.",
+            privileges: PROFILE_PRIVILEGES,
+            after: None,
+        })?;
+        // SAFETY: an open service; no arguments.
+        if unsafe { StartServiceW(s.0, 0, std::ptr::null()) } == 0
+            // SAFETY: plain getter, right after the call.
+            && unsafe { GetLastError() } != ERROR_SERVICE_ALREADY_RUNNING
+        {
+            return Err(format!(
+                "cannot start the service {PROFILE_SERVICE}: {}",
+                last()
+            ));
+        }
+        Ok(())
+    }
+
+    fn delete_profile_service(&self) -> Result<bool, String> {
+        let Some(s) =
+            Scm::open(SC_MANAGER_CONNECT)?.service(PROFILE_SERVICE, SERVICE_ALL_ACCESS)?
+        else {
+            return Ok(false);
+        };
+        stop_and_wait(&s, PROFILE_SERVICE)?;
+        // SAFETY: an open service; it goes once every handle is closed.
+        if unsafe { DeleteService(s.0) } == 0 {
+            return Err(format!(
+                "cannot remove the service {PROFILE_SERVICE}: {}",
+                last()
+            ));
+        }
+        Ok(true)
+    }
+
+    fn run_reach(
+        &self,
+        name: &str,
+        password: &str,
+        own: &[PathBuf],
+        owner: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let t = win_user::batch_logon(name, password)?;
+        let at = |e: std::io::Error| format!("cannot check what {name} can open: {e}");
+        if let Some(p) = win_user::reach(&t, own).map_err(at)? {
+            return Ok(Some(p.display().to_string()));
+        }
+        // The owner's registry, while it is loaded; its Environment key
+        // holds what the owner set for every program of theirs (#90).
+        if let Some(sid) = owner {
+            for key in [sid.to_string(), format!("{sid}\\Environment")] {
+                if win_user::opens_key(&t, &key).map_err(at)? {
+                    return Ok(Some(format!("HKEY_USERS\\{key}")));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn remove_account(&self, name: &str) -> Result<Option<String>, String> {
@@ -395,140 +513,25 @@ impl WinSystem for WinHost {
     }
 
     fn put_service(&self, layout: &Layout, password: &str) -> Result<(), String> {
-        let bin = wide(format!(
-            "\"{}\" --config-dir \"{}\" --state-dir \"{}\" run",
-            layout.bin.display(),
-            layout.paths.config_dir.display(),
-            layout.paths.state_dir.display()
-        ));
-        let user = wide(format!(".\\{USER}"));
-        let password = wide(password);
-        let name = wide(SERVICE_NAME);
-        let shown = wide("Nerve node");
-        let m = Scm::open(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
-        let s = match m.service(SERVICE_NAME, SERVICE_ALL_ACCESS)? {
-            Some(s) => {
-                // SAFETY: an open service and NUL-terminated strings; null
-                // leaves the rest as it is.
-                let ok = unsafe {
-                    ChangeServiceConfigW(
-                        s.0,
-                        SERVICE_WIN32_OWN_PROCESS,
-                        SERVICE_AUTO_START,
-                        SERVICE_ERROR_NORMAL,
-                        bin.as_ptr(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null(),
-                        user.as_ptr(),
-                        password.as_ptr(),
-                        shown.as_ptr(),
-                    )
-                };
-                if ok == 0 {
-                    return Err(format!(
-                        "cannot change the service {SERVICE_NAME}: {}",
-                        last()
-                    ));
-                }
-                s
-            }
-            None => {
-                // SAFETY: an open manager and NUL-terminated strings.
-                let h = unsafe {
-                    CreateServiceW(
-                        m.0,
-                        name.as_ptr(),
-                        shown.as_ptr(),
-                        SERVICE_ALL_ACCESS,
-                        SERVICE_WIN32_OWN_PROCESS,
-                        SERVICE_AUTO_START,
-                        SERVICE_ERROR_NORMAL,
-                        bin.as_ptr(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null(),
-                        user.as_ptr(),
-                        password.as_ptr(),
-                    )
-                };
-                if h.is_null() {
-                    return Err(format!(
-                        "cannot register the service {SERVICE_NAME}: {}",
-                        last()
-                    ));
-                }
-                Scm(h, SERVICE_NAME.into())
-            }
-        };
-        let mut about = wide(concat!(
-            "Links this machine to its Nerve centers. ",
-            env!("CARGO_PKG_REPOSITORY")
-        ));
-        let description = SERVICE_DESCRIPTIONW {
-            lpDescription: about.as_mut_ptr(),
-        };
-        // Started again 5 seconds after a failure, three times a day at most.
-        let mut actions = [
-            SC_ACTION {
-                Type: SC_ACTION_RESTART,
-                Delay: 5000,
-            },
-            SC_ACTION {
-                Type: SC_ACTION_RESTART,
-                Delay: 5000,
-            },
-            SC_ACTION {
-                Type: SC_ACTION_RESTART,
-                Delay: 5000,
-            },
-            SC_ACTION {
-                Type: SC_ACTION_NONE,
-                Delay: 0,
-            },
-        ];
-        let failure = SERVICE_FAILURE_ACTIONSW {
-            dwResetPeriod: 24 * 3600,
-            lpRebootMsg: std::ptr::null_mut(),
-            lpCommand: std::ptr::null_mut(),
-            cActions: actions.len() as u32,
-            lpsaActions: actions.as_mut_ptr(),
-        };
-        // A list of names, each ended by a NUL, and one NUL more.
-        let mut privileges: Vec<u16> = SERVICE_PRIVILEGES
-            .iter()
-            .flat_map(|p| p.encode_utf16().chain(Some(0)))
-            .chain(Some(0))
-            .collect();
-        let required = SERVICE_REQUIRED_PRIVILEGES_INFOW {
-            pmszRequiredPrivileges: privileges.as_mut_ptr(),
-        };
-        for (level, info, what) in [
-            (
-                SERVICE_CONFIG_DESCRIPTION,
-                (&raw const description).cast(),
-                "its description",
+        put(&Spec {
+            name: SERVICE_NAME,
+            shown: "Nerve node",
+            line: format!(
+                "\"{}\" --config-dir \"{}\" --state-dir \"{}\" run",
+                layout.bin.display(),
+                layout.paths.config_dir.display(),
+                layout.paths.state_dir.display()
             ),
-            (
-                SERVICE_CONFIG_FAILURE_ACTIONS,
-                (&raw const failure).cast(),
-                "what follows a failure",
+            account: USER,
+            password,
+            about: concat!(
+                "Links this machine to its Nerve centers. ",
+                env!("CARGO_PKG_REPOSITORY")
             ),
-            (
-                SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
-                (&raw const required).cast(),
-                "its privileges",
-            ),
-        ] {
-            // SAFETY: an open service and the structure of each level.
-            if unsafe { ChangeServiceConfig2W(s.0, level, info) } == 0 {
-                return Err(format!(
-                    "cannot set {what} of the service {SERVICE_NAME}: {}",
-                    last()
-                ));
-            }
-        }
-        Ok(())
+            privileges: SERVICE_PRIVILEGES,
+            after: Some(PROFILE_SERVICE),
+        })
+        .map(|_| ())
     }
 
     fn start(&self) -> Result<(), String> {
@@ -548,26 +551,7 @@ impl WinSystem for WinHost {
 
     fn stop(&self) -> Result<(), String> {
         let s = the_service_for(SERVICE_STOP | SERVICE_QUERY_STATUS)?;
-        // SAFETY: plain data that the call fills.
-        let mut st: SERVICE_STATUS = unsafe { std::mem::zeroed() };
-        // SAFETY: an open service and a place for its status.
-        if unsafe { ControlService(s.0, SERVICE_CONTROL_STOP, &mut st) } == 0 {
-            // SAFETY: plain getter, right after the call.
-            let e = unsafe { GetLastError() };
-            if e != ERROR_SERVICE_NOT_ACTIVE {
-                return Err(format!("cannot stop the service {SERVICE_NAME}: {}", os(e)));
-            }
-        }
-        let until = Instant::now() + Duration::from_secs(60);
-        while s.status()?.dwCurrentState != SERVICE_STOPPED {
-            if Instant::now() > until {
-                return Err(format!(
-                    "the service {SERVICE_NAME} did not stop within a minute"
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        Ok(())
+        stop_and_wait(&s, SERVICE_NAME)
     }
 
     fn owner_sid(&self) -> Option<(String, String)> {
@@ -583,36 +567,35 @@ impl WinSystem for WinHost {
         Some((sid, name))
     }
 
-    fn owners(&self) -> Result<Vec<String>, String> {
-        owners()
+    fn owner(&self) -> Result<Option<(String, String)>, String> {
+        let Some(sid) = owner()? else {
+            return Ok(None);
+        };
+        let name = win_user::name_of_sid(&sid).unwrap_or_else(|_| sid.clone());
+        Ok(Some((sid, name)))
     }
 
-    fn put_owners(&self, sids: &[String]) -> Result<(), String> {
+    fn put_owner(&self, sid: &str) -> Result<(), String> {
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
         use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-        use windows_sys::Win32::System::Registry::REG_MULTI_SZ;
-        // A list of strings, each ended by a NUL, and one NUL more.
-        let data: Vec<u16> = sids
-            .iter()
-            .flat_map(|s| s.encode_utf16().chain(Some(0)))
-            .chain(Some(0))
-            .collect();
+        use windows_sys::Win32::System::Registry::REG_SZ;
+        let data = wide(sid);
         // SAFETY: NUL-terminated names and data of the size given; the key
         // is made when it is missing.
         let r = unsafe {
             RegSetKeyValueW(
                 HKEY_LOCAL_MACHINE,
                 wide(parameters_key()).as_ptr(),
-                wide(crate::owner::OWNERS_VALUE).as_ptr(),
-                REG_MULTI_SZ,
+                wide(crate::owner::OWNER_VALUE).as_ptr(),
+                REG_SZ,
                 data.as_ptr().cast(),
                 (data.len() * 2) as u32,
             )
         };
         if r != 0 {
-            return Err(format!("cannot write the owners of the service: {}", os(r)));
+            return Err(format!("cannot write the owner of the service: {}", os(r)));
         }
         let s = the_service()?;
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -620,7 +603,7 @@ impl WinSystem for WinHost {
         // below.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide(crate::winsvc::service_dacl(sids)).as_ptr(),
+                wide(crate::winsvc::service_dacl(Some(sid))).as_ptr(),
                 SDDL_REVISION_1,
                 &mut sd,
                 std::ptr::null_mut(),
@@ -799,6 +782,180 @@ impl WinSystem for WinHost {
     ) -> crate::grants::Synced {
         crate::grants::remove_all(paths, node_ids, &mut |m| eprintln!("{m}"))
     }
+}
+
+/// Asks the service `s` (`name`) to stop and waits until it has; a stopped
+/// one is fine.
+fn stop_and_wait(s: &Scm, name: &str) -> Result<(), String> {
+    // SAFETY: plain data that the call fills.
+    let mut st: SERVICE_STATUS = unsafe { std::mem::zeroed() };
+    // SAFETY: an open service and a place for its status.
+    if unsafe { ControlService(s.0, SERVICE_CONTROL_STOP, &mut st) } == 0 {
+        // SAFETY: plain getter, right after the call.
+        let e = unsafe { GetLastError() };
+        if e != ERROR_SERVICE_NOT_ACTIVE {
+            return Err(format!("cannot stop the service {name}: {}", os(e)));
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    while s.status()?.dwCurrentState != SERVICE_STOPPED {
+        if Instant::now() > until {
+            return Err(format!("the service {name} did not stop within a minute"));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+/// A service as [`put`] registers it.
+struct Spec<'a> {
+    name: &'a str,
+    shown: &'a str,
+    /// Its command line.
+    line: String,
+    /// The local account it runs as, and that account's password.
+    account: &'a str,
+    password: &'a str,
+    about: &'a str,
+    /// The privileges it keeps; Windows takes every other from its token.
+    privileges: &'a [&'a str],
+    /// The service it needs running first.
+    after: Option<&'a str>,
+}
+
+/// Registers the service `spec` names, or changes it: started with the
+/// machine and again after a failure (5 seconds later, three times a day
+/// at most).
+fn put(spec: &Spec) -> Result<Scm, String> {
+    let name = spec.name;
+    let bin = wide(&spec.line);
+    let user = wide(format!(".\\{}", spec.account));
+    let password = wide(spec.password);
+    let wname = wide(name);
+    let shown = wide(spec.shown);
+    // A list of names, each ended by a NUL, and one NUL more; an empty one
+    // takes the dependencies away.
+    let after: Vec<u16> = spec
+        .after
+        .into_iter()
+        .flat_map(|a| a.encode_utf16().chain(Some(0)))
+        .chain([0, 0])
+        .collect();
+    let m = Scm::open(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
+    let s = match m.service(name, SERVICE_ALL_ACCESS)? {
+        Some(s) => {
+            // SAFETY: an open service and NUL-terminated strings; null
+            // leaves the rest as it is.
+            let ok = unsafe {
+                ChangeServiceConfigW(
+                    s.0,
+                    SERVICE_WIN32_OWN_PROCESS,
+                    SERVICE_AUTO_START,
+                    SERVICE_ERROR_NORMAL,
+                    bin.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    after.as_ptr(),
+                    user.as_ptr(),
+                    password.as_ptr(),
+                    shown.as_ptr(),
+                )
+            };
+            if ok == 0 {
+                return Err(format!("cannot change the service {name}: {}", last()));
+            }
+            s
+        }
+        None => {
+            // SAFETY: an open manager and NUL-terminated strings.
+            let h = unsafe {
+                CreateServiceW(
+                    m.0,
+                    wname.as_ptr(),
+                    shown.as_ptr(),
+                    SERVICE_ALL_ACCESS,
+                    SERVICE_WIN32_OWN_PROCESS,
+                    SERVICE_AUTO_START,
+                    SERVICE_ERROR_NORMAL,
+                    bin.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    after.as_ptr(),
+                    user.as_ptr(),
+                    password.as_ptr(),
+                )
+            };
+            if h.is_null() {
+                return Err(format!("cannot register the service {name}: {}", last()));
+            }
+            Scm(h, name.into())
+        }
+    };
+    let mut about = wide(spec.about);
+    let description = SERVICE_DESCRIPTIONW {
+        lpDescription: about.as_mut_ptr(),
+    };
+    let mut actions = [
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 5000,
+        },
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 5000,
+        },
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 5000,
+        },
+        SC_ACTION {
+            Type: SC_ACTION_NONE,
+            Delay: 0,
+        },
+    ];
+    let failure = SERVICE_FAILURE_ACTIONSW {
+        dwResetPeriod: 24 * 3600,
+        lpRebootMsg: std::ptr::null_mut(),
+        lpCommand: std::ptr::null_mut(),
+        cActions: actions.len() as u32,
+        lpsaActions: actions.as_mut_ptr(),
+    };
+    // A list of names, each ended by a NUL, and one NUL more.
+    let mut privileges: Vec<u16> = spec
+        .privileges
+        .iter()
+        .flat_map(|p| p.encode_utf16().chain(Some(0)))
+        .chain(Some(0))
+        .collect();
+    let required = SERVICE_REQUIRED_PRIVILEGES_INFOW {
+        pmszRequiredPrivileges: privileges.as_mut_ptr(),
+    };
+    for (level, info, what) in [
+        (
+            SERVICE_CONFIG_DESCRIPTION,
+            (&raw const description).cast(),
+            "its description",
+        ),
+        (
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            (&raw const failure).cast(),
+            "what follows a failure",
+        ),
+        (
+            SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+            (&raw const required).cast(),
+            "its privileges",
+        ),
+    ] {
+        // SAFETY: an open service and the structure of each level.
+        if unsafe { ChangeServiceConfig2W(s.0, level, info) } == 0 {
+            return Err(format!(
+                "cannot set {what} of the service {name}: {}",
+                last()
+            ));
+        }
+    }
+    Ok(s)
 }
 
 /// Lets Windows delete `path` at its next start.

@@ -180,7 +180,7 @@ the `result` of the envelope described below.
 - `list(node)`: the node by id, else by name; first, when the node sent an
   `access` block, a line with the mode, its end and the account
   (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
-  one with the folders and their flags (`Folders (r read, w write, x run
+  one with the folders and their flags (`Folders (r read, w read and write, x run
   commands; own: the command account's own; shared: every pairing's):
   /home/me/proj (rw, some folders below allow less),
   /var/lib/nerve-run/box-1/home (rwx, own), /tmp (rwx, own, shared)`, the

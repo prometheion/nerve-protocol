@@ -1139,6 +1139,22 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
         "{}",
         v.body
     );
+    // The page's form keeps Write checked only with Read; a request that
+    // sends Write alone gets a folder that reads too.
+    change(
+        addr,
+        &s,
+        "/api/folders/add",
+        json!({"center": "lab", "path": path, "write": true}),
+    )
+    .await;
+    let v = get(addr, "/api/perm?center=lab", &s).await;
+    assert_eq!(
+        v.json()["folders"]["folders"][0]["rights"],
+        "rw-",
+        "{}",
+        v.body
+    );
     let a = post(
         addr,
         "/api/folders/add",

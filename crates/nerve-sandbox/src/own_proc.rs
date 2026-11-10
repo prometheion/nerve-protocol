@@ -335,6 +335,7 @@ pub fn works(exe: &std::path::Path) -> bool {
         landlock: None,
         container: None,
         own_proc: true,
+        cwd: None,
     };
     let Ok(json) = serde_json::to_vec(&spec) else {
         return false;

@@ -257,7 +257,7 @@ impl Shared {
         #[cfg(windows)]
         {
             use crate::winsudo::{Settle, kept, settle, stored};
-            let user = store.config().machine.user.clone();
+            let user = self.owner.clone();
             match settle(on, held.is_some(), on && kept(&self.paths)) {
                 Settle::Load => {
                     let host = crate::win_host::WinHost;

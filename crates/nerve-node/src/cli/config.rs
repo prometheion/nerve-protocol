@@ -3,9 +3,6 @@
 
 use super::*;
 
-/// Why `config set machine.user` is refused on Linux.
-pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux commands run as nerve-run, or in user mode as the owner, the account that ran `install`";
-
 /// `config get|set|unset|add|remove` on dotted keys. `center.<name>` picks
 /// a `[[center]]` entry by its name.
 pub(super) async fn config_cmd(
@@ -41,17 +38,6 @@ pub(super) async fn config_cmd(
         && (key == "ui" || key.starts_with("ui."))
     {
         return Err(crate::owner::NOT_FROM_THE_WEB.into());
-    }
-    // Linux chooses no account for the commands: they run as nerve-run or
-    // as the owner, the account that ran `install`.
-    if !cfg!(windows)
-        && let ConfigCmd::Set { key, .. }
-        | ConfigCmd::Unset { key }
-        | ConfigCmd::Add { key, .. }
-        | ConfigCmd::Rm { key, .. } = &c
-        && key == "machine.user"
-    {
-        return Err(NO_ACCOUNT_TO_CHOOSE.into());
     }
     // Keys into the keyring: at a terminal, where none answers, the owner
     // is offered one (as root for the node's user) before anything moves.
@@ -125,7 +111,7 @@ pub(super) async fn config_cmd(
     if before.get() != SecretStorage::Keyring
         && cfg.machine.secret_storage == SecretStorage::Keyring
     {
-        tell_folder_commands(paths, &cfg, out).await;
+        tell_folder_commands(paths, out).await;
     }
     Ok(())
 }
@@ -133,8 +119,8 @@ pub(super) async fn config_cmd(
 /// Says, once the keys went into the keyring, that folder mode now runs no
 /// command where Landlock cannot keep a command off the session bus
 /// (crate::daemon::KEYRING_NOT_CONFINED). The running node knows; without one,
-/// the kernel here and the account `cfg` runs commands as tell.
-pub(super) async fn tell_folder_commands(paths: &NodePaths, cfg: &NodeConfig, out: &mut dyn Write) {
+/// the kernel here and the account the node runs commands as tell.
+pub(super) async fn tell_folder_commands(paths: &NodePaths, out: &mut dyn Write) {
     #[cfg(unix)]
     match nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await {
         Ok(v) => {
@@ -159,17 +145,17 @@ pub(super) async fn tell_folder_commands(paths: &NodePaths, cfg: &NodeConfig, ou
         true => detected,
         false => detected.by_hand(),
     };
-    if keyring_turns_commands_off(c, || node_command_account(paths, cfg)) {
+    if keyring_turns_commands_off(c, || node_command_account(paths)) {
         let _ = writeln!(out, "{}", folder_commands_off());
     }
 }
 
-/// The account the node at `paths` runs commands as with `cfg`, looked up as
+/// The account the node at `paths` runs commands as, looked up as
 /// that node does (crate::account::for_commands), for a CLI that finds no
 /// node to ask: the installed node runs as its own user and can switch, a
 /// node run by hand as this CLI's user. `None` for the node's own user, and
 /// where no command runs.
-fn node_command_account(paths: &NodePaths, cfg: &NodeConfig) -> Option<crate::service::Account> {
+fn node_command_account(paths: &NodePaths) -> Option<crate::service::Account> {
     let me = nerve_transport::net::euid();
     let service = crate::service::is_service_node(paths);
     let own = match service {
@@ -179,13 +165,8 @@ fn node_command_account(paths: &NodePaths, cfg: &NodeConfig) -> Option<crate::se
             .map_or(me, |a| a.uid),
         false => me,
     };
-    // Folder mode's account; the owner is the unit's on Linux, the
-    // config's on Windows.
-    let owner = if cfg!(windows) {
-        cfg.machine.user.clone()
-    } else {
-        crate::service::owner_of(paths)
-    };
+    // Folder mode's account; the owner is the one the service names.
+    let owner = crate::service::owner_of(paths);
     crate::account::for_commands(
         false,
         owner.as_deref(),
@@ -490,23 +471,6 @@ mod tests {
         assert!(e.contains("paired: home"), "{e}");
         let v = json_of(&paths, &["config", "get", "center.home"]);
         assert!(v["value"].get("node_id").is_none(), "{v}");
-    }
-
-    /// No account for the commands is chosen on Linux: `config` refuses
-    /// `machine.user` in every verb, and nothing changes.
-    #[cfg(not(windows))]
-    #[test]
-    fn config_chooses_no_account_on_linux() {
-        let (_d, paths) = setup(&["home"]);
-        for cmd in [
-            &["config", "set", "machine.user", "bob"][..],
-            &["config", "unset", "machine.user"],
-            &["config", "add", "machine.user", "bob"],
-        ] {
-            let e = run(&paths, cmd).unwrap_err();
-            assert_eq!(e, NO_ACCOUNT_TO_CHOOSE, "{cmd:?}");
-        }
-        assert_eq!(load(&paths).machine.user, None);
     }
 
     /// The owner sets the run-time limits by name; a limit of 0 is refused

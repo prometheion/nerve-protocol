@@ -42,7 +42,7 @@ fn an_owner_is_asked_only_for_what_needs_an_administrator() {
         "#!/bin/sh\necho \"$1\" >> '{log}'\n\
          case \" $* \" in\n\
          *' service stop '* | *' service start '*) echo '{{\"messages\": [\"done\"]}}'; exit 0 ;;\n\
-         *' restore '*) if [ -e '{refuse}' ]; then echo '{{\"error\": \"the backup sets machine.user other than it is here: {by} root\"}}'; exit 1; fi ;;\n\
+         *' restore '*) if [ -e '{refuse}' ]; then echo '{{\"error\": \"the backup sets machine.shell other than it is here: {by} root\"}}'; exit 1; fi ;;\n\
          esac\n\
          exec '{exe}' \"$@\"\n",
         log = log.display(),

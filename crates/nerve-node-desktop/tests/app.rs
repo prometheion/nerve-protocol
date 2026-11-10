@@ -528,7 +528,20 @@ fn the_app_drives_the_cli_end_to_end() {
         "{f:?}"
     );
     let path = perm.get_folders().row_data(0).unwrap().path;
-    perm.invoke_folder_set(path.clone(), true, true, false);
+    // Write alone reads too.
+    perm.invoke_folder_set(path.clone(), false, true, false);
+    let f = &config(&paths).centers[0].policy.folders[0];
+    assert!(
+        f.access.read && f.access.write && !f.access.execute,
+        "{f:?}"
+    );
+    // Nor does the Add dialog make a folder that is written and not read.
+    perm.invoke_folder_choose();
+    perm.set_folder_read(false);
+    perm.set_folder_write(true);
+    perm.set_folder_execute(false);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
     let f = &config(&paths).centers[0].policy.folders[0];
     assert!(
         f.access.read && f.access.write && !f.access.execute,
@@ -764,20 +777,19 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(caps.get_center(), "home");
     assert_eq!(caps.get_load(), Load::Ready, "{}", caps.get_error());
     // Why this machine offers no programs, or no capabilities of node.toml:
-    // Windows offers neither yet, a Linux node run by hand none of
-    // node.toml.
+    // Windows offers no programs yet, and a node run by hand none of
+    // node.toml, on Linux and on Windows.
+    assert!(
+        caps.get_config_note().contains("runs by hand"),
+        "{}",
+        caps.get_config_note()
+    );
     if cfg!(windows) {
         assert!(caps.get_windows());
         assert!(caps.get_programs_note().contains("Windows"));
-        assert!(caps.get_config_note().contains("Windows"));
     } else {
         assert!(!caps.get_windows());
         assert_eq!(caps.get_programs_note(), "");
-        assert!(
-            caps.get_config_note().contains("runs by hand"),
-            "{}",
-            caps.get_config_note()
-        );
     }
     let row = |name: &str| caps.get_rows().iter().find(|c| c.name == name);
     let run = row("exec.run").expect("exec.run is listed");

@@ -82,10 +82,11 @@ center reads, or the node refuses the whole change and names the field.
 3. `panic` and `unlock`. A center with the grant may pause. Only the owner
    unpauses or unlocks.
 4. Machine settings: `machine.shell`, `machine.allow_root`,
-   `machine.sudo_path`, `machine.secret_storage`, `machine.user` (Windows),
-   `machine.command_env` (the installed Linux node: the variables of the
+   `machine.sudo_path`, `machine.secret_storage`,
+   `machine.command_env` (the installed node: the variables of the
    service's environment a command of `nerve-run` gets besides `PATH`,
-   `LANG` and `TERM`; its `HOME` and `TMPDIR` are its pairing's own). An owner may set `machine.command_env`
+   `LANG` and `TERM` on Linux, its account's own on Windows; its `HOME` and
+   `TMPDIR` are its pairing's own, on Windows in its AppContainer). An owner may set `machine.command_env`
    (it is not in `owner::ROOT_ONLY`): a command as the owner gets the whole
    service environment already, so naming a variable gives `nerve-run`'s
    commands nothing the owner could not read.
@@ -227,7 +228,8 @@ The installed node has one owner besides root: on Linux the account that ran
 (`Environment=NERVE_NODE_OWNER=<name>`, `service::owner_in_unit`; only
 `install` writes it, everyone may read it, so the CLI and the app tell
 whether they are the owner while the node is stopped too); on Windows the
-SIDs in the service's registry value `Parameters\Owners`. `uninstall`
+SID in the service's registry value `Parameters\Owner`, of the account that
+installed it (one owner; another's install replaces it). `uninstall`
 removes the polkit files and the service helper, and on Windows the service
 with its key.
 
@@ -239,7 +241,7 @@ Linux `/run/nerve-node/owner.sock`, mode 0666 in the unit's
 `RuntimeDirectory=` (0755), the account decided by the peer's credentials
 (the unit's owner, looked up by name at each request, and root); on Windows
 the pipe `\\.\pipe\nerve-node-owner`, whose DACL names SYSTEM, the
-administrators and the owners, read at the node's start. It takes `status`
+administrators and the owner, read at the node's start. It takes `status`
 (anyone: `{"running": true}`) and `cli {args, cwd}`: the node refuses anyone
 who is not the owner (`nerve-run` among them), a caller below a command it
 runs, one with `no_new_privs` (Linux; every confined command keeps it) or in
@@ -253,7 +255,7 @@ arguments as its own user, with `NERVE_OWNER=<name>`, and passes the caller's
 input and the program's output and exit code through the connection
 (`{"in"}`/`{"eof"}` up, `{"out"}`, `{"err"}`, `{"exit"}` down). The program
 is the CLI after `become_owner`: its changes go through the store as any,
-and with `NERVE_OWNER` set it refuses a change of `machine.user`,
+and with `NERVE_OWNER` set it refuses a change of
 `machine.allow_root`, `machine.sudo_path` or `machine.shell`, and names the
 owner in the audit (`"user"` beside `"by": "local"`). The node's log has a
 line at info for each owner's command that can change something (its words,
@@ -709,7 +711,7 @@ Where root is the node's owner ([service](service.md#root-as-the-owner)),
 to it, and so run commands as root, with no password asked. On such a node
 the grant gives the center root: `center settings on` warns of it,
 and so does the desktop app when you give the grant. Its Windows twin is an
-owner (`machine.user`) in Administrators or Backup Operators
+owner (the account that installed it) in Administrators or Backup Operators
 (`owner::admin_owner`): user mode's commands run as that account and can take
 its rights, as UAC is no security boundary. `center settings on` and the app
 warn of that too, and `status` (`owner_is_admin`) and the app's Overview say

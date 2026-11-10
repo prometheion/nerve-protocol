@@ -177,6 +177,8 @@ export global Perm {
     // node runs none of them.
     in-out property <bool> no-network;
     in-out property <bool> network-rules: true;
+    // Windows, where the containers hold the network switch.
+    in-out property <bool> windows;
     // The node's verdict (its `network_off`): the commands run as the owner
     // now, which nothing keeps off the network.
     in-out property <bool> runs-as-owner;
@@ -504,8 +506,8 @@ export global Prefs {
     callback raw-set();
     callback raw-unset();
     callback raw-add();
-    // Windows: the account commands run as (machine.user), and giving the
-    // service its new password.
+    // Windows: the owner, as whom user mode runs commands, and giving the
+    // service the owner's new password.
     in-out property <string> account;
     in-out property <string> account-password;
     in-out property <string> account-error;

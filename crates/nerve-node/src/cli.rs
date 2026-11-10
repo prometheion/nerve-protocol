@@ -45,8 +45,8 @@ use cap::{added_by_other, cap_listing};
 use cap::{dropped_note, held_note, shadowed_note, with_own_note};
 use center::tell_pairings_apart;
 pub(crate) use center::{given_link, pairings_warning_here};
+pub use config::moves_keys_to_keyring;
 use config::setting;
-pub use config::{NO_ACCOUNT_TO_CHOOSE, moves_keys_to_keyring};
 use folder::{add_folder, grant_lines};
 pub use help::{
     ArgHelp, Card, Help, Section, TOP_TEMPLATE, Verb, doc_of, everyday, guide_url, help,
@@ -652,7 +652,7 @@ pub enum SudoCmd {
 pub enum FolderCmd {
     /// Let a center use a folder (r, w, x); none closes one to file calls only
     ///
-    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
+    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes and reads, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
     Add {
         /// The folder.
         path: PathBuf,
@@ -1997,9 +1997,8 @@ mod tests {
             out.contains("was not asked whether it found a keyring"),
             "{out}"
         );
-        let cfg = NodeConfig::load(&paths.config_file()).unwrap();
         let mut out = Vec::new();
-        tell_folder_commands(&paths, &cfg, &mut out).await;
+        tell_folder_commands(&paths, &mut out).await;
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("was not asked whether folder mode"), "{out}");
         let mut opts = crate::NodeOptions::new(paths.clone());

@@ -423,14 +423,58 @@ async fn an_overlong_command_line_is_refused_and_audited_with_the_reason() {
         .expect_err("the command line is too long");
     assert_eq!(nerve_conformance::wire::code_of(&e), "forbidden");
     let log = std::fs::read_to_string(node.paths().audit_log()).unwrap();
-    let line: Value = log
+    // One entry for the call, not one from here and another from a generic
+    // error path.
+    let runs: Vec<Value> = log
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
-        .find(|v: &Value| v["action"] == "run")
-        .unwrap_or_else(|| panic!("no audit line for the run: {log}"));
+        .filter(|v: &Value| v["action"] == "run")
+        .collect();
+    assert_eq!(runs.len(), 1, "one audit line for the run: {log}");
+    let line = &runs[0];
     assert_eq!(line["decision"], "forbidden", "{line}");
     let reason = line["reason"].as_str().unwrap_or_default();
     assert!(reason.contains("longer than"), "{line}");
+    node.stop().await;
+}
+
+/// A command whose folder does not resolve is refused, and the audit log
+/// says so with the reason, as for a file call's path: on the installed
+/// Windows node that is a folder the pairing's container may not look into.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_in_a_folder_that_does_not_resolve_is_refused_and_audited() {
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node(dir.path(), &center).await;
+    let mut conn = linked(&mut center).await;
+    let missing = dir.path().join("missing");
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {
+                "command": "echo hi", "cwd": missing.display().to_string()}}),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .expect_err("no such folder");
+    assert_eq!(nerve_conformance::wire::code_of(&e), "bad_path");
+    let log = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    // One entry for the call, not one from here and another from a generic
+    // error path.
+    let runs: Vec<Value> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|v: &Value| v["action"] == "run")
+        .collect();
+    assert_eq!(runs.len(), 1, "one audit line for the run: {log}");
+    let line = &runs[0];
+    assert_eq!(
+        (&line["decision"], &line["code"], &line["reason"]),
+        (&json!("forbidden"), &json!("bad_path"), &json!(e.message)),
+        "{line}"
+    );
+    assert_eq!(line["target"], "echo hi", "{line}");
     node.stop().await;
 }
 

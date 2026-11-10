@@ -73,7 +73,8 @@ pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
             continue;
         }
         let line = line.to_string();
-        if line.starts_with("Warning:") || line.starts_with("no account for commands") {
+        if line.starts_with("Warning:") || line.starts_with(nerve_node::account::NO_COMMANDS_AS_YOU)
+        {
             warn.push(line);
         } else {
             did.push(line);
@@ -428,7 +429,7 @@ mod tests {
         let v = serde_json::json!({"messages": [
             "made the user nerve (uid 991)",
             "Warning: no owner: there is no account bob; only root changes the node and user mode runs no command",
-            format!("no account for commands: the password of alice is wrong; {}", nerve_node::account::NO_ACCOUNT_INSTALL),
+            format!("no commands as you: the password of alice is wrong; {}", nerve_node::account::NO_ACCOUNT_INSTALL),
             "the service nerve-node.service runs as nerve and starts with the machine",
             "Next: `nerve-node center add -` pairs the node with a center.",
         ]});
@@ -437,9 +438,9 @@ mod tests {
         assert_eq!(warn.len(), 2);
         assert!(warn[0].starts_with("Warning: no owner"), "{}", warn[0]);
         assert!(
-            warn[1].starts_with("no account")
+            warn[1].starts_with("no commands as you")
                 && warn[1].ends_with(
-                    "enter its password under Settings › General › Account for commands in the app"
+                    "enter your password under Settings › General › Account for commands in the app"
                 )
         );
         // Nothing sends the owner to a terminal.

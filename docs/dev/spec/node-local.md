@@ -1178,14 +1178,16 @@ grant or not.
   pairing's folders, which that one account owns); where the node reads as `nerve-run` (the installed
   Linux node), reading also, outside every folder, what every account may
   read (below).
-  `access` is three independent flags, any combination
-  (`"r"`, `"w"`, `"x"`, `"rw"`, `"rx"`, `"wx"`, `"rwx"`, `""` for none; the
-  letters in any order, each once). `r` allows reading a path a call names
-  (the read actions of `fs`, a path argument marked `read`) inside it, `w`
-  writing one (`fs.write`, a path argument marked `write`), `x` commands with
-  a working directory in it and an execute action of a provider at its paths.
-  The flags do not imply each other: a write needs `w` and no `r`, a read
-  `r` and no `w`, a command `x` and no `r`. Where folders nest, the deepest
+  `access` is three flags (`"r"`, `"rw"`, `"x"`, `"rx"`, `"rwx"`, `""` for
+  none; the letters in any order, each once). `r` allows reading a path a
+  call names (the read actions of `fs`, a path argument marked `read`)
+  inside it, `w` writing one (`fs.write`, a path argument marked `write`)
+  and reading it as `r` does, `x` commands with a working directory in it
+  and an execute action of a provider at its paths. `w` brings `r` along
+  (`"w"` is read as `"rw"`, `"wx"` as `"rwx"`; `-r` takes `w` away too, and
+  `+w` sets `r`): a folder that may be written but not read makes no sense.
+  Otherwise the flags do not imply each other: a read needs `r` and no `w`,
+  a command `x` and no `r`. Where folders nest, the deepest
   one that holds a path decides for it. Commands are confined where the
   platform can confine them; where it cannot (Linux without Landlock), a
   node run by hand refuses every command of folder mode and offers no `exec`
@@ -1223,8 +1225,7 @@ grant or not.
   such confinement and refuses them. `allow` rules do not count. On Linux a command
   reads the system folders and its `r` folders, writes its `w` folders and
   runs programs from the system folders and its `x` folders (Landlock), each
-  flag with its own rule. A folder with `w` and not `r` can be written but
-  not read or listed by the command: its rule carries the write rights only.
+  flag with its own rule. A folder with `w` reads too: its rule carries the read rights as well.
   Landlock cannot run a file it may not read, so the rule of an `x` folder
   carries the right to read files by name (no listing); the `fs` actions of
   the center stay decided by `r`. The node's own folders are in none of these
@@ -1638,7 +1639,7 @@ password from a client: `nerve-node sudo on` (it asks on the terminal) or a
 center with the settings grant `write` (protocol §7.4.1, sealed end to end so
 the center cannot read it). The node checks it with `sudo -S -k -v` (output
 discarded), run as the owner (§1: on the installed Linux node the account
-the unit names, on Windows `machine.user`, else the node's own user), so the
+the unit names, on Windows the one its service's key names, else the node's own user), so the
 password is the owner's, and refuses a wrong one with `invalid_args`; the
 switch then stays as it was. An allowed sudo command of a pairing whose
 commands run as the owner runs through sudo as the owner, with that
@@ -1870,10 +1871,11 @@ the node as a service.
 The installed node also takes commands from its owner, who is no root: on
 Linux the account the unit names (`NERVE_NODE_OWNER`, which `install` writes:
 the account that ran it), looked up by name at each request, and root; on
-Windows the SIDs in the service's registry value `Parameters\Owners`. It
+Windows the SID in the service's registry value `Parameters\Owner` (one owner,
+the account that installed it). It
 serves them `/run/nerve-node/owner.sock` (0666 in the unit's runtime folder)
 or the pipe `\\.\pipe\nerve-node-owner` (DACL: SYSTEM, the administrators, the
-owners; first instance; no remote clients), with the same lines and two
+owner; first instance; no remote clients), with the same lines and two
 methods. Who may run a command is decided by the account the kernel names
 for the caller (`SO_PEERCRED`); `nerve-run` is not the owner. The pipe's DACL
 names no package, so no AppContainer opens it.
@@ -1902,9 +1904,9 @@ given. The caller asks the passphrase and sends it as the input; a backup's
 new file is its own (`create_new`, 0600, a temporary name and a rename with
 `--overwrite`). A `restore` runs while the node is stopped: the daemon stops,
 runs it, and starts again (`Daemon::run_until`), and with `NERVE_OWNER` the
-program refuses a backup that would change one of the four `machine.*`
+program refuses a backup that would change one of the three `machine.*`
 settings above. A program
-with `NERVE_OWNER` refuses a change of `machine.user`, `machine.allow_root`,
+with `NERVE_OWNER` refuses a change of `machine.allow_root`,
 `machine.sudo_path` and `machine.shell`, and names the owner in the audit's
 settings entries (`"user"`). Starting and stopping the service is the service
 manager's: on Linux the service helper (`/usr/local/lib/nerve-node/service-control`,
@@ -1925,7 +1927,7 @@ whose commands run as it (`acl::wanted`: not user mode, not allowlist mode
 with `as_owner`; their `exec::container_grants`, the node's own folders and the protected
 entries split out as for Landlock, joined over the pairings) as POSIX ACL
 entries (`crate::acl`): `user:nerve-run` with the folder's rights (a folder
-`r` → `r-x`, `w` → `-wx`, `x` → `--x`; a file `r`, `w`, and `x` only for a
+`r` → `r-x`, `rw` → `rwx`, `x` → `--x`; a file `r`, `rw`, and `x` only for a
 file someone may run already) on the folder and everything below it, and on
 each folder below the default entries `user:nerve-run` and `user:<owner>:rwx`
 (a default entry the owner had for itself is left as it is).
@@ -2191,7 +2193,7 @@ owner or root, while the walk is `nerve-run`'s), or as root while the node is
 not root (a walk with root's file ids, `account::FsAs`, keeps the node's
 rights, not root's), a folder the walk may not list refuses the call (`<path> holds a folder the node may not look into, so
 it cannot tell where the links there lead`; where it is the handed folder
-itself, as one granted `w` without `r` is, `<path> is a folder the node may
+itself, as one granted `x` without `r` is, `<path> is a folder the node may
 not list (one granted without `r`, or one only its owner may enter), so it
 cannot tell where the links in it lead`), as the program could follow a
 link there, and so does an entry whose type the walk cannot tell (on a

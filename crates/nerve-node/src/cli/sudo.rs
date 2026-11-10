@@ -68,7 +68,7 @@ pub(super) async fn sudo_cmd(
         match c {
             SudoCmd::On => {
                 let installed = crate::service::is_service_node(paths);
-                crate::winsudo::on(paths, &WinHost, installed, call, out).await
+                crate::winsudo::on(&WinHost, installed, call, out).await
             }
             SudoCmd::Off => crate::winsudo::off(paths, &WinHost, call, out).await,
         }

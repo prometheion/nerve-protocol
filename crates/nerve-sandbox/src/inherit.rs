@@ -22,6 +22,14 @@
 //! carry it. So does a change after one that stopped half way, since the
 //! folders above what that one changed do not show it (`grants::sync`).
 //!
+//! A file with more than one name (hard links) has one list for all of
+//! them, while each name lies in a folder of its own. The walk asks
+//! [`Walk::links`] about each such file it reaches, also one whose list it
+//! leaves as it is: one whose names all get the same from the grants
+//! changes as any file, every other one gets no more than [`Cap`] allows
+//! ([`Objects::cap`]), so a grant on one name never opens the file wider
+//! than another name's folder allows (#149).
+//!
 //! Plain logic over [`Objects`], so it is tested on every platform; the
 //! objects and their lists are Windows' (`appcontainer`).
 
@@ -56,12 +64,26 @@ pub trait Objects {
     ) -> io::Result<Derived<Self::List>>;
     /// Writes `list` as the list of `obj`, and nothing below it.
     fn write(&mut self, obj: &Self::Obj, list: &Self::List) -> io::Result<()>;
-    /// Whether `path` leads to `obj` now: the walk judges a file with more
-    /// than one name by the path it found it at.
-    fn at(&mut self, obj: &Self::Obj, path: &Path) -> io::Result<bool>;
     /// Every name of `obj` (its hard links) as a whole path, as the object
-    /// itself gives them, not as a path leads to it.
+    /// itself gives them, not as a path leads to it. A name in a folder
+    /// that cannot be opened (another account's) is left out: the caller
+    /// tells by the count of names that one is missing.
     fn names_of(&mut self, obj: &Self::Obj) -> io::Result<Vec<PathBuf>>;
+    /// The owner of `obj`, a SID as text, where it names one: who made the
+    /// file, as no grant lets a command change it.
+    fn owner(&mut self, obj: &Self::Obj) -> io::Result<Option<String>>;
+    /// What the list of `obj`, a file with more than one name, becomes as
+    /// `linked` says: `Same` where that is the list `obj` has now. A
+    /// [`Linked::Capped`] works from the list `obj` has, not from `derived`
+    /// (its list under the folder walked), which would give the file that
+    /// folder's entries for every account under all its names; a
+    /// [`Linked::Full`] works from `derived`.
+    fn cap(
+        &mut self,
+        obj: &Self::Obj,
+        derived: Derived<Self::List>,
+        linked: &Linked,
+    ) -> io::Result<Derived<Self::List>>;
 }
 
 /// What an object is.
@@ -103,9 +125,46 @@ pub struct Walked {
     pub changed: u64,
 }
 
-/// Whether a file with more than one name (hard links) may change
-/// ([`Walk::links`]).
-pub type Links<'a> = &'a mut dyn FnMut(&Path, u32, &[PathBuf]) -> io::Result<bool>;
+/// What a file with more than one name (hard links) gets ([`Walk::links`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Linked {
+    /// Every name gets the same from the grants: it changes as any file,
+    /// and the entries of the node's own for these containers (by name,
+    /// or an account's SID) that an earlier [`Linked::Capped`] gave it go.
+    Full(Vec<String>),
+    /// No more than this.
+    Capped(Cap),
+}
+
+/// The most the AppContainers may have on a file with more than one name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cap {
+    /// Each container the node grants (by its name, or an account's SID)
+    /// and what it gets on the file. Every other AppContainer gets read and
+    /// execute at most.
+    pub containers: Vec<(String, Gets)>,
+}
+
+/// What a container gets on a file with more than one name ([`Cap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gets {
+    /// Nothing at all: one of the names lies in a folder closed to it.
+    Closed,
+    /// These rights (`crate::acl` file rights, read and execute at most),
+    /// by entries of the node's own, whatever the folder walked gives: a
+    /// grant of it holds one of the names. The list is one for every name,
+    /// so what it gets through one name's folder must not hang on which
+    /// name the last walk came through.
+    Rights(u32),
+    /// No entry of the node's own: no grant of it holds a name. What it
+    /// inherits is cut to read and execute, as for any other AppContainer.
+    Unheld,
+}
+
+/// What a file with more than one name gets: its path by the names walked,
+/// how many names it has, those names ([`Objects::names_of`]), and its
+/// owner ([`Objects::owner`]).
+pub type Links<'a> = &'a mut dyn FnMut(&Path, u32, &[PathBuf], Option<&str>) -> io::Result<Linked>;
 
 /// [`Walk::progress`] is told after every this many objects.
 pub const STEP: u64 = 256;
@@ -116,10 +175,8 @@ pub struct Walk<'a> {
     pub write: bool,
     /// Go into folders whose list stays as well.
     pub every: bool,
-    /// Whether a file with more than one name (hard links) may change: its
-    /// path by the names walked, how many names it has, and those names
-    /// ([`Objects::names_of`]). Its list is shared by all of them. `None`:
-    /// any may.
+    /// What a file with more than one name (hard links) gets, whose list
+    /// is shared by all of them. `None`: it changes as any file.
     pub links: Option<Links<'a>>,
     /// Told how far the walk is, now and then.
     pub progress: &'a mut dyn FnMut(Walked),
@@ -147,30 +204,16 @@ fn about(path: &Path, e: io::Error) -> io::Error {
     io::Error::other(format!("{}: {e}", path.display()))
 }
 
-/// Where [`pass_down`] stopped: a file with more than one name that may
-/// not change.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stop {
-    /// The file, by the names walked.
-    pub path: PathBuf,
-    /// How many names it has.
-    pub names: u32,
-    /// Whether the list of `top` was written already: the file was made
-    /// in it while the walk was below it, and found once it was written.
-    pub top_written: bool,
-}
-
 /// Passes the list `list` of the folder `top` (at `path`) down to what is
 /// below it, as far as it changes something, and writes it as `top`'s own
 /// list last when `write_top` says so.
 ///
-/// Stops at the first file with more than one name whose list would change
-/// and that [`Walk::links`] refuses, also where its path no longer leads to
-/// it (when it is asked at all), and gives it ([`Stop`]): a walk that
-/// writes leaves what it wrote and writes no folder above it, and `top`
-/// neither, unless the file was found in `top` after `top` was written. An
-/// object that is gone meanwhile is skipped. An error names the object it
-/// is about, and is never of a kind that says nothing changed ([`about`]).
+/// A file with more than one name gets what [`Walk::links`] says, judged
+/// by the names it has as the walk holds it, also where its list would stay
+/// as it is: so a file whose list the owner widened again (by passing a
+/// folder's list down with Windows' own tools) gets the cap back. An object
+/// that is gone meanwhile is skipped. An error names the object it is
+/// about, and is never of a kind that says nothing changed ([`about`]).
 pub fn pass_down<O: Objects>(
     objects: &mut O,
     top: O::Obj,
@@ -178,10 +221,9 @@ pub fn pass_down<O: Objects>(
     path: &Path,
     write_top: bool,
     mut walk: Walk,
-) -> io::Result<(Walked, Option<Stop>)> {
+) -> io::Result<Walked> {
     let gone = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
     let mut walked = Walked::default();
-    let mut top_written = false;
     let writes = walk.write;
     let open_frame = |objects: &mut O,
                       obj: O::Obj,
@@ -213,7 +255,7 @@ pub fn pass_down<O: Objects>(
             let mut done = stack.pop().expect("a frame");
             if done.write && walk.write {
                 match objects.write(&done.obj, &done.list) {
-                    Ok(()) => top_written |= stack.is_empty(),
+                    Ok(()) => {}
                     Err(e) if gone(&e) => continue,
                     Err(e) => return Err(about(&done.path, e)),
                 }
@@ -260,6 +302,24 @@ pub fn pass_down<O: Objects>(
             Err(e) if gone(&e) => continue,
             Err(e) => return Err(about(&path, e)),
         };
+        // A file with more than one name, judged by every name it has.
+        let derived = match walk.links.as_mut() {
+            Some(links)
+                if kind.names > 1 && !kind.walked() && !matches!(derived, Derived::Kept) =>
+            {
+                let capped = objects.names_of(&obj).and_then(|names| {
+                    let owner = objects.owner(&obj)?;
+                    let linked = links(&path, kind.names, &names, owner.as_deref())?;
+                    objects.cap(&obj, derived, &linked)
+                });
+                match capped {
+                    Ok(d) => d,
+                    Err(e) if gone(&e) => continue,
+                    Err(e) => return Err(about(&path, e)),
+                }
+            }
+            _ => derived,
+        };
         let (list, write) = match derived {
             Derived::Kept => continue,
             Derived::Same(l) if kind.walked() && walk.every => (l, false),
@@ -274,22 +334,6 @@ pub fn pass_down<O: Objects>(
             stack.push(next);
             continue;
         }
-        if kind.names > 1
-            && let Some(links) = walk.links.as_mut()
-        {
-            let passes = objects.at(&obj, &path).map_err(|e| about(&path, e))? && {
-                let names = objects.names_of(&obj).map_err(|e| about(&path, e))?;
-                links(&path, kind.names, &names).map_err(|e| about(&path, e))?
-            };
-            if !passes {
-                let stop = Stop {
-                    path,
-                    names: kind.names,
-                    top_written,
-                };
-                return Ok((walked, Some(stop)));
-            }
-        }
         if walk.write {
             match objects.write(&obj, &list) {
                 Err(e) if !gone(&e) => return Err(about(&path, e)),
@@ -297,7 +341,7 @@ pub fn pass_down<O: Objects>(
             }
         }
     }
-    Ok((walked, None))
+    Ok(walked)
 }
 
 #[cfg(test)]
@@ -335,8 +379,6 @@ mod tests {
         written: Vec<String>,
         /// Objects gone by the time they are opened.
         vanished: Vec<String>,
-        /// Files whose path leads elsewhere by the time it is checked.
-        moved: Vec<String>,
         /// Made while the walk runs: when the first is opened, the second
         /// is made, with its folder's list as it is then; one there already
         /// is replaced (a file saved by a rename over it).
@@ -403,7 +445,7 @@ mod tests {
         }
 
         /// Gives the root its own `entries` and passes them down.
-        fn grant(&mut self, entries: &[&str], every: bool) -> (Walked, Option<Stop>) {
+        fn grant(&mut self, entries: &[&str], every: bool) -> Walked {
             self.grant_with(entries, every, true, None, &mut |_| {})
         }
 
@@ -414,7 +456,7 @@ mod tests {
             write: bool,
             links: Option<Links<'a>>,
             progress: &'a mut dyn FnMut(Walked),
-        ) -> (Walked, Option<Stop>) {
+        ) -> Walked {
             let list = List {
                 own: entries.iter().map(|e| e.to_string()).collect(),
                 inherited: self.nodes[0].inherited.clone(),
@@ -553,24 +595,58 @@ mod tests {
             Ok(())
         }
 
-        fn at(&mut self, obj: &usize, _: &Path) -> io::Result<bool> {
-            Ok(!self.moved.contains(&self.nodes[*obj].name))
-        }
-
         fn names_of(&mut self, obj: &usize) -> io::Result<Vec<PathBuf>> {
             let n = &self.nodes[*obj];
             let mut all = vec![Path::new("/top").join(&n.name)];
             all.extend((1..n.names).map(|i| PathBuf::from(format!("/elsewhere/{i}"))));
             Ok(all)
         }
-    }
 
-    /// Where a walk stopped, at a file with two names.
-    fn stop(path: &str, top_written: bool) -> Stop {
-        Stop {
-            path: path.into(),
-            names: 2,
-            top_written,
+        fn owner(&mut self, _: &usize) -> io::Result<Option<String>> {
+            Ok(None)
+        }
+
+        /// An entry of a container in a cap becomes `<entry>:r` (some
+        /// rights) or `<entry>:closed`, as the node's own entries do; `Full`
+        /// drops such an own entry of its containers.
+        fn cap(
+            &mut self,
+            obj: &usize,
+            derived: Derived<List>,
+            linked: &Linked,
+        ) -> io::Result<Derived<List>> {
+            let now = self.list(*obj);
+            let mut list = match derived {
+                Derived::Kept => return Ok(Derived::Kept),
+                Derived::Same(l) | Derived::Changed(l) => l,
+            };
+            if let Linked::Full(listed) = linked {
+                list.own.retain(|e| {
+                    !e.split_once(':')
+                        .is_some_and(|(c, _)| listed.iter().any(|l| l == c))
+                });
+            }
+            let capped = |set: &BTreeSet<String>| -> BTreeSet<String> {
+                set.iter()
+                    .map(|e| match linked {
+                        Linked::Capped(cap) => match cap.containers.iter().find(|(c, _)| c == e) {
+                            Some((_, Gets::Rights(_))) => format!("{e}:r"),
+                            Some((_, Gets::Closed)) => format!("{e}:closed"),
+                            _ => e.clone(),
+                        },
+                        Linked::Full(_) => e.clone(),
+                    })
+                    .collect()
+            };
+            let list = List {
+                own: capped(&list.own),
+                inherited: capped(&list.inherited),
+            };
+            Ok(if list == now {
+                Derived::Same(list)
+            } else {
+                Derived::Changed(list)
+            })
         }
     }
 
@@ -581,8 +657,7 @@ mod tests {
     #[test]
     fn a_change_reaches_everything_below_and_folders_last() {
         let mut f = Fake::new(TREE);
-        let (w, found) = f.grant(&["g"], false);
-        assert_eq!(found, None);
+        let w = f.grant(&["g"], false);
         assert_eq!(
             w,
             Walked {
@@ -617,7 +692,7 @@ mod tests {
         f.grant(&["g"], false);
         f.opened.clear();
         f.written.clear();
-        let (w, _) = f.grant(&["g"], false);
+        let w = f.grant(&["g"], false);
         assert_eq!(
             w,
             Walked {
@@ -641,7 +716,7 @@ mod tests {
         let mut f = Fake::new(TREE);
         f.grant(&["g"], false);
         f.written.clear();
-        let (w, _) = f.grant(&["g2"], false);
+        let w = f.grant(&["g2"], false);
         assert_eq!(w.changed, 7);
         assert_eq!(f.has("a/b/f"), ["g2"]);
     }
@@ -700,8 +775,7 @@ mod tests {
         let i = f.nodes.len() - 1;
         f.node("l").children.push(i);
         f.vanished.push("d/x".into());
-        let (w, found) = f.grant(&["g"], false);
-        assert_eq!(found, None);
+        let w = f.grant(&["g"], false);
         assert_eq!(f.has("l"), ["g"]);
         assert!(f.has("l/inside").is_empty());
         assert!(!f.opened.contains(&"l/inside".to_string()));
@@ -709,71 +783,81 @@ mod tests {
         assert_eq!(w.seen, 3);
     }
 
-    /// A file with a second name that the change reaches stops it, unless
-    /// `links` lets it pass; one in a part that stays is not looked at. A
-    /// walk that writes stops there and writes no folder above it, and the
-    /// folder's own list is not written either. A path that no longer leads
-    /// to the file passes nothing. Without `links`, every file passes and
-    /// none is looked up by its path.
+    /// A file with a second name that the change reaches gets what `links`
+    /// says, judged by the names the file itself gives: `Full` changes it as
+    /// any file, `Capped` gives no more than the cap. Without `links` it
+    /// changes as any file. One whose list the walk would leave as it is is
+    /// capped all the same (the owner passed a folder's list down with
+    /// Windows' tools, which gave it the folder's whole entry): a walk into
+    /// every folder puts the cap back. A file in a part the walk does not go
+    /// into is not looked at.
     #[test]
-    fn a_file_with_a_second_name_stops_the_change() {
+    fn a_file_with_a_second_name_gets_what_links_says() {
         let tree = &["a/", "a/x", "a/y=", "a/z", "b/", "b/l="];
         let asked = std::cell::RefCell::new(Vec::new());
-        let mut refuse = |p: &Path, n: u32, names: &[PathBuf]| {
+        let cap = Cap {
+            containers: vec![("g".into(), Gets::Rights(1)), ("h".into(), Gets::Closed)],
+        };
+        let mut capped = |p: &Path, n: u32, names: &[PathBuf], _: Option<&str>| {
             asked.borrow_mut().push((p.to_path_buf(), n));
             // Judged by the names the file itself gives.
             assert!(names.contains(&p.to_path_buf()) && names.len() == n as usize);
-            Ok(false)
+            Ok(Linked::Capped(cap.clone()))
         };
 
-        // Looked at only.
         let mut f = Fake::new(tree);
-        let (_, found) = f.grant_with(&["g"], false, false, Some(&mut refuse), &mut |_| {});
-        assert_eq!(found, Some(stop("/top/a/y", false)));
-        assert!(f.written.is_empty() && f.has("a/x").is_empty());
-
-        // Changed: what was written before stays, nothing above it.
-        let mut f = Fake::new(tree);
-        let (_, found) = f.grant_with(&["g"], false, true, Some(&mut refuse), &mut |_| {});
-        assert_eq!(found, Some(stop("/top/a/y", false)));
-        assert_eq!(f.written, ["a/x"]);
-        assert!(f.nodes[0].own.is_empty(), "the folder itself stays");
-
-        // Let pass.
-        let mut f = Fake::new(tree);
-        let (w, found) = f.grant_with(
-            &["g"],
+        let w = f.grant_with(
+            &["g", "h", "i"],
             false,
             true,
-            Some(&mut |_, _, _| Ok(true)),
+            Some(&mut capped),
             &mut |_| {},
         );
-        assert_eq!(found, None);
         assert_eq!(w.changed, 6);
+        assert_eq!(f.has("a/x"), ["g", "h", "i"]);
+        for n in ["a/y", "b/l"] {
+            assert_eq!(f.has(n), ["g:r", "h:closed", "i"], "{n}");
+        }
+        assert_eq!(f.nodes[0].own.len(), 3, "the folder itself is written");
+        assert_eq!(asked.borrow().len(), 2);
 
-        // Where the part with the links stays, they are not looked at.
+        // Full, and without `links`: as any file.
+        for full in [true, false] {
+            let mut f = Fake::new(tree);
+            let mut pass =
+                |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| Ok(Linked::Full(Vec::new()));
+            let links: Option<Links> = if full { Some(&mut pass) } else { None };
+            f.grant_with(&["g"], false, true, links, &mut |_| {});
+            assert_eq!(f.has("a/y"), ["g"]);
+        }
+        // Full after a cap: the node's own entries for the containers it
+        // names go, also where the folders' lists stay as they are.
         let mut f = Fake::new(tree);
-        f.grant(&["g"], false);
-        f.node("a").own.insert("mine".into());
+        f.grant_with(&["g"], false, true, None, &mut |_| {});
+        f.node("a/y").own = ["g:r", "h:closed", "mine"].map(String::from).into();
+        let mut full =
+            |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| Ok(Linked::Full(vec!["g".into()]));
+        f.grant_with(&["g"], true, true, Some(&mut full), &mut |_| {});
+        let own: Vec<&String> = f.node("a/y").own.iter().collect();
+        assert_eq!(own, ["h:closed", "mine"]);
+
+        // Widened again behind the node's back: a walk that leaves the
+        // folders as they are does not reach it, one into every folder caps
+        // it again, and the next one finds it capped.
+        let mut f = Fake::new(tree);
+        f.grant_with(&["g"], false, true, Some(&mut capped), &mut |_| {});
+        f.node("a/y").inherited = ["g".to_string()].into();
         asked.borrow_mut().clear();
-        let (_, found) = f.grant_with(&["g"], false, true, Some(&mut refuse), &mut |_| {});
-        assert_eq!(found, None);
+        f.grant_with(&["g"], false, true, Some(&mut capped), &mut |_| {});
+        assert_eq!(f.has("a/y"), ["g"]);
         assert!(asked.borrow().is_empty());
-
-        // Moved meanwhile: refused without asking.
-        let mut f = Fake::new(tree);
-        f.moved.push("a/y".into());
-        let (_, found) = f.grant_with(
-            &["g"],
-            false,
-            false,
-            Some(&mut |_, _, _| Ok(true)),
-            &mut |_| {},
-        );
-        assert_eq!(found, Some(stop("/top/a/y", false)));
-        let (w, found) = f.grant_with(&["g"], false, true, None, &mut |_| {});
-        assert_eq!(found, None);
-        assert_eq!(w.changed, 6);
+        let w = f.grant_with(&["g"], true, true, Some(&mut capped), &mut |_| {});
+        assert_eq!(f.has("a/y"), ["g:r"]);
+        assert_eq!(w.changed, 1);
+        f.written.clear();
+        let w = f.grant_with(&["g"], true, true, Some(&mut capped), &mut |_| {});
+        assert_eq!(w.changed, 0);
+        assert!(f.written.is_empty(), "{:?}", f.written);
     }
 
     /// What is made in a folder while the walk is below it takes the
@@ -803,28 +887,29 @@ mod tests {
             }
             // A second walk changes nothing, as the folders are right.
             f.made.clear();
-            let (w, _) = f.grant(after, every);
+            let w = f.grant(after, every);
             assert_eq!(w.changed, 0, "{after:?}");
         }
     }
 
     /// A file with a second name made in the granted folder while the walk
-    /// is below it is found once the folder is written: the walk stops
-    /// there and says the folder has its new list already.
+    /// is below it is found once the folder is written, and capped too.
     #[test]
-    fn a_link_made_in_the_folder_during_the_walk_is_found_after_its_write() {
+    fn a_link_made_in_the_folder_during_the_walk_is_capped_too() {
         let mut f = Fake::new(&["a/", "a/x"]);
         f.made = vec![("a/x".into(), "l=".into())];
-        let (_, found) = f.grant_with(
+        let cap = Cap {
+            containers: vec![("g".into(), Gets::Rights(1))],
+        };
+        f.grant_with(
             &["g"],
             false,
             true,
-            Some(&mut |_, _, _| Ok(false)),
+            Some(&mut |_, _, _, _| Ok(Linked::Capped(cap.clone()))),
             &mut |_| {},
         );
-        assert_eq!(found, Some(stop("/top/l", true)));
         assert_eq!(f.nodes[0].own.iter().collect::<Vec<_>>(), ["g"]);
-        assert!(f.has("l").is_empty(), "the link itself is not written");
+        assert_eq!(f.has("l"), ["g:r"]);
     }
 
     /// An error from inside the walk names the object, and is never of a

@@ -912,19 +912,18 @@ pub fn programs(v: &Value) -> Vec<ProgramRow> {
 /// does): Windows offers neither yet, and a node run by hand has no
 /// nerve-run, which every capability of node.toml runs as.
 pub fn caps_notes(windows: bool, installed: bool) -> (String, String) {
-    if windows {
-        return (
-            "Windows offers no programs as providers yet; they come with later work on the node for Windows.".into(),
-            "Windows offers no capabilities of node.toml yet; they come with later work on the node for Windows.".into(),
-        );
-    }
+    let programs = if windows {
+        "Windows offers no programs as providers yet; they come with later work on the node for Windows."
+    } else {
+        ""
+    };
     if !installed {
         return (
-            String::new(),
+            programs.into(),
             "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into(),
         );
     }
-    (String::new(), String::new())
+    (programs.into(), String::new())
 }
 
 /// The word `cap set` takes for a switch.
@@ -2550,10 +2549,13 @@ mod tests {
             ("desk", "/usr/bin/desk", "attached")
         );
         assert_eq!(p[1].attached, "");
-        // Windows offers neither programs nor capabilities of node.toml
-        // yet; a node run by hand none of node.toml.
+        // Windows offers no programs yet, but capabilities of node.toml
+        // (#149); a node run by hand none of node.toml.
         let (programs, config) = caps_notes(true, true);
-        assert!(programs.contains("Windows") && config.contains("Windows"));
+        assert!(
+            programs.contains("Windows") && config.is_empty(),
+            "{config}"
+        );
         let (programs, config) = caps_notes(false, false);
         assert!(
             programs.is_empty() && config.contains("runs by hand"),

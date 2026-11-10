@@ -246,12 +246,18 @@ WantedBy=multi-user.target
 }
 
 /// The owner of the node on `paths` when it is the installed one, as its
-/// unit names it.
+/// unit names it (Linux), or the service's key (Windows).
 pub fn owner_of(paths: &NodePaths) -> Option<String> {
     let layout = Layout::system();
     if *paths != layout.paths {
         return None;
     }
+    #[cfg(windows)]
+    return crate::win_host::owner()
+        .ok()
+        .flatten()
+        .and_then(|sid| crate::win_user::name_of_sid(&sid).ok());
+    #[cfg(not(windows))]
     owner_in_unit(&std::fs::read_to_string(&layout.unit).ok()?)
 }
 

@@ -230,6 +230,9 @@ function foldersSection(c, folders) {
   const path = el("input", { class: "input", type: "text", placeholder: "/home/you/project", autocomplete: "off", spellcheck: "false", "aria-label": "Folder" });
   const box = (label) => { const b = el("input", { type: "checkbox", checked: label === "read" }); return [b, el("label", { class: "check" }, b, el("span", {}, label))]; };
   const [r, rl] = box("read"), [w, wl] = box("write"), [x, xl] = box("execute");
+  // Write reads too: checking it checks read, and read goes only with it.
+  w.onchange = () => { if (w.checked) r.checked = true; };
+  r.onchange = () => { if (!r.checked) w.checked = false; };
   return section("Folders", "What the center may do in each folder in folder mode. A whole path, starting at /.", null,
     folders.length ? el("div", { class: "stack" }, folders.map((f) => el("div", { class: "card" },
       el("div", { class: "card-top" }, icon("server"), el("span", { class: "name mono" }, f.path), el("span", { class: "meta push" }, f.rights),

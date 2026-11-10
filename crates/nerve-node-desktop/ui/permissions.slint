@@ -141,7 +141,9 @@ component ModeSection inherits Section {
         if Perm.no-network && !Perm.network-rules: Banner {
             tone: Tone.danger;
             text: "While this is on, none of these commands runs: this machine cannot block their network.";
-            more: "The node's seccomp filter cannot be used here.";
+            more: Perm.windows
+                ? "The Windows Firewall service, which keeps the commands' AppContainer off the network, does not run."
+                : "The node's seccomp filter cannot be used here.";
         }
         if Perm.no-network && Perm.network-rules && Perm.runs-as-owner: Banner {
             tone: Tone.danger;
@@ -290,8 +292,9 @@ component FolderSection inherits Section {
                     text: "Read";
                     label: "Read " + f.path;
                     on: f.read;
+                    // Write reads too, so read goes off with it.
                     toggled(on) => {
-                        Perm.folder-set(f.path, on, f.write, f.execute);
+                        Perm.folder-set(f.path, on, on && f.write, f.execute);
                     }
                 }
                 Chip {
@@ -299,7 +302,7 @@ component FolderSection inherits Section {
                     label: "Write " + f.path;
                     on: f.write;
                     toggled(on) => {
-                        Perm.folder-set(f.path, f.read, on, f.execute);
+                        Perm.folder-set(f.path, on || f.read, on, f.execute);
                     }
                 }
                 Chip {

@@ -78,6 +78,14 @@ pub struct ShimSpec {
     /// ([`own_proc`]), so it sees only its own processes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own_proc: bool,
+    /// The folder the command starts in, which the shim enters first, as
+    /// the account it runs as. Windows: the node starts the shim of another
+    /// account elsewhere, as Windows checks the folder a process starts in
+    /// as the one that starts it, and the node's own account may not look
+    /// into the command's folder (a pairing's home in the container's
+    /// folder, the owner's folders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
 }
 
 /// What a PowerShell command in an AppContainer starts with. PowerShell
@@ -209,6 +217,32 @@ pub const POWERSHELL_START: &str = concat!(
 #[serde(deny_unknown_fields)]
 pub struct ContainerSpec {
     pub name: String,
+    /// The owner's network switch: the container gets none of its network
+    /// capabilities, and Windows keeps it off every network.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
+    /// The command's home and its programs' settings are the container's
+    /// own ([`acl::container_home`]): each pairing has its own, and none is
+    /// the account's, which every pairing's commands share.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
+    /// Variables the command gets besides its account's own
+    /// (`machine.command_env`): names and the values of the node's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+}
+
+impl ContainerSpec {
+    /// The container `name`, with the network, the account's home and
+    /// nothing added.
+    pub fn new(name: impl Into<String>) -> ContainerSpec {
+        ContainerSpec {
+            name: name.into(),
+            no_network: false,
+            home: false,
+            env: Vec::new(),
+        }
+    }
 }
 
 /// The largest spec the shim reads.
@@ -237,7 +271,15 @@ pub fn shim_main() -> i32 {
         return SHIM_FAILED;
     }
     match serde_json::from_slice::<ShimSpec>(&json) {
-        Ok(spec) => imp::run(spec),
+        Ok(spec) => {
+            if let Some(cwd) = &spec.cwd
+                && let Err(e) = std::env::set_current_dir(cwd)
+            {
+                eprintln!("nerve-node: cannot enter {}: {e}", cwd.display());
+                return SHIM_FAILED;
+            }
+            imp::run(spec)
+        }
         Err(e) => {
             eprintln!("nerve-node: bad exec shim spec: {e}");
             SHIM_FAILED
@@ -604,7 +646,7 @@ mod imp {
         // holds this process and what it starts, the container's processes
         // too.
         if let Some(c) = &spec.container {
-            return match super::appcontainer::run(&spec.program, &spec.args, &c.name) {
+            return match super::appcontainer::run(&spec.program, &spec.args, c) {
                 Ok(code) => code as i32,
                 Err(e) => {
                     eprintln!(
@@ -741,9 +783,9 @@ pub mod landlock_rules {
         // that grants whole trees.
         let mut read = AccessFs::from_read(ABI_WANTED);
         read.remove(AccessFs::Execute);
-        // Only the write rights, so a folder that may be written but not read
-        // (`w` without `r`) stays unreadable; reading is the `read` set's.
-        let write = AccessFs::from_write(ABI_WANTED);
+        // A folder that may be written may be read too (nerve-policy reads
+        // `w` as `rw`), so the write set carries the read rights as well.
+        let write = AccessFs::from_write(ABI_WANTED) | read;
         let handled = AccessFs::from_all(ABI_WANTED);
         let mut rs = Ruleset::default().handle_access(handled).map_err(e)?;
         if !Scope::from_all(ABI_WANTED).is_empty() {
@@ -813,20 +855,21 @@ pub mod acl {
     //! below it, one for the files below it. Plain values, so they are
     //! tested on every platform.
     //!
-    //! The flags stay independent, as on Linux: `w` gives no read and no
-    //! listing, and `x` runs and reads files by name but lists nothing (a
-    //! program cannot run from a file it may not read, and a script is read
-    //! by its interpreter). No flag gives a right on the access list or the
-    //! owner, so a command cannot widen its own grants.
+    //! As on Linux, `w` reads too (nerve-policy reads `w` as `rw`) and also
+    //! deletes and renames, and `x` runs and reads files by name but lists
+    //! nothing (a program cannot run from a file it may not read, and a
+    //! script is read by its interpreter). No flag gives a right on the
+    //! access list or the owner, so a command cannot widen its own grants.
     //!
-    //! Deleting and renaming need `r` as well as `w`. Windows grants a move
-    //! by the same right as a delete, and a moved object keeps its own
-    //! access list until a change on its new folder passes that folder's
-    //! entries down to it: so a command that could move what it may not
-    //! read could make it readable, where on Linux Landlock refuses a rename
-    //! that gains rights. And a granted folder or file itself has no
-    //! `DELETE` ([`entries`]): a command deletes, renames or moves it only
-    //! where the folder above it gives that, as on Linux.
+    //! Windows grants a move by the same right as a delete, and a moved
+    //! object keeps its own access list until a change on its new folder
+    //! passes that folder's entries down to it; a command moves only what
+    //! it may read, so no move makes something readable that was not. A
+    //! granted folder or file itself has no `DELETE` ([`entries`]): a
+    //! command deletes, renames or moves it only where the folder above it
+    //! gives that, as on Linux.
+
+    use crate::inherit::Gets;
 
     pub const READ_DATA: u32 = 0x1; // FILE_LIST_DIRECTORY on a folder
     pub const WRITE_DATA: u32 = 0x2; // FILE_ADD_FILE
@@ -853,22 +896,39 @@ pub mod acl {
         pub dir: u32,
         /// Every file below it (or the path itself, when it is a file).
         pub file: u32,
+        /// Denied, not allowed: a folder closed inside one the container
+        /// is granted ([`closed`]).
+        pub deny: bool,
+    }
+
+    /// Every right a file or folder has (FILE_ALL_ACCESS).
+    pub const ALL: u32 = 0x1F_01FF;
+
+    /// The masks of a folder without a flag inside a folder the container
+    /// is granted: every right denied to it there and below, whatever it
+    /// inherits from the folder around, which Windows passes into every
+    /// folder below (nerve-node's grants). Denied entries come first.
+    pub fn closed() -> Masks {
+        Masks {
+            dir: ALL,
+            file: ALL,
+            deny: true,
+        }
     }
 
     /// The masks for a folder with these flags; both 0 without a flag.
+    /// `write` reads too.
     pub fn masks(read: bool, write: bool, execute: bool) -> Masks {
         let mut m = Masks::default();
-        if read {
+        if read || write {
             m.dir |= BASE | READ_DATA | READ_EA | EXECUTE;
             m.file |= BASE | READ_DATA | READ_EA;
         }
         if write {
-            m.dir |= BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
-            m.file |= BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
-            if read {
-                m.dir |= DELETE_CHILD | DELETE;
-                m.file |= DELETE;
-            }
+            m.dir |= WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
+            m.file |= WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES;
+            m.dir |= DELETE_CHILD | DELETE;
+            m.file |= DELETE;
         }
         if execute {
             m.dir |= BASE | EXECUTE;
@@ -881,6 +941,262 @@ pub mod acl {
     pub const OBJECT_INHERIT: u32 = 0x1;
     pub const CONTAINER_INHERIT: u32 = 0x2;
     pub const INHERIT_ONLY: u32 = 0x8;
+    pub const INHERITED: u8 = 0x10;
+
+    /// The most an AppContainer may have on a file with more than one name
+    /// (hard links) whose names lie under different grants: read it, run
+    /// it, and look at it, as on Linux such a file keeps its own, usually
+    /// readable, rights (#149).
+    pub const READ_AND_EXECUTE: u32 = BASE | READ_DATA | READ_EA | EXECUTE;
+
+    /// What a name of such a file under a grant with these flags allows
+    /// the file, within [`READ_AND_EXECUTE`].
+    pub fn file_cap(read: bool, write: bool, execute: bool) -> u32 {
+        masks(read, write, execute).file & READ_AND_EXECUTE
+    }
+
+    /// The kinds of entries of an access list (`ACE_HEADER::AceType`) that
+    /// [`capped`] tells apart.
+    pub const ALLOWED: u8 = 0;
+    pub const DENIED: u8 = 1;
+    const ALLOWED_COMPOUND: u8 = 4;
+    const ALLOWED_OBJECT: u8 = 5;
+    const ALLOWED_CALLBACK: u8 = 9;
+    const ALLOWED_CALLBACK_OBJECT: u8 = 11;
+
+    /// An entry of an access list, as [`capped`] looks at it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Ace {
+        pub kind: u8,
+        pub flags: u8,
+        pub mask: u32,
+        /// Its SID as text (`S-1-…`), for the kinds that have it right
+        /// after the mask (allowed and denied, also with a condition).
+        pub sid: Option<String>,
+    }
+
+    /// One entry of a list [`capped`] gives.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Capped {
+        /// The entry at this place of the list it was given, with this mask.
+        Entry(usize, u32),
+        /// A denying entry of the node's own, for the SID at this place of
+        /// the caps, with this mask.
+        Deny(usize, u32),
+        /// An allowing entry of the node's own, for the SID at this place of
+        /// the caps, with this mask.
+        Allow(usize, u32),
+        /// An allowing entry of the node's own of [`READ_AND_EXECUTE`] for
+        /// the account the walk acts as ([`readable_by`]).
+        Reads,
+    }
+
+    /// A generic right of an entry written out as the rights of a file,
+    /// as Windows maps them; the rights an entry on a file cannot give
+    /// (the system list, the most allowed) go.
+    fn mapped(mask: u32) -> u32 {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const GENERIC_EXECUTE: u32 = 0x2000_0000;
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let mut m = mask & ALL;
+        for (generic, rights) in [
+            (GENERIC_READ, BASE | READ_DATA | READ_EA),
+            (
+                GENERIC_WRITE,
+                BASE | WRITE_DATA | APPEND_DATA | WRITE_EA | WRITE_ATTRIBUTES,
+            ),
+            (GENERIC_EXECUTE, BASE | EXECUTE),
+            (GENERIC_ALL, ALL),
+        ] {
+            if mask & generic != 0 {
+                m |= rights;
+            }
+        }
+        m
+    }
+
+    /// Whether `sid` (as text) is the SID of an app package as Windows
+    /// derives it from a container's name: `S-1-15-2-` and seven numbers,
+    /// as the node's containers have. Not the groups every container is in
+    /// (`ALL APPLICATION PACKAGES`, `S-1-15-2-1`, and `ALL RESTRICTED
+    /// APPLICATION PACKAGES`, `S-1-15-2-2`), which other programs list on
+    /// purpose, nor a capability (`S-1-15-3-…`).
+    pub fn package_sid(sid: &str) -> bool {
+        let Some(rest) = sid
+            .get(..9)
+            .is_some_and(|p| p.eq_ignore_ascii_case("S-1-15-2-"))
+            .then(|| &sid[9..])
+        else {
+            return false;
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
+        parts.len() == 7
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// The access list `aces` of a file with more than one name, as `caps`
+    /// says for each SID (as text) and with no more than
+    /// [`READ_AND_EXECUTE`] for every other AppContainer and capability
+    /// (`S-1-15-…`): an entry that allows more is cut down to that, one that
+    /// allows nothing then goes. The node's own entries for the SIDs of
+    /// `caps` (its allowing and denying ones, inherited too) are worked out
+    /// anew from `caps` alone, not from what the list holds now: a SID that
+    /// [`Gets::Rights`] gets an allowing entry of those and a denying one of
+    /// every other right, a closed one a denying entry of every right, and
+    /// one that is [`Gets::Unheld`] none. So it gets the same whichever
+    /// name's folder the list was worked out under. Its denying entry, first
+    /// in the list, stays when Windows passes a folder's list down to the
+    /// file again (as Explorer and `icacls` do), but it does not hold a
+    /// container back (Windows checks a container by the entries that allow
+    /// it something): the file inherits the folder's whole entry again,
+    /// which [`capped_within`] does not count as capped, so the next sync
+    /// caps it again. The node's allowing entries come after the
+    /// other explicit ones and before the inherited ones, as Windows orders
+    /// a list. Every other entry stays as it is.
+    pub fn capped(aces: &[Ace], caps: &[(String, Gets)]) -> Vec<Capped> {
+        let listed = |sid: &str| caps.iter().position(|(s, _)| s.eq_ignore_ascii_case(sid));
+        let any_app = |sid: &str| {
+            sid.get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("S-1-15-"))
+        };
+        // The cap of an entry's SID, where it has one.
+        let cap_of = |sid: &str| match listed(sid).map(|j| caps[j].1) {
+            Some(Gets::Closed) => Some(0),
+            Some(Gets::Rights(c)) => Some(c & READ_AND_EXECUTE),
+            Some(Gets::Unheld) | None => any_app(sid).then_some(READ_AND_EXECUTE),
+        };
+        let mut out = Vec::new();
+        // Where the inherited entries start in `out`.
+        let mut first_inherited = None;
+        for (i, a) in aces.iter().enumerate() {
+            let explicit = a.flags & INHERITED == 0;
+            let j = a.sid.as_deref().and_then(listed);
+            let cap = a.sid.as_deref().and_then(cap_of);
+            let entry = match (a.kind, j, cap) {
+                // The node's own, worked out again below: also one the file
+                // inherited, since its list is no longer worked out under a
+                // folder's (see `Volume::cap`).
+                (ALLOWED | DENIED, Some(_), _) => None,
+                (ALLOWED | ALLOWED_CALLBACK, _, Some(cap)) => {
+                    let m = mapped(a.mask) & cap;
+                    (m != 0).then_some(Capped::Entry(i, m))
+                }
+                // The SID of these does not follow the mask: whoever it is,
+                // it gets no more than read and execute.
+                (ALLOWED_COMPOUND | ALLOWED_OBJECT | ALLOWED_CALLBACK_OBJECT, _, _) => {
+                    let m = mapped(a.mask) & READ_AND_EXECUTE;
+                    (m != 0).then_some(Capped::Entry(i, m))
+                }
+                _ => Some(Capped::Entry(i, a.mask)),
+            };
+            if let Some(e) = entry {
+                if !explicit && first_inherited.is_none() {
+                    first_inherited = Some(out.len());
+                }
+                out.push(e);
+            }
+        }
+        let denies = caps.iter().enumerate().filter_map(|(j, (_, g))| match g {
+            Gets::Closed => Some(Capped::Deny(j, ALL)),
+            Gets::Rights(c) => Some(Capped::Deny(j, ALL & !(c & READ_AND_EXECUTE))),
+            Gets::Unheld => None,
+        });
+        let allows = caps.iter().enumerate().filter_map(|(j, (_, g))| match g {
+            Gets::Rights(c) if c & READ_AND_EXECUTE != 0 => {
+                Some(Capped::Allow(j, c & READ_AND_EXECUTE))
+            }
+            _ => None,
+        });
+        let at = first_inherited.unwrap_or(out.len());
+        let inherited = out.split_off(at);
+        denies.chain(out).chain(allows).chain(inherited).collect()
+    }
+
+    /// `out`, a list [`capped`] gave for `aces`, with an allowing entry of
+    /// [`READ_AND_EXECUTE`] for `reader` (a SID as text), after the other
+    /// explicit entries and before the node's allowing ones: where
+    /// [`capped`] keeps it on the next walk, which may look at the file
+    /// then and gives no reader, so that walk leaves the list as it is. For the account the
+    /// walk acts as (the owner) on a file its list did not let it look at:
+    /// one a command linked from its own store into a granted folder keeps
+    /// the store's list, which names only the command account, its
+    /// container and the system, so without it the owner could not open
+    /// what an agent installed in their project. Read, not more, as on
+    /// Linux, where the owner reads such a file by its mode. Such an entry
+    /// that the list holds already (an earlier walk's) goes first, so a
+    /// walk that gives it again leaves the list as it is too; the reader's
+    /// other entries stay.
+    pub fn readable_by(out: Vec<Capped>, aces: &[Ace], reader: &str) -> Vec<Capped> {
+        let ours = |i: usize| {
+            let a = &aces[i];
+            a.kind == ALLOWED
+                && a.flags & INHERITED == 0
+                && a.mask == READ_AND_EXECUTE
+                && a.sid
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(reader))
+        };
+        let after_explicit = |e: &Capped| match *e {
+            Capped::Allow(..) => true,
+            Capped::Entry(i, _) => aces[i].flags & INHERITED != 0,
+            Capped::Deny(..) | Capped::Reads => false,
+        };
+        let mut out: Vec<Capped> = out
+            .into_iter()
+            .filter(|e| !matches!(*e, Capped::Entry(i, _) if ours(i)))
+            .collect();
+        let at = out.iter().position(after_explicit).unwrap_or(out.len());
+        out.insert(at, Capped::Reads);
+        out
+    }
+
+    /// The access list `aces` of a file with more than one name that
+    /// changes as any file ([`crate::inherit::Linked::Full`]): without the
+    /// node's own entries for the SIDs `listed` (as text), which an earlier
+    /// cap gave it ([`capped`]). Every other entry stays as it is.
+    pub fn uncapped(aces: &[Ace], listed: &[String]) -> Vec<Capped> {
+        aces.iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                !(a.flags & INHERITED == 0
+                    && matches!(a.kind, ALLOWED | DENIED)
+                    && a.sid
+                        .as_deref()
+                        .is_some_and(|sid| listed.iter().any(|l| l.eq_ignore_ascii_case(sid))))
+            })
+            .map(|(i, a)| Capped::Entry(i, a.mask))
+            .collect()
+    }
+
+    /// Whether `have`, a container's explicit entries (kind, ACE flags,
+    /// mask) on a granted file with more than one name, are those
+    /// [`capped`] gives it under a grant of `m`: a denying entry of every
+    /// right it does not allow, and an allowing one of no more than the
+    /// grant gives within [`READ_AND_EXECUTE`], or none (closed). The node
+    /// caps such a file in place of the grant's own entry (#149): it counts
+    /// as granted, so a sync does not put it on again each time. Not while
+    /// the file inherits an entry that allows the container something
+    /// (`inherits`): Windows does not hold a container to a denying entry,
+    /// so a tool that passed the folder's list down again (Explorer,
+    /// `icacls`) reopened the file, and [`capped`] takes that entry off on
+    /// the next sync.
+    pub fn capped_within(have: &[(u8, u32, u32)], m: Masks, inherits: bool) -> bool {
+        if m.deny || inherits {
+            return false;
+        }
+        let mut have = have.to_vec();
+        have.sort_unstable();
+        match have[..] {
+            [(DENIED, 0, d)] => d == ALL,
+            [(ALLOWED, 0, c), (DENIED, 0, d)] => {
+                c != 0 && c & !(m.file & READ_AND_EXECUTE) == 0 && d == ALL & !c
+            }
+            _ => false,
+        }
+    }
 
     /// The entries a grant of `m` is on a folder (`is_dir`) or a file, as
     /// (ACE flags, mask): for the folder itself, for the folders below it,
@@ -888,6 +1204,14 @@ pub mod acl {
     /// `DELETE`, so a command deletes, renames or moves it only through the
     /// folder above it; what is below it has `DELETE` by the flags.
     pub fn entries(is_dir: bool, m: Masks) -> Vec<(u32, u32)> {
+        if m.deny {
+            let inherit = if is_dir {
+                CONTAINER_INHERIT | OBJECT_INHERIT
+            } else {
+                0
+            };
+            return vec![(inherit, m.dir)];
+        }
         let all = if !is_dir {
             vec![(0, m.file & !DELETE)]
         } else if m.dir & DELETE == 0 {
@@ -1087,6 +1411,77 @@ pub mod acl {
         out.push(("PSModulePath".into(), modules.into()));
         out
     }
+
+    /// The variables that make `ac`, the container's own folder (`AC` of
+    /// its profile), the command's home: `USERPROFILE`, `HOME`,
+    /// `HOMEDRIVE` and `HOMEPATH` name `ac\home`, `APPDATA` the
+    /// `AppData\Roaming` there. So programs that keep settings below the
+    /// home (git, ssh, npm, pip, PowerShell's `~`) keep the pairing's own,
+    /// and what one pairing leaves there steers no other: every pairing's
+    /// commands run as one account. `LOCALAPPDATA`, `TEMP` and `TMP`
+    /// Windows points at `ac` itself. Programs that ask Windows for the
+    /// profile folder (the known-folder API, OpenSSH's `known_hosts`) still
+    /// get the account's, which the container cannot write.
+    ///
+    /// git trusts the repositories the command reaches, as on Linux: they
+    /// are the owner's, given to it, and git refuses another account's
+    /// otherwise ("dubious ownership").
+    pub fn container_home(ac: &std::path::Path) -> Vec<(String, String)> {
+        // Windows paths, also where the tests run elsewhere.
+        let text = format!("{}\\home", ac.display());
+        // `C:` and the rest, as Windows splits a home on a drive.
+        let (drive, path) = match text.get(..2) {
+            Some(d) if d.ends_with(':') => (d.to_string(), text[2..].to_string()),
+            _ => (String::new(), text.clone()),
+        };
+        vec![
+            ("USERPROFILE".into(), text.clone()),
+            ("HOME".into(), text.clone()),
+            ("HOMEDRIVE".into(), drive),
+            ("HOMEPATH".into(), path),
+            ("APPDATA".into(), format!("{text}\\AppData\\Roaming")),
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "*".into()),
+        ]
+    }
+
+    /// What a container's command gets set besides the environment it
+    /// inherits: `env`, the variables the owner passes on, then its home
+    /// (`ac`, its container's folder, [`container_home`]), which wins, as
+    /// on Linux a pairing's own home does.
+    pub fn command_set(
+        ac: Option<&std::path::Path>,
+        env: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut set = env.to_vec();
+        set.extend(ac.map(container_home).unwrap_or_default());
+        set
+    }
+
+    /// `vars` with each of `set` in place of a variable of its name
+    /// (Windows' names know no case); of two in `set` with one name, the
+    /// later.
+    pub fn with_vars(
+        vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        set: &[(String, String)],
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let set: Vec<&(String, String)> = set
+            .iter()
+            .enumerate()
+            .filter(|(i, (k, _))| !set[i + 1..].iter().any(|(l, _)| l.eq_ignore_ascii_case(k)))
+            .map(|(_, v)| v)
+            .collect();
+        let mut out: Vec<_> = vars
+            .into_iter()
+            .filter(|(k, _)| {
+                let k = k.to_string_lossy();
+                !set.iter().any(|(s, _)| s.eq_ignore_ascii_case(&k))
+            })
+            .collect();
+        out.extend(set.iter().map(|(k, v)| (k.into(), v.into())));
+        out
+    }
 }
 
 #[cfg(windows)]
@@ -1119,16 +1514,17 @@ pub mod appcontainer {
         FileHardLinkInformation, NtOpenFile, NtQueryInformationFile,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER,
-        ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE, LocalFree, NTSTATUS, RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW,
-        STATUS_BUFFER_TOO_SMALL, STATUS_DELETE_PENDING, STATUS_INVALID_INFO_CLASS,
-        STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_NOT_FOUND,
-        SetHandleInformation, UNICODE_STRING,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_LEVEL,
+        ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NO_TOKEN, ERROR_NOT_SUPPORTED,
+        GENERIC_ALL, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, NTSTATUS,
+        RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+        STATUS_DELETE_PENDING, STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER,
+        STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_NOT_FOUND, SetHandleInformation, UNICODE_STRING,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+        ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_WINDOW_OBJECT,
+        SetSecurityInfo,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -1136,22 +1532,23 @@ pub mod appcontainer {
     };
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION_DS, ACL_SIZE_INFORMATION,
-        AclSizeInformation, AddAccessAllowedAceEx, AddAce, CONTAINER_INHERIT_ACE,
-        ConvertToAutoInheritPrivateObjectSecurity, CreatePrivateObjectSecurityEx,
-        CreateWellKnownSid, DACL_SECURITY_INFORMATION, DestroyPrivateObjectSecurity, EqualSid,
-        FreeSid, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, GetAce, GetAclInformation,
-        GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorControl,
-        GetSecurityDescriptorDacl, GetSecurityDescriptorGroup, GetSecurityDescriptorLength,
-        GetSecurityDescriptorOwner, GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE,
+        AclSizeInformation, AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce,
+        CONTAINER_INHERIT_ACE, ConvertToAutoInheritPrivateObjectSecurity,
+        CreatePrivateObjectSecurityEx, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        DestroyPrivateObjectSecurity, EqualSid, FreeSid, GENERIC_MAPPING,
+        GROUP_SECURITY_INFORMATION, GetAce, GetAclInformation, GetKernelObjectSecurity,
+        GetLengthSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorGroup, GetSecurityDescriptorLength, GetSecurityDescriptorOwner,
+        GetTokenInformation, INHERIT_ONLY_ACE, INHERITED_ACE, ImpersonateLoggedOnUser,
         InitializeAcl, InitializeSecurityDescriptor, MakeSelfRelativeSD, OBJECT_INHERIT_ACE,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_AUTO_INHERIT_REQ,
-        SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
-        SECURITY_DESCRIPTOR, SEF_AVOID_OWNER_CHECK, SEF_AVOID_PRIVILEGE_CHECK,
-        SEF_DACL_AUTO_INHERIT, SID_AND_ATTRIBUTES, SetKernelObjectSecurity,
-        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorGroup,
-        SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
-        WinCapabilityPrivateNetworkClientServerSid,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+        SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+        SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR, SEF_AVOID_OWNER_CHECK,
+        SEF_AVOID_PRIVILEGE_CHECK, SEF_DACL_AUTO_INHERIT, SID_AND_ATTRIBUTES,
+        SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SetSecurityDescriptorGroup, SetSecurityDescriptorOwner, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        TOKEN_USER, TokenUser, WinCapabilityInternetClientServerSid,
+        WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, ExtendedFileIdType, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
@@ -1168,15 +1565,15 @@ pub mod appcontainer {
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::Threading::{
         CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetCurrentThread, GetExitCodeProcess,
+        INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        OpenProcessToken, OpenThreadToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, SetThreadToken, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     use super::acl::{self, FileId, Found, Masks, command_line, entries};
-    use crate::inherit::{self, Derived, Kind, Objects, Walk, Walked};
+    use crate::inherit::{self, Derived, Kind, Linked, Objects, Walk, Walked};
 
     // The flags of `acl::entries` are Windows' own.
     const _: () = assert!(
@@ -1201,11 +1598,27 @@ pub mod appcontainer {
         }
     }
 
-    /// The SID of the container `name`.
-    pub struct Sid(PSID);
+    /// The SID of the container `name`, or of the account whose SID `name`
+    /// is in text (`S-1-5-…`): the command account gets entries on the
+    /// folders as well as each container (nerve-node's grants). Whether
+    /// Windows allocated it with LocalAlloc.
+    pub struct Sid(PSID, bool);
 
     impl Sid {
+        /// The SID, for a call that takes one; it lives as long as `self`.
+        pub fn as_ptr(&self) -> PSID {
+            self.0
+        }
+
         pub fn derive(name: &str) -> io::Result<Sid> {
+            if name.starts_with("S-1-") {
+                let mut sid: PSID = null_mut();
+                // SAFETY: a NUL-terminated string; the SID the call
+                // allocates is freed with LocalFree.
+                check(unsafe { ConvertStringSidToSidW(wide(OsStr::new(name)).as_ptr(), &mut sid) })
+                    .map_err(|e| io::Error::new(e.kind(), format!("the SID {name}: {e}")))?;
+                return Ok(Sid(sid, true));
+            }
             let n = wide(OsStr::new(name));
             let mut sid: PSID = null_mut();
             // SAFETY: a NUL-terminated name; the call sets `sid` to a SID it
@@ -1216,14 +1629,21 @@ pub mod appcontainer {
                     "cannot derive the AppContainer SID of {name} ({hr:#x})"
                 )));
             }
-            Ok(Sid(sid))
+            Ok(Sid(sid, false))
         }
     }
 
     impl Drop for Sid {
         fn drop(&mut self) {
-            // SAFETY: the SID came from DeriveAppContainerSidFromAppContainerName.
-            unsafe { FreeSid(self.0) };
+            // SAFETY: the SID came from ConvertStringSidToSidW or from
+            // DeriveAppContainerSidFromAppContainerName.
+            unsafe {
+                if self.1 {
+                    LocalFree(self.0);
+                } else {
+                    FreeSid(self.0);
+                }
+            }
         }
     }
 
@@ -1312,6 +1732,11 @@ pub mod appcontainer {
     /// Which object is at `path` now.
     pub fn file_id(path: &Path) -> io::Result<FileId> {
         id_of(&open(path, FILE_READ_ATTRIBUTES)?)
+    }
+
+    /// Which object the open handle `h` is on.
+    pub fn handle_id(h: &impl AsRawHandle) -> io::Result<FileId> {
+        id_by(h.as_raw_handle())
     }
 
     /// `path` opened for `access` alone, as [`open`] does, but a link or
@@ -1433,8 +1858,9 @@ pub mod appcontainer {
 
     /// What is at `path` (its [`FileId`], `None` where the volume gives
     /// none), and whether its own entries for the container `name` are
-    /// exactly those [`set`] puts on for `masks`. NotFound when nothing is
-    /// there.
+    /// exactly those [`set`] puts on for `masks` (on a file with more than
+    /// one name, or the cap [`set_below`] gives it in their place:
+    /// [`acl::capped_within`]). NotFound when nothing is there.
     pub fn look(path: &Path, name: &str, masks: Masks) -> io::Result<(Option<FileId>, bool)> {
         let sid = Sid::derive(name)?;
         let f = open(path, READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -1464,23 +1890,51 @@ pub mod appcontainer {
             return Ok((id, false));
         }
         let mut have = Vec::new();
+        // An entry it inherits that allows the container something: a
+        // folder closed to it is not closed while it has one ([`closing`]),
+        // as where a tool passed the list of the folder around it down.
+        let mut opened = false;
         for ace in aces(dacl)? {
             // SAFETY: the ACE lies in `dacl`, valid while `_sd` lives; an
-            // allowed or denied ACE has its mask after the header.
+            // allowed or denied ACE has its mask after the header and its
+            // SID at SidStart.
             unsafe {
+                let a = ace as *const ACCESS_ALLOWED_ACE;
                 if own_for(ace, &sid) {
-                    let a = ace as *const ACCESS_ALLOWED_ACE;
                     have.push(((*ace).AceType, u32::from((*ace).AceFlags), (*a).Mask));
+                } else if (*ace).AceType == ACCESS_ALLOWED_ACE_TYPE
+                    && EqualSid(&raw const (*a).SidStart as PSID, sid.0) != 0
+                {
+                    opened = true;
                 }
             }
         }
+        if masks.deny && opened {
+            return Ok((id, false));
+        }
+        let kind = if masks.deny {
+            ACCESS_DENIED_ACE_TYPE
+        } else {
+            ACCESS_ALLOWED_ACE_TYPE
+        };
         let mut want: Vec<_> = entries(is_dir, masks)
             .into_iter()
-            .map(|(flags, mask)| (ACCESS_ALLOWED_ACE_TYPE, flags, mask))
+            .map(|(flags, mask)| (kind, flags, mask))
             .collect();
         have.sort_unstable();
         want.sort_unstable();
-        Ok((id, have == want))
+        if have == want || is_dir {
+            return Ok((id, have == want));
+        }
+        // A file with more than one name gets the node's cap in place of
+        // the grant's entry ([`set_below`]).
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: an open handle and a buffer for the answer.
+        check(unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) })?;
+        Ok((
+            id,
+            info.nNumberOfLinks > 1 && acl::capped_within(&have, masks, opened),
+        ))
     }
 
     /// The path of the object open as `f`: by its drive or the folder its
@@ -1807,6 +2261,17 @@ pub mod appcontainer {
             Ok(Sd(buf))
         }
 
+        /// Its owner as text, where it names one.
+        fn owner(&self) -> io::Result<Option<String>> {
+            let (mut owner, mut defaulted): (PSID, i32) = (null_mut(), 0);
+            // SAFETY: a valid descriptor; `owner` points into it.
+            check(unsafe { GetSecurityDescriptorOwner(self.ptr(), &mut owner, &mut defaulted) })?;
+            if owner.is_null() {
+                return Ok(None);
+            }
+            sid_text(owner).map(Some)
+        }
+
         /// Whether an entry of its access list is marked inherited.
         fn marks_inherited(&self) -> io::Result<bool> {
             let (mut present, mut defaulted) = (0, 0);
@@ -1904,22 +2369,92 @@ pub mod appcontainer {
     struct Volume {
         /// This process' token, which Windows asks for in that.
         token: Obj,
+        /// [`Below::maker`].
+        maker: Option<HANDLE>,
     }
 
     impl Volume {
         fn new() -> io::Result<Volume> {
             Ok(Volume {
                 token: process_token()?,
+                maker: None,
             })
+        }
+
+        /// The account this thread acts as (as a SID), where a cap
+        /// (`linked`) is to give it read: it may not look at the file, which
+        /// was opened as its maker then ([`Volume::open`], a file a command
+        /// linked in from its own store; [`acl::readable_by`]). `None`
+        /// otherwise.
+        fn reader(&self, obj: &Obj, linked: &Linked) -> io::Result<Option<String>> {
+            if self.maker.is_none() || !matches!(linked, Linked::Capped(_)) {
+                return Ok(None);
+            }
+            match open_in(obj.h, &[], READ_CONTROL | FILE_READ_ATTRIBUTES) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    acting_sid().map(Some)
+                }
+                Err(e) => Err(e),
+                Ok(_) => Ok(None),
+            }
         }
     }
 
+    /// Runs `f` on this thread as the account of the logon `token`, and
+    /// then as the thread was again (itself, or whoever it acted as). An
+    /// error where it cannot be that again: what follows must not run as
+    /// the account.
+    fn as_token<T>(token: HANDLE, f: impl FnOnce() -> T) -> io::Result<T> {
+        // As the process first: it holds the right to act as another.
+        // SAFETY: a logon token.
+        as_self(|| check(unsafe { ImpersonateLoggedOnUser(token) }).map(|()| f()))?
+    }
+
+    /// Runs `f` on this thread as this process, and then as the thread was
+    /// again (whoever it acted as). An error where it cannot be that again:
+    /// what follows must not run as the process.
+    fn as_self<T>(f: impl FnOnce() -> T) -> io::Result<T> {
+        let mut was: HANDLE = null_mut();
+        // SAFETY: the thread's own token, opened as the process, owned by
+        // the Obj below.
+        let had = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut was) };
+        let was = if had != 0 {
+            Some(Obj {
+                h: was,
+                owned: true,
+            })
+        } else {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+                return Err(e);
+            }
+            None
+        };
+        // SAFETY: plain call.
+        check(unsafe { RevertToSelf() })?;
+        let r = f();
+        // SAFETY: plain calls; the thread's token opened above.
+        let back = unsafe {
+            RevertToSelf();
+            match &was {
+                Some(t) => SetThreadToken(null(), t.h),
+                None => 1,
+            }
+        };
+        check(back)?;
+        Ok(r)
+    }
+
     /// This process' token, which Windows asks for as it works out what an
-    /// object inherits.
+    /// object inherits. Opened as the process: the account the thread acts
+    /// as may not open it (the installed service's owner may not open the
+    /// token of the node's account).
     fn process_token() -> io::Result<Obj> {
         let mut token: HANDLE = null_mut();
         // SAFETY: this process' own token, owned by the Obj below.
-        check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+        as_self(|| {
+            check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })
+        })??;
         Ok(Obj {
             h: token,
             owned: true,
@@ -1967,6 +2502,89 @@ pub mod appcontainer {
                     ))?;
                 }
             }
+        }
+        Sd::with(sd, new, sd.control()?)
+    }
+
+    /// `sd` without the entries it inherited that allow anything to a
+    /// container whose own entry on it denies everything (a folder closed
+    /// to it, [`acl::closed`]). Windows does not hold a container to an
+    /// entry that denies it: it checks a container's process by the entries
+    /// that allow the container something, and one that inherits the grant
+    /// of the folder around it may do all that grant allows (#149's first
+    /// run on the service). The denial stays as the mark of the closed
+    /// folder; what is below it inherits its list without the grant. Only a
+    /// container of the node's kind counts ([`acl::package_sid`]): the
+    /// groups all containers are in (`ALL APPLICATION PACKAGES`) keep what
+    /// they inherit where another program denied them the folder.
+    fn closing(sd: &Sd) -> io::Result<Sd> {
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: a valid descriptor; `dacl` points into it.
+        check(unsafe {
+            GetSecurityDescriptorDacl(sd.ptr(), &mut present, &mut dacl, &mut defaulted)
+        })?;
+        if present == 0 || dacl.is_null() {
+            return Ok(sd.clone());
+        }
+        let all = aces(dacl)?;
+        // SAFETY: every ACE lies in `dacl`, valid while `sd` lives; an
+        // allowed or denied ACE has its mask after the header and its SID
+        // at SidStart.
+        let sid_of = |ace: *const ACE_HEADER| unsafe {
+            &raw const (*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as PSID
+        };
+        let mut closed = Vec::new();
+        for &ace in &all {
+            // SAFETY: as above.
+            let h = unsafe { &*ace };
+            let mask = unsafe { (*(ace as *const ACCESS_ALLOWED_ACE)).Mask };
+            if h.AceType == ACCESS_DENIED_ACE_TYPE
+                && u32::from(h.AceFlags) & INHERITED_ACE == 0
+                && mask & acl::ALL == acl::ALL
+                && acl::package_sid(&sid_text(sid_of(ace))?)
+            {
+                closed.push(sid_of(ace));
+            }
+        }
+        let opens = |ace: *const ACE_HEADER| {
+            // SAFETY: as above.
+            let h = unsafe { &*ace };
+            h.AceType == ACCESS_ALLOWED_ACE_TYPE
+                && u32::from(h.AceFlags) & INHERITED_ACE != 0
+                // SAFETY: two valid SIDs.
+                && closed.iter().any(|&c| unsafe { EqualSid(sid_of(ace), c) } != 0)
+        };
+        if !all.iter().any(|&a| opens(a)) {
+            return Ok(sd.clone());
+        }
+        let mut info = ACL_SIZE_INFORMATION::default();
+        // SAFETY: a valid ACL and a buffer of the size given.
+        check(unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as *mut c_void,
+                size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        })?;
+        let size = info.AclBytesInUse.max(size_of::<ACL>() as u32);
+        let mut buf = vec![0u32; (size as usize).div_ceil(4)];
+        let new = buf.as_mut_ptr() as *mut ACL;
+        // SAFETY: the buffer holds `size` bytes.
+        check(unsafe { InitializeAcl(new, size, ACL_REVISION_DS) })?;
+        for &ace in all.iter().filter(|&&a| !opens(a)) {
+            // SAFETY: the ACE lies in `dacl` and is as long as its header
+            // says; the new list has room for all of them.
+            check(unsafe {
+                AddAce(
+                    new,
+                    ACL_REVISION_DS,
+                    u32::MAX,
+                    ace as *const c_void,
+                    u32::from((*ace).AceSize),
+                )
+            })?;
         }
         Sd::with(sd, new, sd.control()?)
     }
@@ -2027,11 +2645,12 @@ pub mod appcontainer {
             )
         })?;
         // SAFETY: the descriptor just made, copied, then freed once.
-        Ok(unsafe {
+        let made = unsafe {
             let copy = Sd::copy(made);
             DestroyPrivateObjectSecurity(&made);
             copy
-        })
+        };
+        closing(&made)
     }
 
     /// The list of the folder the object open as `f` is in now, by its
@@ -2076,7 +2695,20 @@ pub mod appcontainer {
 
         fn open(&mut self, dir: &Obj, name: &OsStr) -> io::Result<Option<Obj>> {
             let name: Vec<u16> = name.encode_wide().collect();
-            open_in(dir.h, &name, READ_CONTROL | FILE_READ_ATTRIBUTES)
+            let access = READ_CONTROL | FILE_READ_ATTRIBUTES;
+            // A file a command linked in from its own store (pnpm's, uv's,
+            // in its profile) keeps the store's list under every name, so
+            // the thread may not even look at it: opened as its maker then
+            // ([`Below::maker`]), as for a write.
+            match open_in(dir.h, &name, access) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    match self.maker {
+                        Some(t) => as_token(t, || open_in(dir.h, &name, access))?,
+                        None => Err(e),
+                    }
+                }
+                r => r,
+            }
         }
 
         fn kind(&mut self, obj: &Obj) -> io::Result<Kind> {
@@ -2125,20 +2757,21 @@ pub mod appcontainer {
             let list = &list.new;
             // Opened for the change only now, on the same object: one the
             // node may read but not change stops a walk only where its list
-            // changes.
-            let Some(w) = open_in(obj.h, &[], WRITE_DAC)? else {
+            // changes. One the thread may not change is opened as its
+            // maker where one is given ([`Below::maker`]).
+            let w = match open_in(obj.h, &[], WRITE_DAC) {
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                    match self.maker {
+                        Some(t) => as_token(t, || open_in(obj.h, &[], WRITE_DAC))??,
+                        None => return Err(e),
+                    }
+                }
+                r => r?,
+            };
+            let Some(w) = w else {
                 return Err(io::ErrorKind::NotFound.into());
             };
             list.write(w.h)
-        }
-
-        fn at(&mut self, obj: &Obj, path: &Path) -> io::Result<bool> {
-            let there = match open_itself(path, FILE_READ_ATTRIBUTES) {
-                Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(e) => return Err(e),
-            };
-            Ok(id_by(obj.h)? == id_of(&there)?)
         }
 
         fn names_of(&mut self, obj: &Obj) -> io::Result<Vec<PathBuf>> {
@@ -2194,8 +2827,24 @@ pub mod appcontainer {
                         id[..8].copy_from_slice(&(*e).ParentFileId.to_le_bytes());
                         ((*e).NextEntryOffset, id, name)
                     };
-                    let folder = folder_by_id(obj.h, parent)?;
-                    out.push(folder.join(std::ffi::OsString::from_wide(name)));
+                    // A folder the thread may not open may be the command
+                    // account's (its profile, where pnpm and uv keep what
+                    // they link): opened as its maker then. One neither may
+                    // open is left out.
+                    let folder = match folder_by_id(obj.h, parent) {
+                        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                            match self.maker {
+                                Some(t) => as_token(t, || folder_by_id(obj.h, parent))?,
+                                None => Err(e),
+                            }
+                        }
+                        r => r,
+                    };
+                    match folder {
+                        Ok(folder) => out.push(folder.join(std::ffi::OsString::from_wide(name))),
+                        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {}
+                        Err(e) => return Err(e),
+                    }
                     if next == 0 {
                         break;
                     }
@@ -2204,6 +2853,194 @@ pub mod appcontainer {
             }
             Ok(out)
         }
+
+        fn owner(&mut self, obj: &Obj) -> io::Result<Option<String>> {
+            Sd::of(obj.h)?.owner()
+        }
+
+        fn cap(
+            &mut self,
+            obj: &Obj,
+            derived: Derived<Lists>,
+            linked: &Linked,
+        ) -> io::Result<Derived<Lists>> {
+            let lists = match derived {
+                Derived::Kept => return Ok(Derived::Kept),
+                Derived::Same(l) | Derived::Changed(l) => l,
+            };
+            let now = Sd::of(obj.h)?;
+            // A capped file keeps the list it has: the entries it inherited
+            // under its other names' folders (a store's, a cache's, a
+            // source repository's) and those of every account but the
+            // containers stay as they are. The list worked out under the
+            // folder walked would give the file that folder's entries for
+            // everyone, under every name. The node's own entries come from
+            // the grants alone ([`acl::capped`]). A file that changes as any
+            // file gets the folder's list.
+            let base = match linked {
+                Linked::Capped(_) => &now,
+                Linked::Full(_) => &lists.new,
+            };
+            let reader = self.reader(obj, linked)?;
+            let new = capped(base, linked, reader.as_deref())?;
+            Ok(if new.entries()? == now.entries()? {
+                Derived::Same(Lists {
+                    new: now.clone(),
+                    was: now,
+                })
+            } else {
+                Derived::Changed(Lists { new, was: now })
+            })
+        }
+    }
+
+    /// `sd` as `linked` says, the list of a file with more than one name:
+    /// with no more than its cap allows the AppContainers
+    /// ([`acl::capped`]), and read for `reader` where one is given
+    /// ([`acl::readable_by`]), or without the node's own entries of an
+    /// earlier cap ([`acl::uncapped`]).
+    fn capped(sd: &Sd, linked: &Linked, reader: Option<&str>) -> io::Result<Sd> {
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: a valid descriptor; `dacl` points into it.
+        check(unsafe {
+            GetSecurityDescriptorDacl(sd.ptr(), &mut present, &mut dacl, &mut defaulted)
+        })?;
+        if present == 0 || dacl.is_null() {
+            // No list lets everyone in; the node gives it none (`next`).
+            return Err(io::Error::other(
+                "it has more than one name and no access list, so everyone may open it; the node does not give it one",
+            ));
+        }
+        let old = aces(dacl)?;
+        let mut list = Vec::with_capacity(old.len());
+        for &ace in &old {
+            // SAFETY: every ACE starts with its header and has its mask
+            // right after it; the kinds below have their SID after the mask.
+            let (kind, flags, mask) = unsafe {
+                let a = ace as *const ACCESS_ALLOWED_ACE;
+                ((*ace).AceType, (*ace).AceFlags, (*a).Mask)
+            };
+            let sid = match kind {
+                0 | 1 | 9 | 10 => {
+                    // SAFETY: as above.
+                    let p = unsafe { &raw const (*(ace as *const ACCESS_ALLOWED_ACE)).SidStart };
+                    Some(sid_text(p as PSID)?)
+                }
+                _ => None,
+            };
+            list.push(acl::Ace {
+                kind,
+                flags,
+                mask,
+                sid,
+            });
+        }
+        let names: Vec<&String> = match linked {
+            Linked::Full(listed) => listed.iter().collect(),
+            Linked::Capped(cap) => cap.containers.iter().map(|(name, _)| name).collect(),
+        };
+        let sids: Vec<Sid> = names
+            .iter()
+            .map(|name| Sid::derive(name))
+            .collect::<io::Result<_>>()?;
+        let texts: Vec<String> = sids
+            .iter()
+            .map(|sid| sid_text(sid.0))
+            .collect::<io::Result<_>>()?;
+        let out = match linked {
+            Linked::Full(_) => {
+                let out = acl::uncapped(&list, &texts);
+                // Nothing of the node's: the list as it is.
+                if out.len() == list.len() {
+                    return Ok(sd.clone());
+                }
+                out
+            }
+            Linked::Capped(cap) => {
+                let caps: Vec<(String, inherit::Gets)> = texts
+                    .into_iter()
+                    .zip(&cap.containers)
+                    .map(|(sid, (_, g))| (sid, *g))
+                    .collect();
+                let out = acl::capped(&list, &caps);
+                match reader {
+                    Some(r) => acl::readable_by(out, &list, r),
+                    None => out,
+                }
+            }
+        };
+        let reader = reader.map(Sid::derive).transpose()?;
+        let mut size = size_of::<ACL>() as u32;
+        for e in &out {
+            size += match *e {
+                // SAFETY: an ACE of the old list, as long as its header says.
+                acl::Capped::Entry(i, _) => u32::from(unsafe { (*old[i]).AceSize }),
+                // SAFETY: a valid SID.
+                acl::Capped::Deny(j, _) | acl::Capped::Allow(j, _) => {
+                    size_of::<ACCESS_ALLOWED_ACE>() as u32 - 4 + unsafe { GetLengthSid(sids[j].0) }
+                }
+                acl::Capped::Reads => {
+                    let r = reader
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("no reader"))?;
+                    // SAFETY: a valid SID.
+                    size_of::<ACCESS_ALLOWED_ACE>() as u32 - 4 + unsafe { GetLengthSid(r.0) }
+                }
+            };
+        }
+        let mut buf = vec![0u32; (size as usize).div_ceil(4)];
+        let new = buf.as_mut_ptr() as *mut ACL;
+        // SAFETY: the buffer holds `size` bytes.
+        check(unsafe { InitializeAcl(new, size, ACL_REVISION_DS) })?;
+        for e in out {
+            match e {
+                acl::Capped::Entry(i, mask) => {
+                    // SAFETY: the ACE lies in `dacl`, as long as its header
+                    // says, with its mask right after the header.
+                    let mut bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            old[i] as *const u8,
+                            usize::from((*old[i]).AceSize),
+                        )
+                    }
+                    .to_vec();
+                    bytes[4..8].copy_from_slice(&mask.to_le_bytes());
+                    // SAFETY: a whole ACE, and room for it in the new list.
+                    check(unsafe {
+                        AddAce(
+                            new,
+                            ACL_REVISION_DS,
+                            u32::MAX,
+                            bytes.as_ptr() as *const c_void,
+                            bytes.len() as u32,
+                        )
+                    })?;
+                }
+                acl::Capped::Deny(j, mask) => {
+                    // SAFETY: the list has room for it.
+                    check(unsafe {
+                        AddAccessDeniedAceEx(new, ACL_REVISION_DS, 0, mask, sids[j].0)
+                    })?;
+                }
+                acl::Capped::Allow(j, mask) => {
+                    // SAFETY: the list has room for it.
+                    check(unsafe {
+                        AddAccessAllowedAceEx(new, ACL_REVISION_DS, 0, mask, sids[j].0)
+                    })?;
+                }
+                acl::Capped::Reads => {
+                    let r = reader
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("no reader"))?;
+                    // SAFETY: the list has room for it.
+                    check(unsafe {
+                        AddAccessAllowedAceEx(new, ACL_REVISION_DS, 0, acl::READ_AND_EXECUTE, r.0)
+                    })?;
+                }
+            }
+        }
+        Sd::with(sd, new, sd.control()?)
     }
 
     /// The names (hard links) of the object open as `h`, as Windows gives
@@ -2401,6 +3238,15 @@ pub mod appcontainer {
                 )
             })
         };
+        // A denial comes before every entry: Windows decides by the first
+        // entry that names the asker.
+        let deny = masks.is_some_and(|m| m.deny);
+        if deny {
+            for (flags, mask) in &add {
+                // SAFETY: the list has room for each of these ACEs.
+                check(unsafe { AddAccessDeniedAceEx(new, ACL_REVISION_DS, *flags, *mask, sid.0) })?;
+            }
+        }
         // Its own entries but the container's, then the container's new
         // ones, then the inherited entries, as Windows keeps a list's own
         // entries before those it inherited.
@@ -2420,7 +3266,7 @@ pub mod appcontainer {
                 copy(ace)?;
             }
         }
-        for (flags, mask) in add {
+        for (flags, mask) in add.into_iter().filter(|_| !deny) {
             // SAFETY: the list has room for each of these ACEs.
             check(unsafe { AddAccessAllowedAceEx(new, ACL_REVISION_DS, flags, mask, sid.0) })?;
         }
@@ -2447,27 +3293,32 @@ pub mod appcontainer {
 
     /// What a change of a grant asks of what it reaches below its folder.
     pub struct Below<'a> {
-        /// Whether a file with more than one name (hard links) whose list
-        /// changes may change ([`Walk::links`]); `None`: any may.
+        /// What a file with more than one name (hard links) gets
+        /// ([`Walk::links`]); `None`: it changes as any file.
         pub links: Option<inherit::Links<'a>>,
         /// Told how far the change is, now and then.
         pub progress: &'a mut dyn FnMut(Walked),
+        /// A logon token of the account commands run as, which owns what
+        /// they make: a list below the folder the thread may not change is
+        /// changed as that account, which as its owner may. Outside your
+        /// profile Windows gives you no right to change the list of a file
+        /// another account made (#149).
+        pub maker: Option<HANDLE>,
     }
 
     /// Passes the list `next` of the folder open as `f` (at `path`) down
     /// ([`inherit::pass_down`]), into every folder with `every`, and
-    /// writes it on the folder last with `write_top`; only looks with
-    /// `write` false.
+    /// writes it on the folder last with `write_top`.
     fn pass(
         f: &std::fs::File,
         path: &Path,
         next: &Next,
         write_top: bool,
         every: bool,
-        write: bool,
         below: Below,
-    ) -> io::Result<(Walked, Option<inherit::Stop>)> {
+    ) -> io::Result<Walked> {
         let mut volume = Volume::new()?;
+        volume.maker = below.maker;
         let top = Obj {
             h: f.as_raw_handle(),
             owned: false,
@@ -2481,9 +3332,9 @@ pub mod appcontainer {
             top,
             lists,
             path,
-            write_top && write,
+            write_top,
             Walk {
-                write,
+                write: true,
                 every,
                 links: below.links,
                 progress: below.progress,
@@ -2503,6 +3354,7 @@ pub mod appcontainer {
         let below = Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         set_below(path, name, masks, own, false, None, below).map(|(id, _)| id)
     }
@@ -2522,9 +3374,8 @@ pub mod appcontainer {
     /// [`FileId`] of the object it changed, as its handle names it, when
     /// the volume names one, and how far the change went below it.
     ///
-    /// A file below with more than one name that `below.links` refuses as
-    /// the change reaches it stops the change there, as an error: what it
-    /// changed below `path` stays, and `path` keeps its list.
+    /// A file with more than one name, `path` itself or one below it, gets
+    /// what `below.links` says ([`inherit::pass_down`]).
     ///
     /// With `whole`, the change goes into every folder below, also where
     /// the list of `path` stays as it is: an earlier change there may have
@@ -2542,7 +3393,7 @@ pub mod appcontainer {
         own: bool,
         whole: bool,
         expect: Option<FileId>,
-        below: Below,
+        mut below: Below,
     ) -> io::Result<(Option<FileId>, Walked)> {
         let sid = Sid::derive(name)?;
         let refuse = |why: String| {
@@ -2554,8 +3405,19 @@ pub mod appcontainer {
                 ),
             ))
         };
-        // The change goes through this handle, on the object it opened.
-        let f = match open(path, READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES) {
+        // The change goes through this handle, on the object it opened. One
+        // the thread may not change is opened as its maker, as below it
+        // ([`Below::maker`]): a folder commands made outside your profile.
+        // The checks below hold for what that opened as well.
+        let access = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
+        let opened = match open(path, access) {
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => match below.maker {
+                Some(t) => as_token(t, || open(path, access))?,
+                None => Err(e),
+            },
+            r => r,
+        };
+        let f = match opened {
             Ok(f) => f,
             // The recorded object is not at the path (moved away meanwhile):
             // not "nothing there" for the record, which the next sync finds
@@ -2580,57 +3442,47 @@ pub mod appcontainer {
         {
             return refuse(why);
         }
-        let next = next(&f, &sid, masks)?;
+        let mut next = next(&f, &sid, masks)?;
         if own && masks.is_some() && next.protected {
             return refuse("its permissions do not inherit from its folder".into());
+        }
+        // A granted file with more than one name, as one below a folder.
+        // Whether its list inherits does not matter: the cap works on the
+        // entries it has, so a file the owner linked from a protected list
+        // (an SSH key) gets the cap too, not the grant's own entry.
+        if !next.is_dir
+            && let Some(links) = below.links.as_mut()
+        {
+            let top = Obj {
+                h: f.as_raw_handle(),
+                owned: false,
+            };
+            let mut volume = Volume::new()?;
+            volume.maker = below.maker;
+            let names = volume.kind(&top)?.names;
+            if names > 1 {
+                let owner = next.was.owner()?;
+                let linked = links(path, names, &volume.names_of(&top)?, owner.as_deref())?;
+                // As below a folder (`Volume::cap`): a cap works from the
+                // list the file has, not the one its folder would give it.
+                let base = match linked {
+                    Linked::Capped(_) => &next.was,
+                    Linked::Full(_) => &next.sd,
+                };
+                let reader = volume.reader(&top, &linked)?;
+                next.sd = capped(base, &linked, reader.as_deref())?;
+                next.changed = next.sd.entries()? != next.was.entries()?;
+            }
         }
         let every = masks.is_none() || whole;
         let mut walked = Walked::default();
         if next.is_dir && (next.changed || every) {
             // The walk writes the list of `path` itself last.
-            let (w, stopped) = pass(&f, path, &next, next.changed, every, true, below)?;
-            walked = w;
-            if let Some(stop) = stopped {
-                let folder = if stop.top_written {
-                    // Made in the folder while the walk was below it.
-                    "after the folder itself got the change"
-                } else {
-                    "with the folder itself as it was"
-                };
-                return Err(io::Error::other(format!(
-                    "{} below it has {} names (hard links), and the change would reach them all; it stopped there, {folder}",
-                    stop.path.display(),
-                    stop.names
-                )));
-            }
+            walked = pass(&f, path, &next, next.changed, every, below)?;
         } else if next.changed {
             next.sd.write(f.as_raw_handle())?;
         }
         Ok((id_of(&f).ok(), walked))
-    }
-
-    /// The first file below the folder `path` with more than one name (hard
-    /// links) whose list [`set_below`] would change for the container
-    /// `name` and `masks`, and that `below.links` refuses (also one whose
-    /// path no longer leads to it), with how many names it has; and how far
-    /// it looked. Changes nothing. `None` for a file, and where the change
-    /// reaches no such file. `whole` as for [`set_below`].
-    pub fn reaches(
-        path: &Path,
-        name: &str,
-        masks: Option<Masks>,
-        whole: bool,
-        below: Below,
-    ) -> io::Result<(Option<(PathBuf, u32)>, Walked)> {
-        let sid = Sid::derive(name)?;
-        let f = open(path, READ_CONTROL | FILE_READ_ATTRIBUTES).map_err(gone)?;
-        let next = next(&f, &sid, masks)?;
-        let every = masks.is_none() || whole;
-        if !next.is_dir || !(next.changed || every) {
-            return Ok((None, Walked::default()));
-        }
-        let (walked, found) = pass(&f, path, &next, false, every, false, below)?;
-        Ok((found.map(|s| (s.path, s.names)), walked))
     }
 
     /// `e`, marked as nothing at the path where it says so.
@@ -2669,6 +3521,45 @@ pub mod appcontainer {
             )));
         }
         Ok(())
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(p: *const c_void);
+    }
+
+    /// The container `name` made ready for a command of the user this
+    /// process runs as: its profile ([`ensure_profile`]) and the folders of
+    /// its home in it ([`acl::container_home`]). Its own folder, `AC`.
+    pub fn ready(name: &str) -> io::Result<PathBuf> {
+        ensure_profile(name)?;
+        let sid = Sid::derive(name)?;
+        let text = wide(OsStr::new(&sid_text(sid.0)?));
+        let mut at: *mut u16 = null_mut();
+        // SAFETY: a NUL-terminated SID string; the call allocates the path,
+        // freed below with CoTaskMemFree.
+        let hr = unsafe {
+            windows_sys::Win32::Security::Isolation::GetAppContainerFolderPath(
+                text.as_ptr(),
+                &mut at,
+            )
+        };
+        if hr < 0 || at.is_null() {
+            return Err(io::Error::other(format!(
+                "cannot find the folder of the AppContainer {name} ({hr:#x})"
+            )));
+        }
+        // SAFETY: a NUL-terminated string from the call, freed once.
+        let ac = unsafe {
+            let len = (0..).take_while(|&i| *at.add(i) != 0).count();
+            let p = PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+                at, len,
+            )));
+            CoTaskMemFree(at.cast());
+            p
+        };
+        std::fs::create_dir_all(ac.join("home").join("AppData").join("Roaming"))?;
+        Ok(ac)
     }
 
     /// Takes the profile of the container `name` away from the user this
@@ -2738,6 +3629,13 @@ pub mod appcontainer {
         ) -> HANDLE;
         fn CloseDesktop(desktop: HANDLE) -> i32;
         fn CloseWindowStation(station: HANDLE) -> i32;
+        fn GetUserObjectInformationW(
+            obj: HANDLE,
+            index: i32,
+            info: *mut c_void,
+            len: u32,
+            need: *mut u32,
+        ) -> i32;
     }
 
     /// The SID as text (`S-1-...`).
@@ -2774,6 +3672,27 @@ pub mod appcontainer {
     /// The SID of the user this process runs as, as text.
     fn user_sid() -> io::Result<String> {
         let token = Token::open()?;
+        token_user(&token)
+    }
+
+    /// The SID of the account this thread acts as (whom it impersonates,
+    /// else this process' user), as text.
+    fn acting_sid() -> io::Result<String> {
+        let mut h: HANDLE = null_mut();
+        // SAFETY: the thread's own token, opened as the process, closed by
+        // the Token below.
+        if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut h) } == 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+                return Err(e);
+            }
+            return user_sid();
+        }
+        token_user(&Token(h))
+    }
+
+    /// The user of `token`, as text.
+    fn token_user(token: &Token) -> io::Result<String> {
         let mut len = 0u32;
         // SAFETY: the first call asks for the size only.
         unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
@@ -2800,7 +3719,8 @@ pub mod appcontainer {
     /// does not reach the user's windows or clipboard either. They go when
     /// the shim does.
     struct Desktop {
-        station: HANDLE,
+        /// A station of its own; `None` on the logon's own station.
+        station: Option<HANDLE>,
         desktop: HANDLE,
         /// `station\desktop`, for the startup info.
         name: Vec<u16>,
@@ -2808,12 +3728,151 @@ pub mod appcontainer {
 
     impl Drop for Desktop {
         fn drop(&mut self) {
-            // SAFETY: made in `desktop`, closed once.
+            // SAFETY: made in `desktop`, closed once; the logon's own
+            // station stays.
             unsafe {
                 CloseDesktop(self.desktop);
-                CloseWindowStation(self.station);
+                if let Some(s) = self.station {
+                    CloseWindowStation(s);
+                }
             }
         }
+    }
+
+    /// The name of the window object `h` (a station).
+    fn object_name(h: HANDLE) -> io::Result<String> {
+        let mut buf = [0u16; 256];
+        let mut need = 0u32;
+        // SAFETY: a buffer of its size in bytes; UOI_NAME is 2.
+        check(unsafe { GetUserObjectInformationW(h, 2, buf.as_mut_ptr().cast(), 512, &mut need) })?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Ok(String::from_utf16_lossy(&buf[..len]))
+    }
+
+    /// [`desktop`] where this account may make no window station: a
+    /// command account the installed node starts in session 0 of the
+    /// services may not. Its process has the station of its own logon
+    /// (Windows makes one for each, open to that logon only), and each
+    /// command logs on anew (nerve-node's `win_user`), so no two pairings
+    /// share one. The container gets an entry on it and a desktop of its
+    /// own there.
+    ///
+    /// The desktop gets the list `sddl` and a low label, so the container's
+    /// process, of low integrity, may write to it: the way it was tried on a
+    /// Windows 11 machine (#149's probe).
+    fn logon_desktop(container: &Sid, sddl: &str) -> io::Result<Desktop> {
+        // SAFETY: plain getter; the handle is this process's, not closed.
+        let station = unsafe { GetProcessWindowStation() };
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        let mut dacl: *mut ACL = null_mut();
+        // SAFETY: the station's handle and places for the parts; the
+        // descriptor is freed with LocalFree.
+        let r = unsafe {
+            GetSecurityInfo(
+                station,
+                SE_WINDOW_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut dacl,
+                null_mut(),
+                &mut sd,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::from_raw_os_error(r as i32));
+        }
+        let _sd = Local(sd);
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: a valid descriptor; the string is freed with LocalFree.
+        check(unsafe {
+            windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                null_mut(),
+            )
+        })?;
+        let _text = Local(text.cast());
+        // SAFETY: a NUL-terminated string from the call.
+        let old = unsafe {
+            let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+            String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+        };
+        // What a process needs of its station, for the container too.
+        let entry = format!("(A;;GA;;;{})", sid_text(container.0)?);
+        if !old.contains(&entry) {
+            let mut new: PSECURITY_DESCRIPTOR = null_mut();
+            // SAFETY: a NUL-terminated SDDL string; freed with LocalFree.
+            check(unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(OsStr::new(&format!("{old}{entry}"))).as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut new,
+                    null_mut(),
+                )
+            })?;
+            let _new = Local(new);
+            let (mut present, mut defaulted) = (0, 0);
+            let mut list: *mut ACL = null_mut();
+            // SAFETY: the descriptor made above and places for its parts.
+            check(unsafe {
+                GetSecurityDescriptorDacl(new, &mut present, &mut list, &mut defaulted)
+            })?;
+            // SAFETY: the station's handle and a valid list.
+            let r = unsafe {
+                SetSecurityInfo(
+                    station,
+                    SE_WINDOW_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    list,
+                    null(),
+                )
+            };
+            if r != 0 {
+                return Err(io::Error::from_raw_os_error(r as i32));
+            }
+        }
+        let mut labelled: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: a NUL-terminated SDDL string; freed with LocalFree.
+        check(unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(OsStr::new(&format!("{sddl}S:(ML;;NW;;;LW)"))).as_ptr(),
+                SDDL_REVISION_1,
+                &mut labelled,
+                null_mut(),
+            )
+        })?;
+        let _labelled = Local(labelled);
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: labelled,
+            bInheritHandle: 0,
+        };
+        let name = format!("nerve-{}", std::process::id());
+        // SAFETY: a NUL-terminated name and security attributes that live
+        // for the call; the desktop goes on this process's station.
+        let desktop = unsafe {
+            CreateDesktopW(
+                wide(OsStr::new(&name)).as_ptr(),
+                null(),
+                null(),
+                0,
+                GENERIC_ALL,
+                &sa,
+            )
+        };
+        if desktop.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Desktop {
+            station: None,
+            desktop,
+            name: wide(OsStr::new(&format!("{}\\{name}", object_name(station)?))),
+        })
     }
 
     fn desktop(container: &Sid) -> io::Result<Desktop> {
@@ -2846,7 +3905,11 @@ pub mod appcontainer {
             let station =
                 CreateWindowStationW(wide(OsStr::new(&name)).as_ptr(), 0, GENERIC_ALL, &sa);
             if station.is_null() {
-                return Err(io::Error::last_os_error());
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    return logon_desktop(container, &sddl);
+                }
+                return Err(e);
             }
             // CreateDesktopW makes the desktop in this process's window
             // station, so this process stands in the new one meanwhile.
@@ -2871,7 +3934,7 @@ pub mod appcontainer {
                 return Err(made);
             }
             Ok(Desktop {
-                station,
+                station: Some(station),
                 desktop,
                 name: wide(OsStr::new(&format!("{name}\\Default"))),
             })
@@ -2899,20 +3962,29 @@ pub mod appcontainer {
         block
     }
 
-    /// Runs `program` with `args` in the container `name`, with this
+    /// Runs `program` with `args` in the container `spec` names, with this
     /// process's environment as [`acl::container_env`] makes it (Windows
-    /// PowerShell's own module path), working folder, stdout and stderr, and
-    /// the null device as its stdin; no other handle goes to it. Waits for it
-    /// and returns its exit code.
-    pub fn run(program: &Path, args: &[String], name: &str) -> io::Result<u32> {
-        ensure_profile(name)?;
+    /// PowerShell's own module path), the container's home where `spec`
+    /// says so ([`acl::container_home`]) and `spec`'s variables, this
+    /// process's working folder, stdout and stderr, and the null device as
+    /// its stdin; no other handle goes to it. Off the network it gets none
+    /// of the container's network capabilities. Waits for it and returns
+    /// its exit code.
+    pub fn run(program: &Path, args: &[String], spec: &super::ContainerSpec) -> io::Result<u32> {
+        let name = spec.name.as_str();
+        let ac = ready(name)?;
         let sid = Sid::derive(name)?;
-        let mut caps_buf = [
-            WinCapabilityInternetClientSid,
-            WinCapabilityInternetClientServerSid,
-            WinCapabilityPrivateNetworkClientServerSid,
-        ]
-        .map(capability);
+        let wanted: &[i32] = if spec.no_network {
+            &[]
+        } else {
+            &[
+                WinCapabilityInternetClientSid,
+                WinCapabilityInternetClientServerSid,
+                WinCapabilityPrivateNetworkClientServerSid,
+            ]
+        };
+        let mut caps_buf: Vec<io::Result<Vec<u8>>> =
+            wanted.iter().map(|k| capability(*k)).collect();
         let mut caps = Vec::new();
         for c in caps_buf.iter_mut() {
             let c = c
@@ -2925,7 +3997,11 @@ pub mod appcontainer {
         }
         let sc = SECURITY_CAPABILITIES {
             AppContainerSid: sid.0,
-            Capabilities: caps.as_mut_ptr(),
+            Capabilities: if caps.is_empty() {
+                null_mut()
+            } else {
+                caps.as_mut_ptr()
+            },
             CapabilityCount: caps.len() as u32,
             Reserved: 0,
         };
@@ -2994,7 +4070,11 @@ pub mod appcontainer {
         let exe = find(program)?;
         let app = wide(exe.as_os_str());
         let mut line = wide(OsStr::new(&command_line(&exe.to_string_lossy(), args)));
-        let env = env_block(acl::container_env(std::env::vars_os()));
+        let set = acl::command_set(spec.home.then_some(ac.as_path()), &spec.env);
+        let env = env_block(acl::with_vars(
+            acl::container_env(std::env::vars_os()),
+            &set,
+        ));
         let mut pi = PROCESS_INFORMATION::default();
         let started = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", exe.display()));
         // SAFETY: NUL-terminated strings, a writable command line, and the
@@ -3108,9 +4188,13 @@ mod tests {
             parent: 1,
             landlock: Some(LandlockSpec::default()),
             container: Some(ContainerSpec {
-                name: "nerve.x".into(),
+                no_network: true,
+                home: true,
+                env: vec![("HTTPS_PROXY".into(), "http://p:3128".into())],
+                ..ContainerSpec::new("nerve.x")
             }),
             own_proc: true,
+            cwd: Some("C:\\Users\\nerve-run\\x".into()),
         };
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<ShimSpec>(&j).unwrap(), s);
@@ -3118,7 +4202,10 @@ mod tests {
         assert!(serde_json::from_str::<ShimSpec>(extra).is_err());
         let plain = r#"{"program":"x","args":[],"parent":1}"#;
         let plain = serde_json::from_str::<ShimSpec>(plain).unwrap();
-        assert_eq!((plain.landlock, plain.container), (None, None));
+        assert_eq!(
+            (plain.landlock, plain.container, plain.cwd),
+            (None, None, None)
+        );
         let mut c = Confinement {
             landlock_abi: None,
             appcontainer: false,
@@ -3134,6 +4221,420 @@ mod tests {
     /// Each flag gives its own rights and nothing of another's: `w` reads
     /// and lists nothing, `x` runs and reads files but lists nothing, and
     /// no flag may change the access list or the owner.
+    /// A folder without a flag inside a granted one is closed to the
+    /// container: one denied entry, every right, for it and all below it,
+    /// a file just itself.
+    /// A file with more than one name gets no more than its caps: the
+    /// entries of the containers the node grants, inherited or its own, go,
+    /// and it has its own allowing entry of no more than read and execute
+    /// (none for `w` alone) after a denying entry of every other right,
+    /// first in the list; a container closed there gets only a denying
+    /// entry, one no grant holds none. Other AppContainers
+    /// and capabilities are cut down too, without a denying entry; the
+    /// owner's entries and other denials stay. Worked out again from the
+    /// list it gave, and from that list widened again by Windows, the same
+    /// comes out; once the container has nothing, its denial goes too.
+    #[test]
+    fn a_file_with_more_than_one_name_gets_no_more_than_its_caps() {
+        use acl::{
+            ALLOWED, Ace, Capped, DENIED, INHERITED, READ_AND_EXECUTE, capped, file_cap, uncapped,
+        };
+        use inherit::Gets;
+        let ace = |kind, flags, mask, sid: &str| Ace {
+            kind,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let rw = acl::masks(true, true, false).file;
+        let (c, w, shut, away) = (
+            "S-1-15-2-1-2",
+            "S-1-15-2-3-4",
+            "S-1-15-2-5-6",
+            "S-1-15-2-7-8",
+        );
+        let r = file_cap(true, false, false);
+        let caps = vec![
+            (c.to_string(), Gets::Rights(file_cap(true, true, false))),
+            (w.to_string(), Gets::Rights(file_cap(true, false, false))),
+            (shut.to_string(), Gets::Closed),
+            (away.to_string(), Gets::Unheld),
+        ];
+        let list = vec![
+            ace(ALLOWED, 0, acl::ALL, "S-1-5-21-1-2-3-1001"),
+            ace(DENIED, 0, acl::WRITE_DATA, "S-1-5-21-1-2-3-1002"),
+            ace(ALLOWED, INHERITED, rw, c),
+            ace(ALLOWED, INHERITED, 0x4000_0000, w),
+            ace(ALLOWED, INHERITED, rw, shut),
+            ace(ALLOWED, INHERITED, 0x1000_0000, "S-1-15-3-1"),
+            ace(ALLOWED, INHERITED, acl::ALL, "S-1-5-18"),
+            ace(ALLOWED, INHERITED, rw, away),
+        ];
+        let out = capped(&list, &caps);
+        assert_eq!(
+            out,
+            [
+                Capped::Deny(0, acl::ALL & !r),
+                Capped::Deny(1, acl::ALL & !r),
+                Capped::Deny(2, acl::ALL),
+                Capped::Entry(0, acl::ALL),
+                Capped::Entry(1, acl::WRITE_DATA),
+                Capped::Allow(0, r),
+                Capped::Allow(1, r),
+                Capped::Entry(5, READ_AND_EXECUTE),
+                Capped::Entry(6, acl::ALL),
+            ]
+        );
+        assert_eq!(r & (acl::WRITE_DATA | acl::DELETE | acl::WRITE_DAC), 0);
+
+        // The list it gave, as Windows writes it.
+        let sid_of = |j: usize| caps[j].0.clone();
+        let written = |out: &[Capped], from: &[Ace]| -> Vec<Ace> {
+            out.iter()
+                .map(|e| match *e {
+                    Capped::Entry(i, mask) => Ace {
+                        mask,
+                        ..from[i].clone()
+                    },
+                    Capped::Deny(j, mask) => ace(DENIED, 0, mask, &sid_of(j)),
+                    Capped::Allow(j, mask) => ace(ALLOWED, 0, mask, &sid_of(j)),
+                    Capped::Reads => unreachable!(),
+                })
+                .collect()
+        };
+        let once = written(&out, &list);
+        assert_eq!(written(&capped(&once, &caps), &once), once);
+        // Widened again: the folder's whole entries back below the node's
+        // own, as Windows passes a list down.
+        let mut widened: Vec<Ace> = once[..7].to_vec();
+        widened.extend(list[2..].iter().cloned());
+        assert_eq!(written(&capped(&widened, &caps), &widened), once);
+
+        // No grant of the container holds a name any more: its entries of
+        // the node's go, whatever the list holds.
+        let mut gone_caps = caps.clone();
+        gone_caps[0].1 = Gets::Unheld;
+        let again = written(&capped(&once, &gone_caps), &once);
+        assert!(
+            !again
+                .iter()
+                .any(|a| a.sid.as_deref() == Some(c) && a.flags & INHERITED == 0),
+            "{again:?}"
+        );
+        // A change as any file: the node's own entries go, nothing else
+        // changes.
+        let plain = written(&uncapped(&once, &[c.into(), w.into(), shut.into()]), &once);
+        assert!(
+            plain.iter().all(|a| a.flags & INHERITED != 0
+                || !a.sid.as_deref().is_some_and(|s| [c, w, shut].contains(&s))),
+            "{plain:?}"
+        );
+        assert_eq!(plain.len(), once.len() - 5);
+        assert_eq!(uncapped(&list, &[c.into()]).len(), list.len());
+    }
+
+    /// The cap of a file with more than one name leaves what the list gives
+    /// every other account as it is: a file linked from the owner's store
+    /// into a granted folder keeps the store's entries, and gets none of
+    /// the folder's (#149). Only the containers' entries are the node's.
+    #[test]
+    fn a_cap_leaves_the_entries_of_other_accounts_alone() {
+        use acl::{ALLOWED, Ace, Capped, INHERITED, capped, file_cap};
+        use inherit::Gets;
+        let ace = |flags, mask, sid: &str| Ace {
+            kind: ALLOWED,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let (c, owner, everyone) = ("S-1-15-2-1-2", "S-1-5-21-1-2-3-1001", "S-1-1-0");
+        let rw = acl::masks(true, true, false).file;
+        // As a store's list: the owner's, inherited from the store's folder
+        // (the container's stale entry is there too, from a folder it was
+        // granted before).
+        let list = vec![
+            ace(INHERITED, acl::ALL, owner),
+            ace(INHERITED, rw, c),
+            ace(INHERITED, rw, everyone),
+        ];
+        let caps = vec![(c.to_string(), Gets::Rights(file_cap(true, true, false)))];
+        let out = capped(&list, &caps);
+        assert!(out.contains(&Capped::Entry(0, acl::ALL)), "{out:?}");
+        assert!(out.contains(&Capped::Entry(2, rw)), "{out:?}");
+        assert!(
+            !out.iter().any(|e| matches!(e, Capped::Entry(1, _))),
+            "{out:?}"
+        );
+        assert!(out.contains(&Capped::Allow(0, file_cap(true, true, false))));
+    }
+
+    /// A capped file the walk could not look at (a command's own store's,
+    /// whose list names only the command account, its container and the
+    /// system) gets read and execute for the account the walk acts as, the
+    /// owner, after the other explicit entries and before the node's
+    /// allowing ones, so the owner opens what an agent installed in their
+    /// project (#149). The next walk may look at the file and gives no
+    /// reader: it leaves the list as it is, and so does one that gives the
+    /// reader again.
+    #[test]
+    fn a_capped_file_the_walk_could_not_look_at_is_read_by_its_account() {
+        use acl::{ALLOWED, Ace, Capped, DENIED, INHERITED, capped, file_cap, readable_by};
+        use inherit::Gets;
+        let ace = |kind, flags, mask, sid: &str| Ace {
+            kind,
+            flags,
+            mask,
+            sid: Some(sid.into()),
+        };
+        let (c, run, owner) = ("S-1-15-2-1-2", "S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-1001");
+        let list = vec![
+            ace(DENIED, 0, acl::WRITE_DATA, owner),
+            ace(ALLOWED, INHERITED, acl::ALL, run),
+            ace(ALLOWED, INHERITED, acl::ALL, c),
+            ace(ALLOWED, INHERITED, acl::ALL, "S-1-5-18"),
+        ];
+        let caps = vec![(c.to_string(), Gets::Rights(file_cap(true, true, false)))];
+        let out = readable_by(capped(&list, &caps), &list, owner);
+        let r = file_cap(true, true, false);
+        assert_eq!(
+            out,
+            [
+                Capped::Deny(0, acl::ALL & !r),
+                Capped::Entry(0, acl::WRITE_DATA),
+                Capped::Reads,
+                Capped::Allow(0, r),
+                Capped::Entry(1, acl::ALL),
+                Capped::Entry(3, acl::ALL),
+            ]
+        );
+        // The list as Windows writes it.
+        let written = |out: &[Capped], from: &[Ace]| -> Vec<Ace> {
+            out.iter()
+                .map(|e| match *e {
+                    Capped::Entry(i, mask) => Ace {
+                        mask,
+                        ..from[i].clone()
+                    },
+                    Capped::Deny(_, m) => ace(DENIED, 0, m, c),
+                    Capped::Allow(_, m) => ace(ALLOWED, 0, m, c),
+                    Capped::Reads => ace(ALLOWED, 0, acl::READ_AND_EXECUTE, owner),
+                })
+                .collect()
+        };
+        let once = written(&out, &list);
+        // The next walk, which the owner's entry lets look at the file.
+        assert_eq!(written(&capped(&once, &caps), &once), once);
+        // One that may not look at it again.
+        let again = readable_by(capped(&once, &caps), &once, owner);
+        assert_eq!(written(&again, &once), once, "{again:?}");
+    }
+
+    /// A granted file with more than one name carries the node's cap in
+    /// place of the grant's own entry, and a sync that looks at it counts
+    /// that as granted, so it does not put it on again each time: an
+    /// allowing entry of no more than the grant's flags give within read
+    /// and execute with the denial of the rest, or the denial of every
+    /// right alone. A wider allow, the grant's own entry or none does not.
+    #[test]
+    fn a_capped_file_counts_as_granted() {
+        use acl::{ALL, ALLOWED, Capped, DENIED, capped, capped_within, file_cap};
+        use inherit::Gets;
+        let ours = |g: Gets| -> Vec<(u8, u32, u32)> {
+            capped(&[], &[("S-1-15-2-1-2".to_string(), g)])
+                .iter()
+                .map(|e| match *e {
+                    Capped::Deny(_, m) => (DENIED, 0, m),
+                    Capped::Allow(_, m) => (ALLOWED, 0, m),
+                    Capped::Entry(..) | Capped::Reads => unreachable!(),
+                })
+                .collect()
+        };
+        let (rw, rwx, x) = (
+            acl::masks(true, true, false),
+            acl::masks(true, true, true),
+            acl::masks(false, false, true),
+        );
+        for (m, g) in [
+            (rw, Gets::Rights(file_cap(true, true, false))),
+            (rwx, Gets::Rights(file_cap(true, true, true))),
+            (rwx, Gets::Rights(file_cap(true, false, false))),
+            (x, Gets::Rights(file_cap(false, false, true))),
+            (rw, Gets::Closed),
+        ] {
+            assert!(capped_within(&ours(g), m, false), "{m:?} {g:?}");
+            // Not while the file inherits an entry for the container again
+            // (as when a tool passed its folder's list down).
+            assert!(!capped_within(&ours(g), m, true), "{m:?} {g:?}");
+        }
+        assert!(!capped_within(
+            &ours(Gets::Rights(file_cap(true, false, true))),
+            rw,
+            false
+        ));
+        assert!(!capped_within(
+            &ours(Gets::Rights(file_cap(false, false, true))),
+            acl::masks(true, false, false),
+            false
+        ));
+        assert!(!capped_within(
+            &[(ALLOWED, 0, rw.file & !acl::DELETE)],
+            rw,
+            false
+        ));
+        assert!(!capped_within(&[], rw, false));
+        assert!(!capped_within(&[(DENIED, 0, ALL)], acl::closed(), false));
+        let r = file_cap(true, false, false);
+        assert!(!capped_within(
+            &[(ALLOWED, 0, r), (DENIED, 0, ALL)],
+            rw,
+            false
+        ));
+    }
+
+    /// Only the SID of a container as the node makes them closes a folder
+    /// to what it inherits: not the groups every container is in, nor a
+    /// capability, nor a SID of another shape.
+    #[test]
+    fn only_a_containers_own_package_sid_counts_as_one() {
+        let own =
+            "S-1-15-2-3624051433-2125758914-1423191267-1740899205-1073925389-3782572162-737981194";
+        assert!(acl::package_sid(own));
+        assert!(acl::package_sid(&own.to_lowercase()));
+        for other in [
+            // ALL APPLICATION PACKAGES, ALL RESTRICTED APPLICATION PACKAGES.
+            "S-1-15-2-1",
+            "S-1-15-2-2",
+            // A capability, a user, everyone, a child package (more parts).
+            "S-1-15-3-1024-1-2-3-4-5-6-7",
+            "S-1-5-21-1-2-3-1001",
+            "S-1-1-0",
+            "S-1-15-2-1-2-3-4-5-6-7-8-9-10-11",
+            "S-1-15-2-1-2-3-4-5-6",
+            "S-1-15-2-1-2-3-4-5-6-x",
+            "S-1-15-2-1-2-3-4-5-6-",
+            "",
+        ] {
+            assert!(!acl::package_sid(other), "{other}");
+        }
+    }
+
+    /// Two containers with a grant on one name each of the same file (two
+    /// projects linked to one store), walked in turn: the list is worked out
+    /// under one name's folder each time, which holds only that one's
+    /// inherited entry, yet each keeps its read and its denial of writes,
+    /// also when Windows passes either folder's list down again (#149).
+    #[test]
+    fn a_file_linked_into_two_containers_folders_keeps_both_caps() {
+        use acl::{
+            ALLOWED, Ace, Capped, DENIED, INHERITED, READ_DATA, WRITE_DATA, capped, file_cap,
+        };
+        use inherit::Gets;
+        let (a, b) = ("S-1-15-2-1-1", "S-1-15-2-2-2");
+        let rw = acl::masks(true, true, false).file;
+        let owner = Ace {
+            kind: ALLOWED,
+            flags: INHERITED,
+            mask: acl::ALL,
+            sid: Some("S-1-5-21-1-2-3-1001".into()),
+        };
+        // What the folder of each project passes down.
+        let folder = |sid: &str| {
+            vec![
+                owner.clone(),
+                Ace {
+                    kind: ALLOWED,
+                    flags: INHERITED,
+                    mask: rw,
+                    sid: Some(sid.into()),
+                },
+            ]
+        };
+        let caps = vec![
+            (a.to_string(), Gets::Rights(file_cap(true, true, false))),
+            (b.to_string(), Gets::Rights(file_cap(true, true, false))),
+        ];
+        let written = |out: &[Capped], from: &[Ace]| -> Vec<Ace> {
+            out.iter()
+                .map(|e| match *e {
+                    Capped::Entry(i, mask) => Ace {
+                        mask,
+                        ..from[i].clone()
+                    },
+                    Capped::Deny(j, mask) | Capped::Allow(j, mask) => Ace {
+                        kind: if matches!(e, Capped::Deny(..)) {
+                            DENIED
+                        } else {
+                            ALLOWED
+                        },
+                        flags: 0,
+                        mask,
+                        sid: Some(caps[j].0.clone()),
+                    },
+                    Capped::Reads => unreachable!(),
+                })
+                .collect()
+        };
+        // Windows' access check: the first entries that name the SID decide
+        // each right.
+        let may = |list: &[Ace], sid: &str, right: u32| {
+            for e in list.iter().filter(|e| e.sid.as_deref() == Some(sid)) {
+                if e.mask & right != 0 {
+                    return e.kind == ALLOWED;
+                }
+            }
+            false
+        };
+        // The file's own entries kept, the inherited ones those of `dir`.
+        let under = |list: &[Ace], dir: &[Ace]| -> Vec<Ace> {
+            let mut l: Vec<Ace> = list
+                .iter()
+                .filter(|e| e.flags & INHERITED == 0)
+                .cloned()
+                .collect();
+            l.extend(dir.iter().cloned());
+            l
+        };
+        let mut list = folder(a);
+        for (walked, other) in [(a, b), (b, a), (a, b)] {
+            list = written(
+                &capped(&under(&list, &folder(walked)), &caps),
+                &under(&list, &folder(walked)),
+            );
+            for sid in [walked, other] {
+                assert!(
+                    may(&list, sid, READ_DATA),
+                    "{sid} reads after {walked}'s walk: {list:?}"
+                );
+                assert!(
+                    !may(&list, sid, WRITE_DATA),
+                    "{sid} writes after {walked}'s walk: {list:?}"
+                );
+            }
+            // Explorer or icacls passes the other one's folder down.
+            let passed = under(&list, &folder(other));
+            for sid in [walked, other] {
+                assert!(
+                    !may(&passed, sid, WRITE_DATA),
+                    "{sid} writes after {other}'s folder passed down: {passed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_folder_denies_every_right_to_it_and_below() {
+        use acl::*;
+        let c = closed();
+        assert!(c.deny && !masks(true, true, true).deny);
+        let all = READ_DATA | WRITE_DATA | APPEND_DATA | EXECUTE | DELETE | WRITE_DAC;
+        assert_eq!(c.dir & all, all);
+        assert_eq!(
+            entries(true, c),
+            [(OBJECT_INHERIT | CONTAINER_INHERIT, c.dir)]
+        );
+        assert_eq!(entries(false, c), [(0, c.file)]);
+    }
+
     #[test]
     fn each_flag_gives_its_own_windows_rights() {
         use acl::*;
@@ -3147,11 +4648,8 @@ mod tests {
         let w = masks(false, true, false);
         assert_eq!(w.dir & (WRITE_DATA | APPEND_DATA), WRITE_DATA | APPEND_DATA);
         assert_eq!(w.file & WRITE_DATA, WRITE_DATA);
-        assert_eq!(
-            (w.dir | w.file) & (READ_DATA | EXECUTE),
-            0,
-            "w reads nothing"
-        );
+        assert_eq!(w, masks(true, true, false), "w reads too");
+        assert_eq!(w.file & EXECUTE, 0, "w runs nothing");
         let x = masks(false, false, true);
         assert_eq!(x.file & (EXECUTE | READ_DATA), EXECUTE | READ_DATA);
         assert_eq!(x.dir & READ_DATA, 0, "x lists no folder");
@@ -3166,15 +4664,15 @@ mod tests {
             all.file,
             r.file | w.file | x.file | masks(true, true, false).file
         );
-        // A move is a delete to Windows: only what is read is moved, so no
-        // move makes what a command may not read readable at its new place.
-        for (r, w, x) in [(false, true, false), (false, true, true)] {
-            let m = masks(r, w, x);
-            assert_eq!((m.dir | m.file) & (DELETE | DELETE_CHILD), 0, "{r} {w} {x}");
+        // A move is a delete to Windows: only `w` deletes, and it reads, so
+        // no move makes what a command may not read readable at its new
+        // place.
+        for (r, x) in [(true, false), (false, true), (true, true)] {
+            let m = masks(r, false, x);
+            assert_eq!((m.dir | m.file) & (DELETE | DELETE_CHILD), 0, "{r} {x}");
         }
-        let rw = masks(true, true, false);
-        assert_eq!(rw.dir & (DELETE | DELETE_CHILD), DELETE | DELETE_CHILD);
-        assert_eq!(rw.file & DELETE, DELETE);
+        assert_eq!(w.dir & (DELETE | DELETE_CHILD), DELETE | DELETE_CHILD);
+        assert_eq!(w.file & DELETE, DELETE);
     }
 
     /// A granted folder or file itself is never deleted, renamed or moved
@@ -3303,6 +4801,72 @@ mod tests {
         );
     }
 
+    /// A pairing's command has its home in its container's own folder: the
+    /// variables that name a home and the settings below it name `AC\home`,
+    /// in place of the account's, whatever case they came in, and git
+    /// trusts the repositories it reaches. `LOCALAPPDATA`, `TEMP` and the
+    /// rest stay for Windows to point at the container.
+    #[test]
+    fn a_containers_home_is_its_own_folder() {
+        let ac = std::path::Path::new(r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC");
+        let set = acl::container_home(ac);
+        let got = acl::with_vars(
+            vec![
+                ("userprofile".into(), r"C:\Users\nerve-run".into()),
+                (
+                    "APPDATA".into(),
+                    r"C:\Users\nerve-run\AppData\Roaming".into(),
+                ),
+                (
+                    "LOCALAPPDATA".into(),
+                    r"C:\Users\nerve-run\AppData\Local".into(),
+                ),
+                (
+                    "TEMP".into(),
+                    r"C:\Users\nerve-run\AppData\Local\Temp".into(),
+                ),
+            ],
+            &set,
+        );
+        let get = |name: &str| -> Vec<String> {
+            got.iter()
+                .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+                .collect()
+        };
+        let home = r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC\home";
+        assert_eq!(get("USERPROFILE"), [home]);
+        assert_eq!(get("HOME"), [home]);
+        assert_eq!(get("HOMEDRIVE"), ["C:"]);
+        assert_eq!(get("HOMEPATH"), [&home[2..]]);
+        assert_eq!(get("APPDATA"), [format!(r"{home}\AppData\Roaming")]);
+        assert_eq!(get("LOCALAPPDATA"), [r"C:\Users\nerve-run\AppData\Local"]);
+        assert_eq!(get("TEMP"), [r"C:\Users\nerve-run\AppData\Local\Temp"]);
+        assert_eq!(get("GIT_CONFIG_KEY_0"), ["safe.directory"]);
+        assert_eq!(get("GIT_CONFIG_VALUE_0"), ["*"]);
+        // The node's variables the owner passes on (`machine.command_env`)
+        // do not move the home, also where they name it: it is in the
+        // environment once.
+        let passed = [
+            (
+                "Home".to_string(),
+                r"C:\Windows\ServiceProfiles\nerve".to_string(),
+            ),
+            ("HTTPS_PROXY".to_string(), "http://proxy".to_string()),
+        ];
+        let more = acl::with_vars(got.clone(), &acl::command_set(Some(ac), &passed));
+        let homes: Vec<_> = more
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("HOME"))
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(homes, [home]);
+        assert!(
+            more.iter()
+                .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://proxy")
+        );
+    }
+
     /// The command line reads back as the arguments given, by the rules of
     /// `CommandLineToArgvW`.
     #[test]
@@ -3388,7 +4952,11 @@ mod tests {
         match appcontainer::run(
             std::path::Path::new(&program),
             &args,
-            &var("NERVE_TEST_CONTAINER"),
+            &ContainerSpec {
+                no_network: std::env::var_os("NERVE_TEST_NO_NETWORK").is_some(),
+                home: std::env::var_os("NERVE_TEST_HOME").is_some(),
+                ..ContainerSpec::new(var("NERVE_TEST_CONTAINER"))
+            },
         ) {
             Ok(code) => println!("exit code: {code}"),
             Err(e) => println!("exit code: {}\n{e}", u32::MAX),
@@ -3432,6 +5000,258 @@ mod tests {
         appcontainer::set(&granted, &name, None, false).unwrap();
         assert_ne!(run(r"type sub\in.txt > copy2.txt".into()), 0);
         assert!(!granted.join("copy2.txt").exists());
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// A folder closed inside a granted one is closed to the container's
+    /// commands, and to what is below it, also where the grant around it
+    /// comes after the closure: Windows does not hold a container to an
+    /// entry that denies it, only to one that allows it nothing (#149's
+    /// first run on the service, where the closed folder stayed open).
+    /// `look` does not take a closed folder that inherits the grant again
+    /// (as when a tool passed the list around it down) as closed.
+    #[cfg(windows)]
+    #[test]
+    fn a_closed_folder_inside_a_granted_one_is_closed_to_its_container() {
+        let base = tempfile::tempdir().unwrap();
+        let granted = base.path().join("granted");
+        let closed = granted.join("closed");
+        std::fs::create_dir_all(closed.join("deep")).unwrap();
+        std::fs::write(closed.join("deep").join("kept.txt"), "kept").unwrap();
+        std::fs::write(granted.join("open.txt"), "open").unwrap();
+        let name = format!("nerve.test.closed.{}", std::process::id());
+        let rwx = acl::masks(true, true, true);
+        let d = |p: &std::path::Path| p.display().to_string();
+        // Whether `op` went through, and what PowerShell said.
+        let tried = |op: String| {
+            let (code, log) = run_in_container(
+                &name,
+                &granted,
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!("{POWERSHELL_START}try {{ {op}; exit 0 }} catch {{ $_; exit 3 }}"),
+                ],
+            );
+            assert!(code == 0 || code == 3, "{op}: {log}");
+            (code == 0, log)
+        };
+        let reads = || {
+            let all = [
+                "Get-Content -LiteralPath open.txt -ErrorAction Stop".to_string(),
+                format!(
+                    "Get-ChildItem -LiteralPath '{}' -ErrorAction Stop",
+                    d(&closed)
+                ),
+                format!(
+                    "Get-Content -LiteralPath '{}' -ErrorAction Stop",
+                    d(&closed.join("deep").join("kept.txt"))
+                ),
+            ]
+            .map(tried);
+            let said: Vec<String> = all.iter().map(|(_, l)| l.clone()).collect();
+            ((all[0].0, all[1].0, all[2].0), said)
+        };
+        // Closed first, granted after; then granted and closed again.
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        appcontainer::set(&granted, &name, Some(rwx), false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+        assert!(appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        appcontainer::set(&closed, &name, None, false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, true, true), "{said:?}");
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+        let write = format!(
+            "Set-Content -LiteralPath '{}' -Value x -ErrorAction Stop",
+            d(&closed.join("new.txt"))
+        );
+        assert!(!tried(write).0);
+        assert!(!closed.join("new.txt").exists());
+
+        // Windows passes the list of the granted folder down again, as
+        // icacls does: the closed folder inherits the grant, and `look`
+        // says it is not closed; the next change closes it again.
+        let o = std::process::Command::new("icacls")
+            .args([d(&granted).as_str(), "/grant", "*S-1-5-32-545:(OI)(CI)RX"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(!appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        appcontainer::set(&closed, &name, Some(acl::closed()), false).unwrap();
+        assert!(appcontainer::look(&closed, &name, acl::closed()).unwrap().1);
+        let (r, said) = reads();
+        assert_eq!(r, (true, false, false), "{said:?}");
+
+        for p in [&closed, &granted] {
+            appcontainer::set(p, &name, None, false).unwrap();
+        }
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// The access list of `p` as `icacls /save` writes it (SDDL, whose `AC`
+    /// is `ALL APPLICATION PACKAGES`): free of the machine's language.
+    #[cfg(windows)]
+    fn sddl(p: &std::path::Path) -> String {
+        let saved = tempfile::NamedTempFile::new().unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(p)
+            .arg("/save")
+            .arg(saved.path())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        // icacls writes UTF-16.
+        let text: Vec<u16> = std::fs::read(saved.path())
+            .unwrap()
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&text)
+    }
+
+    /// A folder that another program denied `ALL APPLICATION PACKAGES` keeps
+    /// what it inherits for that group when the node's walk passes a
+    /// grant's list down to it: only the denial of a container's own SID
+    /// (as the node derives it) closes a folder ([`acl::package_sid`]). The
+    /// entries are read as SDDL, whose `AC` is that group.
+    #[cfg(windows)]
+    #[test]
+    fn a_denial_of_all_application_packages_does_not_take_its_inherited_entry_off() {
+        let base = tempfile::tempdir().unwrap();
+        let granted = base.path().join("granted");
+        let other = granted.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let d = |p: &std::path::Path| p.display().to_string();
+        for args in [
+            vec![d(&granted), "/grant".into(), "*S-1-15-2-1:(OI)(CI)R".into()],
+            vec![d(&other), "/deny".into(), "*S-1-15-2-1:(F)".into()],
+        ] {
+            let o = std::process::Command::new("icacls")
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{args:?}: {o:?}");
+        }
+        let inherits = |list: &str| {
+            list.split('(')
+                .any(|a| a.starts_with("A;") && a.contains("ID;") && a.contains(";;;AC)"))
+        };
+        assert!(inherits(&sddl(&other)), "{}", sddl(&other));
+        let name = format!("nerve.test.group.{}", std::process::id());
+        // The walk passes the grant down into `other`.
+        appcontainer::set(&granted, &name, Some(acl::masks(true, true, false)), false).unwrap();
+        assert!(
+            inherits(&sddl(&other)),
+            "taken off a folder that is not closed to a container: {}",
+            sddl(&other)
+        );
+        appcontainer::set(&granted, &name, None, false).unwrap();
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// A file with more than one name that is granted itself carries the
+    /// node's cap, and is not counted as capped once Windows has passed its
+    /// folder's list down to it again (Explorer, `icacls`): it inherits the
+    /// container's whole entry then, which a denying entry does not hold
+    /// back, and the next change caps it again. The container writes it
+    /// after the tool and not after the change.
+    #[cfg(windows)]
+    #[test]
+    fn a_capped_file_is_not_in_place_once_its_folders_list_comes_down_again() {
+        use std::path::{Path, PathBuf};
+        let base = tempfile::tempdir().unwrap();
+        let (top, store) = (base.path().join("top"), base.path().join("store"));
+        for d in [&top, &store] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (linked, original) = (top.join("l.txt"), store.join("o.txt"));
+        std::fs::write(&original, "from the store").unwrap();
+        std::fs::hard_link(&original, &linked).unwrap();
+        let name = format!("nerve.test.recap.{}", std::process::id());
+        let rw = acl::masks(true, true, false);
+        let cap = inherit::Cap {
+            containers: vec![(
+                name.clone(),
+                inherit::Gets::Rights(acl::file_cap(true, true, false)),
+            )],
+        };
+        // The grant of `path` as the node puts it on, the cap for a file
+        // with more than one name.
+        let grant = |path: &Path, whole: bool| {
+            let mut capped = |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| {
+                Ok(inherit::Linked::Capped(cap.clone()))
+            };
+            let below = appcontainer::Below {
+                links: Some(&mut capped),
+                progress: &mut |_| {},
+                maker: None,
+            };
+            appcontainer::set_below(path, &name, Some(rw), false, whole, None, below).unwrap();
+        };
+        let writes = || {
+            let (code, log) = run_in_container(
+                &name,
+                &top,
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "{POWERSHELL_START}try {{ Add-Content -LiteralPath '{}' -Value x -ErrorAction Stop; exit 0 }} catch {{ $_; exit 3 }}",
+                        linked.display()
+                    ),
+                ],
+            );
+            assert!(code == 0 || code == 3, "{log}");
+            code == 0
+        };
+        // A list that marks its inherited entries (SE_DACL_AUTO_INHERITED),
+        // as one has that a tool wrote; Windows passes a folder's list down
+        // to it. (A file Windows just made does not mark them, and the
+        // cap's write then gives it a list that does not inherit.)
+        let o = std::process::Command::new("icacls")
+            .arg(&linked)
+            .arg("/reset")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        grant(&top, false);
+        // Granted itself too, the cap in place of the grant's own entry.
+        grant(&linked, false);
+        assert!(appcontainer::look(&linked, &name, rw).unwrap().1);
+        assert!(!writes(), "capped to read");
+
+        let o = std::process::Command::new("icacls")
+            .args([
+                top.display().to_string().as_str(),
+                "/grant",
+                "*S-1-5-32-545:(OI)(CI)RX",
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(
+            !appcontainer::look(&linked, &name, rw).unwrap().1,
+            "{}\n{}",
+            sddl(&top),
+            sddl(&linked)
+        );
+        assert!(writes(), "the folder's whole entry comes down again");
+        grant(&top, true);
+        grant(&linked, false);
+        assert!(appcontainer::look(&linked, &name, rw).unwrap().1);
+        assert!(!writes(), "capped to read again");
+
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
         appcontainer::remove_profile(&name).unwrap();
     }
 
@@ -3481,12 +5301,12 @@ mod tests {
         appcontainer::set(&file, &name, None, false).unwrap();
     }
 
-    /// The flags are independent in the container too: a folder with `w`
-    /// alone is written and not read or listed, one with `x` alone runs its
-    /// program (and reads it by name) and is not listed or written.
+    /// In the container too `w` reads: a folder with `w` alone is written,
+    /// read and listed. One with `x` alone runs its program (and reads it
+    /// by name) and is not listed or written.
     #[cfg(windows)]
     #[test]
-    fn an_appcontainer_keeps_write_and_execute_apart_from_read() {
+    fn an_appcontainer_reads_where_it_writes_and_runs_apart_from_read() {
         let base = tempfile::tempdir().unwrap();
         let (work, wo, xo) = (
             base.path().join("work"),
@@ -3514,7 +5334,23 @@ mod tests {
         grant(&wo, false, true, false);
         grant(&xo, false, false, true);
         let (w, x) = (wo.display(), xo.display());
-        let run = |c: String| in_container(&name, &work, &c);
+        let ps = |c: String| {
+            run_in_container(
+                &name,
+                &work,
+                "powershell.exe",
+                &["-NoProfile", "-Command", &c],
+            )
+        };
+        // Whether `op` went through; cmd would take a quoted path as a
+        // wrong name, which looks like a refusal.
+        let tried = |op: String| {
+            let (code, log) = ps(format!(
+                "{POWERSHELL_START}try {{ {op}; exit 0 }} catch {{ $_; exit 3 }}"
+            ));
+            assert!(code == 0 || code == 3, "{op}: {log}");
+            code == 0
+        };
 
         // cmd opens a file it redirects to for reading as well, so the
         // write goes through .NET, which opens it for writing only.
@@ -3530,18 +5366,14 @@ mod tests {
             std::fs::read_to_string(wo.join("new.txt")).unwrap().trim(),
             "x"
         );
-        assert_ne!(run(format!(r#"type "{w}\old.txt" > got.txt"#)), 0);
-        assert_ne!(run(format!(r#"dir "{w}" > list.txt"#)), 0);
+        assert!(tried(format!(
+            r"Get-Content -ErrorAction Stop '{w}\old.txt' | Set-Content got.txt"
+        )));
+        assert!(tried(format!(
+            r"Get-ChildItem -ErrorAction Stop '{w}' | Out-Null"
+        )));
 
         let out = work.join("ran.txt");
-        let ps = |c: String| {
-            run_in_container(
-                &name,
-                &work,
-                "powershell.exe",
-                &["-NoProfile", "-Command", &c],
-            )
-        };
         let (code, log) = ps(format!(
             "{POWERSHELL_START}& '{x}\\tool.cmd' '{}'; & '{x}\\hostname.exe' > host.txt; \
              exit $LASTEXITCODE",
@@ -3555,8 +5387,12 @@ mod tests {
             "tool ran"
         );
         assert!(work.join("host.txt").exists(), "{log}");
-        assert_ne!(run(format!(r#"dir "{x}" > list2.txt"#)), 0);
-        assert_ne!(run(format!(r#"echo x> "{x}\no.txt""#)), 0);
+        assert!(!tried(format!(
+            r"Get-ChildItem -ErrorAction Stop '{x}' | Out-Null"
+        )));
+        assert!(!tried(format!(
+            r"Set-Content -ErrorAction Stop -Path '{x}\no.txt' -Value x"
+        )));
         assert!(!xo.join("no.txt").exists());
 
         for d in [&work, &wo, &xo] {
@@ -3565,10 +5401,9 @@ mod tests {
         appcontainer::remove_profile(&name).unwrap();
     }
 
-    /// A command deletes, renames and moves inside a folder it reads and
-    /// writes, but neither moves a granted folder itself nor anything out of
-    /// a folder it only writes: a folder with `w` moved into one with `rw`
-    /// would be read there.
+    /// A command deletes, renames and moves inside a folder it writes, but
+    /// neither moves a granted folder itself nor anything out of a folder it
+    /// only reads.
     #[cfg(windows)]
     #[test]
     fn an_appcontainer_moves_only_what_it_reads_and_writes() {
@@ -3588,7 +5423,7 @@ mod tests {
         };
         grant(&work, true, true, true);
         grant(&empty, true, true, false);
-        grant(&outbox, false, true, false);
+        grant(&outbox, true, false, false);
         std::fs::write(work.join("a.txt"), "a").unwrap();
         let (w, o, e) = (work.display(), outbox.display(), empty.display());
         // .NET moves and deletes by name, where cmd would list the folder
@@ -3629,7 +5464,7 @@ mod tests {
         }
         assert!(outbox.join("secret.txt").exists() && outbox.join("sub").exists());
         assert!(empty.exists() && !work.join("o").exists() && !work.join("s.txt").exists());
-        assert!(!ps(format!(
+        assert!(ps(format!(
             r"[IO.File]::ReadAllText('{o}\secret.txt') | Set-Content got.txt"
         )));
 
@@ -3766,6 +5601,7 @@ mod tests {
             let below = appcontainer::Below {
                 links: None,
                 progress: &mut |_| {},
+                maker: None,
             };
             appcontainer::set_below(&top, &name, masks, false, whole, None, below)
                 .unwrap()
@@ -3798,6 +5634,7 @@ mod tests {
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         let e = appcontainer::set_below(&top, &name, None, false, false, Some(elsewhere), below)
             .unwrap_err();
@@ -3808,6 +5645,7 @@ mod tests {
         let below = appcontainer::Below {
             links: None,
             progress: &mut |_| {},
+            maker: None,
         };
         let missing = top.join("moved-away");
         let e =
@@ -3826,43 +5664,478 @@ mod tests {
         appcontainer::set(&closed, &name, None, false).unwrap();
         assert!(!has(&closed) && protected(&closed), "{}", icacls(&closed));
 
+        // A file with a second name outside, capped: it reads and runs,
+        // and has a denying entry of every other right, under either name.
         let linked = top.join("a\\b\\l.txt");
         let o = outside.join("o.txt");
         std::fs::hard_link(&o, &linked).unwrap();
-        let before = icacls(&o);
-        let mut asked: Vec<Vec<PathBuf>> = Vec::new();
-        let mut no = |_: &Path, _: u32, names: &[PathBuf]| -> std::io::Result<bool> {
-            asked.push(names.to_vec());
-            Ok(false)
+        let asked: std::cell::RefCell<Vec<Vec<PathBuf>>> = Default::default();
+        let cap = inherit::Cap {
+            containers: vec![(
+                name.clone(),
+                inherit::Gets::Rights(acl::file_cap(true, true, false)),
+            )],
+        };
+        let mut capped = |_: &Path, _: u32, names: &[PathBuf], _: Option<&str>| {
+            asked.borrow_mut().push(names.to_vec());
+            Ok(inherit::Linked::Capped(cap.clone()))
         };
         let mut quiet = |_: inherit::Walked| {};
         let below = appcontainer::Below {
-            links: Some(&mut no),
+            links: Some(&mut capped),
             progress: &mut quiet,
+            maker: None,
         };
-        let (found, _) = appcontainer::reaches(&top, &name, Some(m), false, below).unwrap();
-        assert_eq!(found, Some((linked.clone(), 2)));
-        assert!(!has(&top.join("a\\f.txt")), "nothing changed");
-        let below = appcontainer::Below {
-            links: Some(&mut no),
-            progress: &mut quiet,
-        };
-        let e =
-            appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap_err();
-        assert!(e.to_string().contains("hard links"), "{e}");
-        let names = asked.first().unwrap();
+        appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap();
+        let names = asked.borrow()[0].clone();
         for n in ["outside\\o.txt", "top\\a\\b\\l.txt"] {
             assert!(names.iter().any(|p| p.ends_with(n)), "{n}: {names:?}");
         }
+        assert!(appcontainer::look(&top, &name, m).unwrap().1);
+        // The container's lines of a list, and whether one allows a write.
+        let ours = |p: &Path| -> Vec<String> {
+            icacls(p)
+                .lines()
+                .filter(|l| l.contains("S-1-15-2-"))
+                .map(str::to_string)
+                .collect()
+        };
+        let writes = |l: &String| ["(W", ",W", "(M)", "(F)"].iter().any(|w| l.contains(w));
+        for p in [&o, &linked] {
+            let lines = ours(p);
+            assert!(lines.iter().any(|l| l.contains("(DENY)")), "{lines:?}");
+            let allows: Vec<&String> = lines.iter().filter(|l| !l.contains("(DENY)")).collect();
+            assert!(!allows.is_empty(), "{lines:?}");
+            assert!(
+                allows.iter().all(|l| l.contains("(R") && !writes(l)),
+                "{lines:?}"
+            );
+        }
+        assert!(ours(&top.join("a\\f.txt")).iter().any(writes));
+        // Granted itself, it carries the cap in place of the grant's
+        // entry, which counts as granted.
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut quiet,
+            maker: None,
+        };
+        appcontainer::set_below(&linked, &name, Some(m), false, false, None, below).unwrap();
         assert!(
-            !appcontainer::look(&top, &name, m).unwrap().1,
-            "the folder stays"
+            appcontainer::look(&linked, &name, m).unwrap().1,
+            "{}",
+            icacls(&linked)
         );
-        assert_eq!(icacls(&o), before);
+        // Taken off, where no grant of it holds a name: neither the entry
+        // nor the denial stays.
+        let mut unheld = |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| {
+            Ok(inherit::Linked::Capped(inherit::Cap {
+                containers: vec![(name.clone(), inherit::Gets::Unheld)],
+            }))
+        };
+        let below = appcontainer::Below {
+            links: Some(&mut unheld),
+            progress: &mut quiet,
+            maker: None,
+        };
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+        assert!(ours(&o).is_empty(), "{}", icacls(&o));
         std::fs::remove_file(&linked).unwrap();
         set(None, false);
         assert_eq!(lists(), at_first, "every list as it was");
         std::fs::remove_dir(&j).unwrap();
+    }
+
+    /// A file a command linked into a granted folder from a store of its
+    /// own (pnpm's, uv's, in its profile) keeps the store's list under
+    /// every name, so the owner, as whom the node's service walks (a
+    /// standard user, or an administrator without its group), may not even
+    /// look at it. The walk opens it, and its name in the store, as the
+    /// command account ([`appcontainer::Below::maker`]) and caps it, where
+    /// it would stop at it with "access denied" (#149), and gives the owner
+    /// read and execute on it, so the owner opens what the agent installed.
+    /// The next walk, which may look at it then, changes nothing.
+    /// Here the walk acts as this process' user, with the signed-in users,
+    /// the administrators and privileges made unusable (so it stands for
+    /// the owner), and this process is the maker.
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_file_the_walk_may_not_look_at_is_opened_as_its_maker() {
+        use std::path::{Path, PathBuf};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, ImpersonateLoggedOnUser, PSID,
+            RevertToSelf, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let base = tempfile::tempdir().unwrap();
+        let (top, store) = (base.path().join("top"), base.path().join("store"));
+        for d in [top.join("a"), store.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(top.join("a\\own.txt"), "x").unwrap();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new(args[0])
+                .args(&args[1..])
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{o:?}");
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let me = run(&["whoami", "/user", "/fo", "csv", "/nh"]);
+        let me = me
+            .trim()
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
+        assert!(me.starts_with("S-1-5-"), "{me}");
+        // The project: everyone, so the walk reaches it without this user.
+        let (t, s) = (top.display().to_string(), store.display().to_string());
+        run(&["icacls", &t, "/grant", "*S-1-1-0:(OI)(CI)F"]);
+        // The store: the signed-in users alone, which the walker below is
+        // not (as only the command account is on a command's own store);
+        // whoever owns what is in it may only read its attributes.
+        run(&[
+            "icacls",
+            &s,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-11:(OI)(CI)F",
+            "*S-1-3-4:(OI)(CI)(RA)",
+        ]);
+        let (in_store, linked) = (store.join("x.js"), top.join("a\\x.js"));
+        std::fs::write(&in_store, "x").unwrap();
+        std::fs::hard_link(&in_store, &linked).unwrap();
+        // The store's list but for the container's lines: the walk below
+        // must not give the file the project's entries (everyone's, here).
+        let others = |p: &Path| -> Vec<String> {
+            let path = p.display().to_string();
+            icacls(&[&path])
+                .lines()
+                .filter(|l| l.contains(":(") && !l.contains("S-1-15-2-"))
+                .map(|l| l.replace(&path, "").trim().to_string())
+                .collect()
+        };
+        let store_list = others(&in_store);
+        assert!(!store_list.is_empty());
+
+        let sid = |text: &str| {
+            let mut p: PSID = std::ptr::null_mut();
+            let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
+            // SAFETY: a NUL-terminated string; the SID is freed below.
+            assert!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) } != 0);
+            p
+        };
+        // The walker is this user, as the owner the walk acts as, without
+        // the groups the store lets in.
+        let off = [sid("S-1-5-11"), sid("S-1-5-32-544")];
+        let disable: Vec<SID_AND_ATTRIBUTES> = off
+            .iter()
+            .map(|&p| SID_AND_ATTRIBUTES {
+                Sid: p,
+                Attributes: 0,
+            })
+            .collect();
+        let (mut process, mut walker): (HANDLE, HANDLE) =
+            (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: this process' own token, and a restricted copy of it,
+        // both closed below; the SIDs live through the call.
+        unsafe {
+            assert!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                    &mut process,
+                ) != 0
+            );
+            assert!(
+                CreateRestrictedToken(
+                    process,
+                    DISABLE_MAX_PRIVILEGE,
+                    disable.len() as u32,
+                    disable.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    &mut walker,
+                ) != 0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            for p in off {
+                LocalFree(p);
+            }
+        }
+        // This thread acts as the walker until the end, however the test
+        // ends.
+        struct Back(HANDLE, HANDLE);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                // SAFETY: plain calls; the tokens opened above.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(self.0);
+                    CloseHandle(self.1);
+                }
+            }
+        }
+        let _back = Back(process, walker);
+        // SAFETY: a token of this process' own user.
+        assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
+
+        let name = format!("nerve.test.maker.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let e = appcontainer::look(&linked, &name, m).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+        let asked: std::cell::RefCell<Vec<(Vec<PathBuf>, Option<String>)>> = Default::default();
+        let mut capped = |_: &Path, _: u32, names: &[PathBuf], owner: Option<&str>| {
+            asked
+                .borrow_mut()
+                .push((names.to_vec(), owner.map(String::from)));
+            Ok(inherit::Linked::Capped(inherit::Cap {
+                containers: vec![(
+                    name.clone(),
+                    inherit::Gets::Rights(acl::file_cap(true, true, false)),
+                )],
+            }))
+        };
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut |_| {},
+            maker: Some(process),
+        };
+        appcontainer::set_below(&top, &name, Some(m), false, false, None, below).unwrap();
+        // The walker, the owner, now opens what the command installed.
+        assert_eq!(std::fs::read(&linked).unwrap(), b"x");
+        // SAFETY: a plain call.
+        unsafe { RevertToSelf() };
+        let (names, owner) = asked.borrow()[0].clone();
+        for n in ["store\\x.js", "top\\a\\x.js"] {
+            assert!(names.iter().any(|p| p.ends_with(n)), "{n}: {names:?}");
+        }
+        // Who made the file (this process: its user, or the administrators
+        // where it runs elevated), as the node tells a store's file by.
+        assert!(
+            owner.as_deref().is_some_and(|o| o.starts_with("S-1-5-")),
+            "{owner:?}"
+        );
+        let lines = icacls(&[&in_store.display().to_string()]);
+        let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
+        assert!(ours.iter().any(|l| l.contains("(DENY)")), "{lines}");
+        assert!(ours.iter().any(|l| !l.contains("(DENY)")), "{lines}");
+        // The store's own entries, and the owner's read.
+        let now = others(&in_store);
+        let added: Vec<&String> = now.iter().filter(|l| !store_list.contains(l)).collect();
+        assert!(store_list.iter().all(|l| now.contains(l)), "{now:?}");
+        assert!(added.len() == 1 && added[0].ends_with(":(RX)"), "{now:?}");
+        // The next walk, which the owner's read lets look at the file,
+        // leaves its list as it is.
+        // SAFETY: a token of this process' own user.
+        assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
+        let below = appcontainer::Below {
+            links: Some(&mut capped),
+            progress: &mut |_| {},
+            maker: Some(process),
+        };
+        let again = appcontainer::set_below(&top, &name, Some(m), false, true, None, below);
+        // SAFETY: a plain call.
+        unsafe { RevertToSelf() };
+        let (_, walked) = again.unwrap();
+        assert!(walked.seen >= 2, "{walked:?}");
+        assert_eq!(walked.changed, 0, "{walked:?}");
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        std::fs::remove_file(&linked).unwrap();
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+    }
+
+    /// The installed service changes the entries of the owner's folders
+    /// as the owner, who may not open the token of the node's own account,
+    /// which the walk asks Windows to work out what each object below
+    /// inherits: the walk opens it as the node (#149's first run on the
+    /// service, where every grant failed with "access denied"). Here the
+    /// walk acts as this process' user, restricted to everyone's and the
+    /// users' rights: the folders give everyone every right, this process'
+    /// token gives neither any.
+    #[cfg(windows)]
+    #[test]
+    fn a_walk_as_an_account_that_may_not_open_the_nodes_token_puts_its_grant_on() {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, ImpersonateLoggedOnUser, PSID,
+            RevertToSelf, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+        };
+        let base = tempfile::tempdir().unwrap();
+        let top = base.path().join("top");
+        std::fs::create_dir(&top).unwrap();
+        let t = top.display().to_string();
+        let o = std::process::Command::new("icacls")
+            .args([t.as_str(), "/grant", "*S-1-1-0:(OI)(CI)F"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        std::fs::create_dir(top.join("a")).unwrap();
+        std::fs::write(top.join("a").join("f.txt"), "x").unwrap();
+        // Everyone's and the users' rights: the users' let it load the
+        // system's programs, which give everyone nothing.
+        let only: Vec<SID_AND_ATTRIBUTES> = ["S-1-1-0", "S-1-5-32-545"]
+            .iter()
+            .map(|text| {
+                let mut p: PSID = std::ptr::null_mut();
+                let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
+                // SAFETY: a NUL-terminated string; the SID is freed below.
+                assert!(unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut p) } != 0);
+                SID_AND_ATTRIBUTES {
+                    Sid: p,
+                    Attributes: 0,
+                }
+            })
+            .collect();
+        let (mut process, mut walker): (HANDLE, HANDLE) =
+            (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: this process' own token, and a restricted copy of it,
+        // both closed below; the SID lives through the call.
+        unsafe {
+            assert!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                    &mut process,
+                ) != 0
+            );
+            assert!(
+                CreateRestrictedToken(
+                    process,
+                    DISABLE_MAX_PRIVILEGE,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    only.len() as u32,
+                    only.as_ptr(),
+                    &mut walker,
+                ) != 0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+            for s in &only {
+                LocalFree(s.Sid);
+            }
+        }
+        struct Back(HANDLE, HANDLE);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                // SAFETY: plain calls; the tokens opened above.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(self.0);
+                    CloseHandle(self.1);
+                }
+            }
+        }
+        let _back = Back(process, walker);
+        // SAFETY: a token of this process' own user.
+        assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: an out pointer; a handle opened is closed at once.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if opened != 0 {
+            // SAFETY: the handle just opened.
+            unsafe { CloseHandle(token) };
+        }
+        assert_eq!(opened, 0, "the walker opens this process' token");
+
+        let name = format!("nerve.test.astoken.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        let put = appcontainer::set_below(&top, &name, Some(m), false, false, None, below);
+        // It still acts as the walker afterwards.
+        let mut now: HANDLE = std::ptr::null_mut();
+        // SAFETY: the thread's token, opened as the process, closed at once.
+        assert!(unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut now) } != 0);
+        // SAFETY: the handle just opened.
+        unsafe {
+            CloseHandle(now);
+            RevertToSelf();
+        }
+        put.unwrap();
+        let icacls = |p: &std::path::Path| {
+            let o = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        for p in ["", "a", "a\\f.txt"] {
+            assert!(icacls(&top.join(p)).contains("S-1-15-2-"), "{p}");
+        }
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
+    }
+
+    /// A granted file with more than one name whose list does not inherit
+    /// (the owner made it a link of an SSH key, say) is capped as one that
+    /// does, not given the grant's own entry (#149): a name in a folder
+    /// closed to the container leaves it with a denial and no entry.
+    #[cfg(windows)]
+    #[test]
+    fn a_protected_linked_file_that_is_granted_gets_the_cap() {
+        use std::path::{Path, PathBuf};
+        let base = tempfile::tempdir().unwrap();
+        let (top, other) = (base.path().join("top"), base.path().join("other"));
+        for d in [&top, &other] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let key = top.join("key");
+        std::fs::write(&key, "x").unwrap();
+        std::fs::hard_link(&key, other.join("key")).unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(&key)
+            .arg("/inheritance:d")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        let name = format!("nerve.test.protected.{}", std::process::id());
+        let m = acl::masks(true, true, false);
+        let mut closed = |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| {
+            Ok(inherit::Linked::Capped(inherit::Cap {
+                containers: vec![(name.clone(), inherit::Gets::Closed)],
+            }))
+        };
+        let below = appcontainer::Below {
+            links: Some(&mut closed),
+            progress: &mut |_| {},
+            maker: None,
+        };
+        // Not `own`: the owner put the grant on a file it chose.
+        appcontainer::set_below(&key, &name, Some(m), false, false, None, below).unwrap();
+        let lines = icacls(&[&key.display().to_string()]);
+        let ours: Vec<&str> = lines.lines().filter(|l| l.contains("S-1-15-2-")).collect();
+        assert!(!ours.is_empty(), "{lines}");
+        // A denial of every right is listed as "no access".
+        assert!(
+            ours.iter()
+                .all(|l| l.trim_end().ends_with(":(N)") || l.contains("(DENY)")),
+            "{lines}"
+        );
     }
 
     /// A folder on a volume mounted in a folder (no drive letter) is found
@@ -4554,12 +6827,11 @@ mod tests {
         assert!(!other.join("no").exists() && !other.join("inner/no").exists());
     }
 
-    /// The flags are independent in the kernel too: a folder in `write` alone
-    /// can be written and not read or listed, and one in `exec` alone can run
-    /// its program and not be read.
+    /// A folder in `write` alone can be written, read and listed (`w` reads
+    /// too), and one in `exec` alone can run its program and not be read.
     #[cfg(target_os = "linux")]
     #[test]
-    fn landlock_write_without_read_and_execute_without_read() {
+    fn landlock_write_reads_too_and_execute_without_read() {
         if landlock_rules::abi_version().is_none() {
             eprintln!("skipped: no Landlock here");
             return;
@@ -4585,8 +6857,8 @@ mod tests {
             std::fs::read_to_string(wo.path().join("new")).unwrap(),
             "x\n"
         );
-        assert!(!confined_sh(&spec, &format!("cat {}/old", d(wo.path()))));
-        assert!(!confined_sh(&spec, &format!("ls {}", d(wo.path()))));
+        assert!(confined_sh(&spec, &format!("cat {}/old", d(wo.path()))));
+        assert!(confined_sh(&spec, &format!("ls {}", d(wo.path()))));
         assert!(confined_sh(&spec, &format!("{}/tool", d(xo.path()))));
         // Not listed, not written; a file can be read by name only because
         // Landlock cannot run what it may not read.

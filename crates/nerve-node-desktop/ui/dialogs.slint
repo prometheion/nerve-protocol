@@ -391,16 +391,23 @@ export component FolderDialog inherits Dialog {
             text: "Read";
             detail: "List, read and search files.";
             checked: Perm.folder-read;
+            // Write reads too, so read goes off with it.
             toggled(on) => {
                 Perm.folder-read = on;
+                if (!on) {
+                    Perm.folder-write = false;
+                }
             }
         }
         CheckBox {
             text: "Write";
-            detail: "Change, add and delete files.";
+            detail: "Change, add and delete files. Reads too.";
             checked: Perm.folder-write;
             toggled(on) => {
                 Perm.folder-write = on;
+                if (on) {
+                    Perm.folder-read = true;
+                }
             }
         }
         CheckBox {

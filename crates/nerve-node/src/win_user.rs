@@ -1,9 +1,9 @@
 //! The account a center's commands run as on a node installed as a Windows
 //! service (docs/dev/windows.md). The service runs as `nerve`, which alone
 //! (with SYSTEM and the administrators) may open the node's config, keys and
-//! state; every command runs as the account `machine.user` names instead,
-//! logged on with the password `install` stored with DPAPI in the config
-//! folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
+//! state; every command runs as the owner instead, the account that ran
+//! `install`, logged on with the password `install` stored with DPAPI in the
+//! config folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
 //! account's token the service keeps two privileges,
 //! SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege; the command
 //! gets none of them, since it gets the account's own token.
@@ -44,14 +44,14 @@ use windows_sys::Win32::Security::{
     LookupAccountSidW, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
     SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SID_NAME_USE,
     SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_OWNER,
-    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenOwner,
-    TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid, WinBuiltinBackupOperatorsSid,
-    WinLocalSystemSid,
+    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups,
+    TokenOwner, TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid,
+    WinBuiltinBackupOperatorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_DATA,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -61,9 +61,10 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    GetCurrentThread, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    OpenProcessToken, OpenThreadToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetThreadToken, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
 
@@ -160,6 +161,54 @@ pub fn name_of_sid(text: &str) -> Result<String, String> {
         bytes
     };
     sid_name(&bytes).map_err(|e| format!("no account has the SID {text}: {e}"))
+}
+
+/// Runs `f` on this thread as this process, also where the thread acts as
+/// another account ([`FsAs`]), and then as that account again: the node's
+/// own state folder is open to the node, not to the owner it acts as. An
+/// error where the thread cannot act as that account again; it is then
+/// itself, which [`FsAs`]'s end leaves it as anyway.
+pub fn as_process<T>(f: impl FnOnce() -> T) -> io::Result<T> {
+    use windows_sys::Win32::Foundation::ERROR_NO_TOKEN;
+    use windows_sys::Win32::Security::TOKEN_IMPERSONATE;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, OpenThreadToken, SetThreadToken,
+    };
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: the thread's own token, opened as the process, owned below.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut h) } == 0 {
+        let e = last();
+        if e.raw_os_error() == Some(ERROR_NO_TOKEN as i32) {
+            return Ok(f());
+        }
+        return Err(e);
+    }
+    // SAFETY: OpenThreadToken returned a handle this code now owns.
+    let was = Token(unsafe { OwnedHandle::from_raw_handle(h as _) });
+    // SAFETY: plain call; the thread is itself until the token goes back.
+    unsafe { RevertToSelf() };
+    let r = f();
+    // SAFETY: the thread's own token, opened above.
+    if unsafe { SetThreadToken(std::ptr::null(), was.raw()) } == 0 {
+        return Err(failed("SetThreadToken"));
+    }
+    Ok(r)
+}
+
+/// The profile folder of the account whose SID is `text`, where Windows
+/// keeps it; `None` before its first logon, and for a text that is no SID.
+pub fn profile_of_sid(text: &str) -> Option<PathBuf> {
+    let mut sid: PSID = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated string; the SID Windows allocates is freed
+    // once it was read.
+    unsafe {
+        if ConvertStringSidToSidW(wide(text).as_ptr(), &mut sid) == 0 {
+            return None;
+        }
+        let dir = profile_dir(sid);
+        LocalFree(sid as _);
+        dir
+    }
 }
 
 /// The name an account or group has on this machine, by its SID.
@@ -460,7 +509,7 @@ pub(crate) fn enable(names: &[&str]) -> io::Result<()> {
 /// machine would be: an administrator gets the filtered token UAC gives
 /// such a logon, without the Administrators group.
 pub fn logon(name: &str, password: &str) -> Result<Token, String> {
-    logon_as(name, password, LOGON32_LOGON_INTERACTIVE)
+    logon_as(name, password, LOGON32_LOGON_INTERACTIVE).map_err(|(why, _)| why)
 }
 
 /// Logs `name` on with `password` as a batch job, as the task scheduler
@@ -468,10 +517,16 @@ pub fn logon(name: &str, password: &str) -> Result<Token, String> {
 /// logon, so an administrator gets its full token, with the Administrators
 /// group. What a sudo command starts with (crate::winsudo).
 pub fn batch_logon(name: &str, password: &str) -> Result<Token, String> {
-    logon_as(name, password, LOGON32_LOGON_BATCH)
+    logon_as(name, password, LOGON32_LOGON_BATCH).map_err(|(why, _)| why)
 }
 
-fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, String> {
+/// [`logon`], and whether a failure is the password's: the one Windows
+/// counts toward a lockout.
+fn logon_counted(name: &str, password: &str) -> Result<Token, (String, bool)> {
+    logon_as(name, password, LOGON32_LOGON_INTERACTIVE)
+}
+
+fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, (String, bool)> {
     let mut h: HANDLE = std::ptr::null_mut();
     // SAFETY: NUL-terminated strings ("." is this machine) and a place for
     // the token.
@@ -487,17 +542,23 @@ fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, St
     };
     if ok == 0 {
         let e = last();
-        return Err(match e.raw_os_error().map(|c| c as u32) {
-            Some(ERROR_LOGON_FAILURE) => {
-                format!("the password of {name} is wrong, or {name} cannot log on with a password")
-            }
-            // Administrators may log on as a batch job unless a policy
-            // took it from them.
-            Some(ERROR_LOGON_TYPE_NOT_GRANTED) if kind == LOGON32_LOGON_BATCH => format!(
-                "{name} may not log on as a batch job, which a sudo command needs; administrators have the right \"Log on as a batch job\" unless a policy takes it"
-            ),
-            _ => format!("cannot log {name} on: {e}"),
-        });
+        let wrong = e.raw_os_error().map(|c| c as u32) == Some(ERROR_LOGON_FAILURE);
+        return Err((
+            match e.raw_os_error().map(|c| c as u32) {
+                Some(ERROR_LOGON_FAILURE) => {
+                    format!(
+                        "the password of {name} is wrong, or {name} cannot log on with a password"
+                    )
+                }
+                // Administrators may log on as a batch job unless a policy
+                // took it from them.
+                Some(ERROR_LOGON_TYPE_NOT_GRANTED) if kind == LOGON32_LOGON_BATCH => format!(
+                    "{name} may not log on as a batch job, which a sudo command needs; administrators have the right \"Log on as a batch job\" unless a policy takes it"
+                ),
+                _ => format!("cannot log {name} on: {e}"),
+            },
+            wrong,
+        ));
     }
     // SAFETY: LogonUserW returned a token this code now owns.
     Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
@@ -529,10 +590,22 @@ pub fn has_admins(t: &Token) -> io::Result<bool> {
     }
 }
 
+/// The sudo password of the owner that did not work, so that every sudo
+/// command does not log on with it again (see [`crate::winsvc::sudo_attempt`]).
+static STALE_SUDO: Mutex<crate::winsvc::StalePassword> =
+    Mutex::new(crate::winsvc::StalePassword::default_const());
+
 /// The token a sudo command of `name` starts with: its batch logon with
-/// `password`, which must hold the Administrators group.
+/// `password`, which must hold the Administrators group. A password that
+/// Windows refused is not tried again until `sudo on` keeps another: every
+/// wrong one counts toward locking the account.
 pub fn sudo_token(name: &str, password: &str) -> Result<Token, String> {
-    let t = batch_logon(name, password)?;
+    let t = crate::winsvc::sudo_attempt(
+        &mut nerve_transport::sync::lock(&STALE_SUDO),
+        name,
+        password,
+        || logon_as(name, password, LOGON32_LOGON_BATCH),
+    )?;
     match has_admins(&t) {
         Ok(true) => Ok(t),
         Ok(false) => Err(crate::winsudo::not_admin(name)),
@@ -541,8 +614,11 @@ pub fn sudo_token(name: &str, password: &str) -> Result<Token, String> {
 }
 
 /// The thread acts as another account while this lives. It is not `Send`,
-/// so it stays on its thread and cannot be held across an `.await`.
-struct Impersonation(PhantomData<*const ()>);
+/// so it stays on its thread and cannot be held across an `.await`. The
+/// policy's path resolve knows it ([`nerve_policy::paths::Acting`]): the node's
+/// own account is refused a path it cannot look at to the end, an account it
+/// acts as is not.
+struct Impersonation(PhantomData<*const ()>, nerve_policy::paths::Acting);
 
 impl Impersonation {
     fn new(t: &Token) -> io::Result<Impersonation> {
@@ -550,7 +626,10 @@ impl Impersonation {
         if unsafe { ImpersonateLoggedOnUser(t.raw()) } == 0 {
             return Err(last());
         }
-        Ok(Impersonation(PhantomData))
+        Ok(Impersonation(
+            PhantomData,
+            nerve_policy::paths::Acting::begin(),
+        ))
     }
 }
 
@@ -558,6 +637,62 @@ impl Drop for Impersonation {
     fn drop(&mut self) {
         // SAFETY: plain call; the thread is itself again.
         unsafe { RevertToSelf() };
+    }
+}
+
+/// The full name of `p` (`\\?\C:\…`), for [`nerve_policy::paths`] when
+/// the account this thread acts as is refused it: Windows Server refuses a
+/// pairing's AppContainer the name of a folder it may open (os error 5).
+/// The path is opened as that account, so what it may not open stays
+/// refused; only the name of that open object is asked for as the node,
+/// which then acts as the account again.
+pub fn name_as_self(p: &Path) -> io::Result<PathBuf> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)?;
+    let mut raw: HANDLE = std::ptr::null_mut();
+    // SAFETY: this thread's token, opened with the node's own rights.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut raw) } == 0 {
+        return Err(last());
+    }
+    // SAFETY: a handle OpenThreadToken just gave.
+    let acting = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+    // SAFETY: plain call; the thread acts again below.
+    unsafe { RevertToSelf() };
+    let name = final_name(&f);
+    // SAFETY: the token this thread acted with a moment ago.
+    if unsafe { SetThreadToken(std::ptr::null(), acting.as_raw_handle() as HANDLE) } == 0 {
+        // A thread that cannot act as the account again would go on as the
+        // node, which may open the node's keys: never.
+        std::process::abort();
+    }
+    name
+}
+
+/// The full name of the object open as `f`, by its drive.
+fn final_name(f: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = vec![0u16; 512];
+    loop {
+        // SAFETY: an open handle and a buffer of the length given.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                f.as_raw_handle() as HANDLE,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                0,
+            )
+        } as usize;
+        if n == 0 {
+            return Err(last());
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        buf.resize(n, 0);
     }
 }
 
@@ -608,6 +743,56 @@ fn opens(p: &Path) -> bool {
             return true;
         }
         GetLastError() == ERROR_SHARING_VIOLATION
+    }
+}
+
+/// Makes the profile of `name`, whose logon `t` is, where Windows has none,
+/// by loading it once: the folder and the registry Windows makes at the
+/// first logon. Needs an administrator (`install`). Its folder.
+pub fn make_profile(t: &Token, name: &str) -> io::Result<PathBuf> {
+    use windows_sys::Win32::UI::Shell::{LoadUserProfileW, PROFILEINFOW, UnloadUserProfile};
+    /// PI_NOUI: no message box when it fails.
+    const PI_NOUI: u32 = 1;
+    let mut user = wide(name);
+    let mut info = PROFILEINFOW {
+        dwSize: std::mem::size_of::<PROFILEINFOW>() as u32,
+        dwFlags: PI_NOUI,
+        lpUserName: user.as_mut_ptr(),
+        ..Default::default()
+    };
+    // SAFETY: a logon token and a filled PROFILEINFOW whose name lives for
+    // the call; the profile is unloaded below.
+    if unsafe { LoadUserProfileW(t.raw(), &mut info) } == 0 {
+        return Err(failed("LoadUserProfileW"));
+    }
+    // SAFETY: the token and the profile handle the load gave.
+    unsafe { UnloadUserProfile(t.raw(), info.hProfile) };
+    let buf = token_info(t.raw(), TokenUser)?;
+    // SAFETY: the buffer holds a TOKEN_USER whose SID points into it.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: a valid SID.
+    unsafe { profile_dir(sid) }
+        .ok_or_else(|| io::Error::other("Windows names no profile folder for it"))
+}
+
+/// Whether the account of `t` may read the registry key `key` below
+/// `HKEY_USERS`: one that is not there (a hive not loaded) is not read.
+pub fn opens_key(t: &Token, key: &str) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+    use windows_sys::Win32::System::Registry::{HKEY_USERS, KEY_READ, RegCloseKey, RegOpenKeyExW};
+    let _as = Impersonation::new(t)?;
+    let mut h = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated key name and a place for the handle, closed
+    // below.
+    let r = unsafe { RegOpenKeyExW(HKEY_USERS, wide(key).as_ptr(), 0, KEY_READ, &mut h) };
+    match r {
+        0 => {
+            // SAFETY: the handle the call opened.
+            unsafe { RegCloseKey(h) };
+            Ok(true)
+        }
+        ERROR_ACCESS_DENIED | ERROR_FILE_NOT_FOUND => Ok(false),
+        e => Err(io::Error::from_raw_os_error(e as i32)),
     }
 }
 
@@ -677,20 +862,30 @@ fn crypt(data: &[u8], seal: bool) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Where the daemon finds the stored password: set once at its start.
+/// The config folder, where the daemon finds the stored passwords: set
+/// once at its start.
 static SECRET: OnceLock<PathBuf> = OnceLock::new();
 
 /// The last logon of the command account, and when it was made.
 static LOGON: Mutex<Option<(String, Instant, Arc<Token>)>> = Mutex::new(None);
 
-/// Tells the commands where the stored password is: the config folder.
+/// The stored password of the owner that did not work, so that it is tried
+/// once, not at every look at the folders' entries.
+static STALE: Mutex<crate::winsvc::StalePassword> =
+    Mutex::new(crate::winsvc::StalePassword::default_const());
+
+/// Tells the commands where the stored passwords are: the config folder.
 pub fn init(config_dir: &Path) {
-    let _ = SECRET.set(config_dir.join(crate::winsvc::SECRET_FILE));
+    let _ = SECRET.set(config_dir.to_path_buf());
 }
 
-/// A logon of `account`, with the password `install` stored; one is kept
-/// for [`FRESH`].
+/// A logon of `account`, with the password `install` stored; one of the
+/// owner's is kept for [`FRESH`]. The command account `nerve-run` logs on
+/// as a batch job ([`run_logon`]), anew each time.
 pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
+    if account.name.eq_ignore_ascii_case(crate::account::RUN_USER) {
+        return run_logon().map(Arc::new);
+    }
     let mut cached = nerve_transport::sync::lock(&LOGON);
     if let Some((n, at, t)) = cached.as_ref()
         && *n == account.name
@@ -701,8 +896,9 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     let again = crate::account::NO_ACCOUNT_INSTALL;
     let file = SECRET
         .get()
+        .map(|d| d.join(crate::winsvc::SECRET_FILE))
         .ok_or_else(|| format!("no password of {} is stored; {again}", account.name))?;
-    let blob = match std::fs::read(file) {
+    let blob = match std::fs::read(&file) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(format!(
@@ -726,9 +922,101 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
             account.name
         ));
     }
-    let t = Arc::new(logon(&name, &password).map_err(|e| format!("{e}; {again}"))?);
+    // A password that failed stays failed until the owner saves another:
+    // Windows locks the account after a few wrong ones, and every sync of
+    // the folders' entries logs the owner on.
+    let t = nerve_transport::sync::lock(&STALE)
+        .attempt(&blob, || logon_counted(&name, &password))
+        .map_err(|e| format!("{e}; {again}"))?;
+    let t = Arc::new(t);
     *cached = Some((account.name.clone(), Instant::now(), t.clone()));
     Ok(t)
+}
+
+/// A logon of the command account `nerve-run` as a batch job, the logon its
+/// commands start with, with the password `install` made and stored
+/// ([`crate::winsvc::RUN_SECRET_FILE`]). Made anew for each command: each
+/// gets the window station of a logon of its own, which no other pairing's
+/// command shares (nerve_sandbox::appcontainer).
+pub fn run_logon() -> Result<Token, String> {
+    let name = crate::account::RUN_USER;
+    let again = "install Nerve again with its installer, which makes it again";
+    let file = SECRET
+        .get()
+        .map(|d| d.join(crate::winsvc::RUN_SECRET_FILE))
+        .ok_or_else(|| format!("no password of {name} is stored; {again}"))?;
+    let blob = std::fs::read(&file).map_err(|e| format!("{}: {e}; {again}", file.display()))?;
+    let plain = unprotect(&blob)
+        .map_err(|e| format!("the stored password of {name} cannot be decrypted ({e}); {again}"))?;
+    let (stored, password) = crate::winsvc::parse_secret(&plain)
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("the stored password of {name} cannot be read; {again}"))?;
+    batch_logon(&stored, &password).map_err(|e| format!("{e}; {again}"))
+}
+
+#[repr(C)]
+struct ObjectAttributes {
+    len: u32,
+    root: HANDLE,
+    name: *mut std::ffi::c_void,
+    attributes: u32,
+    descriptor: *mut std::ffi::c_void,
+    quality: *mut std::ffi::c_void,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateLowBoxToken(
+        token: *mut HANDLE,
+        existing: HANDLE,
+        access: u32,
+        attributes: *const ObjectAttributes,
+        package: PSID,
+        capability_count: u32,
+        capabilities: *mut SID_AND_ATTRIBUTES,
+        handle_count: u32,
+        handles: *mut HANDLE,
+    ) -> i32;
+}
+
+/// `t` as a process of the container `name` holds it: what that container
+/// may open, the folders granted to it and what Windows opens to every
+/// AppContainer, and only where `t`'s account may open it too. Without
+/// capabilities: it opens files, nothing of the network. Needs no profile.
+pub fn lowbox(t: &Token, name: &str) -> io::Result<Token> {
+    use windows_sys::Win32::Security::TOKEN_ALL_ACCESS;
+    let sid = nerve_sandbox::appcontainer::Sid::derive(name)?;
+    let attributes = ObjectAttributes {
+        len: std::mem::size_of::<ObjectAttributes>() as u32,
+        root: std::ptr::null_mut(),
+        name: std::ptr::null_mut(),
+        attributes: 0,
+        descriptor: std::ptr::null_mut(),
+        quality: std::ptr::null_mut(),
+    };
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: an open token, empty object attributes, the container's SID
+    // and no capabilities or handles; the new token is owned below.
+    let st = unsafe {
+        NtCreateLowBoxToken(
+            &mut h,
+            t.raw(),
+            TOKEN_ALL_ACCESS,
+            &attributes,
+            sid.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if st < 0 {
+        return Err(io::Error::other(format!(
+            "cannot make the token of the AppContainer {name} ({st:#x})"
+        )));
+    }
+    // SAFETY: the call made a token this code now owns.
+    Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
 }
 
 /// The node's own file access as `account`, on this thread only, while it
@@ -745,6 +1033,17 @@ impl FsAs {
         let t = token_for(account).map_err(io::Error::other)?;
         Ok(FsAs {
             _as: Impersonation::new(&t)?,
+        })
+    }
+
+    /// As `account` in the pairing's container `name` ([`lowbox`]): what
+    /// its commands may open, and not what the account may besides, which
+    /// is every pairing's folders (#149, Q4).
+    pub fn in_container(account: &Account, name: &str) -> io::Result<FsAs> {
+        let t = token_for(account).map_err(io::Error::other)?;
+        let boxed = lowbox(&t, name)?;
+        Ok(FsAs {
+            _as: Impersonation::new(&boxed)?,
         })
     }
 }
@@ -848,21 +1147,30 @@ fn nul() -> io::Result<OwnedHandle> {
 
 /// Starts `line` (a command line, [`crate::exec::windows_command_line`])
 /// suspended with token `t`, in `cwd`, with the account's own environment
-/// and no window. It gets the NUL device as stdin and a pipe each for
-/// stdout and stderr, and no other handle of the node. A token that is not
-/// a restricted copy of this process's own needs [`SWITCH`].
+/// and no window. It gets `input` on its stdin, a pipe that a thread of the
+/// node fills and closes (the shim's spec, which a full pipe would hold
+/// while the process waits to be resumed), else the NUL device; a pipe each
+/// for stdout and stderr, and no other handle of the node. A token that is
+/// not a restricted copy of this process's own needs [`SWITCH`].
 pub fn spawn(
     t: &Token,
     line: &str,
     cwd: Option<&Path>,
     home: Option<&Path>,
+    input: Option<Vec<u8>>,
 ) -> io::Result<Spawned> {
     // Held by the service; another caller starts only restricted copies of
     // its own token, which need neither.
     let _ = enable(&SWITCH);
     let (out_r, out_w) = pipe()?;
     let (err_r, err_w) = pipe()?;
-    let input = nul()?;
+    let (input, feed) = match input {
+        Some(bytes) => {
+            let (r, w) = pipe()?;
+            (r, Some((w, bytes)))
+        }
+        None => (nul()?, None),
+    };
     let given = [
         input.as_raw_handle() as HANDLE,
         out_w.as_raw_handle() as HANDLE,
@@ -890,6 +1198,13 @@ pub fn spawn(
         )
     };
     drop((input, out_w, err_w));
+    if let Some((w, bytes)) = feed {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut w = std::fs::File::from(w);
+            let _ = w.write_all(&bytes);
+        });
+    }
     Ok(Spawned {
         pid: pi.dwProcessId,
         process,
@@ -1145,7 +1460,7 @@ pub fn run_capture(
     job: Option<&crate::win::Job>,
 ) -> io::Result<(u32, Vec<u8>)> {
     use std::io::Read;
-    let child = spawn(t, line, None, None)?;
+    let child = spawn(t, line, None, None, None)?;
     if let Some(job) = job
         && let Err(e) = job.assign(child.process())
     {

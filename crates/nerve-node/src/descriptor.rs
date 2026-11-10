@@ -2136,13 +2136,24 @@ mod tests {
                 &separate,
                 &[]
             )),
-            pairs(&[
-                ("/srv/data", "r"),
-                ("/tmp", "rwx own shared"),
-                ("/var/tmp", "rwx own shared"),
-                ("/var/lib/nerve-run/lab/home", "rwx own"),
-                ("/var/lib/nerve-run/lab/tmp", "rwx own"),
-            ])
+            if cfg!(windows) {
+                // Windows shares no folder of temporary files, so `/tmp`
+                // stays the owner's grant.
+                pairs(&[
+                    ("/srv/data", "r"),
+                    ("/tmp", "r"),
+                    ("/var/lib/nerve-run/lab/home", "rwx own"),
+                    ("/var/lib/nerve-run/lab/tmp", "rwx own"),
+                ])
+            } else {
+                pairs(&[
+                    ("/srv/data", "r"),
+                    ("/tmp", "rwx own shared"),
+                    ("/var/tmp", "rwx own shared"),
+                    ("/var/lib/nerve-run/lab/home", "rwx own"),
+                    ("/var/lib/nerve-run/lab/tmp", "rwx own"),
+                ])
+            }
         );
         let own = Reach::of(&e, 0, Some("me".into()), true, None);
         let d = super::for_center(&NodeConfig::default(), &e, &own, &[]);
