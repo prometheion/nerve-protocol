@@ -176,10 +176,32 @@ pub trait WinSystem {
 }
 
 /// [`WinSystem::stage_vault`] before nerve's vault becomes unreadable (a new
-/// password) or goes (uninstall). A service that cannot do it is fine where
-/// the config keeps nothing there; else nothing changes.
+/// password) or goes (uninstall). Only the running service reads its vault,
+/// so a stopped one that may hold entries (the keys, with the keyring; the
+/// proxy's header values, which are there whatever the storage) is started
+/// for it. Where that or the staging fails and entries may be there,
+/// nothing changes; a service that holds none needs neither.
 fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
-    let keyring = crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring;
+    let Some(runs) = sys.service()? else {
+        return Ok(());
+    };
+    let holds = crate::secrets::vault::may_hold(&layout.paths);
+    if !runs && !holds {
+        return Ok(());
+    }
+    let lost = |e: String| {
+        format!(
+            "the service did not put what its Credential Manager keeps aside ({e}), and it would be lost: nothing was changed. Start the node on the app's Overview and try again, or choose Files under Settings › Network › Keys and turn the proxy off first"
+        )
+    };
+    if !runs {
+        sys.start()
+            .and_then(|()| sys.wait_running(layout))
+            .map_err(lost)?;
+        steps.did(format!(
+            "started the service {SERVICE_NAME}: only the running service reads its Credential Manager"
+        ));
+    }
     match sys.stage_vault(&layout.paths) {
         Ok(0) => Ok(()),
         Ok(n) => {
@@ -188,9 +210,7 @@ fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
             ));
             Ok(())
         }
-        Err(e) if keyring => Err(format!(
-            "the running service did not put the keys in its Credential Manager aside ({e}), and they would be lost: nothing was changed. Choose Files under Settings › Network › Keys, then try again"
-        )),
+        Err(e) if holds => Err(lost(e)),
         Err(_) => Ok(()),
     }
 }
@@ -511,9 +531,7 @@ fn install_steps(
     // opens what its Credential Manager kept: the running service copies
     // its entries aside first, sealed, and takes them back at its start
     // (crate::secrets::vault).
-    if sys.service()? == Some(true) {
-        stage_vault(layout, sys, steps)?;
-    }
+    stage_vault(layout, sys, steps)?;
     // A running service holds the program and the folders' files.
     if sys.service()? == Some(true) {
         sys.stop()?;
@@ -791,7 +809,7 @@ fn uninstall_steps(
 ) -> Result<(), String> {
     // The Credential Manager of nerve goes with the account: kept data keeps
     // its entries aside, sealed, for a later install's service to take.
-    if !purge && sys.service()? == Some(true) {
+    if !purge {
         stage_vault(layout, sys, steps)?;
     }
     if sys.service()?.is_some() {
@@ -1710,6 +1728,72 @@ pub(crate) mod tests {
         std::fs::write(l.paths.config_file(), "").unwrap();
         sys.types("alice's");
         install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+    }
+
+    /// A stopped service is started to put its entries aside where it may
+    /// hold any: the keys with the keyring, the proxy's header values with
+    /// any storage. One that holds none is not, and one that cannot start
+    /// changes nothing; so for install and for an uninstall that keeps the
+    /// data.
+    #[test]
+    fn a_stopped_service_starts_to_put_its_vault_aside() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        let started_then_staged = |sys: &Fake| {
+            let calls = sys.calls();
+            let start = calls.iter().position(|c| c == "start");
+            let staged = calls.iter().position(|c| c.starts_with("stage vault"));
+            start.is_some() && start < staged
+        };
+        // The keys in files and no proxy headers: nothing to put aside.
+        sys.stop().unwrap();
+        sys.calls.borrow_mut().clear();
+        sys.types("alice's");
+        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        let calls = sys.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("stage vault")),
+            "{calls:?}"
+        );
+        for config in [
+            "[machine]\nsecret_storage = \"keyring\"\n",
+            "[connection]\nproxy = \"http://proxy.example:3128\"\nheaders = [\"X-Token\"]\n",
+        ] {
+            std::fs::write(l.paths.config_file(), config).unwrap();
+            sys.stop().unwrap();
+            sys.calls.borrow_mut().clear();
+            sys.types("alice's");
+            install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+            assert!(started_then_staged(&sys), "{config}: {:?}", sys.calls());
+            // A service that does not start: nerve keeps its password.
+            sys.stop().unwrap();
+            sys.starts.set(false);
+            sys.calls.borrow_mut().clear();
+            sys.types("alice's");
+            let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+            assert!(e.contains("would be lost: nothing was changed"), "{e}");
+            assert!(
+                !sys.calls().iter().any(|c| c.starts_with("reset")),
+                "{:?}",
+                sys.calls()
+            );
+            sys.starts.set(true);
+        }
+        // A running service that cannot put the proxy's header values
+        // aside, with the keys in files.
+        sys.service.set(Some(true));
+        *sys.vault_fails.borrow_mut() = true;
+        sys.types("alice's");
+        let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+        assert!(e.contains("would be lost"), "{e}");
+        *sys.vault_fails.borrow_mut() = false;
+        // Uninstall that keeps the data, with the service stopped.
+        sys.stop().unwrap();
+        sys.calls.borrow_mut().clear();
+        uninstall(&l, &l.paths, &sys, false, &mut Vec::new()).unwrap();
+        assert!(started_then_staged(&sys), "{:?}", sys.calls());
     }
 
     #[test]

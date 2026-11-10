@@ -1334,6 +1334,19 @@ pub(crate) mod vault {
         false
     }
 
+    /// Whether the service's vault may hold entries of the node at `paths`:
+    /// its keys, where `node.toml` says the keyring, and the proxy's header
+    /// values, which are there whatever it says. A config that cannot be
+    /// read may name either.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn may_hold(paths: &NodePaths) -> bool {
+        if !paths.config_file().exists() {
+            return false;
+        }
+        super::stated_storage(paths) == nerve_policy::config::SecretStorage::Keyring
+            || super::stated_config(paths).map_or(true, |c| !c.connection.headers.is_empty())
+    }
+
     /// One call to the running service, from code that does not wait
     /// (`get` is called inside and outside the runtime): on a thread of its
     /// own with a runtime of its own.
