@@ -1016,6 +1016,27 @@ pub mod acl {
         m
     }
 
+    /// Whether `sid` (as text) is the SID of an app package as Windows
+    /// derives it from a container's name: `S-1-15-2-` and seven numbers,
+    /// as the node's containers have. Not the groups every container is in
+    /// (`ALL APPLICATION PACKAGES`, `S-1-15-2-1`, and `ALL RESTRICTED
+    /// APPLICATION PACKAGES`, `S-1-15-2-2`), which other programs list on
+    /// purpose, nor a capability (`S-1-15-3-…`).
+    pub fn package_sid(sid: &str) -> bool {
+        let Some(rest) = sid
+            .get(..9)
+            .is_some_and(|p| p.eq_ignore_ascii_case("S-1-15-2-"))
+            .then(|| &sid[9..])
+        else {
+            return false;
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
+        parts.len() == 7
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }
+
     /// The access list `aces` of a file with more than one name, as `caps`
     /// says for each SID (as text) and with no more than
     /// [`READ_AND_EXECUTE`] for every other AppContainer and capability
@@ -1026,10 +1047,13 @@ pub mod acl {
     /// [`Gets::Rights`] gets an allowing entry of those and a denying one of
     /// every other right, a closed one a denying entry of every right, and
     /// one that is [`Gets::Unheld`] none. So it gets the same whichever
-    /// name's folder the list was worked out under, and its denying entry,
-    /// first in the list, stays when Windows passes a folder's list down to
-    /// the file again (as Explorer and `icacls` do, which would give it the
-    /// folder's whole entry). The node's allowing entries come after the
+    /// name's folder the list was worked out under. Its denying entry, first
+    /// in the list, stays when Windows passes a folder's list down to the
+    /// file again (as Explorer and `icacls` do), but it does not hold a
+    /// container back (Windows checks a container by the entries that allow
+    /// it something): the file inherits the folder's whole entry again,
+    /// which [`capped_within`] does not count as capped, so the next sync
+    /// caps it again. The node's allowing entries come after the
     /// other explicit ones and before the inherited ones, as Windows orders
     /// a list. Every other entry stays as it is.
     pub fn capped(aces: &[Ace], caps: &[(String, Gets)]) -> Vec<Capped> {
@@ -1153,9 +1177,14 @@ pub mod acl {
     /// right it does not allow, and an allowing one of no more than the
     /// grant gives within [`READ_AND_EXECUTE`], or none (closed). The node
     /// caps such a file in place of the grant's own entry (#149): it counts
-    /// as granted, so a sync does not put it on again each time.
-    pub fn capped_within(have: &[(u8, u32, u32)], m: Masks) -> bool {
-        if m.deny {
+    /// as granted, so a sync does not put it on again each time. Not while
+    /// the file inherits an entry that allows the container something
+    /// (`inherits`): Windows does not hold a container to a denying entry,
+    /// so a tool that passed the folder's list down again (Explorer,
+    /// `icacls`) reopened the file, and [`capped`] takes that entry off on
+    /// the next sync.
+    pub fn capped_within(have: &[(u8, u32, u32)], m: Masks, inherits: bool) -> bool {
+        if m.deny || inherits {
             return false;
         }
         let mut have = have.to_vec();
@@ -1904,7 +1933,7 @@ pub mod appcontainer {
         check(unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) })?;
         Ok((
             id,
-            info.nNumberOfLinks > 1 && acl::capped_within(&have, masks),
+            info.nNumberOfLinks > 1 && acl::capped_within(&have, masks, opened),
         ))
     }
 
@@ -2484,7 +2513,10 @@ pub mod appcontainer {
     /// that allow the container something, and one that inherits the grant
     /// of the folder around it may do all that grant allows (#149's first
     /// run on the service). The denial stays as the mark of the closed
-    /// folder; what is below it inherits its list without the grant.
+    /// folder; what is below it inherits its list without the grant. Only a
+    /// container of the node's kind counts ([`acl::package_sid`]): the
+    /// groups all containers are in (`ALL APPLICATION PACKAGES`) keep what
+    /// they inherit where another program denied them the folder.
     fn closing(sd: &Sd) -> io::Result<Sd> {
         let (mut present, mut defaulted) = (0, 0);
         let mut dacl: *mut ACL = null_mut();
@@ -2510,7 +2542,7 @@ pub mod appcontainer {
             if h.AceType == ACCESS_DENIED_ACE_TYPE
                 && u32::from(h.AceFlags) & INHERITED_ACE == 0
                 && mask & acl::ALL == acl::ALL
-                && sid_text(sid_of(ace))?.starts_with("S-1-15-2-")
+                && acl::package_sid(&sid_text(sid_of(ace))?)
             {
                 closed.push(sid_of(ace));
             }
@@ -4429,21 +4461,61 @@ mod tests {
             (x, Gets::Rights(file_cap(false, false, true))),
             (rw, Gets::Closed),
         ] {
-            assert!(capped_within(&ours(g), m), "{m:?} {g:?}");
+            assert!(capped_within(&ours(g), m, false), "{m:?} {g:?}");
+            // Not while the file inherits an entry for the container again
+            // (as when a tool passed its folder's list down).
+            assert!(!capped_within(&ours(g), m, true), "{m:?} {g:?}");
         }
         assert!(!capped_within(
             &ours(Gets::Rights(file_cap(true, false, true))),
-            rw
+            rw,
+            false
         ));
         assert!(!capped_within(
             &ours(Gets::Rights(file_cap(false, false, true))),
-            acl::masks(true, false, false)
+            acl::masks(true, false, false),
+            false
         ));
-        assert!(!capped_within(&[(ALLOWED, 0, rw.file & !acl::DELETE)], rw));
-        assert!(!capped_within(&[], rw));
-        assert!(!capped_within(&[(DENIED, 0, ALL)], acl::closed()));
+        assert!(!capped_within(
+            &[(ALLOWED, 0, rw.file & !acl::DELETE)],
+            rw,
+            false
+        ));
+        assert!(!capped_within(&[], rw, false));
+        assert!(!capped_within(&[(DENIED, 0, ALL)], acl::closed(), false));
         let r = file_cap(true, false, false);
-        assert!(!capped_within(&[(ALLOWED, 0, r), (DENIED, 0, ALL)], rw));
+        assert!(!capped_within(
+            &[(ALLOWED, 0, r), (DENIED, 0, ALL)],
+            rw,
+            false
+        ));
+    }
+
+    /// Only the SID of a container as the node makes them closes a folder
+    /// to what it inherits: not the groups every container is in, nor a
+    /// capability, nor a SID of another shape.
+    #[test]
+    fn only_a_containers_own_package_sid_counts_as_one() {
+        let own =
+            "S-1-15-2-3624051433-2125758914-1423191267-1740899205-1073925389-3782572162-737981194";
+        assert!(acl::package_sid(own));
+        assert!(acl::package_sid(&own.to_lowercase()));
+        for other in [
+            // ALL APPLICATION PACKAGES, ALL RESTRICTED APPLICATION PACKAGES.
+            "S-1-15-2-1",
+            "S-1-15-2-2",
+            // A capability, a user, everyone, a child package (more parts).
+            "S-1-15-3-1024-1-2-3-4-5-6-7",
+            "S-1-5-21-1-2-3-1001",
+            "S-1-1-0",
+            "S-1-15-2-1-2-3-4-5-6-7-8-9-10-11",
+            "S-1-15-2-1-2-3-4-5-6",
+            "S-1-15-2-1-2-3-4-5-6-x",
+            "S-1-15-2-1-2-3-4-5-6-",
+            "",
+        ] {
+            assert!(!acl::package_sid(other), "{other}");
+        }
     }
 
     /// Two containers with a grant on one name each of the same file (two
@@ -5017,6 +5089,169 @@ mod tests {
         for p in [&closed, &granted] {
             appcontainer::set(p, &name, None, false).unwrap();
         }
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// The access list of `p` as `icacls /save` writes it (SDDL, whose `AC`
+    /// is `ALL APPLICATION PACKAGES`): free of the machine's language.
+    #[cfg(windows)]
+    fn sddl(p: &std::path::Path) -> String {
+        let saved = tempfile::NamedTempFile::new().unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(p)
+            .arg("/save")
+            .arg(saved.path())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        // icacls writes UTF-16.
+        let text: Vec<u16> = std::fs::read(saved.path())
+            .unwrap()
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&text)
+    }
+
+    /// A folder that another program denied `ALL APPLICATION PACKAGES` keeps
+    /// what it inherits for that group when the node's walk passes a
+    /// grant's list down to it: only the denial of a container's own SID
+    /// (as the node derives it) closes a folder ([`acl::package_sid`]). The
+    /// entries are read as SDDL, whose `AC` is that group.
+    #[cfg(windows)]
+    #[test]
+    fn a_denial_of_all_application_packages_does_not_take_its_inherited_entry_off() {
+        let base = tempfile::tempdir().unwrap();
+        let granted = base.path().join("granted");
+        let other = granted.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let d = |p: &std::path::Path| p.display().to_string();
+        for args in [
+            vec![d(&granted), "/grant".into(), "*S-1-15-2-1:(OI)(CI)R".into()],
+            vec![d(&other), "/deny".into(), "*S-1-15-2-1:(F)".into()],
+        ] {
+            let o = std::process::Command::new("icacls")
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{args:?}: {o:?}");
+        }
+        let inherits = |list: &str| {
+            list.split('(')
+                .any(|a| a.starts_with("A;") && a.contains("ID;") && a.contains(";;;AC)"))
+        };
+        assert!(inherits(&sddl(&other)), "{}", sddl(&other));
+        let name = format!("nerve.test.group.{}", std::process::id());
+        // The walk passes the grant down into `other`.
+        appcontainer::set(&granted, &name, Some(acl::masks(true, true, false)), false).unwrap();
+        assert!(
+            inherits(&sddl(&other)),
+            "taken off a folder that is not closed to a container: {}",
+            sddl(&other)
+        );
+        appcontainer::set(&granted, &name, None, false).unwrap();
+        appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// A file with more than one name that is granted itself carries the
+    /// node's cap, and is not counted as capped once Windows has passed its
+    /// folder's list down to it again (Explorer, `icacls`): it inherits the
+    /// container's whole entry then, which a denying entry does not hold
+    /// back, and the next change caps it again. The container writes it
+    /// after the tool and not after the change.
+    #[cfg(windows)]
+    #[test]
+    fn a_capped_file_is_not_in_place_once_its_folders_list_comes_down_again() {
+        use std::path::{Path, PathBuf};
+        let base = tempfile::tempdir().unwrap();
+        let (top, store) = (base.path().join("top"), base.path().join("store"));
+        for d in [&top, &store] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (linked, original) = (top.join("l.txt"), store.join("o.txt"));
+        std::fs::write(&original, "from the store").unwrap();
+        std::fs::hard_link(&original, &linked).unwrap();
+        let name = format!("nerve.test.recap.{}", std::process::id());
+        let rw = acl::masks(true, true, false);
+        let cap = inherit::Cap {
+            containers: vec![(
+                name.clone(),
+                inherit::Gets::Rights(acl::file_cap(true, true, false)),
+            )],
+        };
+        // The grant of `path` as the node puts it on, the cap for a file
+        // with more than one name.
+        let grant = |path: &Path, whole: bool| {
+            let mut capped = |_: &Path, _: u32, _: &[PathBuf], _: Option<&str>| {
+                Ok(inherit::Linked::Capped(cap.clone()))
+            };
+            let below = appcontainer::Below {
+                links: Some(&mut capped),
+                progress: &mut |_| {},
+                maker: None,
+            };
+            appcontainer::set_below(path, &name, Some(rw), false, whole, None, below).unwrap();
+        };
+        let writes = || {
+            let (code, log) = run_in_container(
+                &name,
+                &top,
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "{POWERSHELL_START}try {{ Add-Content -LiteralPath '{}' -Value x -ErrorAction Stop; exit 0 }} catch {{ $_; exit 3 }}",
+                        linked.display()
+                    ),
+                ],
+            );
+            assert!(code == 0 || code == 3, "{log}");
+            code == 0
+        };
+        // A list that marks its inherited entries (SE_DACL_AUTO_INHERITED),
+        // as one has that a tool wrote; Windows passes a folder's list down
+        // to it. (A file Windows just made does not mark them, and the
+        // cap's write then gives it a list that does not inherit.)
+        let o = std::process::Command::new("icacls")
+            .arg(&linked)
+            .arg("/reset")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        grant(&top, false);
+        // Granted itself too, the cap in place of the grant's own entry.
+        grant(&linked, false);
+        assert!(appcontainer::look(&linked, &name, rw).unwrap().1);
+        assert!(!writes(), "capped to read");
+
+        let o = std::process::Command::new("icacls")
+            .args([
+                top.display().to_string().as_str(),
+                "/grant",
+                "*S-1-5-32-545:(OI)(CI)RX",
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(
+            !appcontainer::look(&linked, &name, rw).unwrap().1,
+            "{}\n{}",
+            sddl(&top),
+            sddl(&linked)
+        );
+        assert!(writes(), "the folder's whole entry comes down again");
+        grant(&top, true);
+        grant(&linked, false);
+        assert!(appcontainer::look(&linked, &name, rw).unwrap().1);
+        assert!(!writes(), "capped to read again");
+
+        let below = appcontainer::Below {
+            links: None,
+            progress: &mut |_| {},
+            maker: None,
+        };
+        appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
         appcontainer::remove_profile(&name).unwrap();
     }
 

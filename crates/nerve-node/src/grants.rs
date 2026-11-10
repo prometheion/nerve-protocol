@@ -2174,7 +2174,8 @@ impl Folders for Acls<'_> {
         let _as = self.act()?;
         // Nothing the node may look at: a recorded grant is looked for by
         // its object then (`locate`).
-        if not_remote(path).is_err() {
+        if let Err(e) = not_remote(path) {
+            tracing::warn!("folder grants: {e}");
             return Ok(None);
         }
         let masks = masks_of(access);
@@ -2192,10 +2193,12 @@ impl Folders for Acls<'_> {
         let _as = self.act()?;
         // The folders on the way are opened to find the volume: not
         // through a link to another machine.
-        let near = if not_remote(near).is_ok() {
-            near
-        } else {
-            Path::new("")
+        let near = match not_remote(near) {
+            Ok(()) => near,
+            Err(e) => {
+                tracing::warn!("folder grants: {e}");
+                Path::new("")
+            }
         };
         let id = id.parse().map_err(io::Error::other)?;
         nerve_sandbox::appcontainer::locate(&id, near)

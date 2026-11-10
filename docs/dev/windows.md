@@ -593,7 +593,10 @@ runs in the container as well, unless the pairing runs as you.
   it, and keeps a denying entry of the container's as the mark of the
   closed folder. A tool that passes the list of the folder around it down
   again (Explorer, `icacls`) puts the inherited entry back: the node's next
-  sync (with the pairing's next call) takes it off again. Where the node
+  sync (with the pairing's next call) takes it off again. Only the node's
+  containers count there: a denial that another program put on a folder for
+  `ALL APPLICATION PACKAGES` leaves what the folder inherits for that group
+  alone. Where the node
   cannot close it, that pairing's commands do not run. A file in it with another name elsewhere
   (a hard link) is closed under every name (see hard links below).
   A command may rename a closed folder through the rights of the folder
@@ -781,6 +784,15 @@ runs in the container as well, unless the pairing runs as you.
     looked at: a file linked from it into a granted folder gets that
     folder's grant. Close such a folder in Nerve (a folder without flags)
     instead.
+  - Windows does not hold a container to a denying entry, which is the
+    other half of the cap (the allowing entry is read and run). A file that
+    inherits its folder's whole entry again, because a tool passed the
+    folder's permissions down (Explorer's "replace child permissions",
+    `icacls`), is open to the container for that entry. A file granted
+    itself is capped again at the pairing's next call, which sees the
+    entry. One below a granted folder is not looked at one by one: it is
+    capped again when that folder is walked, by a change of the folders,
+    **Sync folders**, or new names in it.
   - Inside a granted folder that holds a closed folder, a file with more
     than one name gets read and run at most for the pairing, not write,
     whatever the folder around gives: a command may rename the closed

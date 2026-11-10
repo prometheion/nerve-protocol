@@ -26,7 +26,10 @@
 //!   nor the owner's registry, nor the node's pipes;
 //! - with the network off a connection and a sudo command are refused;
 //! - a pairing's home stays when its last folder goes, and its container's
-//!   profile goes with the pairing.
+//!   profile goes with the pairing;
+//! - a command the node's folder sync refuses is in the audit log;
+//! - a folder that is a link to another machine is not followed by the
+//!   sync, which acts as the owner.
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -36,8 +39,8 @@
 //! cargo test -p nerve-node --test win_account -- --ignored
 //! ```
 //!
-//! It pairs the service with the centers `wina`, `winb` and `winc`, and
-//! removes them and its folders again.
+//! It pairs the service with the centers `wina`, `winb` and `winc` (`wind`
+//! in the two smaller tests below), and removes them and its folders again.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -57,6 +60,7 @@ const WAIT: Duration = Duration::from_secs(90);
 const A: &str = "wina";
 const B: &str = "winb";
 const C: &str = "winc";
+const D: &str = "wind";
 /// The desktop app, whose program is the node's on Windows (#176).
 static APP: Edition = Edition {
     program: DESKTOP_PROGRAM,
@@ -324,11 +328,11 @@ fn load_profile(t: windows_sys::Win32::Foundation::HANDLE, name: &str) {
 async fn forget(paths: &nerve_node::NodePaths) {
     let _ = nerve_node::cli::edit(paths, |cfg| {
         cfg.centers
-            .retain(|c| ![A, B, C].contains(&c.name.as_str()));
+            .retain(|c| ![A, B, C, D].contains(&c.name.as_str()));
         Ok(())
     })
     .await;
-    for c in [A, B, C] {
+    for c in [A, B, C, D] {
         let _ = std::fs::remove_file(paths.key_file(c));
     }
 }
@@ -1180,4 +1184,149 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     for d in [&base, &open, &mine] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+/// One pairing `D` of the fake center, in folder mode with `folders`, and
+/// its first link.
+async fn pair_d(
+    paths: &nerve_node::NodePaths,
+    folders: Vec<Folder>,
+) -> (FakeCenter, Conn<TcpStream>) {
+    forget(paths).await;
+    let mut center = FakeCenter::start(false).await.unwrap();
+    nerve_node::pair::pair(paths, &center.link(), Some(D))
+        .await
+        .expect("pair d");
+    nerve_node::cli::edit(paths, |cfg| {
+        let e = cfg.center_mut(D).expect("paired");
+        e.policy.mode = nerve_policy::Mode::Folder;
+        e.policy.folders = folders.clone();
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let conn = linked(&mut center).await;
+    (center, conn)
+}
+
+/// A command the folder sync refuses (here: the record of the grants
+/// cannot be read) never reaches the gate, and is in the audit log all the
+/// same, as any command the node does not run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service on a Windows test machine"]
+async fn a_command_the_folder_sync_refuses_is_in_the_audit_log() {
+    let paths = Layout::of(&APP).paths.clone();
+    let owner_sid = env("NERVE_TEST_SID");
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive + "\\nerve-w2-refused");
+    let _ = std::fs::remove_dir_all(&base);
+    owners_folder(&base, &owner_sid);
+    let g = base.join("g");
+    std::fs::create_dir_all(&g).unwrap();
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&g, "rwx")]).await;
+    let r = run_in(&mut conn, &g, "Write-Output fine")
+        .await
+        .expect("a command in its folder");
+    assert!(out(&r).contains("fine"), "{r}");
+
+    // The record the node keeps of its grants is garbage; the owner's next
+    // change of the folders makes the node read it.
+    let record = nerve_node::grants::record_file(&paths);
+    let kept = std::fs::read(&record).unwrap();
+    std::fs::write(&record, "this is not a record").unwrap();
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(D)
+            .expect("paired")
+            .policy
+            .folders
+            .push(folder(&base.join("g2"), "r"));
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    // The audit log keeps the lines of earlier runs: this command is its own.
+    let command = format!("Write-Output refused-{}", std::process::id());
+    let refused = run_in(&mut conn, &g, &command).await;
+    std::fs::write(&record, &kept).unwrap();
+    let e = refused.expect_err("the sync refuses the command");
+    assert_eq!(e.kind(), ErrorCode::Unavailable, "{}", e.message);
+    let audit = std::fs::read_to_string(paths.audit_log()).unwrap();
+    let line: Value = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .find(|v: &Value| v["action"] == "run" && v["target"] == command.as_str())
+        .unwrap_or_else(|| panic!("no audit line for the refused command: {audit}"));
+    assert_eq!(
+        (&line["decision"], &line["code"], &line["reason"]),
+        (
+            &json!("forbidden"),
+            &json!("unavailable"),
+            &json!(e.message)
+        ),
+        "{line}"
+    );
+
+    forget(&paths).await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A granted folder of the owner's that becomes a link to another machine
+/// is never followed by the node's folder sync (#149's probe: opening it
+/// would connect there as the owner, whom the sync acts as, and send the
+/// owner's NTLM answer). The service's own account sees nothing in the
+/// owner's folders, so the check has to be made as the owner: only then
+/// does the sync find the link and say so. The address is one of the
+/// documentation range (TEST-NET-1), where nothing answers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service on a Windows test machine"]
+async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync() {
+    let paths = Layout::of(&APP).paths.clone();
+    let owner_sid = env("NERVE_TEST_SID");
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive + "\\nerve-w2-remote");
+    let _ = std::fs::remove_dir_all(&base);
+    owners_folder(&base, &owner_sid);
+    let id = std::process::id();
+    let (g, sub) = (base.join("g"), base.join("g").join(format!("sub{id}")));
+    std::fs::create_dir_all(&sub).unwrap();
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&g, "rwx"), folder(&sub, "rw")]).await;
+    // The folder is granted, as an ordinary folder.
+    let r = run_in(&mut conn, &g, "Write-Output fine")
+        .await
+        .expect("a command in its folder");
+    assert!(out(&r).contains("fine"), "{r}");
+
+    // It is replaced by a link to a share.
+    std::fs::remove_dir(&sub).unwrap();
+    let made = Command::new("cmd")
+        .args(["/c", "mklink", "/D"])
+        .arg(&sub)
+        .arg(format!(r"\\192.0.2.{}\share", 1 + id % 250))
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    // The next call brings the sync, which looks at the folder it granted:
+    // as the owner it finds the link, and the log says it does not follow it
+    // (the policy's own look at the folder has another wording).
+    let _ = run_in(&mut conn, &g, "Write-Output still fine").await;
+    let said = format!(
+        "folder grants: {} is a link to another machine, which the node does not follow",
+        sub.display()
+    );
+    wait_for(
+        "the node's log does not say that the sync left sub, a link to another machine, alone",
+        || {
+            // The log is JSON lines: the path's backslashes are escaped.
+            std::fs::read_to_string(paths.log_file()).is_ok_and(|log| {
+                log.lines()
+                    .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                    .any(|v| v["msg"].as_str() == Some(said.as_str()))
+            })
+        },
+    )
+    .await;
+
+    forget(&paths).await;
+    let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();
+    let _ = std::fs::remove_dir_all(&base);
 }

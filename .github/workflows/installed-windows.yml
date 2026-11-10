@@ -20,9 +20,11 @@
 #   --as-owner, a folder in the owner's profile split around a protected
 #   entry, a folder outside the owner's profile, what nerve-run opens, the
 #   network switch, a pairing's home and container profile
-#   (crates/nerve-node/tests/win_account.rs). The install makes nerve-run and
-#   its profile itself, by a logon that loads it, as nobody signs in on a
-#   runner;
+#   (crates/nerve-node/tests/win_account.rs), and in two smaller tests of
+#   it, a command the folder sync refuses in the audit log and a granted
+#   folder that becomes a link to another machine. The install makes
+#   nerve-run and its profile itself, by a logon that loads it, as nobody
+#   signs in on a runner;
 # - the administrator's batch logon (nerve-node's
 #   win_host::tests::an_administrators_batch_logon_has_the_full_token) and a
 #   folder on a virtual disk mounted in a folder (nerve-sandbox's
@@ -163,6 +165,8 @@ jobs:
             @('win_sudo.exe', 'sudo_runs_a_listed_command_elevated_on_the_installed_service'),
             @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
             @('win_account.exe', 'folder_and_allowlist_mode_run_as_nerve_run_in_their_containers'),
+            @('win_account.exe', 'a_command_the_folder_sync_refuses_is_in_the_audit_log'),
+            @('win_account.exe', 'a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
             @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
             @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),

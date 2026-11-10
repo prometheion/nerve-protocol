@@ -3340,12 +3340,30 @@ impl Link {
         let home = self.shared.rules_home(cfg);
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) && !sudo_call {
-            self.acls_ready(cfg).await?;
-            // On Windows its folder is looked at below as the pairing's
-            // container, which sees it once the container's entries are on:
-            // the owner may have granted it just before the call.
-            #[cfg(windows)]
-            self.grants_ready(entry).await?;
+            let synced = async {
+                self.acls_ready(cfg).await?;
+                // On Windows its folder is looked at below as the pairing's
+                // container, which sees it once the container's entries are
+                // on: the owner may have granted it just before the call.
+                #[cfg(windows)]
+                self.grants_ready(entry).await?;
+                Ok::<(), RpcError>(())
+            }
+            .await;
+            // A refusal comes before the gate, which writes the other
+            // decisions down: it is in the audit log here, as any command
+            // the node does not run.
+            if let Err(e) = synced {
+                let command = inv.args.get("command").and_then(Value::as_str);
+                self.audit(
+                    inv,
+                    command.unwrap_or_default(),
+                    "forbidden",
+                    Some("unavailable"),
+                    Some(&e.message),
+                );
+                return Err(e);
+            }
         }
         // Where the pairing's home cannot be had and the call names no other
         // folder, the command has nowhere to start: it says why, and is in
