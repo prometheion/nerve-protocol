@@ -65,6 +65,8 @@ mod win_host;
 #[cfg(windows)]
 pub mod win_profile;
 #[cfg(windows)]
+mod win_provider;
+#[cfg(windows)]
 pub mod win_service;
 #[cfg(windows)]
 pub mod win_stop;

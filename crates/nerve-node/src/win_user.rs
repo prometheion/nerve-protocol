@@ -255,6 +255,31 @@ pub fn own_uid() -> u32 {
     }
 }
 
+/// The token this thread acts with now (one it impersonates), for a query.
+pub(crate) fn thread_token() -> io::Result<Token> {
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: this thread's pseudo handle and a place for the token, opened
+    // with the process's own rights (`OpenAsSelf`).
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut h) } == 0 {
+        return Err(last());
+    }
+    // SAFETY: OpenThreadToken returned a handle this code now owns.
+    Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
+}
+
+/// The SID of the account of `t`, as text.
+pub(crate) fn token_sid(t: &Token) -> io::Result<String> {
+    let buf = token_info(t.raw(), TokenUser)?;
+    // SAFETY: the buffer holds a TOKEN_USER, whose SID points into it; the
+    // SID is copied while the buffer lives.
+    let sid = unsafe {
+        let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        let len = GetLengthSid(sid) as usize;
+        std::slice::from_raw_parts(sid.cast::<u8>(), len).to_vec()
+    };
+    crate::win_host::sid_text(&sid).map_err(io::Error::other)
+}
+
 /// The SID of the account this process runs as.
 pub(crate) fn own_sid() -> io::Result<Vec<u8>> {
     let t = process_token(TOKEN_QUERY)?;

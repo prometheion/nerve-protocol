@@ -23,9 +23,9 @@ Debian 12, Fedora 36 and later) and fontconfig.
 | `allowlist` and `user` mode run commands | Yes | Yes: `allowlist` as `nerve-run` in the pairing's AppContainer, or as you with `--as-owner`; `user` as you. Each in a Job Object |
 | Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with your administrator token ([sudo on Windows](#sudo-on-windows)) |
 | [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter | The AppContainer without its network capabilities, while the Windows Firewall service runs |
-| Control socket | Yes | A [control pipe](#the-control-pipe): every change at once, no providers |
+| Control socket | Yes | A [control pipe](#the-control-pipe): every change at once |
 | [Limits per command](#limits-per-command) | A cgroup | The command's job object |
-| [Providers](capabilities.md#capability-providers-in-use) | Yes | Not yet |
+| [Providers](capabilities.md#capability-providers-in-use) | Yes | On the installed service's provider pipe ([providers on Windows](#providers-on-windows)) |
 | [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Yes: as `nerve-run`, in the pairing's AppContainer |
 | Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node and the [center](#the-center-as-a-windows-service) |
 | A second center on one state folder | Attaches over a socket | Attaches over a [pipe](#a-second-center-attaches) |
@@ -971,6 +971,25 @@ container and `nerve-run` may open.
   [deny rules](policy-engine.md#deny-a-command) and the
   [protected paths](policy-engine.md#protected-paths-as-the-owner-sees-them)
   decide, and none runs while the pairing's network is off.
+
+## Providers on Windows
+
+A program you allow under **Capabilities**, **Programs** (`provider add`)
+attaches to the installed service over the provider pipe
+`\\.\pipe\nerve-node-provider`, as it attaches to the provider socket on
+Linux ([the spec](spec/node-local.md#providers-on-windows)):
+
+- Only your programs and an elevated administrator's get in, told by the
+  client's token; the pipe refuses other accounts, `nerve-run`'s commands and
+  clients from the network.
+- The node checks the program by its image: the path Windows names for the
+  client's process must be the one you allowed. It reads it as the client
+  where its own account may not, so the program must open the pipe so that
+  the node may act as it (a plain open does; tokio's client defaults to
+  identification and must set `SECURITY_IMPERSONATION`).
+- A process of a command the node runs is refused.
+- The program runs as whoever started it, outside the node's containers, as
+  on Linux; its actions show in the descriptor and in `cap` as there.
 
 ## Sudo on Windows
 

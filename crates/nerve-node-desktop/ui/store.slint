@@ -304,12 +304,9 @@ export global Caps {
     // Whether the node runs: only then does it know the programs'
     // capabilities and whether a center may use each one now.
     in-out property <bool> running;
-    // Why this machine offers no programs, or no capabilities of node.toml
-    // (src/view.rs, caps_notes); "" where it does.
-    in-out property <string> programs-note;
+    // Why this machine offers no capabilities of node.toml (src/view.rs,
+    // config_note); "" where it does.
     in-out property <string> config-note;
-    // Windows offers neither yet: the page has nothing to add there.
-    in-out property <bool> windows;
     // A program to allow: its name and its file.
     in-out property <string> program-name;
     in-out property <string> program-exe;

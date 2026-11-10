@@ -2010,8 +2010,8 @@ new one.
 A local program, such as a desktop app, can add capabilities to the node
 without talking to a center: it attaches as a **provider**, on the installed
 node to its provider socket `/run/nerve-node/provider.sock`, on a node run by
-hand to its control socket. Linux only for now: the node tells which program
-asks from `/proc/<pid>/exe`, and Windows' pipes take no provider.
+hand to its control socket. On Windows the installed node takes it on its
+provider pipe `\\.\pipe\nerve-node-provider` ([below](#providers-on-windows)).
 
 ### Who may attach
 
@@ -2048,6 +2048,36 @@ provider socket takes `hello` only, and the installed node's control socket
 takes no `hello` (`refused: the installed node takes a provider's hello on
 /run/nerve-node/provider.sock only`): root, who may connect there too, would
 meet a check that reads as the node and holds no pidfd.
+
+### Providers on Windows
+
+The installed node serves the provider pipe `\\.\pipe\nerve-node-provider`
+beside its owner pipe (a fixed name, as the owner, who may be no
+administrator, cannot look into the node's folders). It takes `hello` only,
+with 16 places of its own, and:
+
+- its DACL lets in SYSTEM, the administrators (elevated), the node's own
+  account and the owner, as the owner pipe's; it refuses remote clients
+  (`PIPE_REJECT_REMOTE_CLIENTS`);
+- the client's token decides, read by impersonating it
+  (`ImpersonateNamedPipeClient`): the owner's account, SYSTEM, or a token
+  that holds the Administrators group in effect. Another account, `nerve-run`
+  and an administrator's filtered token are told `refused: only the owner's
+  programs and the administrators' attach a provider to the node`;
+- a process in the job of a command the node runs is refused, as on the
+  control pipe;
+- the program is told by the image of the client's process
+  (`GetNamedPipeClientProcessId`, then `QueryFullProcessImageNameW`) against
+  the entry's path once resolved, compared without `\\?\` and in any case.
+  The node reads both as itself, and where its account may not (the owner's
+  process, the owner's folders) as the client: a program that opened the pipe
+  for identification only (`SECURITY_IDENTIFICATION`, tokio's default) is then
+  refused and told to allow impersonation, which a plain open allows.
+
+A provider runs as whoever started it, outside the node's containers, as on
+Linux. A call it gets is decided as on Linux; a path it is handed is walked as
+for a program of another account than the walk's (a folder the walk may not
+list refuses the call).
 
 The provider sends one request, `hello`, with the control socket's token on
 a node run by hand (the provider socket takes none, and ignores one):

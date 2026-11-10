@@ -231,9 +231,8 @@ component DeclaredSection inherits Section {
 component ProgramSection inherits Section {
     icon: @image-url("icons/window.svg");
     title: "Programs";
-    text: Caps.programs-note != "" ? Caps.programs-note
-        : "A program you allow adds capabilities while it runs, as a provider.";
-    more: Caps.programs-note != "" ? "" : "The node checks that the program that attaches runs this very file.";
+    text: "A program you allow adds capabilities while it runs, as a provider.";
+    more: "The node checks that the program that attaches runs this very file.";
     ScrollBox {
         rows: Caps.programs.length;
         for p[i] in Caps.programs: ListRow {
@@ -275,7 +274,7 @@ component ProgramSection inherits Section {
             }
         }
     }
-    if !Caps.windows: VerticalLayout {
+    VerticalLayout {
         if Caps.programs.length > 0: Divider { }
         HorizontalLayout {
             padding: Space.lg;

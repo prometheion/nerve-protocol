@@ -2413,7 +2413,21 @@ impl Daemon {
             }
             None => None,
         };
-        #[cfg(not(target_os = "linux"))]
+        // On Windows the provider pipe, for the owners `install` named.
+        #[cfg(windows)]
+        let providers = match endpoint.as_ref().map(|e| &e.owners) {
+            Some(crate::owner::Owners::Sids(owners)) => {
+                match crate::win_provider::serve(shared.clone(), owners.clone()) {
+                    Ok(task) => Some((task, PathBuf::from(crate::provider::PIPE_NAME))),
+                    Err(e) => {
+                        tracing::error!("{e}; no program of the owner attaches as a provider");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        #[cfg(not(any(target_os = "linux", windows)))]
         let providers = None;
         // The web UI is the installed node's, for the owners of its
         // endpoint; it listens only while the config says so.

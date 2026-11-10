@@ -915,23 +915,15 @@ pub fn programs(v: &Value) -> Vec<ProgramRow> {
         .collect()
 }
 
-/// Why this machine offers no programs as providers, and why no
-/// capabilities of node.toml, for the Capabilities page ("" where it
-/// does): Windows offers neither yet, and a node run by hand has no
-/// nerve-run, which every capability of node.toml runs as.
-pub fn caps_notes(windows: bool, installed: bool) -> (String, String) {
-    let programs = if windows {
-        "Windows offers no programs as providers yet; they come with later work on the node for Windows."
-    } else {
-        ""
-    };
-    if !installed {
-        return (
-            programs.into(),
-            "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into(),
-        );
+/// Why this machine offers no capabilities of node.toml, for the
+/// Capabilities page ("" where it does): a node run by hand has no
+/// nerve-run, which every capability of node.toml runs as. Programs attach
+/// as providers on Linux and Windows alike.
+pub fn config_note(installed: bool) -> String {
+    if installed {
+        return String::new();
     }
-    (programs.into(), String::new())
+    "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into()
 }
 
 /// The word `cap set` takes for a switch.
@@ -2574,19 +2566,10 @@ mod tests {
             ("desk", "/usr/bin/desk", "attached")
         );
         assert_eq!(p[1].attached, "");
-        // Windows offers no programs yet, but capabilities of node.toml
-        // (#149); a node run by hand none of node.toml.
-        let (programs, config) = caps_notes(true, true);
-        assert!(
-            programs.contains("Windows") && config.is_empty(),
-            "{config}"
-        );
-        let (programs, config) = caps_notes(false, false);
-        assert!(
-            programs.is_empty() && config.contains("runs by hand"),
-            "{config}"
-        );
-        assert_eq!(caps_notes(false, true), (String::new(), String::new()));
+        // A node run by hand offers no capabilities of node.toml; the
+        // installed one does, on Linux and Windows.
+        assert!(config_note(false).contains("runs by hand"));
+        assert_eq!(config_note(true), "");
     }
 
     /// The dialog's command line splits as `cap` writes one, so an edit

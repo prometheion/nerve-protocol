@@ -45,6 +45,7 @@ Built and tested, not released: the releases before 0.1.0 publish the Linux prog
 - The center's commands and web UI say an administrator's terminal, not `sudo`, on Windows, and name the Nerve app's places (Permissions › Folders, Centers, Capabilities) for a Windows machine instead of `nerve-node` commands.
 - Sudo on Windows works as on Linux: the node holds your Windows password in its memory only, so sudo is off after a restart of the node or of Windows (`sudo.dpapi` is gone). Only the app on the machine turns it on: the node refuses sudo on from a center for a Windows machine, and the center's page says to use the app.
 - Where the node on Windows has no password of yours that works (none stored, or Windows refused it), the app asks for it where it is needed: switching a pairing to user mode or to allowlist mode as you, turning sudo on, and the folder grants' warning. The running node checks it and keeps it at once, without a new install.
+- Providers on Windows: a program you allow under Capabilities › Programs attaches to the installed service over its provider pipe, as on Linux over the provider socket. Only your programs and an elevated administrator's get in, the node checks the program by the image Windows names for it, and clients from the network and the node's own commands are refused.
 - Building needs Rust 1.89 or newer.
 
 ## 0.0.8

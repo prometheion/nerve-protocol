@@ -2,7 +2,9 @@
 //! the owner allowed in `providers.allowed` that add capabilities to the
 //! node: over the provider socket of the installed node ([`serve`]), which
 //! the owner's programs and root's reach, or over the control socket of a
-//! node run by hand.
+//! node run by hand. On Windows over the installed node's provider pipe
+//! ([`PIPE_NAME`], crate::win_provider), which the owner's programs and the
+//! administrators' reach.
 //!
 //! A provider sends `hello` with role `provider` and a descriptor fragment.
 //! The node checks that the program on the other end is the one the owner
@@ -610,8 +612,8 @@ fn other_program(name: &str, running: &Path, allowed: &Path) -> String {
     )
 }
 
-/// The program `pid` runs, as the kernel resolved it. Linux only: elsewhere
-/// the node cannot tell, and no provider attaches.
+/// The program `pid` runs, as the kernel resolved it. Linux only: Windows
+/// reads it as the client (crate::win_provider::look).
 fn program_of(pid: u32) -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
@@ -621,7 +623,7 @@ fn program_of(pid: u32) -> Result<PathBuf, String> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
-        Err("refused: providers attach on Linux only for now".into())
+        Err("refused: the node cannot tell which program asks here".into())
     }
 }
 
@@ -724,6 +726,68 @@ pub(crate) struct Caller {
     pub refuse_commands: bool,
 }
 
+/// Who asks to attach on Windows: the process Windows names for the
+/// client of the provider pipe, the pipe (its handle, which lives while the
+/// request is answered) to act as the client on, and the owners the pipe
+/// lets in besides the administrators (crate::win_provider).
+#[cfg(windows)]
+pub(crate) struct Caller {
+    pub pid: Option<u32>,
+    pub pipe: usize,
+    pub owners: Vec<String>,
+}
+
+/// The account a provider's program runs as, where Windows has no uid: one
+/// that is never the account a walk runs as, so a folder the walk may not
+/// list refuses a call that hands it to the program (crate::link).
+#[cfg(windows)]
+pub(crate) const WINDOWS_PROGRAM: u32 = u32::MAX;
+
+/// The name of the provider pipe of the installed node on Windows, beside
+/// its owner pipe (crate::owner::pipe_name): fixed, as the owner, who may
+/// be no administrator, cannot look into the node's folders.
+// Used by the provider pipe on Windows; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const PIPE_NAME: &str = r"\\.\pipe\nerve-node-provider";
+
+/// Why the provider pipe refuses a client.
+// Used by the provider pipe on Windows; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const NOT_THE_OWNERS: &str =
+    "refused: only the owner's programs and the administrators' attach a provider to the node";
+
+/// Whether the provider pipe lets the client in, told by its token: the
+/// owner's account (`sid` one of `owners`), SYSTEM, or a token that holds
+/// the Administrators group in effect (`admin`: an elevated administrator).
+/// Another standard account, `nerve-run` and an administrator's filtered
+/// token (UAC) are refused.
+// Used by the provider pipe on Windows; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn admits(sid: &str, owners: &[String], admin: bool) -> Result<(), String> {
+    if admin || sid == "S-1-5-18" || owners.iter().any(|o| o.eq_ignore_ascii_case(sid)) {
+        Ok(())
+    } else {
+        Err(NOT_THE_OWNERS.into())
+    }
+}
+
+/// Whether the image Windows names for the client's process (`running`)
+/// is the allowed program once resolved (`allowed`): the same path, without
+/// the `\\?\` of a resolved one, in any case, as Windows' file names are.
+// Used by the provider pipe on Windows; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn same_image(running: &Path, allowed: &Path) -> bool {
+    let plain = |p: &Path| {
+        let s = p.to_string_lossy();
+        let s = s
+            .strip_prefix(r"\\?\UNC\")
+            .map(|r| format!(r"\\{r}"))
+            .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+        s.replace('/', r"\").to_lowercase()
+    };
+    plain(running) == plain(allowed)
+}
+
 /// Why a program of root is refused where the node cannot tell which one
 /// it is.
 #[cfg(target_os = "linux")]
@@ -784,6 +848,12 @@ fn read_caller(caller: &Caller, allowed: &Path, exe: Option<&Path>) -> Result<Se
         return Err(nerve_transport::ctl::PEER_ENDED.into());
     }
     looked
+}
+
+/// [`crate::win_provider::look`] for `caller`. Blocks.
+#[cfg(windows)]
+fn read_caller(caller: &Caller, allowed: &Path, _exe: Option<&Path>) -> Result<Seen, String> {
+    crate::win_provider::look(caller.pipe, caller.pid, allowed, &caller.owners)
 }
 
 /// The argument that starts the node's program as the helper that tells
@@ -1134,7 +1204,6 @@ fn capabilities(
 /// attaches it as the provider it names when `providers.allowed` names that
 /// provider with the program it runs. The answer keeps the connection
 /// ([`nerve_transport::ctl::Reply::Session`]); its end detaches it.
-#[cfg(unix)]
 pub(crate) async fn attach(
     shared: &Arc<Shared>,
     params: Value,
@@ -1150,7 +1219,6 @@ pub(crate) async fn attach(
     }
 }
 
-#[cfg(unix)]
 async fn check(
     shared: &Arc<Shared>,
     params: Value,
@@ -1171,7 +1239,11 @@ async fn check(
         .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?
         .clone();
     let want = PathBuf::from(&allowed.exe);
+    #[cfg(unix)]
     let (uid, refuse_commands) = (caller.uid, caller.refuse_commands);
+    // Every client of the provider pipe: it is the installed node's.
+    #[cfg(windows)]
+    let (uid, refuse_commands) = (WINDOWS_PROGRAM, true);
     let looked = {
         let (want, exe) = (want.clone(), shared.exe.clone());
         tokio::task::spawn_blocking(move || read_caller(&caller, &want, exe.as_deref()))
@@ -1187,8 +1259,15 @@ async fn check(
         true => e,
         false => format!("refused: the provider {name}: {e}"),
     })?;
+    #[cfg(unix)]
     if refuse_commands && let Some(why) = crate::owner::command_refusal(shared, &chain, nnp) {
         return Err(why.into());
+    }
+    // A process in the job of a command the node runs.
+    #[cfg(windows)]
+    if refuse_commands && crate::win::from_a_command(chain.first().copied()) {
+        let _ = nnp;
+        return Err(crate::owner::FROM_A_COMMAND.into());
     }
     if !same {
         return Err(other_program(&name, &running, &want));
@@ -2242,5 +2321,41 @@ mod tests {
             std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
         assert!(program_of(u32::MAX).is_err());
+    }
+
+    /// The provider pipe on Windows lets in the owner's account, SYSTEM and
+    /// a token that holds the Administrators group in effect; another
+    /// account, `nerve-run` and an administrator's filtered token are not.
+    #[test]
+    fn the_provider_pipe_admits_the_owner_and_the_administrators() {
+        let owners = vec!["S-1-5-21-1-2-3-1001".to_string()];
+        assert_eq!(admits("S-1-5-21-1-2-3-1001", &owners, false), Ok(()));
+        assert_eq!(admits("s-1-5-21-1-2-3-1001", &owners, false), Ok(()));
+        assert_eq!(admits("S-1-5-18", &owners, false), Ok(()));
+        // An elevated administrator, whoever it is.
+        assert_eq!(admits("S-1-5-21-1-2-3-1002", &owners, true), Ok(()));
+        for other in ["S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-10011", ""] {
+            assert_eq!(
+                admits(other, &owners, false),
+                Err(NOT_THE_OWNERS.to_string()),
+                "{other}"
+            );
+        }
+        // No owner: the administrators only.
+        assert!(admits("S-1-5-21-1-2-3-1001", &[], false).is_err());
+    }
+
+    /// A program on Windows is the allowed one by the image Windows names
+    /// for its process: the resolved path, without `\\?\`, in any case.
+    #[test]
+    fn a_windows_program_is_told_by_its_image() {
+        let same = |a: &str, b: &str| same_image(Path::new(a), Path::new(b));
+        assert!(same(r"C:\Tools\desk.exe", r"\\?\C:\Tools\desk.exe"));
+        assert!(same(r"C:\Tools\Desk.EXE", r"\\?\c:\tools\desk.exe"));
+        assert!(same(r"\\srv\share\desk.exe", r"\\?\UNC\srv\share\desk.exe"));
+        assert!(same("C:/Tools/desk.exe", r"C:\Tools\desk.exe"));
+        assert!(!same(r"C:\Tools\desk.exe", r"\\?\C:\Tools\desk2.exe"));
+        assert!(!same(r"C:\Tools\desk.exe", r"\\?\D:\Tools\desk.exe"));
+        assert!(!same(r"C:\Tools\desk.exe.bak", r"\\?\C:\Tools\desk.exe"));
     }
 }
