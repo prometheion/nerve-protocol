@@ -25,16 +25,52 @@ From [Releases](https://github.com/prometheion/nerve-protocol/releases):
 
 | System | File |
 |---|---|
-| Linux, x86_64 | `nerve-node-desktop-x86_64-linux` (needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
+| Linux, x86_64 | `nerve-node-desktop_<version>_amd64.deb`, `nerve-node-desktop-<version>.x86_64.rpm`, or the plain `nerve-node-desktop-x86_64-linux` (each needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
 | Windows, x86_64 | `nerve-node-desktop-x86_64-windows.exe` |
 
 Check it against `SHA256SUMS` ([install](service.md#download)).
 
 ## Install
 
+### The package (Linux)
+
+Double-click the `.deb` or `.rpm` and press **Install** in the software
+installer, or `sudo apt install ./nerve-node-desktop_<version>_amd64.deb`,
+`sudo dnf install ./nerve-node-desktop-<version>.x86_64.rpm`. The package
+puts the program in `/usr/bin`, **Nerve** in the application menu with its
+icon, and the mark `/usr/share/nerve-node-desktop/package` (`deb` or `rpm`),
+and brings fontconfig. Then open **Nerve** and press **Install**: the
+installer finds the program in place and goes on with the node.
+
+How the release makes them: `.github/scripts/desktop-packages.sh` runs the
+released program's `__package-root <folder> deb|rpm`, which writes the
+packages' files (`parts::package_root`), and packs them with `dpkg-deb` and
+`rpmbuild`; the release installs each on Ubuntu 22.04 and 24.04 and Fedora
+before it publishes them.
+
+What the mark changes (`service::Layout::of`, `service::Package`):
+
+- `install` leaves the program where it is, refuses another program in its
+  place, writes no menu entry of its own (only the `nerve://` default), and
+  removes the plain program and menu entry an earlier install put in
+  `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve-node-desktop`.
+- `update` takes the release's package of the same kind from `SHA256SUMS`,
+  checks it, refuses an older one, installs it with `apt-get install -y` or
+  `dnf install -y`, and restarts the service with it, the service's files
+  as the new program has them; a new program that does not start is put
+  back. `update --from <file>` is refused: only the package manager replaces
+  the program. A package installed by hand runs
+  `nerve-node-desktop update --from=/usr/bin/nerve-node-desktop` in its own
+  script where the node is installed, which restarts the service with it;
+  the update that installs the package itself sets `NERVE_PACKAGE_UPDATE`,
+  so the script leaves that to it.
+- `uninstall` removes the node and leaves the program; `apt remove` or
+  `dnf remove` removes the app. Removing the package first leaves a service
+  without its program: uninstall in the app first.
+
 ### Let the file run (Linux)
 
-A downloaded file may not run as a program yet.
+The plain program, downloaded, may not run as a program yet.
 
 - **GNOME Files**: right-click the file, **Properties**, switch on
   **Executable as Program**, close the window, then double-click the file.
@@ -81,8 +117,8 @@ where it is needed. Apps & features has a `QuietUninstallString`,
 
 | What | Linux | Windows |
 |---|---|---|
-| The program, which the service runs too | `/usr/local/bin/nerve-node-desktop` | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
-| The menu entry | `/usr/local/share/applications/nerve-node-desktop.desktop`, its icon in `/usr/local/share/icons/hicolor` | `Nerve` in the Start menu of all users |
+| The program, which the service runs too | `/usr/local/bin/nerve-node-desktop`; from a package `/usr/bin/nerve-node-desktop` | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
+| The menu entry | `/usr/local/share/applications/nerve-node-desktop.desktop`, its icon in `/usr/local/share/icons/hicolor`; from a package the same in `/usr/share` | `Nerve` in the Start menu of all users |
 | `nerve://` links | the entry's `x-scheme-handler/nerve`, the default in `/etc/xdg/mimeapps.list` | `HKEY_LOCAL_MACHINE\Software\Classes\nerve` |
 | Apps & features | | `Nerve`, in `HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve` |
 | The node's files, the service | as `nerve-node install` puts them ([service](service.md#what-install-does)) | as on Windows ([service](windows.md#the-node-as-a-service-on-windows)) |
@@ -415,7 +451,9 @@ after a failed window hands the link on the same way.
 **Settings**, **App**, **Update…**: from the latest release
 on GitHub (checked against its `SHA256SUMS`), or from a file you downloaded.
 The update replaces the program, puts the menu entry back and restarts the
-service; the node's settings, keys and audit log stay. **Restart Nerve**
+service; the node's settings, keys and audit log stay. The app from a package
+installs the release's newer package with `apt-get` or `dnf` instead
+([the package](#the-package-linux)). **Restart Nerve**
 opens the new version. Opening a newer downloaded file offers **Update** too,
 also while the app is open: the open window comes to the front and says
 which version the file is (on Wayland, where no program may raise itself,
@@ -431,7 +469,9 @@ it. Opening
 the downloaded file again offers **Uninstall…** too, and on Windows so does
 **Uninstall** at Nerve in **Settings**, **Apps** (Apps & features): it opens
 the same in the app. Kept data comes back with the next install
-([uninstall](service.md#uninstall-the-node)).
+([uninstall](service.md#uninstall-the-node)). The app from a package stays,
+with its menu entry: `sudo apt remove nerve-node-desktop` or
+`sudo dnf remove nerve-node-desktop` removes it.
 
 ## What the app needs
 

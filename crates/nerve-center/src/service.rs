@@ -1133,6 +1133,7 @@ pub async fn update(
             mode: 0o644,
         }],
         before_restart: &|_| {},
+        placed: None,
     };
     let mut steps = Steps::new(out);
     let started = || sys.wait_running(&layout.state);

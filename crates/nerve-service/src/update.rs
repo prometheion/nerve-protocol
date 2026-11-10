@@ -140,6 +140,20 @@ pub struct Program<'a> {
     /// its AppArmor profile). It says in `steps` what it did and does not
     /// fail the update.
     pub before_restart: &'a dyn Fn(&mut Steps<'_>),
+    /// Where a package manager put the new program at `bin` already (the
+    /// desktop app from a .deb or .rpm): the update leaves the file to it.
+    pub placed: Option<Placed>,
+}
+
+/// The program as it was before a package manager put the new one in its
+/// place ([`Program::placed`]). The service may still run it, so the
+/// update restarts the service even where nothing else changed.
+#[derive(Debug, Clone, Default)]
+pub struct Placed {
+    /// Its bytes, which go back where the new one does not start; none
+    /// where the package manager ran before the update did.
+    pub old: Option<Vec<u8>>,
+    pub version: Option<Version>,
 }
 
 /// Where the file of a role goes, and its mode.
@@ -229,6 +243,10 @@ pub async fn update(
             )
         })?;
     let new = match from {
+        // The package manager's program, at its place.
+        _ if p.placed.is_some() => {
+            std::fs::read(p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?
+        }
         Some(f) => {
             let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
             steps.did(format!("read the new program from {}", f.display()));
@@ -244,30 +262,43 @@ pub async fn update(
             b
         }
     };
-    let old = std::fs::read(p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
-    let same = new == old;
+    let old = match &p.placed {
+        Some(placed) => placed.old.clone(),
+        None => Some(std::fs::read(p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?),
+    };
+    // A program the package manager placed is never the same: the service
+    // still runs the one before it.
+    let same = p.placed.is_none() && old.as_deref() == Some(&new[..]);
+    let placed = p.placed.is_some();
     // Staged beside the program, so the rename that puts it in place does
     // not cross file systems.
     let staged = p.bin.with_file_name(format!(".{name}.new"));
-    if !same {
+    let stage = !same && !placed;
+    if stage {
         write_file(&staged, &new, 0o755)?;
     }
     // Where the program is the installed one already, it still has the
     // files: an `update` brings those a program left behind, as the update
     // that installed it did not know them.
-    let from_program = if same { p.bin } else { &staged };
+    let from_program = if stage { &staged } else { p.bin };
     let checked = (|| {
-        let old_v = sys
-            .version_of(p.bin, &account)
-            .ok()
-            .and_then(|s| Version::parse_of(name, &s));
+        let old_v = match &p.placed {
+            Some(placed) => placed.version,
+            None => sys
+                .version_of(p.bin, &account)
+                .ok()
+                .and_then(|s| Version::parse_of(name, &s)),
+        };
         let mut new_v = old_v;
         if !same {
-            let said = sys.version_of(&staged, &account)?;
+            let said = sys.version_of(from_program, &account)?;
             let v = Version::parse_of(name, &said)
                 .ok_or_else(|| format!("the new program is not {name}: it says {said:?}"))?;
+            // The package manager's program is in place already; the
+            // node refused an older package before it ran.
             if let Some(o) = old_v
                 && v < o
+                && !placed
             {
                 return Err(format!(
                     "the new program is {name} {v}, older than the installed {o}; nothing changed"
@@ -290,7 +321,7 @@ pub async fn update(
     let (old_v, new_v, (want, unknown)) = match checked {
         Ok(v) => v,
         Err(e) => {
-            if !same {
+            if stage {
                 let _ = std::fs::remove_file(&staged);
             }
             return Err(e);
@@ -298,12 +329,14 @@ pub async fn update(
     };
     let shown = |v: Option<Version>| v.map_or_else(|| "?".to_string(), |v| v.to_string());
     if !same {
-        std::fs::rename(&staged, p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
-        steps.did(format!(
-            "replaced {name} {} with {}",
-            shown(old_v),
-            shown(new_v)
-        ));
+        if stage {
+            std::fs::rename(&staged, p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
+        }
+        steps.did(match old_v {
+            // The package manager replaced it before this update ran.
+            None if placed => format!("{name} {} from its package is in place", shown(new_v)),
+            _ => format!("replaced {name} {} with {}", shown(old_v), shown(new_v)),
+        });
     }
     let mut before = Vec::new();
     let put = put_files(&want, &mut before, steps);
@@ -321,17 +354,19 @@ pub async fn update(
         })
         .and_then(|()| started());
     if let Err(e) = start {
-        if !same {
-            write_file(p.bin, &old, 0o755)?;
+        // A placed program whose old bytes are unknown stays.
+        let program_back = !same && old.is_some();
+        if let (true, Some(old)) = (program_back, &old) {
+            write_file(p.bin, old, 0o755)?;
         }
         let files_back = put_back(&before).and_then(|()| reload(sys, &before));
         let back = files_back
             .and_then(|()| sys.systemctl(&["restart", p.unit]))
             .and_then(|()| started());
-        let what = match (same, before.is_empty()) {
-            (false, true) => format!("{name} {}", shown(old_v)),
-            (false, false) => format!("{name} {} and its service's files", shown(old_v)),
-            (true, _) => "the service's files".to_string(),
+        let what = match (program_back, before.is_empty()) {
+            (true, true) => format!("{name} {}", shown(old_v)),
+            (true, false) => format!("{name} {} and its service's files", shown(old_v)),
+            (false, _) => "the service's files".to_string(),
         };
         steps.did(format!("put {what} back"));
         let new = if same {
@@ -434,17 +469,30 @@ fn mode_of(path: &Path) -> u32 {
 /// Downloads `asset` from the release at `base` and checks it against the
 /// release's `SHA256SUMS`.
 pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
+    fetch_release_where(base, asset, &|name| name == asset)
+        .await
+        .map(|(_, b)| b)
+}
+
+/// [`fetch_release`] of the first file `SHA256SUMS` lists that `pick`
+/// takes (a package, whose name holds the release's version): its name
+/// and bytes. `what` names it where the list has none.
+pub async fn fetch_release_where(
+    base: &str,
+    what: &str,
+    pick: &dyn Fn(&str) -> bool,
+) -> Result<(String, Vec<u8>), String> {
     nerve_transport::init_crypto();
     let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX).await?;
-    let want = String::from_utf8_lossy(&sums)
+    let (asset, want) = String::from_utf8_lossy(&sums)
         .lines()
         .find_map(|l| {
             let (hash, name) = l.split_once(char::is_whitespace)?;
             let name = name.trim_start();
             let name = name.strip_prefix('*').unwrap_or(name);
-            (name == asset).then(|| hash.to_ascii_lowercase())
+            pick(name).then(|| (name.to_string(), hash.to_ascii_lowercase()))
         })
-        .ok_or_else(|| format!("the release's SHA256SUMS lists no {asset}"))?;
+        .ok_or_else(|| format!("the release's SHA256SUMS lists no {what}"))?;
     let program = download(&format!("{base}/{asset}"), PROGRAM_MAX).await?;
     let got = nerve_transport::keys::sha256_hex(&program);
     if got != want {
@@ -452,7 +500,7 @@ pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
             "the downloaded {asset} does not match its line in SHA256SUMS; nothing changed"
         ));
     }
-    Ok(program)
+    Ok((asset, program))
 }
 
 /// `GET url`, following redirects (never from https to http), through the
@@ -534,6 +582,7 @@ mod tests {
                 },
             ],
             before_restart: &|_| {},
+            placed: None,
         }
     }
 
@@ -663,6 +712,63 @@ mod tests {
         assert_eq!(r, Ok(false));
         assert_eq!(read(&at.unit).as_deref(), Some("old unit"));
         assert_eq!(sys.calls(), ["useradd svc /var/lib/svc"]);
+    }
+
+    /// A program a package manager put in place: the update does not write
+    /// it, restarts the service with it even where it and its files are the
+    /// ones there already (the service may run the one before), and puts
+    /// the old one back where the new one does not start.
+    #[tokio::test]
+    async fn a_program_the_package_manager_placed_restarts_the_service() {
+        let sys = Fake::new("svc", "Svc", "/var/lib/svc");
+        let at = installed(&sys);
+        let old = std::fs::read(&at.bin).unwrap();
+        // Placed before the update ran: nothing to put back, but restarted.
+        let mut p = program(&at);
+        p.placed = Some(Placed::default());
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let r = update(&p, &sys, None, &|| sys.started(), &mut steps).await;
+        assert_eq!(r, Ok(true), "{:?}", steps.done);
+        assert_eq!(sys.calls().last().unwrap(), "systemctl restart svc.service");
+        assert!(
+            steps
+                .done
+                .iter()
+                .any(|s| s == "svc 1.0.0 from its package is in place"),
+            "{:?}",
+            steps.done
+        );
+        // Placed by the update itself, which knows the old one.
+        std::fs::copy(newer(&at), &at.bin).unwrap();
+        p.placed = Some(Placed {
+            old: Some(old.clone()),
+            version: Version::parse_of("svc", "svc 1.0.0"),
+        });
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let r = update(&p, &sys, None, &|| sys.started(), &mut steps).await;
+        assert_eq!(r, Ok(true), "{:?}", steps.done);
+        assert!(
+            steps
+                .done
+                .iter()
+                .any(|s| s == "replaced svc 1.0.0 with 1.1.0")
+        );
+        assert_eq!(read(&at.unit).as_deref(), Some("new unit"));
+        assert!(!at.bin.with_file_name(".svc.new").exists());
+        // One that does not start: the old one goes back.
+        write_file(&at.unit, b"old unit", 0o644).unwrap();
+        std::fs::copy(newer(&at), &at.bin).unwrap();
+        sys.next_start.set(Some(false));
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let e = update(&p, &sys, None, &|| sys.started(), &mut steps)
+            .await
+            .unwrap_err();
+        assert!(e.contains("the old one runs again"), "{e}");
+        assert_eq!(std::fs::read(&at.bin).unwrap(), old);
+        assert_eq!(read(&at.unit).as_deref(), Some("old unit"));
     }
 
     /// An installed program whose files were not written by the update that

@@ -48,6 +48,14 @@ fn main() {
             .collect();
         std::process::exit(nerve_node_desktop::dialog::main(&rest));
     }
+    // The files of the app's package, for the release (#212).
+    if words.first() == Some(&Some(nerve_node_desktop::parts::PACKAGE_ROOT_ARG)) {
+        let rest: Vec<String> = args[1..]
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        std::process::exit(nerve_node_desktop::parts::package_root_main(&rest));
+    }
     // A silent install, for winget (#67): no window, no question.
     if words == [Some(nerve_node_desktop::parts::SILENT_ARG)] {
         std::process::exit(nerve_node_desktop::parts::silent_install());

@@ -11,7 +11,8 @@
 # nothing. `conformance` runs the conformance suite against the Linux binaries
 # that were built (the ones that will be released), on a runner of their own
 # architecture, and `installed` installs and drives them on the distributions
-# Nerve supports (.github/workflows/installed.yml). `publish` is the only job
+# Nerve supports (.github/workflows/installed.yml); the desktop app's .deb and
+# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`). `publish` is the only job
 # that may write: it tags the commit and publishes the release only after
 # every check, build, the conformance run and the install test passed, so a
 # failed run leaves no tag. Tags are never moved or reused.
@@ -303,6 +304,94 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The desktop app for Linux as a .deb and an .rpm (#212), from the program
+  # `desktop-linux` built: the program writes the packages' files itself
+  # (`__package-root`) and dpkg-deb and rpmbuild, from apt, pack them
+  # (.github/scripts/desktop-packages.sh).
+  desktop-packages:
+    needs: [check, desktop-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nerve-desktop-x86_64-linux
+          path: program
+      - name: rpmbuild, and the fontconfig the program links
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm libfontconfig1
+      - name: The packages
+        run: |
+          chmod +x program/nerve-node-desktop-x86_64-linux
+          .github/scripts/desktop-packages.sh program/nerve-node-desktop-x86_64-linux dist
+          test -f "dist/nerve-node-desktop_${VERSION}_amd64.deb"
+          test -f "dist/nerve-node-desktop-${VERSION}.x86_64.rpm"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nerve-desktop-packages
+          path: dist/*
+          if-no-files-found: error
+
+  # Each package installed where install.md says it is tested, in a
+  # container: the .deb on Ubuntu 22.04 and 24.04, the .rpm on Fedora. The
+  # package manager brings what the app links; the app starts headless
+  # (`--version`), its menu entry is valid and opens the package's
+  # program, and removing the package removes them.
+  desktop-packages-test:
+    needs: desktop-packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            kind: deb
+          - image: ubuntu:24.04
+            kind: deb
+          - image: fedora:44
+            kind: rpm
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    env:
+      KIND: ${{ matrix.kind }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nerve-desktop-packages
+          path: dist
+      - name: Install the package
+        run: |
+          if [ "$KIND" = deb ]; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              "./dist/nerve-node-desktop_${VERSION}_amd64.deb" desktop-file-utils
+          else
+            dnf install -y "./dist/nerve-node-desktop-${VERSION}.x86_64.rpm" desktop-file-utils
+          fi
+      - name: The app starts, and its menu entry opens it
+        run: |
+          said=$(nerve-node-desktop --version)
+          if [ "$said" != "nerve-node-desktop $VERSION" ]; then
+            echo "the installed app says '$said', not 'nerve-node-desktop $VERSION'" >&2
+            exit 1
+          fi
+          test "$(command -v nerve-node-desktop)" = /usr/bin/nerve-node-desktop
+          entry=/usr/share/applications/nerve-node-desktop.desktop
+          desktop-file-validate "$entry"
+          grep -qx 'Exec=/usr/bin/nerve-node-desktop %u' "$entry"
+          test -f /usr/share/icons/hicolor/scalable/apps/nerve-node-desktop.svg
+          test "$(cat /usr/share/nerve-node-desktop/package)" = "$KIND"
+      - name: Removing the package removes the app
+        run: |
+          if [ "$KIND" = deb ]; then
+            apt-get remove -y nerve-node-desktop
+          else
+            dnf remove -y nerve-node-desktop
+          fi
+          test ! -e /usr/bin/nerve-node-desktop
+          test ! -e /usr/share/applications/nerve-node-desktop.desktop
+
   # The conformance suite (crates/nerve-conformance) against the binaries that
   # were built, not against the source: the end-to-end tests start the real
   # `nerve-center` and `nerve-node` from NERVE_CENTER_BIN and NERVE_NODE_BIN
@@ -417,12 +506,14 @@ jobs:
   # job too, so it says itself what it needs: every other job passed, and the
   # Windows job passed with the input or was skipped without it.
   publish:
-    needs: [check, linux, desktop-linux, windows, conformance, installed]
+    needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, windows, conformance, installed]
     if: >-
       ${{ !cancelled()
       && needs.check.result == 'success'
       && needs.linux.result == 'success'
       && needs.desktop-linux.result == 'success'
+      && needs.desktop-packages.result == 'success'
+      && needs.desktop-packages-test.result == 'success'
       && needs.conformance.result == 'success'
       && needs.installed.result == 'success'
       && needs.windows.result == (inputs.windows && 'success' || 'skipped') }}
@@ -449,11 +540,12 @@ jobs:
         run: |
           cd dist
           # Two Linux programs on each of two machines and the Linux desktop
-          # app; with Windows also its two (nerve-node-* takes the desktop
-          # app's as well; Windows has no nerve-node of its own).
-          want=5
+          # app, also as a .deb and an .rpm; with Windows also its two
+          # (nerve-node-* takes the desktop app's as well; Windows has no
+          # nerve-node of its own).
+          want=7
           if [ "$WINDOWS" = true ]; then
-            want=7
+            want=9
           fi
           files=(nerve-center-* nerve-node-*)
           if [ "${#files[@]}" != "$want" ]; then
@@ -475,9 +567,9 @@ jobs:
               ;;
           esac
           if [ "$WINDOWS" = true ]; then
-            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
+            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
           else
-            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer), built from $SHA. Windows comes with 0.1.0. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
+            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm), built from $SHA. Windows comes with 0.1.0. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
           fi
           # A pre-release's body is the footer alone.
           if [ "$KIND" = release ]; then

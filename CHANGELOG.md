@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### New
+
+- The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
+
 ### Windows (with 0.1.0)
 
 Built and tested, not released: the releases before 0.1.0 publish the Linux programs only.

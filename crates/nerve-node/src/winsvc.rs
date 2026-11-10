@@ -1616,6 +1616,7 @@ pub(crate) mod tests {
             run_temp: Vec::new(),
             release: "http://127.0.0.1:1/none".into(),
             edition: &crate::edition::NODE,
+            package: None,
         }
     }
 

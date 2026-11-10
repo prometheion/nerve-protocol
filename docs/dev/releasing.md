@@ -64,7 +64,12 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
    built but not run by the workflow.
 4. Publishes a GitHub Release with `SHA256SUMS` and the five Linux binaries:
    `nerve-center` and `nerve-node` for each machine, and
-   `nerve-node-desktop-x86_64-linux`. With `windows` there are seven:
+   `nerve-node-desktop-x86_64-linux`, which also comes as
+   `nerve-node-desktop_<version>_amd64.deb` and
+   `nerve-node-desktop-<version>.x86_64.rpm`: packed from that program with
+   `dpkg-deb` and `rpmbuild` (`.github/scripts/desktop-packages.sh`) and
+   installed on Ubuntu 22.04 and 24.04 and Fedora in containers first
+   (`desktop-packages-test`). With `windows` there are two more:
    `nerve-center-x86_64-windows.exe` and
    `nerve-node-desktop-x86_64-windows.exe` too (Windows has no `nerve-node` of
    its own: the desktop app is the node there). The release text ends with a
