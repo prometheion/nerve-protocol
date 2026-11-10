@@ -930,9 +930,12 @@ fn real(p: &Path) -> PathBuf {
 }
 
 /// [`real`] with the reason it could not resolve. A path whose links lead
-/// to another machine is not followed (nerve_policy::paths::remote_link).
+/// to another machine is not followed (nerve_policy::paths::remote_link),
+/// nor one whose links this process cannot look at to the end: the installed
+/// node's own account may not look into the owner's folders, and Windows
+/// follows a link there all the same, by a connection to the share it names.
 fn real_checked(p: &Path) -> std::io::Result<PathBuf> {
-    if let Some(link) = nerve_policy::paths::remote_link(p) {
+    if let Some(link) = nerve_policy::paths::remote_link_checked(p)? {
         return Err(std::io::Error::other(format!(
             "{} is a link to another machine, which is not followed",
             link.display()

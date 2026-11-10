@@ -395,48 +395,74 @@ pub fn remote_target(target: &str) -> bool {
 /// link leads, that leads to another machine ([`remote_target`]), found
 /// without following any: a symbolic link to a share is followed by a
 /// connection to it. Windows only; elsewhere a network mount is a path.
+///
+/// `None` also where a part of the way cannot be looked at (the caller has
+/// no right on it); [`remote_link_checked`] tells those apart. Fit for a
+/// caller that acts as an account which can look at the whole way.
 pub fn remote_link(p: &Path) -> Option<PathBuf> {
+    remote_link_checked(p).unwrap_or(None)
+}
+
+/// [`remote_link`], but an error where a part of the way cannot be looked
+/// at: the caller cannot tell there is no link, and Windows follows a link in
+/// a folder its caller may not look into (traversing is not checked), so
+/// whoever follows the path next would connect to a share it names.
+pub fn remote_link_checked(p: &Path) -> io::Result<Option<PathBuf>> {
     #[cfg(windows)]
     {
-        remote_link_in(p, 0)
+        remote_link_by(p, 0, &link_target)
     }
     #[cfg(not(windows))]
     {
         let _ = p;
-        None
+        Ok(None)
     }
 }
 
+/// Where the link at `at` leads, or `None` when `at` is not a link.
 #[cfg(windows)]
-fn remote_link_in(p: &Path, depth: usize) -> Option<PathBuf> {
+fn link_target(at: &Path) -> io::Result<Option<PathBuf>> {
+    if !fs::symlink_metadata(at)?.file_type().is_symlink() {
+        return Ok(None);
+    }
+    fs::read_link(at).map(Some)
+}
+
+/// [`remote_link_checked`] with the file system behind `target`: the place
+/// the link at a path leads to (`Ok(None)` for a path that is none), or why
+/// it cannot be told. A path that is not there ends the way (nothing
+/// below it is a link).
+#[cfg(any(windows, test))]
+fn remote_link_by(
+    p: &Path,
+    depth: usize,
+    target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
+) -> io::Result<Option<PathBuf>> {
     // Windows follows no more than 63 links on a path.
     if depth > 63 {
-        return None;
+        return Ok(None);
     }
     let mut at = PathBuf::new();
     for c in p.components() {
         at.push(c.as_os_str());
-        let Ok(m) = fs::symlink_metadata(&at) else {
-            return None;
+        let to = match target(&at) {
+            Ok(Some(to)) => to,
+            Ok(None) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
         };
-        if !m.file_type().is_symlink() {
-            continue;
-        }
-        let Ok(target) = fs::read_link(&at) else {
-            continue;
-        };
-        if remote_target(&target.to_string_lossy()) {
-            return Some(at);
+        if remote_target(&to.to_string_lossy()) {
+            return Ok(Some(at));
         }
         let next = match at.parent() {
-            Some(dir) if target.is_relative() => dir.join(&target),
-            _ => target,
+            Some(dir) if to.is_relative() => dir.join(&to),
+            _ => to,
         };
-        if remote_link_in(&next, depth + 1).is_some() {
-            return Some(at);
+        if remote_link_by(&next, depth + 1, target)?.is_some() {
+            return Ok(Some(at));
         }
     }
-    None
+    Ok(None)
 }
 
 /// `realpath`, on Windows without the `\\?\` prefix so resolved paths compare with
@@ -699,6 +725,71 @@ mod remote_tests {
         ] {
             assert!(!remote_target(t), "{t}");
         }
+    }
+
+    /// The links of a made-up file system: `links` maps a path to where it
+    /// leads, `hidden` are paths the caller may not look at, anything else
+    /// is a plain folder, and `/gone` is not there.
+    fn fake_fs<'a>(
+        links: &'a [(&'a str, &'a str)],
+        hidden: &'a [&'a str],
+    ) -> impl Fn(&Path) -> io::Result<Option<PathBuf>> + 'a {
+        move |at| {
+            let s = at.to_string_lossy();
+            if hidden.iter().any(|h| *h == s) {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            if s == "/gone" {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            Ok(links
+                .iter()
+                .find(|(l, _)| *l == s)
+                .map(|(_, to)| PathBuf::from(to)))
+        }
+    }
+
+    /// The walk names a link to a share, also behind a local link, and goes
+    /// on past a plain folder and a path that is not there.
+    #[test]
+    fn the_link_walk_finds_a_link_to_another_machine() {
+        let fs = fake_fs(
+            &[
+                ("/a/share", r"\\192.0.2.1\share"),
+                ("/b/hop", "/a/share"),
+                ("/b/rel", "hop"),
+            ],
+            &[],
+        );
+        for (path, want) in [
+            ("/a/share/x", Some("/a/share")),
+            ("/b/hop", Some("/b/hop")),
+            ("/b/rel", Some("/b/rel")),
+            ("/a/plain/x", None),
+            ("/gone/x", None),
+        ] {
+            let got = remote_link_by(Path::new(path), 0, &fs).unwrap();
+            assert_eq!(got, want.map(PathBuf::from), "{path}");
+        }
+    }
+
+    /// A part of the way the caller may not look at is an error, not "no
+    /// link": Windows follows a link in a folder its caller may not look
+    /// into, by a connection to the share, so a caller that went on would
+    /// send its NTLM answer there (the installed node's own account, in the
+    /// owner's folders). A link it did see before that is still named.
+    #[test]
+    fn the_link_walk_does_not_call_a_path_plain_that_it_cannot_look_at() {
+        let fs = fake_fs(&[("/open/share", r"\\192.0.2.1\share")], &["/owner/g"]);
+        let e = remote_link_by(Path::new("/owner/g/sub"), 0, &fs).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            remote_link_by(Path::new("/open/share/owner/g"), 0, &fs).unwrap(),
+            Some(PathBuf::from("/open/share"))
+        );
+        // A link that leads to a place it cannot look at is no better.
+        let fs = fake_fs(&[("/open/l", "d")], &["/open/d"]);
+        assert!(remote_link_by(Path::new("/open/l"), 0, &fs).is_err());
     }
 
     /// A symbolic link to a share is refused by its target, before

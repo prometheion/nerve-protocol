@@ -620,7 +620,13 @@ runs in the container as well, unless the pairing runs as you.
   path too, and a path from a root without a drive) counts as such a link. Following it would connect to that machine as the account the
   node acts as, and send that account's NTLM answer there. A command in a
   container that opens such a link gets "network access denied", and no
-  connection leaves the machine (checked).
+  connection leaves the machine (checked). The same holds for a path whose
+  links the node's own process cannot look at to the end: the service's
+  account may not look into your folders, yet Windows follows a link there
+  all the same (traversing is not checked), so such a path is not resolved
+  (`exec::real_checked` fails, and the callers keep the path as given). Without that, a granted folder of yours that became a link
+  to a host that does not answer held every call of its pairing for about
+  20 seconds.
 - Removing a folder or changing its rights under **Permissions ›
   Folders** changes the entry, and removing the pairing takes it off. That
   is the node's entry on the folder: permissions a command gave what it made

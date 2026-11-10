@@ -28,8 +28,8 @@
 //! - a pairing's home stays when its last folder goes, and its container's
 //!   profile goes with the pairing;
 //! - a command the node's folder sync refuses is in the audit log;
-//! - a folder that is a link to another machine is not followed by the
-//!   sync, which acts as the owner.
+//! - a granted folder that is a link to another machine is not followed
+//!   by a call of its pairing, nor left changed by the folder sync.
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -1271,12 +1271,19 @@ async fn a_command_the_folder_sync_refuses_is_in_the_audit_log() {
 }
 
 /// A granted folder of the owner's that becomes a link to another machine
-/// is never followed by the node's folder sync (#149's probe: opening it
-/// would connect there as the owner, whom the sync acts as, and send the
-/// owner's NTLM answer). The service's own account sees nothing in the
-/// owner's folders, so the check has to be made as the owner: only then
-/// does the sync find the link and say so. The address is one of the
-/// documentation range (TEST-NET-1), where nothing answers.
+/// is never followed by the node (#149's probe: opening it would connect
+/// there as the account that follows it and send that account's NTLM
+/// answer). Two accounts could: the service's own, which resolves a
+/// pairing's folders on every call and may not look into the owner's folders
+/// (so it cannot see the link, and Windows follows it all the same), and the
+/// owner, whom the folder sync acts as. The test shows the first by time: a
+/// followed link to the address below, where nothing answers, holds the
+/// call for about 20 seconds (once per address). For the sync it shows that
+/// the log says the link is left alone, not who looked: the service's
+/// account can look at the folder in this setup, so the order in
+/// `grants::Acls` (look as the owner, then check for the link) is a
+/// precaution that no flow here tells apart. The address is one of the
+/// documentation range (TEST-NET-1).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the node installed as a service on a Windows test machine"]
 async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync() {
@@ -1308,7 +1315,13 @@ async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed
     // The next call brings the sync, which looks at the folder it granted:
     // as the owner it finds the link, and the log says it does not follow it
     // (the policy's own look at the folder has another wording).
+    let started = Instant::now();
     let _ = run_in(&mut conn, &g, "Write-Output still fine").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the call took {:?}: the node followed the link to the other machine",
+        started.elapsed()
+    );
     let said = format!(
         "folder grants: {} is a link to another machine, which the node does not follow",
         sub.display()
