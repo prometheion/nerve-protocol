@@ -773,6 +773,9 @@ pub(crate) struct Shared {
     pub program_wait: Duration,
     /// The capability providers attached now (crate::provider).
     pub providers: crate::provider::Providers,
+    /// Windows: why the installed node serves no provider pipe, which the
+    /// status says (another process may hold its name).
+    pub provider_pipe_lost: std::sync::OnceLock<String>,
     /// Linux: the installed node's provider socket, the only place it
     /// takes a provider's hello (crate::provider::serve); `None` for a node
     /// run by hand, which takes it on the control socket.
@@ -1985,6 +1988,7 @@ impl Shared {
             "network_rules": self.network_held(),
             "command_limits": crate::cgroup::status(&cfg.limits.command, &self.cgroups),
             "providers": self.providers.status(),
+            "provider_pipe_warning": self.provider_pipe_lost.get(),
             "folder_access": grants,
             // What nerve-run may read of the owner's home without Landlock.
             "home_warning": self.home_warning(&cfg),
@@ -2361,6 +2365,7 @@ impl Daemon {
             grace: opts.resume_grace,
             program_wait: opts.program_wait,
             providers: Default::default(),
+            provider_pipe_lost: Default::default(),
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
@@ -2417,7 +2422,9 @@ impl Daemon {
                 match crate::win_provider::serve(shared.clone(), owners.clone()) {
                     Ok(task) => Some((task, PathBuf::from(crate::provider::PIPE_NAME))),
                     Err(e) => {
-                        tracing::error!("{e}; no program of the owner attaches as a provider");
+                        let why = crate::provider::pipe_lost(&e);
+                        tracing::error!("{why}");
+                        let _ = shared.provider_pipe_lost.set(why);
                         None
                     }
                 }

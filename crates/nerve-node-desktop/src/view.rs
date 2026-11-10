@@ -116,6 +116,9 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         if let Some(why) = v["processes_warning"].as_str() {
             warnings.push(why.into());
         }
+        if let Some(why) = v["provider_pipe_warning"].as_str() {
+            warnings.push(why.into());
+        }
         if v["keyring_failed"] == true {
             warnings.push(
                 "The node found no keyring at its start. Restart it once the keyring runs.".into(),
@@ -2055,6 +2058,11 @@ mod tests {
         // The Linux node's note that pairings see each other's commands.
         let v = json!({"daemon": "running", "locked": false, "centers": [],
             "processes_warning": "commands of different pairings can read each other"});
+        let (st, _) = status(&v, NOW);
+        assert_eq!(st.warnings.row_count(), 1);
+        // The Windows node that runs without its provider pipe.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "provider_pipe_warning": "no program of yours attaches as a provider"});
         let (st, _) = status(&v, NOW);
         assert_eq!(st.warnings.row_count(), 1);
     }

@@ -750,6 +750,16 @@ pub(crate) const WINDOWS_PROGRAM: u32 = u32::MAX;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const PIPE_NAME: &str = r"\\.\pipe\nerve-node-provider";
 
+/// What the status says when the installed node on Windows could not make
+/// its provider pipe (`e`): the name is global, and a process that made a
+/// pipe of that name first would take the providers' hellos.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn pipe_lost(e: &str) -> String {
+    format!(
+        "{e}; no program of yours attaches as a provider. If another process made {PIPE_NAME} before the node started, end it and restart the node"
+    )
+}
+
 /// Why the provider pipe refuses a client.
 // Used by the provider pipe on Windows; tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -6,7 +6,8 @@
 //! in a file, a log, an error text or the audit log. The installed node on
 //! Windows keeps them, and its keys where they are in the keyring, in the
 //! Credential Manager of its own account, which only the service reads and
-//! writes ([`vault`]).
+//! writes ([`vault`]); while that service is stopped, what goes there waits
+//! in a file sealed with the machine's DPAPI key ([`vault::PENDING`]).
 //!
 //! The node's own keys, the key of the config's MAC, the node key per
 //! center, the relay's TLS key and the password of an `https://` proxy (a

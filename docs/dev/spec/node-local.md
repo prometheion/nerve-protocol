@@ -261,13 +261,20 @@ control pipe (`vault.get`, `vault.set`, `vault.delete` with an entry's
 `account`; one that is not this node's is refused). While no service runs,
 a write waits in `<config>/keys/vault.pending`, sealed with DPAPI for the
 machine, and a read finds what waits there, or says to start the node; the
-service takes the file into its Credential Manager at its start, before it
-reads a key. `install` gives `nerve` a new password, after which Windows no
-longer opens what it kept: first the running service copies its entries
-into that file (`vault.stage`); a service that cannot, with the keys in the
-keyring, makes the install change nothing. `uninstall` with the data kept
-does the same before it removes `nerve`, whose Credential Manager goes with
-it. A restore into that node writes there as well. On Linux the keys may be
+service takes the file into its Credential Manager at its start, under the
+keys' lock and before it reads a key; whoever writes the file holds that
+lock too. `install` gives `nerve` a new password, after which Windows no
+longer opens what it kept: first the service copies its entries into that
+file (`vault.stage`), started for it when it is stopped and may hold
+entries (the keys with `keyring`, the proxy's header values with either);
+one that cannot makes the install change nothing. `uninstall` with the data
+kept does the same before it removes `nerve`, whose Credential Manager goes
+with it. A restore into that node writes there as well; it tells the node
+by the pairings of a `node.toml` it reads without the MAC (the MAC key is
+in the stopped service's vault), and one that fails takes back only what it
+put in the file. While entries wait there, the keys and the proxy's values
+are in a file, sealed with the machine's DPAPI key: the config folder's ACL
+(`nerve`, SYSTEM, the administrators) keeps them then. On Linux the keys may be
 in the keyring on every kernel; a node run by hand then runs no `folder`
 mode command (§1, the paragraphs on the session bus below).
 
@@ -321,7 +328,8 @@ that move in the file. `center rm` deletes the center's key in both places
 while `keys.moving` is there, since the start that finishes the move no
 longer looks for a removed center.
 
-With `keyring` the MAC key is in no file that a process can read. The check
+With `keyring` the MAC key is in no file that a process can read (on the
+installed node on Windows, but while it waits in `vault.pending`, above). The check
 still stands on that key: a process that can write both folders can still
 set `file` with a key of its own, and a process of the node's user can ask
 the keyring for its entries over the user's D-Bus session.
@@ -2047,6 +2055,14 @@ with 16 places of its own, and:
   programs and the administrators' attach a provider to the node`;
 - a process in the job of a command the node runs is refused, as on the
   control pipe;
+- the name is global and fixed, and Windows lets any account make a pipe of
+  a name nobody holds: while the node is stopped another account could, and
+  a node that then cannot make its own runs without it and says why in
+  `status` (`provider_pipe_warning`). So a provider checks the pipe before
+  `hello`, as the CLI checks the control pipe (`pipe::check_owner`): it
+  opens it with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` and talks
+  only to a pipe whose owner (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`)
+  is SYSTEM, the Administrators or `nerve`;
 - the program is told by the image of the client's process
   (`GetNamedPipeClientProcessId`, then `QueryFullProcessImageNameW`) against
   the entry's path once resolved, compared without `\\?\` and in any case.

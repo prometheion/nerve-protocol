@@ -156,6 +156,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     if let Some(p) = v["processes_warning"].as_str() {
         lines.push(format!("warning: {p}"));
     }
+    if let Some(p) = v["provider_pipe_warning"].as_str() {
+        lines.push(format!("warning: {p}"));
+    }
     lines.extend(
         grant_lines(&v["folder_access"])
             .into_iter()
@@ -399,6 +402,12 @@ mod tests {
             shared.contains(&"warning: they see each other".to_string()),
             "{shared:#?}"
         );
+        // So is a Windows node without its provider pipe, whose name
+        // another process may hold.
+        let why = crate::provider::pipe_lost("access is denied");
+        let pipe = status_lines(&json!({"provider_pipe_warning": why}));
+        assert!(pipe.contains(&format!("warning: {why}")), "{pipe:#?}");
+        assert!(why.contains("restart the node"), "{why}");
         // An administrator as the owner on Windows is its twin (#197).
         let admin = status_lines(&json!({"owner": "alice", "owner_is_admin": true}));
         assert!(

@@ -248,12 +248,17 @@ administrator ask the running service over its
 for this node's entries only), never their own. The proxy's header values and
 password live there too. While no service runs (a restore, an install), what
 goes there waits in `config\keys\vault.pending`, sealed with DPAPI, and the
-service takes it at its start. An install gives `nerve` a new password, after
-which Windows no longer opens what its Credential Manager kept: so the
-running service first puts its entries aside the same way (`vault.stage`);
-with the keys in the Credential Manager and a service that cannot, the
-install changes nothing. Uninstall removes `nerve` and its Credential Manager
-with it; **Keep the data** puts the entries aside first, for a later install.
+service takes it at its start, under the keys' lock that whoever writes the
+file holds too. An install gives `nerve` a new password, after which Windows
+no longer opens what its Credential Manager kept: so the service first puts
+its entries aside the same way (`vault.stage`), started for it when it is
+stopped; where entries may be there (the keys with the keyring, the proxy's
+header values) and it cannot, the install changes nothing. Uninstall removes
+`nerve` and its Credential Manager with it; **Keep the data** puts the
+entries aside first, for a later install. While they wait in that file, the
+keys and the proxy's values are in a file after all: sealed with the
+machine's DPAPI key, so its folder's ACL (`nerve`, SYSTEM, the
+administrators) is what keeps them, as it keeps the keys in files.
 `nerve-run`'s commands do not reach that Credential Manager: it is another
 account's.
 
@@ -989,6 +994,13 @@ Linux ([the spec](spec/node-local.md#providers-on-windows)):
 - A process of a command the node runs is refused.
 - The program runs as whoever started it, outside the node's containers, as
   on Linux; its actions show in the descriptor and in `cap` as there.
+- The pipe's name is fixed and Windows lets any account make a pipe of a
+  name nobody holds, so while the node is stopped another account could
+  make it and take a provider's hello. A provider checks the pipe before it
+  says `hello`, as Nerve's CLI checks the control pipe: it opens it with
+  `SECURITY_IDENTIFICATION` and talks only to a pipe whose owner is SYSTEM,
+  the Administrators or `nerve`. A node that could not make the pipe says
+  so in `status` and on the app's Overview.
 
 ## Sudo on Windows
 
