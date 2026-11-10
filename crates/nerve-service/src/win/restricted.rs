@@ -394,13 +394,16 @@ mod tests {
             .join("WindowsPowerShell")
             .join("v1.0")
             .join("powershell.exe");
-        // It starts a sleeper, says its id and ends.
+        // It starts a sleeper, says its id and ends. Through .NET, not
+        // Start-Process: a cmdlet loads its module from PSModulePath, which a
+        // test started from PowerShell 7 inherits with PowerShell 7's own
+        // modules first, and Windows PowerShell then may take its time.
         let (code, out) = output_of(
             &ps,
             &[
                 "-NoProfile",
                 "-Command",
-                "$p = Start-Process -PassThru -WindowStyle Hidden cmd.exe '/c ping -n 60 127.0.0.1 > nul'; $p.Id",
+                "$i = [Diagnostics.ProcessStartInfo]::new('cmd.exe', '/c ping -n 60 127.0.0.1 > nul'); $i.UseShellExecute = $false; $i.CreateNoWindow = $true; [Diagnostics.Process]::Start($i).Id",
             ],
             Duration::from_secs(60),
         )

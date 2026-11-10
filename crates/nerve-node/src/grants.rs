@@ -3616,6 +3616,9 @@ mod tests {
 
     /// A pairing's folders are told as the owner wrote them, `~` the home of
     /// the rules; one that names no place is left out.
+    // Its `/home` and `/srv` paths are no paths on Windows, where a folder
+    // that names no place there is left out.
+    #[cfg(unix)]
     #[test]
     fn a_pairings_folders_are_spelled_with_its_home() {
         let folder = |path: &str, access: &str| nerve_policy::config::Folder {
