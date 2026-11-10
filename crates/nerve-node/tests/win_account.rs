@@ -873,6 +873,21 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         "{}",
         e.message
     );
+    // A command in the split folder itself is refused too: the grant goes
+    // on its entries, not on the folder that holds the protected one.
+    let e = run_in(&mut conn_a, &mine, "Get-ChildItem")
+        .await
+        .unwrap_err();
+    assert!(
+        e.message
+            .contains(&format!("may not open {}", mine.display()))
+            && e.message.contains(&format!(
+                "goes on the entries of {0}, not on {0} itself, because it holds a protected entry",
+                mine.display()
+            )),
+        "{}",
+        e.message
+    );
 
     // The owner's Documents folder redirected (as OneDrive's backup does):
     // PowerShell's profiles there are protected as in the usual place, read

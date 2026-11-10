@@ -3545,6 +3545,26 @@ fn given_in_home(cfg: &NodeConfig, home: &std::path::Path) -> Vec<PathBuf> {
 mod every_platform {
     use super::*;
 
+    /// The Windows twin of `tests::a_stopped_node_holds_no_control_endpoint`
+    /// (Linux): right after `stop`, a call over the control pipe finds no
+    /// node, as the CLI must to write node.toml itself. A few rounds, on a
+    /// runtime whose other thread could drop the pipe's task late.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_node_takes_no_call_on_its_pipe() {
+        for _ in 0..5 {
+            let d = tempfile::tempdir().unwrap();
+            let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+            let mut opts = NodeOptions::new(paths.clone());
+            opts.home = d.path().to_path_buf();
+            let daemon = Daemon::start(opts).await.unwrap();
+            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
+            daemon.stop().await;
+            let r = crate::pipe::call(&paths, "status", json!({})).await;
+            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
+        }
+    }
+
     /// On Windows the node notes its pairings' containers at its start,
     /// before its first sync could (crate::grants::note_pairings): `center
     /// rm` right after the start then finds the node removing the profile of
@@ -3923,23 +3943,6 @@ mod tests {
         assert!(held());
         daemon.stop().await;
         assert!(!held(), "the stopped node still holds its control socket");
-    }
-
-    /// Its Windows twin: right after `stop`, a call over the control pipe
-    /// finds no node, as the CLI must to write node.toml itself. A few
-    /// rounds, on a runtime whose other thread could drop the pipe's task
-    /// late.
-    #[cfg(windows)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_stopped_node_takes_no_call_on_its_pipe() {
-        for _ in 0..5 {
-            let (_d, daemon) = daemon().await;
-            let paths = daemon.shared.paths.clone();
-            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
-            daemon.stop().await;
-            let r = crate::pipe::call(&paths, "status", json!({})).await;
-            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
-        }
     }
 
     /// A node.toml that keeps the keys in the keyring, made before.
