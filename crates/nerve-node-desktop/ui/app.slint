@@ -19,7 +19,7 @@ import { SettingsPage } from "settings.slint";
 import { HelpPage } from "help.slint";
 import { SetupDialog } from "setup.slint";
 import {
-    PairDialog, ConfirmDialog, AboutDialog, ModeDialog, FolderDialog, SudoDialog, ProxyDialog,
+    PairDialog, ConfirmDialog, AboutDialog, ModeDialog, FolderDialog, SudoDialog, OwnerPasswordDialog, ProxyDialog,
     OnceDialog, BackupDialog, RestoreDialog, ElevateDialog, UpdateDialog, UninstallDialog,
     MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog, CapDialog,
 } from "dialogs.slint";
@@ -237,7 +237,8 @@ export component AppWindow inherits Window {
     // A dialog is open: the window's own shortcuts wait, and the focus comes
     // back to the window when it closes.
     property <bool> dialog-open: Store.pair-open || Store.confirm-open || Store.about-open
-        || Perm.mode-open || Perm.folder-open || Perm.sudo-open || Prefs.proxy-open
+        || Perm.mode-open || Perm.folder-open || Perm.sudo-open || Perm.owner-password-open
+        || Prefs.proxy-open
         || Prefs.once-open || Prefs.relay-edit-open || Prefs.backup-open || Prefs.restore-open
         || Store.setup-open || Store.elevate-open || Install.update-open || Install.uninstall-open
         || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open
@@ -398,6 +399,7 @@ export component AppWindow inherits Window {
         if Perm.mode-open: ModeDialog { }
         if Perm.folder-open: FolderDialog { }
         if Perm.sudo-open: SudoDialog { }
+        if Perm.owner-password-open: OwnerPasswordDialog { }
         if Caps.edit-open: CapDialog { }
         if Prefs.proxy-open: ProxyDialog { }
         if Prefs.once-open: OnceDialog { }

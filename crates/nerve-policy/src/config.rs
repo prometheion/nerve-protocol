@@ -134,10 +134,9 @@ pub struct Machine {
     #[serde(default)]
     pub allow_root: bool,
     /// The node's sudo switch (one per node, not per center). The password
-    /// is never in this file. On Linux the node keeps it in memory only
-    /// while the switch is on, so a restarted node starts with the switch
-    /// off; the installed Windows node keeps it with DPAPI in `sudo.dpapi`
-    /// and holds it again at start (docs/dev/spec/node-local.md §4).
+    /// is never in this file: the node keeps it in memory only while the
+    /// switch is on, so a restarted node starts with the switch off, on
+    /// Linux and Windows (docs/dev/spec/node-local.md §4).
     #[serde(default)]
     pub sudo: Sudo,
     /// The `sudo` program; `sudo` from `PATH` when unset. Only the owner

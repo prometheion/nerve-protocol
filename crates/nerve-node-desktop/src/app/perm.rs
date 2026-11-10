@@ -61,13 +61,14 @@ impl Ctl {
             .find(|c| c["name"] == center.as_str())
             .cloned()
             .unwrap_or(Value::Null);
-        // The installed Linux node runs folder and allowlist mode as
-        // nerve-run (nerve_node::account): its status says it is installed,
-        // and it names its owner, and a pairing's account, also when
-        // `install` found no owner and every pairing runs as the owner.
+        // The installed node runs folder and allowlist mode as nerve-run
+        // (nerve_node::account), on Windows in the pairing's AppContainer:
+        // its status says it is installed, and it names its owner, and a
+        // pairing's account, also when `install` found no owner and every
+        // pairing runs as the owner.
         let run = nerve_node::account::RUN_USER;
         let account = c["account"].as_str().unwrap_or_default().to_string();
-        let separate = cfg!(target_os = "linux")
+        let separate = (cfg!(target_os = "linux") || cfg!(windows))
             && (st["installed"] == true
                 || st["owner"].is_string()
                 || st["centers"]
@@ -129,6 +130,7 @@ impl Ctl {
             p.set_runs_as_owner(c["network_off"] == "as_owner");
             p.set_owner_is_root(st["owner_is_root"] == true);
             p.set_owner_is_admin(st["owner_is_admin"] == true);
+            p.set_owner_password_missing(view::owner_password_missing(&st));
             p.set_built_in(built_in.as_str().into());
             p.set_grant_errors(errors.join("\n").into());
             p.set_stale(stale.join("\n").into());
@@ -147,6 +149,9 @@ impl Ctl {
     /// Allowlist mode as the owner (`mode allowlist --as-owner`), or as
     /// nerve-run again.
     fn as_owner_set(self: &Rc<Self>, on: bool) {
+        if on && self.owner_password_first("as-owner") {
+            return;
+        }
         let center = self.perm_center();
         let mut args = vec!["mode".into(), "allowlist".into()];
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
@@ -305,6 +310,9 @@ impl Ctl {
                 |_| {},
                 |c, e| c.toast(e, Tone::Danger),
             );
+            return;
+        }
+        if mode == "user" && self.owner_password_first("user") {
             return;
         }
         self.with_perm(|p| {
@@ -630,11 +638,15 @@ impl Ctl {
             p.set_sudo_busy(true);
             p.set_sudo_error(SharedString::new());
         });
+        let renew = self
+            .with_perm(|p| p.get_windows() && p.get_owner_password_missing())
+            .unwrap_or(false)
+            .then(|| password.clone());
         // The password goes in on stdin, never as an argument.
         self.command(
             vec!["sudo".into(), "on".into()],
             Some(password),
-            |c, answer| {
+            move |c, answer| {
                 c.with_perm(|p| {
                     p.set_sudo_busy(false);
                     p.set_sudo_password(SharedString::new());
@@ -643,6 +655,17 @@ impl Ctl {
                     Ok(v) => {
                         c.with_perm(|p| p.set_sudo_open(false));
                         c.done(&v, "Sudo is on.");
+                        // On Windows sudo took your Windows password: where
+                        // the node keeps none that works, it keeps this one
+                        // too, for the commands that run as you.
+                        if let Some(pw) = renew {
+                            c.command(vec!["password".into()], Some(pw), |c, answer| {
+                                if let Err(e) = answer {
+                                    c.toast(e, Tone::Danger);
+                                }
+                                c.refresh_status();
+                            });
+                        }
                     }
                     Err(e) => {
                         c.with_perm(|p| p.set_sudo_error(e.into()));
@@ -651,6 +674,70 @@ impl Ctl {
                 c.perm_load();
             },
         );
+    }
+
+    /// Whether the page asks for the owner's Windows password first, as the
+    /// node has none that works, before it goes on with `then` (see
+    /// [`Ctl::owner_password_save`]).
+    fn owner_password_first(self: &Rc<Self>, then: &str) -> bool {
+        let ask = self
+            .with_perm(|p| p.get_windows() && p.get_owner_password_missing())
+            .unwrap_or(false);
+        if ask {
+            self.owner_password_ask(then);
+        }
+        ask
+    }
+
+    fn owner_password_ask(self: &Rc<Self>, then: &str) {
+        self.with_perm(|p| {
+            p.set_owner_password_then(then.into());
+            p.set_owner_password(SharedString::new());
+            p.set_owner_password_error(SharedString::new());
+            p.set_owner_password_open(true);
+        });
+    }
+
+    /// `password` with the owner's Windows password on stdin: the node
+    /// checks it and keeps it, then the page goes on with what asked for it.
+    fn owner_password_save(self: &Rc<Self>) {
+        let Some(password) = self.with_perm(|p| p.get_owner_password().to_string()) else {
+            return;
+        };
+        if password.is_empty() {
+            return;
+        }
+        self.with_perm(|p| {
+            p.set_owner_password_busy(true);
+            p.set_owner_password_error(SharedString::new());
+        });
+        self.command(vec!["password".into()], Some(password), |c, answer| {
+            c.with_perm(|p| {
+                p.set_owner_password_busy(false);
+                p.set_owner_password(SharedString::new());
+            });
+            match answer {
+                Ok(_) => {
+                    let then = c
+                        .with_perm(|p| {
+                            p.set_owner_password_open(false);
+                            p.set_owner_password_missing(false);
+                            p.get_owner_password_then().to_string()
+                        })
+                        .unwrap_or_default();
+                    c.toast("The node has your password.", Tone::Ok);
+                    match then.as_str() {
+                        "user" => c.mode_pick("user"),
+                        "as-owner" => c.as_owner_set(true),
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    c.with_perm(|p| p.set_owner_password_error(e.into()));
+                }
+            }
+            c.refresh_status();
+        });
     }
 
     fn sudo_off(self: &Rc<Self>) {
@@ -722,4 +809,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_sudo_confirm(move || c.sudo_confirm());
     let c = ctl.clone();
     p.on_sudo_off(move || c.sudo_off());
+    let c = ctl.clone();
+    p.on_owner_password_ask(move |then| c.owner_password_ask(&then));
+    let c = ctl.clone();
+    p.on_owner_password_save(move || c.owner_password_save());
 }

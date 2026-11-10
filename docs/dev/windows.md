@@ -213,7 +213,7 @@ The install does this, and the installer shows each step:
 
 | What | Where |
 |---|---|
-| `node.toml`, one key per center, `nerve-run`'s password and yours, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
+| `node.toml`, one key per center, `nerve-run`'s password and yours | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logging.md#the-log-as-the-owner-reads-it), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
 | The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](#the-windows-event-log)) |
@@ -315,16 +315,24 @@ the twin of root as the owner on Linux.
 [Sudo on Windows](#sudo-on-windows) needs you to be an administrator.
 
 If your password changes, commands that run as you fail until you save the
-new one under **Settings**, **General**, **Account for commands**. So do
+new one under **Settings**, **General**, **Account for commands**, or where the
+app asks for it: while the node has no password of yours that works
+(`status`'s `owner_password` is `missing` or `stale`), the app asks for it when
+you switch a pairing to `user` mode or to allowlist mode as you, when you turn
+sudo on (sudo's password is yours, so the node keeps that one too), and on the
+folder grants' warning. The app hands it to the running node over the
+[control pipe](#the-control-pipe) (`owner.password`, the hidden `password`
+command): the node checks it with a logon, as the install does, stores it with
+DPAPI in place of the old one and brings the folder grants in line at once. So do
 the changes of your folders' entries for `folder` and `allowlist` mode: a
 folder you add gives the commands no access, and one you remove or close
 stops the pairing's commands, until the node can log on as you again (the
 log says so). The node tries a stored password that failed once only, until
 you save a new one (or the service restarts), so its calls cannot run up the
-wrong-password count that locks your account. [Sudo](#sudo-on-windows) keeps
-a copy of your password of its own, which saving the new one does not renew:
-the node tries it once too, and sudo commands fail until you turn sudo off
-and on again. A Microsoft account works with its Microsoft password, which
+wrong-password count that locks your account. [Sudo](#sudo-on-windows) holds
+a copy of your password of its own while it is on, which saving the new one
+does not renew: the node tries it once too, and sudo commands fail until you
+turn sudo off and on again. A Microsoft account works with its Microsoft password, which
 can change outside the machine.
 
 To start a process as another account, the service keeps two privileges,
@@ -353,8 +361,7 @@ its entry in Apps & features. It also takes off the folder grants left on
 your folders, the containers' and `nerve-run`'s
 ([modes](#what-a-command-can-reach-in-folder-mode-windows)). With
 **Keep the data** the folders and the stored password stay, open to the
-administrators only; the [sudo](#sudo-on-windows) password goes, so
-sudo is off after a later install. A later install takes them up again.
+administrators only. A later install takes them up again.
 **Delete the data** deletes them. The installed program cannot delete its
 own file at once: it moves it aside, and Windows deletes it at its next
 start. Where Windows still holds the profile of `nerve` or `nerve-run`
@@ -978,15 +985,20 @@ of `nerve-run`, which is no administrator, never get them. So:
   Your other commands (`user` mode, `--as-owner`) run with the token UAC
   filtered, but UAC is no security boundary: any of them can get the
   administrator rights back and read the node's keys.
-- Turning it on asks for your password. A wrong password is refused and
-  the switch stays as it was.
-- The node keeps the password with DPAPI in the config folder (`sudo.dpapi`).
-  Unlike on Linux, sudo stays on when the service restarts. Turning it off
-  removes the file, and uninstalling removes it too. Neither takes you out
-  of Administrators. Turning it off reminds you.
-- If your password changes, turn sudo off and on again: the node tries the
-  password it kept once, not at every command, and a sudo command fails
-  until then.
+- Turning it on asks for your Windows password. A wrong password is
+  refused and the switch stays as it was.
+- The node holds the password in its memory only, as on Linux: sudo is off
+  after a restart of the service or of Windows. Turning it off does not take
+  you out of Administrators; it reminds you.
+- Only the app on the machine turns it on. A center cannot (Q13): the
+  password is your Windows password, maybe your Microsoft account's, which
+  should not pass through a web page and the relay. The node refuses
+  `settings.sudo` on from a center on Windows, as it does for root as the
+  owner on Linux; the center's page says to use the app. A center with the
+  settings grant can still turn it off.
+- If your password changes while sudo is on, turn sudo off and on again: the
+  node tries the password it holds once, not at every command, and a sudo
+  command fails until then.
 - No sudo command runs while the pairing's network is off.
 
 In the [desktop app](desktop.md), the **Sudo** section of **Permissions**
@@ -994,10 +1006,7 @@ turns it on and off, and the center's sudo list there takes the commands
 (`net session`). Turning it on needs an administrator: the app asks Windows
 for the rights, with the UAC prompt. Both take effect at once, over the
 [control pipe](#the-control-pipe): the running service checks the password
-and keeps it, or drops it. Turning it on needs the node running.
-
-A center with the settings grant switches the running service at once, as on
-Linux.
+and holds it, or drops it. Turning it on needs the node running.
 
 The node starts the command line after `sudo` with the shell
 (`machine.shell`, Windows PowerShell 5.1 by default), logged on as a batch

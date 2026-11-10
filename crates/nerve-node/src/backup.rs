@@ -422,7 +422,7 @@ pub struct RestoreReport {
     /// Things the owner should know, one line each.
     pub notes: Vec<String>,
     /// The notes that ask the owner to set something again, by their
-    /// index in `notes`: what (`proxy`, `sudo`, `sudo-file`, `pin`,
+    /// index in `notes`: what (`proxy`, `sudo`, `pin`,
     /// `relay`) and for which center. A program words these itself, with
     /// its own way to do it (`restore --json`).
     pub fixes: Vec<(usize, &'static str, Option<String>)>,
@@ -707,24 +707,6 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
             "the version {} of node.toml is not recorded: {e}. The node records it at its next start",
             cfg.version
         ));
-    }
-    // The sudo switch is off now, and on the installed node on Windows the
-    // administrator's password it kept is at rest in the config folder, with
-    // DPAPI, only while the switch is on (`sudo off` removes it).
-    if cfg!(windows) && crate::winsudo::kept(paths) {
-        match crate::winsudo::forget(paths) {
-            Ok(()) => report.notes.push(format!(
-                "{} is deleted: the sudo switch is off, so the administrator's password it held is not kept",
-                crate::winsudo::SUDO_FILE
-            )),
-            Err(e) => {
-                report.notes.push(format!(
-                    "the sudo switch is off, but the administrator's password it held could not be deleted ({e}): delete {}, or run `nerve-node sudo on` and `sudo off`",
-                    crate::winsudo::SUDO_FILE
-                ));
-                report.fix("sudo-file", None);
-            }
-        }
     }
     let _ = AuditLog::new(paths.audit_log()).config(
         "restored",
@@ -2891,23 +2873,6 @@ mod tests {
         assert!(notes.contains("proxy's password"), "{notes}");
         assert!(notes.contains("header values"), "{notes}");
         assert_eq!(r.no_key, ["home"]);
-    }
-
-    /// The sudo password the installed node on Windows keeps with DPAPI is at
-    /// rest only while the switch is on.
-    #[cfg(windows)]
-    #[test]
-    fn a_restore_deletes_the_dpapi_password_of_the_sudo_switch() {
-        let (_a, from) = node();
-        paired(&from, SecretStorage::File, &["home"]);
-        let (_f, parsed, _) = roundtrip(&from, false);
-        let (_b, to) = node();
-        let file = to.config_dir.join(crate::winsudo::SUDO_FILE);
-        std::fs::create_dir_all(&to.config_dir).unwrap();
-        std::fs::write(&file, b"sealed password").unwrap();
-        let r = restore(&to, &parsed, &RestoreOpts::default()).unwrap();
-        assert!(!file.exists());
-        assert!(r.notes.iter().any(|n| n.contains("sudo.dpapi")), "{r:?}");
     }
 
     #[test]

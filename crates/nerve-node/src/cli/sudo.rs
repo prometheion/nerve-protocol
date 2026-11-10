@@ -5,8 +5,7 @@ use super::*;
 
 /// `nerve-node sudo`, `sudo on|off`. The password lives in the running
 /// daemon only, so `on` needs one; `off` without a daemon edits the file.
-/// On Windows the service also keeps it with DPAPI, and the CLI talks to it
-/// over its control pipe (crate::winsudo).
+/// On Windows the CLI talks to it over its control pipe (crate::winsudo).
 pub(super) async fn sudo_cmd(
     paths: &NodePaths,
     c: Option<SudoCmd>,
@@ -75,9 +74,31 @@ pub(super) async fn sudo_cmd(
     }
 }
 
-/// Whether sudo is on: the running node holds the password (on Windows,
-/// with no node running, the signed config says so and the password is
-/// kept, crate::winsudo).
+/// `nerve-node password`: the owner's Windows password to the running
+/// node, which checks it and stores it for the commands that run as the
+/// owner (crate::winsvc::save_owner_password). Only Windows keeps one.
+pub(super) async fn owner_password(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (paths, out);
+        Err("only the node on Windows keeps its owner's password".into())
+    }
+    #[cfg(windows)]
+    {
+        use crate::winsvc::WinSystem;
+        let password = crate::win_host::WinHost.read_password("Your Windows password: ", out)?;
+        let v = node_call(paths, "owner.password", json!({"password": password})).await?;
+        let _ = writeln!(
+            out,
+            "the node has the password of {}: commands that run as you run",
+            v["owner"].as_str().unwrap_or_default()
+        );
+        Ok(())
+    }
+}
+
+/// Whether sudo is on: the running node holds the password; one that does
+/// not run holds none.
 pub(super) async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
     #[cfg(unix)]
     {

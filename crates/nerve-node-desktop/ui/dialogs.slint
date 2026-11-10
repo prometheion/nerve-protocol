@@ -627,7 +627,7 @@ export component CapDialog inherits Dialog {
 
 export component SudoDialog inherits Dialog {
     title: "Turn sudo on";
-    subtitle: "Your sudo password, kept in the node's memory only. On Windows, the password of the commands' account.";
+    subtitle: Perm.windows ? "Your Windows password. Sudo commands run as you, with your administrator rights. The node keeps it in memory only: sudo is off after a restart." : "Your sudo password. The node keeps it in memory only: sudo is off after a restart.";
     card-width: 480px;
     close => {
         Perm.sudo-open = false;
@@ -668,6 +668,56 @@ export component SudoDialog inherits Dialog {
             busy: Perm.sudo-busy;
             clicked => {
                 Perm.sudo-confirm();
+            }
+        }
+    }
+}
+
+// The owner's Windows password, where the node has none that works
+// (src/app/perm.rs).
+export component OwnerPasswordDialog inherits Dialog {
+    title: "Your Windows password";
+    subtitle: "Commands that run as you need it. The node checks it and keeps it with DPAPI.";
+    card-width: 480px;
+    close => {
+        Perm.owner-password-open = false;
+    }
+    enter => {
+        if (Perm.owner-password != "" && !Perm.owner-password-busy) {
+            Perm.owner-password-save();
+        }
+    }
+    Field {
+        label: "Password";
+        TextField {
+            text <=> Perm.owner-password;
+            password: true;
+            label: "Password";
+            enabled: !Perm.owner-password-busy;
+            accepted => {
+                Perm.owner-password-save();
+            }
+            init => {
+                self.focus();
+            }
+        }
+    }
+    DialogButtons {
+        error: Perm.owner-password-error;
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Perm.owner-password-open = false;
+            }
+        }
+        Button {
+            text: "Save";
+            kind: ButtonKind.primary;
+            enabled: Perm.owner-password != "";
+            busy: Perm.owner-password-busy;
+            clicked => {
+                Perm.owner-password-save();
             }
         }
     }

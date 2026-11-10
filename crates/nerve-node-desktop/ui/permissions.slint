@@ -263,6 +263,12 @@ component FolderSection inherits Section {
                 tone: Tone.warn;
                 title: "nerve-run did not get every folder";
                 text: Perm.grant-errors;
+                // On Windows the node gives the folders as you, with your
+                // password.
+                action: Perm.windows && Perm.owner-password-missing ? "Enter your password" : "";
+                acted => {
+                    Perm.owner-password-ask("");
+                }
             }
         }
     }

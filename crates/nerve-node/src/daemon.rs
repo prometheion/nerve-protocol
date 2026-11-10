@@ -1891,6 +1891,16 @@ impl Shared {
         Value::Null
     }
 
+    /// What `status` says of the owner's stored Windows password on the
+    /// installed node; `None` on a node run by hand and elsewhere.
+    fn owner_password(&self) -> Option<&'static str> {
+        #[cfg(windows)]
+        if self.service {
+            return Some(crate::win_user::owner_password_state());
+        }
+        None
+    }
+
     pub fn status(&self) -> Value {
         let cfg = self.config();
         // What the last sync of the folders' ACLs left, on the installed
@@ -1959,6 +1969,10 @@ impl Shared {
             "confinement": self.confinement.describe(),
             "running": self.running.load(Ordering::Relaxed),
             "sudo": if self.sudo_on() { "on" } else { "off" },
+            // The owner's stored Windows password, for the commands that
+            // run as the owner and the folder grants: missing, stale or
+            // stored (crate::winsvc::owner_password_state); none elsewhere.
+            "owner_password": self.owner_password(),
             // This process found no keyring and does not look again
             // (crate::secrets::store::failed): setup restarts it after it
             // installed one.
@@ -2864,7 +2878,39 @@ pub(crate) async fn pipe_control(
         // Checking the password takes a logon, so it cannot block inside
         // `control`.
         "sudo.on" => sudo_on(shared, params, false).await,
+        #[cfg(windows)]
+        "owner.password" => owner_password(shared, params).await,
         m => control(shared, m, params, false),
+    }
+}
+
+/// `owner.password {password}`: the owner's Windows password, where the
+/// stored one is missing or no longer works (crate::winsvc::save_owner_password),
+/// for the commands that run as the owner and the folder grants, which are
+/// brought in line with it at once.
+#[cfg(windows)]
+async fn owner_password(shared: &Arc<Shared>, params: Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let Some(password) = params.get("password").and_then(Value::as_str) else {
+        return Reply::Err("password is missing".into());
+    };
+    let password = crate::sudo::Secret::new(password.to_string());
+    let s = shared.clone();
+    // A logon takes a moment; it does not hold up the other requests.
+    let r = tokio::task::spawn_blocking(move || {
+        let name = crate::winsvc::save_owner_password(
+            &s.paths,
+            &crate::win_host::WinHost,
+            password.expose(),
+        )?;
+        let synced = s.sync_grants().json(0);
+        Ok::<Value, String>(json!({"owner": name, "grants": synced}))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Reply::Ok(v),
+        Ok(Err(e)) => Reply::Err(e),
+        Err(e) => Reply::Err(e.to_string()),
     }
 }
 

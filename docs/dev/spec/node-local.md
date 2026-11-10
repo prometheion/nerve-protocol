@@ -8,7 +8,7 @@ same way and so the owner knows what each setting does.
 
 | What | Default | Override |
 |---|---|---|
-| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
+| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows, on the installed node, also `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
 | control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_NODE_STATE_DIR` |
 
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
@@ -288,9 +288,8 @@ its key is in does not check, and is refused like any changed file.
 
 With `keyring` and no keyring that answers, the node does not start, and a
 command that reads the config refuses. The message names the entry and the
-keyring's error. Nothing falls back to a file. On Linux the sudo password is
-never at rest, whatever the setting; on Windows the node keeps it with DPAPI
-in `sudo.dpapi` in the config folder, whatever the setting (§4).
+keyring's error. Nothing falls back to a file. The sudo password is never at
+rest, whatever the setting (§4).
 
 A change of the setting moves the keys once, through the settings store, in
 whatever writes the config (the running node, else the CLI):
@@ -1675,19 +1674,18 @@ run as, which must be an administrator. `sudo on` checks it with a logon of
 that account as a batch job (`LogonUserW`, `LOGON32_LOGON_BATCH`), which UAC
 does not filter: the logon must succeed and its token must hold the
 Administrators group enabled; else the switch stays as it was. The node then
-keeps the password with DPAPI in the config folder (`sudo.dpapi`, like the
-command account's password), and holds it in memory as on Linux. A restart
-holds the kept password again when `machine.sudo` says on and the file is
-the current account's. A sudo command runs what followed `sudo` in the
+holds the password in memory only, as on Linux: a restart starts with the
+switch off. A center may not turn the switch on for a Windows node
+(`settings.sudo` with `on` is `forbidden`, as for root as the owner): the
+password is the owner's Windows password, which only the app on the machine
+takes. A sudo command runs what followed `sudo` in the
 shell, started with a fresh batch logon's full token (`CreateProcessAsUserW`)
 with the account's own environment, in a job like every command; the check
 that the account cannot open the node's folders does not apply to it.
 `sudo.on` and `sudo.off` reach the running service over the control pipe,
-as over the socket on Linux: the service checks the password, keeps it in
-the file and sets `machine.sudo` at once, or removes the file and drops the
-password. `sudo on` needs the running node; `sudo off` without one removes
-the file and sets the switch off in the signed file. `uninstall` removes the
-file.
+as over the socket on Linux: the service checks the password, holds it and
+sets `machine.sudo` at once, or drops the password. `sudo on` needs the
+running node; `sudo off` without one sets the switch off in the signed file.
 
 ## 5. Control socket
 

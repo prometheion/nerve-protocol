@@ -406,6 +406,15 @@ pub fn grant_errors_for(errors: &[String], folders: &[String], home: &Path) -> V
         .collect()
 }
 
+/// Whether the node on Windows has no working copy of the owner's
+/// password (its status' `owner_password`: missing, or stale after a logon
+/// refused it), which the commands that run as the owner and the folder
+/// grants need: the app asks for it where they are turned on. Other nodes
+/// say nothing of it.
+pub fn owner_password_missing(status: &Value) -> bool {
+    matches!(status["owner_password"].as_str(), Some("missing" | "stale"))
+}
+
 /// The node's folder-grant errors (`status`'s `folder_access`) split by
 /// whether they are about access `nerve-run` keeps although it should have
 /// lost it (`stale`: folders whose entries could not be taken off, or the
@@ -693,7 +702,6 @@ pub fn restored(said: &Value, started: &str) -> String {
         let line = match s(&n["fix"]) {
             "proxy" => "The proxy is not restored whole: set it again under Settings, Network, Proxy.".into(),
             "sudo" => "Sudo is off: its password is in no backup. Turn it on again on the Permissions page.".into(),
-            "sudo-file" => "Sudo is off, but the administrator's password it kept could not be deleted: turn sudo on and off again on the Permissions page.".into(),
             "pin" => format!("The pin of {center} here differed from the backup's, and the restore took the backup's. If the node does not link to {center}, set center.{center}.pin under Settings, Advanced."),
             "relay" => "The relay's TLS key was not in the backup: turn the relay on again on the Relay page; the nodes behind it need new links.".into(),
             _ => full_sentence(s(&n["text"])),
@@ -1744,6 +1752,23 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The app asks for the owner's Windows password only where the node
+    /// has none that works; a node that says nothing of it needs none.
+    #[test]
+    fn the_owner_password_is_asked_for_where_the_node_has_none_that_works() {
+        use serde_json::json;
+        for (state, ask) in [
+            (json!("missing"), true),
+            (json!("stale"), true),
+            (json!("stored"), false),
+            (json!(null), false),
+        ] {
+            let st = json!({"owner_password": state});
+            assert_eq!(super::owner_password_missing(&st), ask, "{st}");
+        }
+        assert!(!super::owner_password_missing(&json!({})));
+    }
+
     #[test]
     fn a_pairing_link_goes_on_the_input_and_not_in_the_arguments() {
         let link = "nerve://pair?center=https%3A%2F%2Fc.example&code=SECRETCODE&pin=x";

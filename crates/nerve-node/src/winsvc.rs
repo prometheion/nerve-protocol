@@ -327,14 +327,63 @@ impl StalePassword {
             }
         }
     }
+
+    /// Whether the password in `blob` failed and is not tried again.
+    pub fn failed(&self, blob: &[u8]) -> bool {
+        matches!(&self.0, Some((seen, _)) if seen == blob)
+    }
+}
+
+/// What `status` says of the owner's stored password on the installed
+/// Windows node (`owner_password`), which the commands that run as the
+/// owner and the folder grants need: none stored (`blob`), one that Windows
+/// refused (`stale`), or one stored. The app asks for it where it is needed
+/// while it is not `stored`.
+pub fn owner_password_state(blob: Option<&[u8]>, stale: &StalePassword) -> &'static str {
+    match blob {
+        None => "missing",
+        Some(b) if stale.failed(b) => "stale",
+        Some(_) => "stored",
+    }
+}
+
+/// Why the node takes no password of its owner: it names none.
+pub const NO_OWNER_PASSWORD: &str = "this node has no owner, whose password the commands that run as the owner need: install Nerve again as yourself, with the desktop app's installer";
+
+/// The owner's password the app gives the running node where the stored
+/// one is missing or no longer works (`owner.password` on its control
+/// pipe): checked as `install` checks it, a logon of the owner that must
+/// not open the node's folders, then stored with DPAPI in [`SECRET_FILE`],
+/// in place of the old one. The owner's name.
+pub fn save_owner_password(
+    paths: &NodePaths,
+    sys: &dyn WinSystem,
+    password: &str,
+) -> Result<String, String> {
+    let (_, name) = sys.owner()?.ok_or(NO_OWNER_PASSWORD)?;
+    let a = usable_account(sys, &name)?;
+    if password.is_empty() || password.contains(['\n', '\r']) {
+        return Err("the password is empty or has a line break".into());
+    }
+    if let Some(at) = sys.check_logon(&a.name, password, &paths.own())? {
+        return Err(format!(
+            "{} could open {}, where the node keeps its keys",
+            a.name,
+            at.display()
+        ));
+    }
+    let file = paths.config_dir.join(SECRET_FILE);
+    write_file(&file, &sys.protect(&secret(&a.name, password))?, 0o600)?;
+    Ok(a.name)
 }
 
 /// What a sudo command's refused logon tells the owner to do.
 pub const SUDO_AGAIN: &str = "turn sudo off and on again with the password you have now";
 
-/// [`StalePassword::attempt`] for the password `sudo on` kept, which is a
-/// second copy of the owner's and goes stale when that changes (saving the
-/// new one under Account for commands renews the other copy only). It is
+/// [`StalePassword::attempt`] for the password `sudo on` gave the node, which
+/// is a second copy of the owner's and goes stale when that changes while
+/// the switch is on (saving the new one under Account for commands renews
+/// the other copy only). It is
 /// keyed on the account and a hash of the password, so the memory holds
 /// no password and `sudo on` with another one is tried anew.
 pub fn sudo_attempt<T>(
@@ -684,7 +733,7 @@ pub fn admin_warning(name: &str, groups: &[String]) -> String {
 
 /// `uninstall`: stops and removes the service, then the folders (deleted
 /// with `purge`, the stored password with them, else kept and open to the
-/// administrators only, without the sudo password), the user and the
+/// administrators only), the user and the
 /// program. The folder grants of folder mode come off: the service's, and
 /// those of the node this user runs by hand at `by_hand`, the only node
 /// whose commands run in a container (crate::grants).
@@ -751,13 +800,6 @@ fn uninstall_steps(
         &layout.home,
         &layout.paths.state_dir,
     ];
-    // The kept folders keep no sudo password: an install over them starts
-    // with sudo off.
-    let sudo = layout.paths.config_dir.join(crate::winsudo::SUDO_FILE);
-    if !purge && sudo.exists() {
-        crate::winsudo::forget(&layout.paths)?;
-        steps.did("removed the stored sudo password: sudo is off");
-    }
     if purge {
         for dir in folders {
             if dir.exists() {
@@ -1058,6 +1100,69 @@ pub(crate) mod tests {
         assert!(stale.attempt(b"fixed", || Ok(())).is_ok());
         assert!(stale.attempt(b"fixed", || bad("expired", true)).is_err());
         assert_eq!(tries.get(), 6);
+    }
+
+    /// The app gives the running node the owner's password where the
+    /// stored one is missing or Windows refused it: it is checked as
+    /// `install` checks it and stored in place of the old one, and the
+    /// state `status` says follows.
+    #[test]
+    fn the_owner_password_is_taken_where_it_is_missing_or_stale() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let file = l.paths.config_dir.join(SECRET_FILE);
+        let blob = std::fs::read(&file).unwrap();
+        let mut stale = StalePassword::default();
+        assert_eq!(owner_password_state(None, &stale), "missing");
+        assert_eq!(owner_password_state(Some(&blob), &stale), "stored");
+        let _ = stale.attempt(&blob, || Err::<(), _>(("wrong".to_string(), true)));
+        assert_eq!(owner_password_state(Some(&blob), &stale), "stale");
+        // A failure that is not the password's leaves it stored.
+        let mut busy = StalePassword::default();
+        let _ = busy.attempt(&blob, || Err::<(), _>(("busy".to_string(), false)));
+        assert_eq!(owner_password_state(Some(&blob), &busy), "stored");
+        // Alice changed her password: the old one is refused and the stored
+        // one stays as it was.
+        sys.passwords.borrow_mut().retain(|(n, _)| n != "alice");
+        sys.passwords
+            .borrow_mut()
+            .push(("alice".into(), "new".into()));
+        let e = save_owner_password(&l.paths, &sys, "alice's").unwrap_err();
+        assert!(e.contains("password of alice is wrong"), "{e}");
+        assert_eq!(std::fs::read(&file).unwrap(), blob);
+        for bad in ["", "new\n", "a\rb"] {
+            let e = save_owner_password(&l.paths, &sys, bad).unwrap_err();
+            assert!(e.contains("line break"), "{e}");
+        }
+        // The new one is stored, and the state is stored again.
+        assert_eq!(save_owner_password(&l.paths, &sys, "new").unwrap(), "alice");
+        assert_eq!(
+            stored(&sys, &l, SECRET_FILE),
+            Some(("alice".into(), "new".into()))
+        );
+        let fresh = std::fs::read(&file).unwrap();
+        assert_eq!(owner_password_state(Some(&fresh), &stale), "stored");
+        // A logon that opens the node's folders is refused, as at install.
+        sys.reaching.borrow_mut().push("alice".into());
+        let e = save_owner_password(&l.paths, &sys, "new").unwrap_err();
+        assert!(e.contains("where the node keeps its keys"), "{e}");
+        sys.reaching.borrow_mut().clear();
+        // The node's own accounts are never the owner whose password it
+        // keeps, and a node without an owner takes none.
+        sys.put_owner(&format!(
+            "S-1-5-21-1-2-3-{}",
+            sys.account(RUN_USER).unwrap().unwrap().uid
+        ))
+        .unwrap();
+        let e = save_owner_password(&l.paths, &sys, "new").unwrap_err();
+        assert!(e.contains("commands' own user"), "{e}");
+        sys.owner_of.borrow_mut().take();
+        assert_eq!(
+            save_owner_password(&l.paths, &sys, "new").unwrap_err(),
+            NO_OWNER_PASSWORD
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), fresh);
     }
 
     /// A Windows machine in a temporary folder: accounts, the service, the
@@ -1881,14 +1986,9 @@ pub(crate) mod tests {
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
         std::fs::write(l.paths.config_file(), "version = 3\n").unwrap();
-        let sudo = l.paths.config_dir.join(crate::winsudo::SUDO_FILE);
-        std::fs::write(&sudo, "sealed").unwrap();
         sys.secured.borrow_mut().clear();
         let mut out = Vec::new();
         uninstall(&l, &by_hand(d.path()), &sys, false, &mut out).unwrap();
-        // No sudo password stays behind: an install over the folders
-        // starts with sudo off.
-        assert!(!sudo.exists());
         assert!(!l.bin.exists());
         assert_eq!(sys.service.get(), None);
         assert!(sys.account(USER).unwrap().is_none());
@@ -1932,7 +2032,6 @@ pub(crate) mod tests {
             "{out}"
         );
         assert!(out.contains("removed the program"), "{out}");
-        assert!(out.contains("removed the stored sudo password"), "{out}");
         // The command account goes with its profile service and its
         // profile, which holds those of the commands' AppContainers.
         assert!(sys.account(RUN_USER).unwrap().is_none());

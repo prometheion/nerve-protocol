@@ -250,6 +250,20 @@ export global Perm {
     in-out property <string> sudo-error;
     in-out property <bool> sudo-busy;
 
+    // Windows: the node has no working copy of your password for the
+    // commands that run as you (its status' `owner_password`). Where they
+    // are turned on, and at the folder grants, the page asks for it, then
+    // goes on with what it asked for (`owner-password-then`: "user",
+    // "as-owner" or "").
+    in-out property <bool> owner-password-missing;
+    in-out property <bool> owner-password-open;
+    in-out property <string> owner-password;
+    in-out property <string> owner-password-error;
+    in-out property <bool> owner-password-busy;
+    in-out property <string> owner-password-then;
+    callback owner-password-ask(string);
+    callback owner-password-save();
+
     callback pick(int);
     callback refresh();
     callback mode-pick(string);

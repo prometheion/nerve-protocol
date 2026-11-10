@@ -933,6 +933,16 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     Ok(t)
 }
 
+/// What `status` says of the owner's stored password: missing, stale (a
+/// logon refused it and it is not tried again) or stored
+/// (crate::winsvc::owner_password_state).
+pub fn owner_password_state() -> &'static str {
+    let blob = SECRET
+        .get()
+        .and_then(|d| std::fs::read(d.join(crate::winsvc::SECRET_FILE)).ok());
+    crate::winsvc::owner_password_state(blob.as_deref(), &nerve_transport::sync::lock(&STALE))
+}
+
 /// A logon of the command account `nerve-run` as a batch job, the logon its
 /// commands start with, with the password `install` made and stored
 /// ([`crate::winsvc::RUN_SECRET_FILE`]). Made anew for each command: each

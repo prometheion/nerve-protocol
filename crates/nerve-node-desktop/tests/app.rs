@@ -641,7 +641,9 @@ fn the_app_drives_the_cli_end_to_end() {
             ctl.show_status(Ok(st.clone()));
             assert!(perm.get_home_warning().contains("mode 755"));
         } else {
-            assert!(!perm.get_separate());
+            // The installed Windows node runs them as nerve-run too, each
+            // pairing's in its AppContainer, with no folders of its own.
+            assert_eq!(perm.get_separate(), cfg!(windows));
             assert_eq!(perm.get_built_in(), "");
         }
     }

@@ -295,6 +295,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: Option<SudoCmd>,
     },
+    /// Give the running node your Windows password (Windows; the app asks for it)
+    ///
+    /// Give the running node your Windows password, for the commands that run as you and the folder grants. It checks it and keeps it with DPAPI in place of the old one. The app asks for it where it is missing.
+    #[command(hide = true)]
+    Password,
     /// Show how the node is: its service, each center, and what to do next.
     Status,
     /// Show what the node allowed and refused.
@@ -1459,6 +1464,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Relay { cmd } => relay::relay_cmd(&paths, cmd, out).await,
         Cmd::Ui { cmd } => ui::ui_cmd(&paths, cmd, out).await,
         Cmd::Sudo { cmd } => sudo::sudo_cmd(&paths, cmd, out).await,
+        Cmd::Password => sudo::owner_password(&paths, out).await,
         Cmd::Backup {
             file,
             include_keyring,
