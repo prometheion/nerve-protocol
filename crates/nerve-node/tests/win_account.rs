@@ -1397,8 +1397,11 @@ async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed
         },
     )
     .await;
-    // A call into the link, and one below it, is refused at once: nothing
-    // opens the link to say why either.
+    // A call into the link, and one below it, is refused at once, and not
+    // looked into: only "Access is denied" is, and never through a link to
+    // another machine. (Here the container's own resolve is refused the
+    // share at once, "network access is denied", so the old look into any
+    // refusal did not hold these calls up either.)
     let started = Instant::now();
     let in_it = run_in(&mut conn, &sub, "Write-Output no").await;
     let wire = nerve_policy::paths::to_wire(&sub.join("x"));
