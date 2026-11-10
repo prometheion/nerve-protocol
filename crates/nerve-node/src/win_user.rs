@@ -44,14 +44,14 @@ use windows_sys::Win32::Security::{
     LookupAccountSidW, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
     SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SID_NAME_USE,
     SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_OWNER,
-    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenOwner,
-    TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid, WinBuiltinBackupOperatorsSid,
-    WinLocalSystemSid,
+    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups,
+    TokenOwner, TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid,
+    WinBuiltinBackupOperatorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_DATA,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -61,9 +61,10 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    GetCurrentThread, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    OpenProcessToken, OpenThreadToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetThreadToken, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
 
@@ -636,6 +637,62 @@ impl Drop for Impersonation {
     fn drop(&mut self) {
         // SAFETY: plain call; the thread is itself again.
         unsafe { RevertToSelf() };
+    }
+}
+
+/// The full name of `p` (`\\?\C:\…`), for [`nerve_policy::paths`] when
+/// the account this thread acts as is refused it: Windows Server refuses a
+/// pairing's AppContainer the name of a folder it may open (os error 5).
+/// The path is opened as that account, so what it may not open stays
+/// refused; only the name of that open object is asked for as the node,
+/// which then acts as the account again.
+pub fn name_as_self(p: &Path) -> io::Result<PathBuf> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)?;
+    let mut raw: HANDLE = std::ptr::null_mut();
+    // SAFETY: this thread's token, opened with the node's own rights.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, 1, &mut raw) } == 0 {
+        return Err(last());
+    }
+    // SAFETY: a handle OpenThreadToken just gave.
+    let acting = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+    // SAFETY: plain call; the thread acts again below.
+    unsafe { RevertToSelf() };
+    let name = final_name(&f);
+    // SAFETY: the token this thread acted with a moment ago.
+    if unsafe { SetThreadToken(std::ptr::null(), acting.as_raw_handle() as HANDLE) } == 0 {
+        // A thread that cannot act as the account again would go on as the
+        // node, which may open the node's keys: never.
+        std::process::abort();
+    }
+    name
+}
+
+/// The full name of the object open as `f`, by its drive.
+fn final_name(f: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = vec![0u16; 512];
+    loop {
+        // SAFETY: an open handle and a buffer of the length given.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                f.as_raw_handle() as HANDLE,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                0,
+            )
+        } as usize;
+        if n == 0 {
+            return Err(last());
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        buf.resize(n, 0);
     }
 }
 

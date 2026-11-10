@@ -456,6 +456,23 @@ impl Drop for Acting {
     }
 }
 
+/// How the Windows node asks for the full name of a path that the account
+/// this thread acts as may open, but whose name Windows does not give it
+/// ([`set_name_as_self`]).
+#[cfg(windows)]
+static NAME_AS_SELF: std::sync::OnceLock<fn(&Path) -> io::Result<PathBuf>> =
+    std::sync::OnceLock::new();
+
+/// Sets how [`canonical`] gets the full name of a path when the account
+/// this thread acts as ([`Acting`]) is refused it: Windows Server refuses a
+/// pairing's AppContainer the name of a folder it may open (os error 5).
+/// `name` opens the path as that account, so what it cannot open stays
+/// refused, and asks for the name as the node itself.
+#[cfg(windows)]
+pub fn set_name_as_self(name: fn(&Path) -> io::Result<PathBuf>) {
+    let _ = NAME_AS_SELF.set(name);
+}
+
 /// [`remote_link_by`] as [`canonical`] needs it: strict unless this thread
 /// holds an [`Acting`].
 #[cfg(any(windows, test))]
@@ -544,7 +561,17 @@ fn canonical(p: &Path) -> io::Result<PathBuf> {
             }
         }
     }
-    let c = fs::canonicalize(p)?;
+    let c = match fs::canonicalize(p) {
+        Ok(c) => c,
+        #[cfg(windows)]
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied && ACTING.with(|n| n.get()) > 0 => {
+            match NAME_AS_SELF.get() {
+                Some(name) => name(p)?,
+                None => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
     #[cfg(windows)]
     {
         let s = c.to_string_lossy();

@@ -2298,6 +2298,7 @@ impl Daemon {
         #[cfg(windows)]
         {
             crate::win_user::init(&paths.config_dir);
+            nerve_policy::paths::set_name_as_self(crate::win_user::name_as_self);
             if service && crate::account::own_uid() != 0 && !crate::account::can_switch() {
                 tracing::warn!(
                     "this is the installed node, started without SeAssignPrimaryTokenPrivilege: it runs no command; start it as the service (Start on the app's Overview)"
