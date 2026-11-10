@@ -460,15 +460,17 @@ pub(crate) mod for_tests {
     }
 
     /// The calls a process that is not the service makes to it
-    /// (crate::secrets::vault): what the running service answers, else that
-    /// it does not run.
+    /// (crate::secrets::vault): what the running service answers, else what
+    /// the pipe says when it finds none (crate::pipe::call).
     pub fn service_call(
         paths: &NodePaths,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         if !with(paths, |p| p.service_runs) {
-            return Err(nerve_transport::ctl::NOT_RUNNING.into());
+            return Err(crate::pipe::missing_pipe(|| {
+                super::KeysLock::node_runs(paths)
+            }));
         }
         super::vault::serve(paths, method, &params)
     }
@@ -1062,9 +1064,29 @@ const FORKED_COPY_WAIT: std::time::Duration = std::time::Duration::from_millis(3
 /// them. It is released when its holder ends, however it ends.
 pub struct KeysLock {
     _file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+/// The locks this process holds: a node cannot run on their folders, so a
+/// call to it that finds no pipe finds none that runs (the restore asks the
+/// stopped service's vault while it holds the lock).
+static HELD_HERE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+impl Drop for KeysLock {
+    fn drop(&mut self) {
+        let mut held = nerve_transport::sync::lock(&HELD_HERE);
+        if let Some(i) = held.iter().position(|p| *p == self.path) {
+            held.remove(i);
+        }
+    }
 }
 
 impl KeysLock {
+    fn held(file: std::fs::File, path: std::path::PathBuf) -> KeysLock {
+        nerve_transport::sync::lock(&HELD_HERE).push(path.clone());
+        KeysLock { _file: file, path }
+    }
+
     /// The lock, when nobody holds it; `None` when someone does.
     pub fn try_take(paths: &NodePaths) -> Result<Option<KeysLock>, String> {
         let path = paths.keys_lock();
@@ -1082,7 +1104,7 @@ impl KeysLock {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Some(KeysLock { _file: file }));
+                return Ok(Some(KeysLock::held(file, path)));
             }
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -1096,7 +1118,7 @@ impl KeysLock {
             // Opened without sharing: nobody else opens it while it is held.
             const SHARING_VIOLATION: i32 = 32;
             match o.share_mode(0).open(&path) {
-                Ok(file) => Ok(Some(KeysLock { _file: file })),
+                Ok(file) => Ok(Some(KeysLock::held(file, path))),
                 Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
                 Err(e) => Err(format!("{}: {e}", path.display())),
             }
@@ -1104,14 +1126,17 @@ impl KeysLock {
     }
 
     /// Whether a node holds the lock, asked without making anything: no
-    /// state folder or no lock file is a node that never ran, and a lock
-    /// that cannot be tried counts as held (the safe answer for a caller that
-    /// writes behind a node).
+    /// state folder or no lock file is a node that never ran, a lock this
+    /// process holds is no node's, and a lock that cannot be tried counts as
+    /// held (the safe answer for a caller that writes behind a node).
     #[cfg(any(windows, test))]
     pub fn node_runs(paths: &NodePaths) -> bool {
         // Only a file known to be missing is "no node": an entry that cannot
         // be looked at goes on to the lock, whose error counts as held.
         if matches!(paths.keys_lock().try_exists(), Ok(false)) {
+            return false;
+        }
+        if nerve_transport::sync::lock(&HELD_HERE).contains(&paths.keys_lock()) {
             return false;
         }
         !matches!(KeysLock::try_take(paths), Ok(Some(_)))
@@ -1168,14 +1193,21 @@ pub(crate) struct HeldByANode {
 
 #[cfg(test)]
 impl HeldByANode {
+    /// `lock` as a node's, as if another process held it.
+    #[cfg(not(target_os = "linux"))]
+    fn unlisted(lock: KeysLock) -> HeldByANode {
+        nerve_transport::sync::lock(&HELD_HERE).retain(|p| *p != lock.path);
+        HeldByANode { _lock: lock }
+    }
+
     pub(crate) fn take(paths: &NodePaths) -> HeldByANode {
         nerve_transport::files::create_private_dir(&paths.state_dir).unwrap();
         #[cfg(not(target_os = "linux"))]
-        return HeldByANode {
-            _lock: KeysLock::try_take(paths)
+        return HeldByANode::unlisted(
+            KeysLock::try_take(paths)
                 .unwrap()
                 .expect("the lock is free"),
-        };
+        );
         #[cfg(target_os = "linux")]
         {
             use std::io::Read;
@@ -1664,6 +1696,19 @@ mod tests {
         assert!(KeysLock::node_runs(&paths));
         drop(held);
         assert!(!KeysLock::node_runs(&paths));
+    }
+
+    /// A lock this process holds (a restore's) is no node's: the stopped
+    /// service's vault is asked while the restore holds it.
+    #[test]
+    fn a_lock_this_process_holds_is_no_nodes() {
+        let (_d, paths) = node();
+        let mine = KeysLock::try_take(&paths).unwrap().unwrap();
+        assert!(!KeysLock::node_runs(&paths));
+        drop(mine);
+        let held = HeldByANode::take(&paths);
+        assert!(KeysLock::node_runs(&paths));
+        drop(held);
     }
 
     /// A state folder that cannot be looked into is not proof that no node

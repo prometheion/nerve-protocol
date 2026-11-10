@@ -2039,8 +2039,9 @@ with 16 places of its own, and:
 - its DACL lets in SYSTEM, the administrators (elevated), the node's own
   account and the owner, as the owner pipe's; it refuses remote clients
   (`PIPE_REJECT_REMOTE_CLIENTS`);
-- the client's token decides, read by impersonating it
-  (`ImpersonateNamedPipeClient`): the owner's account, SYSTEM, or a token
+- the client's token decides, read by identifying it
+  (`ImpersonateNamedPipeClient`; the node keeps no SeImpersonatePrivilege,
+  so it can identify a client but not act as it): the owner's account, SYSTEM, or a token
   that holds the Administrators group in effect. Another account, `nerve-run`
   and an administrator's filtered token are told `refused: only the owner's
   programs and the administrators' attach a provider to the node`;
@@ -2049,10 +2050,14 @@ with 16 places of its own, and:
 - the program is told by the image of the client's process
   (`GetNamedPipeClientProcessId`, then `QueryFullProcessImageNameW`) against
   the entry's path once resolved, compared without `\\?\` and in any case.
-  The node reads both as itself, and where its account may not (the owner's
-  process, the owner's folders) as the client: a program that opened the pipe
-  for identification only (`SECURITY_IDENTIFICATION`, tokio's default) is then
-  refused and told to allow impersonation, which a plain open allows.
+  The node reads both as itself. Where its account may not open the process
+  (the owner's, an administrator's elevated one), it asks Windows for the
+  image by the process id (`NtQuerySystemInformation`,
+  `SystemProcessIdInformation`), which needs no handle of the process, and
+  turns the NT path into the drive letter's (`QueryDosDeviceW`). A path it
+  may not open (in the owner's folders) it resolves as the owner, with the
+  logon the owner's stored password gives, as the folder grants do; without
+  that password such a program is refused.
 
 A provider runs as whoever started it, outside the node's containers, as on
 Linux. A call it gets is decided as on Linux; a path it is handed is walked as

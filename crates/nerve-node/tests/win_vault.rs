@@ -80,6 +80,13 @@ async fn the_service_keeps_its_secrets_in_its_own_credential_manager() {
     let layout = Layout::of(&APP);
     let paths = layout.paths.clone();
     let mut center = FakeCenter::start(false).await.unwrap();
+    // What an earlier run left goes first: the keys in files, no proxy.
+    ok(&layout, &["proxy", "off"], "");
+    ok(
+        &layout,
+        &["config", "set", "machine.secret_storage", "file"],
+        "",
+    );
     nerve_node::cli::edit(&paths, |cfg| {
         cfg.centers.retain(|c| c.name != CENTER);
         Ok(())

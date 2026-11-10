@@ -445,7 +445,15 @@ enum Target {
     /// A `node.toml` this node cannot read (changed outside the owner's path,
     /// or its keys are out of reach).
     Unreadable(String),
+    /// The `node.toml` of the installed node on Windows whose keys are in
+    /// the Credential Manager of its service, which reads them only while it
+    /// runs; a restore runs with it stopped.
+    Sealed,
 }
+
+/// What a restore into a [`Target::Sealed`] node says: it replaces the
+/// node's config without the check that the backup is of this node.
+const SEALED: &str = "the node here keeps its keys in the Credential Manager of its service, which reads them only while it runs, so the restore could not check that the backup is of this node";
 
 fn inspect(paths: &NodePaths) -> Target {
     if !paths.config_file().exists() {
@@ -453,6 +461,7 @@ fn inspect(paths: &NodePaths) -> Target {
     }
     match SettingsStore::peek_with(&paths.config_file(), &NodeSecrets::new(paths)) {
         Ok(c) => Target::Node(Box::new(c)),
+        Err(e) if e.contains(secrets::vault::NOT_RUNNING) => Target::Sealed,
         Err(e) => Target::Unreadable(e),
     }
 }
@@ -463,7 +472,7 @@ fn inspect(paths: &NodePaths) -> Target {
 pub fn root_only_change(paths: &NodePaths, b: &Parsed) -> Option<&'static str> {
     let here = match inspect(paths) {
         Target::Node(c) => *c,
-        Target::Empty | Target::Unreadable(_) => NodeConfig::default(),
+        Target::Empty | Target::Unreadable(_) | Target::Sealed => NodeConfig::default(),
     };
     crate::owner::root_only_change(&here, &b.cfg)
 }
@@ -554,6 +563,9 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
         centers: cfg.centers.iter().map(|c| c.name.clone()).collect(),
         ..RestoreReport::default()
     };
+    if matches!(target, Target::Sealed) {
+        report.notes.push(SEALED.into());
+    }
     if opts.without_proxy && had_proxy {
         report.notes.push(
             "the proxy is left out of the restored config, with its pin, password and header values: set it again on this machine with `nerve-node proxy set`, which needs the address, the `--pin` of an https:// proxy and its login. For a relay, `nerve-node relay token <name>` on the relay prints the command with a new token and the pin".into(),
@@ -1508,6 +1520,33 @@ mod tests {
         assert_eq!(
             secrets::proxy_headers(&to, &["X-Token".into()]).unwrap(),
             vec![("X-Token".to_string(), "tok-value".to_string())]
+        );
+    }
+
+    /// The installed node on Windows that keeps its keys in its service's
+    /// vault, stopped as a restore wants it: its config cannot be read
+    /// without the service, so the restore goes on, says that it could not
+    /// check the node, and leaves the keys for the service's start.
+    #[test]
+    fn a_restore_into_a_stopped_windows_service_that_holds_its_keys_goes_on() {
+        let (_a, from) = node();
+        let keys = paired(&from, SecretStorage::Keyring, &["home"]);
+        let (_f, parsed, _) = roundtrip(&from, true);
+        let (_b, to) = node();
+        secrets::for_tests::pretend_windows_service(&to);
+        secrets::for_tests::pretend_service_runs(&to, true);
+        paired(&to, SecretStorage::Keyring, &["other"]);
+        secrets::for_tests::pretend_service_runs(&to, false);
+        assert!(matches!(inspect(&to), Target::Sealed));
+        let r = restore(&to, &parsed, &RestoreOpts::default()).unwrap();
+        assert!(r.notes.iter().any(|n| n == SEALED), "{:?}", r.notes);
+        assert!(secrets::vault::pending_file(&to).exists());
+        secrets::vault::take_pending(&to).unwrap();
+        secrets::for_tests::pretend_service_account(&to);
+        assert_eq!(config(&to).centers[0].name, "home");
+        assert_eq!(
+            &key_text(&to, SecretStorage::Keyring, "home"),
+            &keys["home"]
         );
     }
 

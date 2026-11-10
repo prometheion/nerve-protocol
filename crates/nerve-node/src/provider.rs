@@ -788,6 +788,21 @@ pub fn same_image(running: &Path, allowed: &Path) -> bool {
     plain(running) == plain(allowed)
 }
 
+/// The Win32 path of a program Windows names by its NT path
+/// (`\Device\HarddiskVolume3\Tools\desk.exe`), through the devices the
+/// drive letters stand for (`devices`: `C` and `\Device\HarddiskVolume3`):
+/// how the node reads the image of a process it may not open. None where no
+/// drive letter stands for its device.
+// Used by the provider pipe on Windows; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn drive_path(nt: &str, devices: &[(char, String)]) -> Option<PathBuf> {
+    devices.iter().find_map(|(letter, device)| {
+        let rest = nt.strip_prefix(device.as_str())?;
+        rest.starts_with('\\')
+            .then(|| PathBuf::from(format!("{letter}:{rest}")))
+    })
+}
+
 /// Why a program of root is refused where the node cannot tell which one
 /// it is.
 #[cfg(target_os = "linux")]
@@ -2357,5 +2372,31 @@ mod tests {
         assert!(!same(r"C:\Tools\desk.exe", r"\\?\C:\Tools\desk2.exe"));
         assert!(!same(r"C:\Tools\desk.exe", r"\\?\D:\Tools\desk.exe"));
         assert!(!same(r"C:\Tools\desk.exe.bak", r"\\?\C:\Tools\desk.exe"));
+    }
+
+    /// A process the node may not open (the owner's, an administrator's
+    /// elevated one) is named by its NT path, which the drive letters'
+    /// devices turn into the path `provider add` names.
+    #[test]
+    fn an_nt_path_is_told_by_its_drive_letter() {
+        let devices = [
+            ('C', r"\Device\HarddiskVolume3".to_string()),
+            ('D', r"\Device\HarddiskVolume30".to_string()),
+        ];
+        let at = |nt: &str| drive_path(nt, &devices);
+        assert_eq!(
+            at(r"\Device\HarddiskVolume3\Tools\desk.exe"),
+            Some(PathBuf::from(r"C:\Tools\desk.exe"))
+        );
+        assert_eq!(
+            at(r"\Device\HarddiskVolume30\desk.exe"),
+            Some(PathBuf::from(r"D:\desk.exe"))
+        );
+        assert_eq!(at(r"\Device\HarddiskVolume4\desk.exe"), None);
+        assert_eq!(at(r"\Device\Mup\srv\desk.exe"), None);
+        assert!(same_image(
+            &at(r"\Device\HarddiskVolume3\Tools\Desk.exe").unwrap(),
+            Path::new(r"\\?\C:\Tools\desk.exe")
+        ));
     }
 }

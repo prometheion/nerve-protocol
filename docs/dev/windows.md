@@ -982,10 +982,10 @@ Linux ([the spec](spec/node-local.md#providers-on-windows)):
   client's token; the pipe refuses other accounts, `nerve-run`'s commands and
   clients from the network.
 - The node checks the program by its image: the path Windows names for the
-  client's process must be the one you allowed. It reads it as the client
-  where its own account may not, so the program must open the pipe so that
-  the node may act as it (a plain open does; tokio's client defaults to
-  identification and must set `SECURITY_IMPERSONATION`).
+  client's process must be the one you allowed. Where its own account may
+  not open the process (yours, an elevated one), Windows names the image by
+  the process id. A program in your folders is looked at as you, with the
+  password the app keeps for folder mode.
 - A process of a command the node runs is refused.
 - The program runs as whoever started it, outside the node's containers, as
   on Linux; its actions show in the descriptor and in `cap` as there.

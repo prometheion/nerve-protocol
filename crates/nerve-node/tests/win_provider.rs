@@ -163,12 +163,9 @@ async fn provider_program() {
         PathBuf::from(parts.next().unwrap()),
     );
     let write = |s: &str| std::fs::write(&log, format!("{s}\n")).unwrap();
-    // As a plain open does: the node may act as this program, to look at
-    // it as its account (tokio's default is identification only).
-    let client = match tokio::net::windows::named_pipe::ClientOptions::new()
-        .security_qos_flags(windows_sys::Win32::Storage::FileSystem::SECURITY_IMPERSONATION)
-        .open(&pipe)
-    {
+    // tokio's default, identification only: all the node needs to tell
+    // the program.
+    let client = match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe) {
         Ok(c) => c,
         Err(e) => return write(&format!("open: {e}")),
     };
