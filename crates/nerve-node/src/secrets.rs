@@ -1125,6 +1125,11 @@ impl KeysLock {
         }
     }
 
+    /// Whether this process holds the lock of the node at `paths`.
+    fn held_here(paths: &NodePaths) -> bool {
+        nerve_transport::sync::lock(&HELD_HERE).contains(&paths.keys_lock())
+    }
+
     /// Whether a node holds the lock, asked without making anything: no
     /// state folder or no lock file is a node that never ran, a lock this
     /// process holds is no node's, and a lock that cannot be tried counts as
@@ -1136,10 +1141,11 @@ impl KeysLock {
         if matches!(paths.keys_lock().try_exists(), Ok(false)) {
             return false;
         }
-        if nerve_transport::sync::lock(&HELD_HERE).contains(&paths.keys_lock()) {
+        if KeysLock::held_here(paths) {
             return false;
         }
-        !matches!(KeysLock::try_take(paths), Ok(Some(_)))
+        // A holder that let go a moment ago may still have a forked copy.
+        !matches!(KeysLock::try_take_soon(paths), Ok(Some(_)))
     }
 
     /// The lock, trying again for a moment when someone holds it. A process
@@ -1427,12 +1433,37 @@ pub(crate) mod vault {
         e == nerve_transport::ctl::NOT_RUNNING
     }
 
+    /// What staging says when a node took the keys' lock meanwhile: it
+    /// started since the call found none.
+    pub const STARTED: &str =
+        "the node started meanwhile, so nothing was kept for its start: try again";
+
     /// Keeps `value` (or, with `None`, deletes the entry) for the service
-    /// to take at its start.
-    fn stage(paths: &NodePaths, account: &str, value: Option<&str>) -> Result<(), String> {
+    /// to take at its start. Under the keys' lock, which the service takes
+    /// before it takes the file: the two never write it at once. A process
+    /// that holds the lock already (a restore) writes on.
+    pub(super) fn stage(
+        paths: &NodePaths,
+        account: &str,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        let _lock = match super::KeysLock::held_here(paths) {
+            true => None,
+            false => Some(super::KeysLock::try_take_soon(paths)?.ok_or(STARTED)?),
+        };
         let mut p = read_pending(paths)?;
         p.insert(account.into(), value.map(String::from));
         write_pending(paths, &p)
+    }
+
+    /// Takes back the change of `account` staged for the service, for a
+    /// restore that failed: what the service's vault holds stays.
+    pub fn unstage(paths: &NodePaths, account: &str) -> Result<(), String> {
+        let mut p = read_pending(paths)?;
+        if p.remove(account).is_some() {
+            write_pending(paths, &p)?;
+        }
+        Ok(())
     }
 
     pub fn get(paths: &NodePaths, account: &str) -> Result<Option<String>, String> {
@@ -1709,6 +1740,27 @@ mod tests {
         assert!(KeysLock::node_runs(&paths));
         drop(held);
         assert!(!KeysLock::node_runs(&paths));
+    }
+
+    /// What waits for the service's start is written under the keys' lock:
+    /// never while a node that just started holds it (it may be taking the
+    /// file), and on where this process holds it (a restore).
+    #[test]
+    fn what_waits_for_the_service_is_written_under_the_keys_lock() {
+        let (_d, paths) = node();
+        let file = vault::pending_file(&paths);
+        let held = HeldByANode::take(&paths);
+        let e = vault::stage(&paths, "proxy:x", Some("v")).unwrap_err();
+        assert_eq!(e, vault::STARTED);
+        assert!(!file.exists());
+        drop(held);
+        let mine = KeysLock::try_take(&paths).unwrap().unwrap();
+        vault::stage(&paths, "proxy:x", Some("v")).unwrap();
+        assert!(file.exists());
+        drop(mine);
+        vault::stage(&paths, "proxy:y", None).unwrap();
+        // The lock went with the write.
+        assert!(KeysLock::try_take_soon(&paths).unwrap().is_some());
     }
 
     /// A lock this process holds (a restore's) is no node's: the stopped

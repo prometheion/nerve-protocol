@@ -17,8 +17,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nerve_policy::config::SecretStorage;
-
 use crate::account::{RUN_MARK, RUN_USER};
 use crate::paths::NodePaths;
 use crate::service::{

@@ -2221,16 +2221,6 @@ impl Daemon {
             nerve_transport::files::create_private_dir(dir)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        // The installed node on Windows takes into the Credential Manager
-        // of its own account what was written for it while it did not run
-        // (a restore, an install): before anything reads a key.
-        if crate::secrets::windows_service(&paths) {
-            match crate::secrets::vault::take_pending(&paths) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!("took {n} entries into the Credential Manager"),
-                Err(e) => tracing::error!("{e}"),
-            }
-        }
         // Keys in the keyring of the node's own session: the system-wide
         // environment of the login can have given that session another
         // user's folders again since `setup` put it right (a reboot).
@@ -2260,6 +2250,18 @@ impl Daemon {
                     })?
             }
         };
+        // The installed node on Windows takes into the Credential Manager
+        // of its own account what was written for it while it did not run
+        // (a restore, an install): before anything reads a key, and under
+        // the keys' lock, which whoever writes that file holds too
+        // (crate::secrets::vault).
+        if crate::secrets::windows_service(&paths) {
+            match crate::secrets::vault::take_pending(&paths) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("took {n} entries into the Credential Manager"),
+                Err(e) => tracing::error!("{e}"),
+            }
+        }
         let open_to_bus = Arc::new(AtomicUsize::new(0));
         let mut store = SettingsStore::open_with(
             paths.config_file(),
@@ -3984,6 +3986,32 @@ mod tests {
                 .as_deref(),
             Some("{}")
         );
+        daemon.stop().await;
+    }
+
+    /// What waits for the vault is taken under the keys' lock: while
+    /// another holds it (a restore staging its keys), the start waits and
+    /// leaves the file alone.
+    #[tokio::test]
+    async fn the_installed_node_on_windows_takes_what_waits_only_under_the_keys_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let log = Log::new(Level::Info);
+        let opts = options(&d, &log);
+        let paths = opts.paths.clone();
+        keys_in_the_keyring(&paths);
+        crate::secrets::for_tests::pretend_windows_service(&paths);
+        let entry = crate::secrets::Entry::proxy(&paths);
+        crate::secrets::vault::set(&paths, entry.account(), "{}").unwrap();
+        let file = crate::secrets::vault::pending_file(&paths);
+        crate::secrets::for_tests::pretend_service_account(&paths);
+        let held = crate::secrets::HeldByANode::take(&paths);
+        let start = tokio::spawn(Daemon::start(opts));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(file.exists());
+        assert!(!start.is_finished());
+        drop(held);
+        let daemon = start.await.unwrap().expect("the node starts");
+        assert!(!file.exists());
         daemon.stop().await;
     }
 
