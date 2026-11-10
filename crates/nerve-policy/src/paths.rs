@@ -396,11 +396,20 @@ pub fn remote_target(target: &str) -> bool {
 /// without following any: a symbolic link to a share is followed by a
 /// connection to it. Windows only; elsewhere a network mount is a path.
 ///
-/// `None` also where a part of the way cannot be looked at (the caller has
-/// no right on it); [`remote_link_checked`] tells those apart. Fit for a
-/// caller that acts as an account which can look at the whole way.
+/// A part of the way that cannot be looked at (the caller has no right on
+/// it) ends the look at the way, or at the place a link leads to, with no
+/// link found; [`remote_link_checked`] tells those apart. Fit for a caller
+/// that acts as an account which can look at the whole way.
 pub fn remote_link(p: &Path) -> Option<PathBuf> {
-    remote_link_checked(p).unwrap_or(None)
+    #[cfg(windows)]
+    {
+        remote_link_by(p, 0, false, &link_target).unwrap_or(None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        None
+    }
 }
 
 /// [`remote_link`], but an error where a part of the way cannot be looked
@@ -410,13 +419,51 @@ pub fn remote_link(p: &Path) -> Option<PathBuf> {
 pub fn remote_link_checked(p: &Path) -> io::Result<Option<PathBuf>> {
     #[cfg(windows)]
     {
-        remote_link_by(p, 0, &link_target)
+        remote_link_by(p, 0, true, &link_target)
     }
     #[cfg(not(windows))]
     {
         let _ = p;
         Ok(None)
     }
+}
+
+thread_local! {
+    /// How many [`Acting`] this thread holds.
+    static ACTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Held while this thread acts as another account (the installed Windows
+/// node as the owner, or in a pairing's container): [`resolve`] then takes
+/// a part of a path that account cannot look at as no link, since the
+/// account may be able to open the path past it. A thread that does not act
+/// as anyone is the node's own account, which may not look into the owner's
+/// folders and is refused a path it cannot see to the end, since Windows
+/// follows a link there all the same ([`remote_link_checked`]). Not `Send`:
+/// it ends on the thread that began it, as the impersonation does.
+pub struct Acting(std::marker::PhantomData<*const ()>);
+
+impl Acting {
+    pub fn begin() -> Acting {
+        ACTING.with(|n| n.set(n.get() + 1));
+        Acting(std::marker::PhantomData)
+    }
+}
+
+impl Drop for Acting {
+    fn drop(&mut self) {
+        ACTING.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// [`remote_link_by`] as [`canonical`] needs it: strict unless this thread
+/// holds an [`Acting`].
+#[cfg(any(windows, test))]
+fn remote_link_here(
+    p: &Path,
+    target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
+) -> io::Result<Option<PathBuf>> {
+    remote_link_by(p, 0, ACTING.with(|n| n.get()) == 0, target)
 }
 
 /// Where the link at `at` leads, or `None` when `at` is not a link.
@@ -431,11 +478,14 @@ fn link_target(at: &Path) -> io::Result<Option<PathBuf>> {
 /// [`remote_link_checked`] with the file system behind `target`: the place
 /// the link at a path leads to (`Ok(None)` for a path that is none), or why
 /// it cannot be told. A path that is not there ends the way (nothing
-/// below it is a link).
+/// below it is a link). `strict`: a place that cannot be told is an error;
+/// else it ends the look at its path (or at the place a link leads to) with
+/// no link found.
 #[cfg(any(windows, test))]
 fn remote_link_by(
     p: &Path,
     depth: usize,
+    strict: bool,
     target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
 ) -> io::Result<Option<PathBuf>> {
     // Windows follows no more than 63 links on a path.
@@ -445,10 +495,16 @@ fn remote_link_by(
     let mut at = PathBuf::new();
     for c in p.components() {
         at.push(c.as_os_str());
+        // A drive or volume before its root (`\\?\C:`) names the device,
+        // which cannot be opened as a file (os error 1), whoever asks; the
+        // root after it is the first place to look at.
+        if matches!(c, Component::Prefix(_)) {
+            continue;
+        }
         let to = match target(&at) {
             Ok(Some(to)) => to,
             Ok(None) => continue,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if !strict || e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
         if remote_target(&to.to_string_lossy()) {
@@ -458,7 +514,7 @@ fn remote_link_by(
             Some(dir) if to.is_relative() => dir.join(&to),
             _ => to,
         };
-        if remote_link_by(&next, depth + 1, target)?.is_some() {
+        if remote_link_by(&next, depth + 1, strict, target)?.is_some() {
             return Ok(Some(at));
         }
     }
@@ -467,13 +523,26 @@ fn remote_link_by(
 
 /// `realpath`, on Windows without the `\\?\` prefix so resolved paths compare with
 /// configured ones. A path whose links lead to another machine is refused
-/// before anything follows them ([`remote_link`]).
+/// before anything follows them, and so is one the thread cannot look at to
+/// its end unless it acts as another account ([`Acting`]).
 fn canonical(p: &Path) -> io::Result<PathBuf> {
-    if let Some(link) = remote_link(p) {
-        return Err(io::Error::other(format!(
-            "{} is a link to another machine, which is not followed",
-            link.display()
-        )));
+    #[cfg(windows)]
+    {
+        match remote_link_here(p, &link_target) {
+            Ok(None) => {}
+            Ok(Some(link)) => {
+                return Err(io::Error::other(format!(
+                    "{} is a link to another machine, which is not followed",
+                    link.display()
+                )));
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{} cannot be looked at to its end: {e}", p.display()),
+                ));
+            }
+        }
     }
     let c = fs::canonicalize(p)?;
     #[cfg(windows)]
@@ -735,7 +804,8 @@ mod remote_tests {
         hidden: &'a [&'a str],
     ) -> impl Fn(&Path) -> io::Result<Option<PathBuf>> + 'a {
         move |at| {
-            let s = at.to_string_lossy();
+            // The paths are spelled with `/`, also where the test runs on Windows.
+            let s = at.to_string_lossy().replace('\\', "/");
             if hidden.iter().any(|h| *h == s) {
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
             }
@@ -768,7 +838,7 @@ mod remote_tests {
             ("/a/plain/x", None),
             ("/gone/x", None),
         ] {
-            let got = remote_link_by(Path::new(path), 0, &fs).unwrap();
+            let got = remote_link_by(Path::new(path), 0, true, &fs).unwrap();
             assert_eq!(got, want.map(PathBuf::from), "{path}");
         }
     }
@@ -781,15 +851,79 @@ mod remote_tests {
     #[test]
     fn the_link_walk_does_not_call_a_path_plain_that_it_cannot_look_at() {
         let fs = fake_fs(&[("/open/share", r"\\192.0.2.1\share")], &["/owner/g"]);
-        let e = remote_link_by(Path::new("/owner/g/sub"), 0, &fs).unwrap_err();
+        let e = remote_link_by(Path::new("/owner/g/sub"), 0, true, &fs).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
-            remote_link_by(Path::new("/open/share/owner/g"), 0, &fs).unwrap(),
+            remote_link_by(Path::new("/open/share/owner/g"), 0, true, &fs).unwrap(),
             Some(PathBuf::from("/open/share"))
         );
         // A link that leads to a place it cannot look at is no better.
         let fs = fake_fs(&[("/open/l", "d")], &["/open/d"]);
-        assert!(remote_link_by(Path::new("/open/l"), 0, &fs).is_err());
+        assert!(remote_link_by(Path::new("/open/l"), 0, true, &fs).is_err());
+    }
+
+    /// The lenient look (a caller that acts as an account that can look at
+    /// the way) gives up on a place it cannot look at only for the place a
+    /// link leads to, and goes on with the rest of its path: a link to
+    /// another machine below it is still found. The strict one errs.
+    #[test]
+    fn the_lenient_link_walk_gives_up_on_a_link_target_it_cannot_look_at_alone() {
+        let fs = fake_fs(
+            &[("/a/l", "hid"), ("/a/l/sub/share", r"\\192.0.2.1\share")],
+            &["/a/hid"],
+        );
+        let p = Path::new("/a/l/sub/share/x");
+        assert_eq!(
+            remote_link_by(p, 0, false, &fs).unwrap(),
+            Some(PathBuf::from("/a/l/sub/share"))
+        );
+        let e = remote_link_by(p, 0, true, &fs).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        // Nor does the lenient one err on a part of the path itself.
+        let fs = fake_fs(&[], &["/owner"]);
+        assert_eq!(
+            remote_link_by(Path::new("/owner/g"), 0, false, &fs).unwrap(),
+            None
+        );
+    }
+
+    /// Whether a part of a path that cannot be looked at ends the walk in an
+    /// error follows the account the thread acts as: the node's own account
+    /// (no [`Acting`]) must not canonicalize a path it cannot see to the
+    /// end, but an account it acts as may open the path past that part.
+    #[test]
+    fn a_path_that_cannot_be_looked_at_is_refused_unless_the_thread_acts_as_an_account() {
+        let fs = fake_fs(&[], &["/owner"]);
+        let p = Path::new("/owner/g");
+        let refused =
+            |fs: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>| remote_link_here(p, fs).is_err();
+        assert!(refused(&fs));
+        let owner = Acting::begin();
+        {
+            let _container = Acting::begin();
+            assert!(!refused(&fs));
+        }
+        // The container's end leaves the thread acting as the owner.
+        assert!(!refused(&fs));
+        drop(owner);
+        assert!(refused(&fs));
+        // And another thread does not act because this one does.
+        let _owner = Acting::begin();
+        std::thread::scope(|s| {
+            assert!(s.spawn(|| refused(&fs)).join().unwrap());
+        });
+    }
+
+    /// A verbatim path (`\\?\C:\…`, a volume GUID) is walked from its root: the
+    /// drive or volume before it cannot be opened as a file (os error 1), and
+    /// the walk refused every such path whole. Only a Windows run shows it.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_path_is_walked() {
+        let root = std::env::var("SystemRoot").unwrap();
+        let p = PathBuf::from(format!(r"\\?\{root}\System32"));
+        assert_eq!(remote_link_checked(&p).unwrap(), None);
+        assert_eq!(remote_link(&p), None);
     }
 
     /// A symbolic link to a share is refused by its target, before
@@ -811,7 +945,12 @@ mod remote_tests {
         let hop = d.path().join("hop");
         std::os::windows::fs::symlink_dir(&dir, &hop).unwrap();
         let t = std::time::Instant::now();
-        for p in [link.join("x"), hop.join("share").join("x")] {
+        let verbatim = |p: PathBuf| PathBuf::from(format!(r"\\?\{}", p.display()));
+        for p in [
+            link.join("x"),
+            hop.join("share").join("x"),
+            verbatim(link.join("x")),
+        ] {
             assert!(remote_link(&p).is_some(), "{p:?}");
             let e = resolve(&p).unwrap_err().to_string();
             assert!(e.contains("link to another machine"), "{e}");

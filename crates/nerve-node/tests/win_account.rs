@@ -29,7 +29,8 @@
 //!   profile goes with the pairing;
 //! - a command the node's folder sync refuses is in the audit log;
 //! - a granted folder that is a link to another machine is not followed
-//!   by a call of its pairing, nor left changed by the folder sync.
+//!   by a call of its pairing, nor left changed by the folder sync, also
+//!   while the node cannot log on as the owner.
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -40,7 +41,7 @@
 //! ```
 //!
 //! It pairs the service with the centers `wina`, `winb` and `winc` (`wind`
-//! in the two smaller tests below), and removes them and its folders again.
+//! in the smaller tests below), and removes them and its folders again.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -1338,6 +1339,76 @@ async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed
         },
     )
     .await;
+
+    forget(&paths).await;
+    let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The node's own account cannot look into the owner's folders, so it cannot
+/// tell that a granted folder there has become a link to another machine, and
+/// Windows follows the link all the same. Where the node cannot log on as
+/// the owner (the stored password is gone, as when it has changed and the
+/// node tried it once) the grant sync and the protected list look at the
+/// pairing's folders as the node itself, and must leave such a link alone
+/// too: the call is not held up by a connection to the share.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service on a Windows test machine"]
+async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_the_owner() {
+    /// The owner's stored password out of the node's reach, and the service
+    /// started again for the token it holds of the owner (kept for minutes);
+    /// both undone when it ends, also by a panic.
+    struct NoOwner(PathBuf, PathBuf);
+    impl NoOwner {
+        fn restart() -> bool {
+            Command::new("powershell.exe")
+                .args(["-NoProfile", "-Command", "Restart-Service nerve-node"])
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+    }
+    impl Drop for NoOwner {
+        fn drop(&mut self) {
+            let _ = std::fs::rename(&self.1, &self.0);
+            Self::restart();
+        }
+    }
+
+    let paths = Layout::of(&APP).paths.clone();
+    let owner_sid = env("NERVE_TEST_SID");
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive + "\\nerve-w2-noowner");
+    let _ = std::fs::remove_dir_all(&base);
+    owners_folder(&base, &owner_sid);
+    let id = std::process::id();
+    let (g, sub) = (base.join("g"), base.join("g").join(format!("sub{id}")));
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let stored = paths.config_dir.join("command-account.dpapi");
+    let away = paths.config_dir.join("command-account.dpapi.away");
+    std::fs::rename(&stored, &away).expect("the owner's stored password");
+    let _undo = NoOwner(stored, away);
+    assert!(NoOwner::restart(), "Restart-Service nerve-node");
+
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&g, "rwx"), folder(&sub, "rw")]).await;
+    std::fs::remove_dir(&sub).unwrap();
+    let made = Command::new("cmd")
+        .args(["/c", "mklink", "/D"])
+        .arg(&sub)
+        .arg(format!(r"\\192.0.2.{}\share", 1 + id % 250))
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    // Each of these calls looks at the pairing's folders (the sync, the
+    // protected list) as the service's account.
+    let started = Instant::now();
+    let _ = run_in(&mut conn, &g, "Write-Output no owner").await;
+    let _ = run_in(&mut conn, &g, "Write-Output still no owner").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "two calls took {:?}: the node followed the link to the other machine",
+        started.elapsed()
+    );
 
     forget(&paths).await;
     let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();

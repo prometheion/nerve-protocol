@@ -613,8 +613,11 @@ pub fn sudo_token(name: &str, password: &str) -> Result<Token, String> {
 }
 
 /// The thread acts as another account while this lives. It is not `Send`,
-/// so it stays on its thread and cannot be held across an `.await`.
-struct Impersonation(PhantomData<*const ()>);
+/// so it stays on its thread and cannot be held across an `.await`. The
+/// policy's path resolve knows it ([`nerve_policy::paths::Acting`]): the node's
+/// own account is refused a path it cannot look at to the end, an account it
+/// acts as is not.
+struct Impersonation(PhantomData<*const ()>, nerve_policy::paths::Acting);
 
 impl Impersonation {
     fn new(t: &Token) -> io::Result<Impersonation> {
@@ -622,7 +625,10 @@ impl Impersonation {
         if unsafe { ImpersonateLoggedOnUser(t.raw()) } == 0 {
             return Err(last());
         }
-        Ok(Impersonation(PhantomData))
+        Ok(Impersonation(
+            PhantomData,
+            nerve_policy::paths::Acting::begin(),
+        ))
     }
 }
 

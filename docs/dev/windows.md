@@ -624,9 +624,15 @@ runs in the container as well, unless the pairing runs as you.
   links the node's own process cannot look at to the end: the service's
   account may not look into your folders, yet Windows follows a link there
   all the same (traversing is not checked), so such a path is not resolved
-  (`exec::real_checked` fails, and the callers keep the path as given). Without that, a granted folder of yours that became a link
-  to a host that does not answer held every call of its pairing for about
-  20 seconds.
+  (`exec::real_checked` fails, and the callers keep the path as given).
+  The policy's `resolve` holds the same for a thread that acts as no one
+  (`paths::Acting` is held while it acts as the owner or in a container,
+  by `win_user::Impersonation`): it refuses such a path with a permission
+  error. That is the node when it cannot log on as you (your password
+  changed and was not saved yet), where the sync of the grants and the
+  protected list look at your folders as the service's own account. Without
+  that, a granted folder of yours that became a link to a host that does
+  not answer held every call of its pairing for about 20 seconds.
 - Removing a folder or changing its rights under **Permissions ›
   Folders** changes the entry, and removing the pairing takes it off. That
   is the node's entry on the folder: permissions a command gave what it made
