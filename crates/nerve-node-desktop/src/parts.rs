@@ -52,6 +52,37 @@ impl Parts for Desktop {
 /// it for one.
 pub const UNINSTALL_ARG: &str = "__desktop-uninstall";
 
+/// The switch of a silent install (winget, #67): `install` without a
+/// window and without a question; the app asks for the owner's password
+/// later, where it is needed.
+pub const SILENT_ARG: &str = "--silent";
+
+/// What a silent install runs: the program's own `install`, the owner's
+/// password not asked (no input), its output the caller's.
+pub fn silent_install() -> i32 {
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(e) => {
+            eprintln!("nerve-node-desktop: {e}");
+            return 1;
+        }
+    };
+    match std::process::Command::new(me)
+        .args(SILENT_COMMAND)
+        .stdin(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("nerve-node-desktop: {e}");
+            1
+        }
+    }
+}
+
+/// The command a silent install runs.
+pub const SILENT_COMMAND: [&str; 1] = ["install"];
+
 /// The scheme of the links the app opens.
 pub const SCHEME: &str = "nerve";
 const MIME: &str = "x-scheme-handler/nerve";
@@ -328,7 +359,8 @@ fn write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
 
 /// The texts of Nerve's entry in Apps & features on Windows, for the
 /// program `bin` of `version`: Uninstall there runs `bin` with
-/// [`UNINSTALL_ARG`].
+/// [`UNINSTALL_ARG`]; a quiet one (winget) runs its `uninstall`, which keeps
+/// the data.
 pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
     let exe = bin.display().to_string();
     let folder = bin
@@ -341,6 +373,7 @@ pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
         ("DisplayVersion", version.to_string()),
         ("DisplayIcon", format!("\"{exe}\",0")),
         ("UninstallString", format!("\"{exe}\" {UNINSTALL_ARG}")),
+        ("QuietUninstallString", format!("\"{exe}\" uninstall")),
         ("InstallLocation", folder),
         ("URLInfoAbout", env!("CARGO_PKG_REPOSITORY").to_string()),
         (
@@ -710,6 +743,16 @@ mod tests {
             entry["UninstallString"],
             format!(r#""C:\Program Files\Nerve\nerve-node-desktop.exe" {UNINSTALL_ARG}"#)
         );
+        // A quiet uninstall without a window keeps the data: no --purge.
+        assert_eq!(
+            entry["QuietUninstallString"],
+            r#""C:\Program Files\Nerve\nerve-node-desktop.exe" uninstall"#
+        );
+        // The silent install is the program's `install`, which a command
+        // line takes as such (and which needs an administrator).
+        let args: Vec<String> = SILENT_COMMAND.iter().map(|a| a.to_string()).collect();
+        assert_eq!(args, ["install"]);
+        assert!(nerve_node::owner::args_need_admin(&args));
         assert_eq!(
             entry["DisplayIcon"],
             r#""C:\Program Files\Nerve\nerve-node-desktop.exe",0"#

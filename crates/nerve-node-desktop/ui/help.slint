@@ -1,10 +1,10 @@
-// Help: the app's keys and the command reference: every nerve-node card
-// by topic or from A to Z, to filter, each one opening on its commands, with
-// an example, the place in the app and their arguments folded (src/reference.rs).
-// Each action in the app runs one of these commands. Every part opens and
-// closes on its own: opening one leaves the others as they are. Windows
-// has no reference: there the app is the only way to the node, and a list
-// of commands to type would send the owner to a terminal that is not there.
+// Help: a task map (a task, where in the app, what differs here), the app's
+// keys and the command reference: every nerve-node card by topic or from A
+// to Z, to filter, each one opening on its commands, with an example, the
+// place in the app and their arguments folded (src/reference.rs). Each
+// action in the app runs one of these commands. Every part opens and closes
+// on its own: opening one leaves the others as they are. On Windows the
+// reference says that the app runs them: there is no terminal for the node.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Page, RefRow, RefVerb } from "data.slint";
@@ -276,6 +276,38 @@ component KeyRow {
     }
 }
 
+// One task of the map: what to do, where in the app, and what differs on
+// this machine ("" where nothing does).
+component TaskRow {
+    in property <string> task;
+    in property <string> where;
+    in property <string> differs;
+    HorizontalLayout {
+        spacing: Space.lg;
+        Text {
+            width: 210px;
+            text: root.task;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+        Text {
+            width: 200px;
+            text: root.where;
+            color: Theme.accent-text;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.differs;
+            color: Theme.text-muted;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+    }
+}
+
 // The head of a topic of the reference: a click opens or closes its
 // commands.
 component GroupHead inherits Rectangle {
@@ -362,6 +394,79 @@ export component HelpPage inherits PageFrame {
         height: Space.xs;
     }
     Expander {
+        title: "Tasks";
+        open: Manual.tasks-open;
+        toggled => {
+            Manual.tasks-open = !Manual.tasks-open;
+        }
+        icon: @image-url("icons/check.svg");
+        TaskRow {
+            task: "Pair a center";
+            where: "Centers › Pair";
+            differs: "";
+        }
+        TaskRow {
+            task: "Choose what it may do";
+            where: "Permissions › Mode";
+            differs: Install.windows ? "User mode and allowlist as you need your Windows password." : "";
+        }
+        TaskRow {
+            task: "Give it a folder";
+            where: "Permissions › Folders";
+            differs: Install.windows ? "Its commands run in an AppContainer of their own." : "";
+        }
+        TaskRow {
+            task: "Allow one command";
+            where: "Permissions › Allow";
+            differs: "";
+        }
+        TaskRow {
+            task: "Run commands with sudo";
+            where: "Permissions › Sudo";
+            differs: Install.windows ? "Your Windows password; only here, not from a center." : "";
+        }
+        TaskRow {
+            task: "Keep commands off the network";
+            where: "Permissions › Network";
+            differs: Install.windows ? "Name lookups fail too." : "";
+        }
+        TaskRow {
+            task: "Add a program's capabilities";
+            where: "Capabilities › Programs";
+            differs: "";
+        }
+        TaskRow {
+            task: "Use a proxy or a relay";
+            where: "Settings › Network, Relay";
+            differs: "";
+        }
+        TaskRow {
+            task: "Where the keys live";
+            where: "Settings › Keys";
+            differs: Install.windows ? "The keyring is the service's Credential Manager." : "";
+        }
+        TaskRow {
+            task: "Back up, restore";
+            where: "Settings › Backup";
+            differs: "";
+        }
+        TaskRow {
+            task: "See what happened";
+            where: "Audit, Log";
+            differs: "";
+        }
+        TaskRow {
+            task: "Stop everything at once";
+            where: "Overview › Panic";
+            differs: "";
+        }
+        TaskRow {
+            task: "Update, uninstall";
+            where: "Settings › App";
+            differs: Install.windows ? "Also in Apps & features." : "";
+        }
+    }
+    Expander {
         title: "Keyboard shortcuts";
         open: Manual.keys-open;
         toggled => {
@@ -399,7 +504,7 @@ export component HelpPage inherits PageFrame {
     }
     // Wrapping text that comes and goes sits in a Reveal (widgets.slint).
     Reveal {
-        shown: !Install.windows;
+        shown: true;
         Expander {
             title: "Command reference";
             open: Manual.commands-open;
@@ -408,7 +513,7 @@ export component HelpPage inherits PageFrame {
             }
             icon: @image-url("icons/terminal.svg");
             Answer {
-                text: "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
+                text: Install.windows ? "Every action here runs one of these commands for you, with the same checks and audit records. There is nothing to type." : "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
             }
             HorizontalLayout {
                 spacing: Space.md;

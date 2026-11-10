@@ -254,7 +254,7 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_setup_start();
     store.set_toast("".into());
     store.invoke_setup_skip();
-    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
     assert_eq!(store.get_toast(), "");
@@ -1233,17 +1233,43 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 2));
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 1, "{}", store.get_pair_error());
+    // Folder mode with the network off: the folder step comes next.
     store.set_setup_mode("folder".into());
+    store.set_setup_no_network(true);
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
-    assert_eq!(
-        config(&paths).center("studio-center").unwrap().policy.mode,
-        nerve_policy::Mode::Folder
-    );
+    let policy = config(&paths)
+        .center("studio-center")
+        .unwrap()
+        .policy
+        .clone();
+    assert_eq!(policy.mode, nerve_policy::Mode::Folder);
+    assert!(policy.no_network);
     store.invoke_setup_back();
     assert_eq!(store.get_setup_step(), 1);
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
+    // A folder, with write: it is the center's now.
+    let work = dir.path().join("setup-work");
+    std::fs::create_dir_all(&work).unwrap();
+    store.set_setup_folder(work.display().to_string().into());
+    store.invoke_setup_next();
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
+    let folders = config(&paths)
+        .center("studio-center")
+        .unwrap()
+        .policy
+        .folders
+        .clone();
+    assert!(
+        folders.iter().any(|f| f.path == work.display().to_string()),
+        "{folders:?}"
+    );
+    // Back from the end goes to the folder in folder mode.
+    store.invoke_setup_back();
+    assert_eq!(store.get_setup_step(), 2);
+    store.invoke_setup_next();
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
     let after = config(&paths);

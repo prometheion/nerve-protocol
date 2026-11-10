@@ -69,8 +69,15 @@ install makes (on Windows each pairing's in an AppContainer of its own), and
 [Windows](windows.md#the-account-commands-run-as-on-windows)).
 
 When it is done, **Open Nerve** opens the app. Its first-run steps pair the
-first center and choose its mode; **Back** goes to the step before, **Skip** past one. The downloaded
-file is no longer needed.
+first center, choose its mode and whether its commands may use the network,
+and in folder mode give it a first folder, as `nerve-node setup` asks; **Back**
+goes to the step before, **Skip** past one. The downloaded file is no longer
+needed.
+
+On Windows `nerve-node-desktop.exe --silent` installs without a window and
+without a question, for winget; the app asks for your Windows password later,
+where it is needed. Apps & features has a `QuietUninstallString`,
+`"…\nerve-node-desktop.exe" uninstall`, which keeps the data.
 
 | What | Linux | Windows |
 |---|---|---|
@@ -489,15 +496,17 @@ A click on the page that is open reads nothing again; **Refresh** does.
 
 ## Help
 
-**Help** lists these keys and, on Linux, has the command reference: every
+**Help** opens on a task map, folded: a task, where in the app it is done,
+and what differs on this machine (on Windows: the AppContainer, the Windows
+password, the Credential Manager, name lookups with the network off). It
+lists these keys and has the command reference: every
 `nerve-node` command by topic or from A to Z, with a filter, one row per
 command card as on the web UI. A row opens on its commands, each with its
 line, an example and a button to the place in the app that does the same; its
 options fold under **Options**, and the row ends on its page of this guide.
-The keys, the reference, each topic, each row and each fold open and close
-on their own. On Windows Help has the keys and no command reference: there
-the app is the only way to the node, and every page it would point to is in
-the sidebar.
+The task map, the keys, the reference, each topic, each row and each fold
+open and close on their own. On Windows the reference says that the app runs
+these commands for you: there is nothing to type.
 
 ## The app's own settings
 

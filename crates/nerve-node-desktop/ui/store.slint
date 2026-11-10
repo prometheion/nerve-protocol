@@ -135,13 +135,19 @@ export global Store {
     in-out property <string> elevate-error;
     callback elevate-allow();
 
-    // The first-run steps: 0 the first center, 1 its mode, 2 done.
+    // The first-run steps: 0 the first center, 1 its mode and its network,
+    // 2 a folder (folder mode only), 3 done.
     in-out property <bool> setup-open;
     in-out property <int> setup-step;
     in-out property <string> setup-center;
     in-out property <string> setup-mode: "allowlist";
+    in-out property <bool> setup-no-network;
+    in-out property <string> setup-folder;
+    in-out property <bool> setup-folder-write;
+    in-out property <bool> setup-folder-execute;
     in-out property <bool> setup-busy;
     in-out property <string> setup-error;
+    callback setup-folder-choose();
     callback setup-start();
     callback setup-next();
     callback setup-skip();
@@ -376,6 +382,7 @@ export global Logs {
 // the reference (src/reference.rs): what it shows for the filter and the
 // order. Each part, topic and command opens and closes on its own.
 export global Manual {
+    in-out property <bool> tasks-open;
     in-out property <bool> keys-open;
     in-out property <bool> commands-open;
     in-out property <[RefGroup]> ref-groups;

@@ -48,6 +48,10 @@ fn main() {
             .collect();
         std::process::exit(nerve_node_desktop::dialog::main(&rest));
     }
+    // A silent install, for winget (#67): no window, no question.
+    if words == [Some(nerve_node_desktop::parts::SILENT_ARG)] {
+        std::process::exit(nerve_node_desktop::parts::silent_install());
+    }
     // A nerve:// link alone, which the desktop hands to the app when one is
     // opened (no command of nerve-node): the app goes straight to pairing.
     // The link is taken off this command line at once: a new start gets it
