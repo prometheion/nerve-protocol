@@ -1148,9 +1148,14 @@ not list), and only once it has looked at the links on the way as the owner
 (as the node itself, strictly, where it cannot act as the owner): where one
 may lead to another machine, nothing is opened, and the message names the
 path with the resolve's own error. The path and the pairing's folders are
-compared where they lead for the owner (a link on the way, a `..`), as the
-record holds them. Any other refusal (a
-path that is not there, a link to another machine) keeps its own message.
+compared where they lead for the owner (a link on the way, a `..`, folded as
+Windows folds it), as the record holds them; a path spelled in a folder that
+leads out of it is in none. The owner resolves a path only where it can look
+at the way to its end and no link on it leads to another machine. The look
+goes up past what is not there, never above the pairing's folder: a folder
+that is not there is told as the folder whose grant is not on, not its parent.
+Any other refusal (a path that is not there, a link to another machine) keeps
+its own message.
 
 | Message | Fix |
 |---|---|

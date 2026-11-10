@@ -2486,9 +2486,11 @@ pub fn spelled(folders: &[nerve_policy::config::Folder], home: &Path) -> Vec<(Pa
 /// from `path` past what is not there, as the resolve looks at the way, and
 /// is done with (dropped) before `why` looks. Nothing is opened where
 /// `probe` finds no use for it ([`probeable`]: the container's view of other
-/// places is not the call's to tell), or where `remote` finds that a link on
-/// the way may lead to another machine (opening it would connect there): the
-/// why is then told of `path` with the resolve's own error.
+/// places is not the call's to tell), nor above the top of what it finds use
+/// for (a folder of the pairing that is not there is told, not its parent),
+/// or where `remote` finds that a link on the way may lead to another machine
+/// (opening it would connect there): the why is then told of `path` with the
+/// resolve's own error.
 #[cfg(any(windows, test))]
 #[allow(clippy::too_many_arguments)]
 pub fn explained(
@@ -2496,7 +2498,7 @@ pub fn explained(
     message: &str,
     given: &str,
     path: &Path,
-    probe: impl FnOnce() -> bool,
+    probe: impl Fn(&Path) -> bool,
     remote: impl FnOnce() -> bool,
     open: impl FnMut(&Path) -> io::Result<()>,
     why: impl FnOnce(&Path, &Result<(), String>) -> String,
@@ -2505,10 +2507,10 @@ pub fn explained(
     if kind != "bad_path" || !error.ends_with("(os error 5)") {
         return None;
     }
-    let (at, opened) = if !probe() || remote() {
+    let (at, opened) = if !probe(path) || remote() {
         (path.to_path_buf(), Err(error.to_string()))
     } else {
-        probed(path, open)?
+        probed(path, probe, open)?
     };
     let why = why(&at, &opened);
     // Where it opened, the error of its name is kept.
@@ -2521,17 +2523,25 @@ pub fn explained(
 /// Where `open` is refused on `path`, or on the deepest part of it that is
 /// there: that part and the error; the path itself with `Ok` where it
 /// opens. `None` where something else ends the look (a part opens, the
-/// rest is not there; another error).
+/// rest is not there; another error). The look stays where `probe` finds
+/// use for it: where the part above is not (the pairing's folder is not
+/// there), the part that is missing is told with its error.
 #[cfg(any(windows, test))]
 fn probed(
     path: &Path,
+    probe: impl Fn(&Path) -> bool,
     mut open: impl FnMut(&Path) -> io::Result<()>,
 ) -> Option<(PathBuf, Result<(), String>)> {
     let mut at = path;
     loop {
         match open(at) {
             Ok(()) => return (at == path).then(|| (at.to_path_buf(), Ok(()))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => at = at.parent()?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match at.parent().filter(|up| probe(up)) {
+                    Some(up) => at = up,
+                    None => return Some((at.to_path_buf(), Err(e.to_string()))),
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
                 return Some((at.to_path_buf(), Err(e.to_string())));
             }
@@ -2570,22 +2580,27 @@ struct Within<'a> {
 /// holds where `path` leads (`real`), by where the folders lead: the
 /// record holds the grants at their real places, and a link on the way, a
 /// `..`, or a folder whose place moved behind a link makes the spellings
-/// differ. Else the deepest that holds `path` as spelled (a place that does
-/// not resolve stays as spelled).
+/// differ. Else the deepest that holds that place as the folder is spelled
+/// (a place that does not resolve stays as spelled). A path that leads out
+/// of the folders it is spelled in (through a link, or with a `..`) is in
+/// none: Windows folds the `..` and follows the link before it opens
+/// anything. The `..` of a part that is not there is folded by hand.
 #[cfg(any(windows, test))]
 fn folder_of<'a>(
     path: &Path,
     folders: &'a [(PathBuf, Access)],
     real: &dyn Fn(&Path) -> PathBuf,
 ) -> Option<Within<'a>> {
-    let real_path = real(path);
+    let real_path = folded(&real(path));
     let placed: Vec<(PathBuf, &'a (PathBuf, Access))> =
-        folders.iter().map(|f| (real(&f.0), f)).collect();
+        folders.iter().map(|f| (folded(&real(&f.0)), f)).collect();
     let (folder, real_folder) = match deepest(&placed, |p| &p.0, &real_path) {
         Some((r, f)) => (*f, r.clone()),
         None => {
-            let f = deepest(folders, |f| &f.0, path)?;
-            (f, real(&f.0))
+            let spelled: Vec<(PathBuf, &'a (PathBuf, Access))> =
+                folders.iter().map(|f| (folded(&f.0), f)).collect();
+            let (_, f) = deepest(&spelled, |p| &p.0, &real_path)?;
+            (*f, folded(&real(&f.0)))
         }
     };
     Some(Within {
@@ -2594,6 +2609,24 @@ fn folder_of<'a>(
         real_folder,
         real_path,
     })
+}
+
+/// `path` with its `.` and `..` parts folded away, as Windows does before it
+/// opens a path (a `..` after a link goes up from the link's own place).
+#[cfg(any(windows, test))]
+fn folded(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 /// What the grants of the folder around `path` leave out of it, by `left_out`
@@ -2630,6 +2663,48 @@ pub fn probeable(
 ) -> bool {
     folder_of(path, folders, real)
         .is_some_and(|w| w.access != Access::NONE && left_out_at(&w, path, &left_out).is_none())
+}
+
+/// What the grants of a folder leave out at `p`, for [`Within`]: `own` are the
+/// node's own folders, `protected` the protected list. The read and execute
+/// sets split a folder around the entries protected for reads only; only the
+/// write set splits around the ones protected for writes too, and every level
+/// there keeps a grant of its own with the read flag. So a level that holds
+/// only entries protected for writes is not left out.
+#[cfg(any(windows, test))]
+pub fn left_out_of(
+    p: &Path,
+    own: &[PathBuf],
+    protected: &nerve_policy::protected::Protected,
+) -> Option<LeftOut> {
+    if own.iter().any(|o| within(p, o)) {
+        Some(LeftOut::Own)
+    } else if protected.in_entry(p, false) {
+        Some(LeftOut::Protected)
+    } else if own.iter().any(|o| within(o, p)) {
+        Some(LeftOut::HoldsOwn)
+    } else if protected.holds_entry(p, false) {
+        Some(LeftOut::HoldsProtected)
+    } else {
+        None
+    }
+}
+
+/// Where `p` leads, for [`Refused::real`]: `resolved` (the owner's resolve)
+/// only where `look` (the owner's strict look at the links on its way) finds
+/// the way open and no link to another machine; else `p` as spelled, and
+/// nothing resolves it: the owner's logon would follow a link it cannot see
+/// past, and connect to the host it names.
+#[cfg(any(windows, test))]
+pub fn placed(
+    p: &Path,
+    look: impl FnOnce(&Path) -> io::Result<Option<PathBuf>>,
+    resolved: impl FnOnce(&Path) -> Option<PathBuf>,
+) -> PathBuf {
+    let open = matches!(look(p), Ok(None));
+    open.then(|| resolved(p))
+        .flatten()
+        .unwrap_or_else(|| p.to_path_buf())
 }
 
 /// Why a path of a pairing's call does not resolve in its container, for
@@ -3057,6 +3132,7 @@ mod tests {
             moved("/home/o", "/d/home")
                 .or_else(|| moved("/w/a/../secret", "/w/secret"))
                 .or_else(|| moved("/link", "/w/a"))
+                .or_else(|| moved("/w/a/j", "/x/out"))
                 .unwrap_or_else(|| p.to_path_buf())
         };
         let who = Refused {
@@ -3120,6 +3196,18 @@ mod tests {
         );
         // A path that does not resolve is told as spelled.
         assert!(said("/w/a/y").contains("the grant of /w/a (rwx) is on, with"));
+        // A `..` in a part that is not there is folded: /w/b is /w's.
+        assert!(
+            said("/w/a/../b/x").contains("the grant of /w (r) is on, with"),
+            "{}",
+            said("/w/a/../b/x")
+        );
+        // Spelled in /w/a, but through a link that leads out of every folder.
+        assert!(
+            said("/w/a/j/x").contains("it is in none of wina's folders"),
+            "{}",
+            said("/w/a/j/x")
+        );
     }
 
     /// A refusal is looked into (the path opened as the container) only for
@@ -3162,6 +3250,20 @@ mod tests {
         };
         assert!(probeable(Path::new("/w/a/x"), &folders, &led, left_out));
         assert!(!probeable(Path::new("/link/id"), &folders, &led, left_out));
+        // A path spelled through a folder that leads out of it, with a `..`
+        // or through a link, is in none of the pairing's folders.
+        let only = [(PathBuf::from("/w/a"), Access::parse("rwx").unwrap())];
+        let out = |p: &Path| match p.strip_prefix("/w/a/j") {
+            Ok(rest) => Path::new("/home/o").join(rest),
+            Err(_) if p == Path::new("/w/a/../b/x") => PathBuf::from("/w/b/x"),
+            Err(_) => p.to_path_buf(),
+        };
+        assert!(!probeable(Path::new("/w/a/../b/x"), &only, &out, left_out));
+        assert!(!probeable(Path::new("/w/a/j/x"), &only, &out, left_out));
+        assert!(probeable(Path::new("/w/a/x"), &only, &out, left_out));
+        // The same where nothing resolves: the `..` is folded as Windows does.
+        assert!(!probeable(Path::new("/w/a/../b/y"), &only, &same, left_out));
+        assert!(probeable(Path::new("/w/a/../a/y"), &only, &same, left_out));
         // A protected entry the owner added as a folder is granted whole.
         let released = [(PathBuf::from("/w/a/.ssh"), Access::parse("r").unwrap())];
         assert!(probeable(
@@ -3186,7 +3288,7 @@ mod tests {
         let given = "/c/w/a/x";
         let path = Path::new("/w/a/x");
         let denied = format!("{given}: Access is denied. (os error 5)");
-        let never_probe = || -> bool { panic!("asked whether to look") };
+        let never_probe = |_: &Path| -> bool { panic!("asked whether to look") };
         let never_remote = || -> bool { panic!("looked for links") };
         let never_open = |_: &Path| -> io::Result<()> { panic!("opened") };
         let never_why = |_: &Path, _: &Result<(), String>| -> String { panic!("asked why") };
@@ -3241,7 +3343,7 @@ mod tests {
                 &format!("{marked}: Access is denied. (os error 5)"),
                 marked,
                 Path::new("/w/(os error 5)/x"),
-                || false,
+                |_| false,
                 never_remote,
                 never_open,
                 |_, _| "why".to_string()
@@ -3257,7 +3359,7 @@ mod tests {
                 &denied,
                 given,
                 path,
-                || false,
+                |_| false,
                 never_remote,
                 never_open,
                 |at, opened| {
@@ -3280,7 +3382,7 @@ mod tests {
                 &denied,
                 given,
                 path,
-                || true,
+                |_| true,
                 || true,
                 never_open,
                 |at, opened| {
@@ -3328,7 +3430,7 @@ mod tests {
                     &denied,
                     given,
                     path,
-                    || true,
+                    |_| true,
                     || false,
                     open,
                     |at, opened| {
@@ -3377,6 +3479,79 @@ mod tests {
                 Some((PathBuf::from("/w/a/x"), Ok(())))
             )
         );
+        // A folder of the pairing that is not there: the look stops at its
+        // top and tells that, and does not open the folder's parent (which
+        // is the container's to refuse, and not the pairing's).
+        let asked = RefCell::new(Vec::new());
+        let said = explained(
+            "bad_path",
+            &denied,
+            given,
+            path,
+            |p| within(p, Path::new("/w/a")),
+            || false,
+            |p| {
+                asked.borrow_mut().push(p.to_path_buf());
+                Err(refuse(NotFound))
+            },
+            |at, opened| {
+                *told.borrow_mut() = Some((at.to_path_buf(), opened.clone()));
+                "why".to_string()
+            },
+        );
+        assert_eq!(said, Some(format!("{given}: why")));
+        assert_eq!(
+            asked.into_inner(),
+            vec![PathBuf::from("/w/a/x"), PathBuf::from("/w/a")]
+        );
+        assert_eq!(
+            told.take(),
+            Some((PathBuf::from("/w/a"), Err("NotFound".into())))
+        );
+    }
+
+    /// The grants split a folder around the entries protected for reads, and
+    /// the write set around the ones protected for writes too; every level
+    /// keeps a grant of its own. So only a level that holds an entry
+    /// protected for reads is left out.
+    #[test]
+    fn a_level_that_holds_only_write_protected_entries_is_not_left_out() {
+        use nerve_policy::protected::{Protected, WinFolders};
+        let home = Path::new("C:\\Users\\o");
+        let prot = Protected::new(
+            &Platform::Windows(WinFolders::default()),
+            home,
+            &[],
+            &Default::default(),
+        );
+        let at = |p: &str| left_out_of(Path::new(p), &[], &prot);
+        // `.config\git` is protected for writes only.
+        assert!(prot.holds_entry(Path::new("C:\\Users\\o\\.config"), true));
+        assert_eq!(at("C:\\Users\\o\\.config"), None);
+        assert_eq!(at("C:\\Users\\o\\.config\\git"), None);
+        assert_eq!(at("C:\\Users\\o\\.local\\share"), None);
+        // `.ssh` is protected for reads: the home holds it, and it is one.
+        assert_eq!(at("C:\\Users\\o"), Some(LeftOut::HoldsProtected));
+        assert_eq!(at("C:\\Users\\o\\.ssh"), Some(LeftOut::Protected));
+        assert_eq!(at("C:\\Users\\o\\.ssh\\id"), Some(LeftOut::Protected));
+        assert_eq!(at("C:\\Users\\o\\AppData"), Some(LeftOut::HoldsProtected));
+        assert_eq!(at("C:\\Users\\o\\proj"), None);
+    }
+
+    /// A path leads where the owner's resolve says only where the owner can
+    /// look at its way to the end and no link on it leads to another machine:
+    /// else it stays as spelled, and nothing resolves (and follows) it.
+    #[test]
+    fn a_path_is_resolved_only_where_its_way_can_be_looked_at() {
+        let p = Path::new("/w/a/x");
+        let to = |_: &Path| Some(PathBuf::from("/real/x"));
+        let never = |_: &Path| -> Option<PathBuf> { panic!("resolved") };
+        let denied = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        let remote = |_: &Path| Ok(Some(PathBuf::from("/w/a")));
+        assert_eq!(placed(p, |_| Ok(None), to), PathBuf::from("/real/x"));
+        assert_eq!(placed(p, |_| Ok(None), |_| None), PathBuf::from("/w/a/x"));
+        assert_eq!(placed(p, denied, never), PathBuf::from("/w/a/x"));
+        assert_eq!(placed(p, remote, never), PathBuf::from("/w/a/x"));
     }
 
     /// A grant recorded as on is looked at in its folder's list, for the

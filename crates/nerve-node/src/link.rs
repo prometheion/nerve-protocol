@@ -2958,7 +2958,6 @@ impl Link {
     ) -> RpcError {
         #[cfg(windows)]
         {
-            use crate::grants::LeftOut;
             let run = account.filter(|a| a.name.eq_ignore_ascii_case(crate::account::RUN_USER));
             let (Some(run), Some(container), Some(given)) = (run, self.boxed(), given) else {
                 return e;
@@ -2981,26 +2980,23 @@ impl Link {
             });
             let left_out = |p: &std::path::Path| {
                 let (_, protected, own) = &*known;
-                if own.iter().any(|o| nerve_policy::paths::within(p, o)) {
-                    Some(LeftOut::Own)
-                } else if protected.in_entry(p, false) {
-                    Some(LeftOut::Protected)
-                } else if own.iter().any(|o| nerve_policy::paths::within(o, p)) {
-                    Some(LeftOut::HoldsOwn)
-                } else if protected.holds_entry(p, true) {
-                    Some(LeftOut::HoldsProtected)
-                } else {
-                    None
-                }
+                crate::grants::left_out_of(p, own, protected)
             };
             // Where a path leads, as the owner sees it (who may look at the
             // whole way, as the sync does); a path that does not resolve
-            // there stays as it is.
+            // there stays as it is, and so does one whose way the owner
+            // cannot look at to its end or that leads to another machine:
+            // resolving it would follow that link.
             let real = |p: &std::path::Path| {
                 let _acting = crate::grants::act_as(owner.as_ref()).ok().flatten();
-                nerve_policy::paths::resolve(p).unwrap_or_else(|_| p.to_path_buf())
+                crate::grants::placed(
+                    p,
+                    |p| crate::grants::remote_here(p, false),
+                    |p| nerve_policy::paths::resolve(p).ok(),
+                )
             };
-            let probe = || crate::grants::probeable(&path, &known.0, &real, left_out);
+            let probe =
+                |p: &std::path::Path| crate::grants::probeable(p, &known.0, &real, left_out);
             // The links on the way are looked at as the owner, who may look
             // at the whole way (as the sync does), before anything opens
             // the path.
