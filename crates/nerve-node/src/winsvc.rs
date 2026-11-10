@@ -173,13 +173,31 @@ pub trait WinSystem {
     fn stage_vault(&self, paths: &NodePaths) -> Result<u64, String>;
 }
 
+/// What [`stage_vault`] may do.
+struct Staging {
+    /// Whether it may start a stopped service. Install starts the service at
+    /// its end anyway; an uninstall must not bring a node the owner stopped
+    /// online, even for a moment.
+    start: bool,
+    /// `--forget-secrets`: go on although the entries cannot be put aside.
+    forget: bool,
+}
+
 /// [`WinSystem::stage_vault`] before nerve's vault becomes unreadable (a new
 /// password) or goes (uninstall). Only the running service reads its vault,
 /// so a stopped one that may hold entries (the keys, with the keyring; the
 /// proxy's header values, which are there whatever the storage) is started
-/// for it. Where that or the staging fails and entries may be there,
-/// nothing changes; a service that holds none needs neither.
-fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
+/// for it, where `how` allows. Where that or the staging fails and entries
+/// may be there, nothing changes, unless `how.forget` says they may go; a
+/// service that holds none needs neither. A stopped service whose entries
+/// an earlier run put aside completely (it failed after that, or the service
+/// cannot start) needs no start: they wait for its next start.
+fn stage_vault(
+    layout: &Layout,
+    sys: &dyn WinSystem,
+    steps: &mut Steps,
+    how: &Staging,
+) -> Result<(), String> {
     let Some(runs) = sys.service()? else {
         return Ok(());
     };
@@ -187,15 +205,32 @@ fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
     if !runs && !holds {
         return Ok(());
     }
-    let lost = |e: String| {
-        format!(
-            "the service did not put what its Credential Manager keeps aside ({e}), and it would be lost: nothing was changed. Start the node on the app's Overview and try again, or choose Files under Settings › Network › Keys and turn the proxy off first"
-        )
+    if !runs && crate::secrets::vault::staged_all(&layout.paths) {
+        steps.did("the entries of the service's Credential Manager are put aside already");
+        return Ok(());
+    }
+    let lost = |e: String, steps: &mut Steps| {
+        if how.forget {
+            steps.did(format!(
+                "went on without putting what the service's Credential Manager keeps aside ({e}): its keys and the proxy's login are lost"
+            ));
+            return Ok(());
+        }
+        Err(format!(
+            "the service did not put what its Credential Manager keeps aside ({e}): {}. Start the node on the app's Overview and try again. If it cannot start, choose to go on without them: the keys and the proxy's login are lost, and entered again afterwards",
+            crate::service::SECRETS_KEPT
+        ))
     };
     if !runs {
-        sys.start()
-            .and_then(|()| sys.wait_running(layout))
-            .map_err(lost)?;
+        if !how.start {
+            return lost(
+                "the node is stopped, and only the running node reads them".into(),
+                steps,
+            );
+        }
+        if let Err(e) = sys.start().and_then(|()| sys.wait_running(layout)) {
+            return lost(e, steps);
+        }
         steps.did(format!(
             "started the service {SERVICE_NAME}: only the running service reads its Credential Manager"
         ));
@@ -208,7 +243,7 @@ fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
             ));
             Ok(())
         }
-        Err(e) if holds => Err(lost(e)),
+        Err(e) if holds => lost(e, steps),
         Err(_) => Ok(()),
     }
 }
@@ -501,6 +536,7 @@ pub fn install(
     sys: &dyn WinSystem,
     exe: &Path,
     invoker: &str,
+    forget_secrets: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
@@ -508,7 +544,7 @@ pub fn install(
         done: Vec::new(),
         out,
     };
-    let r = install_steps(layout, sys, exe, invoker, &mut steps);
+    let r = install_steps(layout, sys, exe, invoker, forget_secrets, &mut steps);
     audit(&layout.paths, "install", &steps.done, &r, steps.out);
     r?;
     let _ = writeln!(
@@ -523,13 +559,18 @@ fn install_steps(
     sys: &dyn WinSystem,
     exe: &Path,
     invoker: &str,
+    forget_secrets: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
     // The install gives nerve a new password, after which Windows no longer
     // opens what its Credential Manager kept: the running service copies
     // its entries aside first, sealed, and takes them back at its start
     // (crate::secrets::vault).
-    stage_vault(layout, sys, steps)?;
+    let how = Staging {
+        start: true,
+        forget: forget_secrets,
+    };
+    stage_vault(layout, sys, steps, &how)?;
     // A running service holds the program and the folders' files.
     if sys.service()? == Some(true) {
         sys.stop()?;
@@ -779,6 +820,7 @@ pub fn uninstall(
     by_hand: &NodePaths,
     sys: &dyn WinSystem,
     purge: bool,
+    forget_secrets: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "uninstall")?;
@@ -786,7 +828,7 @@ pub fn uninstall(
         done: Vec::new(),
         out,
     };
-    let r = uninstall_steps(layout, by_hand, sys, purge, &mut steps);
+    let r = uninstall_steps(layout, by_hand, sys, purge, forget_secrets, &mut steps);
     // With --purge the log went with the state folder.
     audit(&layout.paths, "uninstall", &steps.done, &r, steps.out);
     if r.is_ok() && steps.done.is_empty() {
@@ -803,12 +845,17 @@ fn uninstall_steps(
     by_hand: &NodePaths,
     sys: &dyn WinSystem,
     purge: bool,
+    forget_secrets: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
     // The Credential Manager of nerve goes with the account: kept data keeps
     // its entries aside, sealed, for a later install's service to take.
     if !purge {
-        stage_vault(layout, sys, steps)?;
+        let how = Staging {
+            start: false,
+            forget: forget_secrets,
+        };
+        stage_vault(layout, sys, steps, &how)?;
     }
     if sys.service()?.is_some() {
         sys.stop()?;
@@ -1420,6 +1467,9 @@ pub(crate) mod tests {
         fn put_service(&self, layout: &Layout, _: &str) -> Result<(), String> {
             self.call(format!("put {}", layout.bin.display()));
             *self.program.borrow_mut() = Some(layout.bin.clone());
+            // The install put the program and the password back that a
+            // service which could not start lacked.
+            self.starts.set(true);
             if self.service.get().is_none() {
                 self.service.set(Some(false));
             }
@@ -1649,7 +1699,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, format!("nerve-node {version}\n")).unwrap();
         sys.types("alice's");
-        install(&l, sys, &exe, "alice", &mut Vec::new()).unwrap();
+        install(&l, sys, &exe, "alice", false, &mut Vec::new()).unwrap();
         l
     }
 
@@ -1701,7 +1751,7 @@ pub(crate) mod tests {
         sys.calls.borrow_mut().clear();
         let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
         let calls = sys.calls();
         let staged = calls.iter().position(|c| c.starts_with("stage vault"));
         let stopped = calls.iter().position(|c| c == "stop");
@@ -1715,8 +1765,8 @@ pub(crate) mod tests {
         *sys.vault_fails.borrow_mut() = true;
         sys.calls.borrow_mut().clear();
         sys.types("alice's");
-        let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
-        assert!(e.contains("would be lost: nothing was changed"), "{e}");
+        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
         assert!(
             !sys.calls().iter().any(|c| c == "stop"),
             "{:?}",
@@ -1725,7 +1775,7 @@ pub(crate) mod tests {
         // With the keys in files it goes on.
         std::fs::write(l.paths.config_file(), "").unwrap();
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
     }
 
     /// A stopped service is started to put its entries aside where it may
@@ -1749,7 +1799,7 @@ pub(crate) mod tests {
         sys.stop().unwrap();
         sys.calls.borrow_mut().clear();
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
         let calls = sys.calls();
         assert!(
             !calls.iter().any(|c| c.starts_with("stage vault")),
@@ -1763,15 +1813,15 @@ pub(crate) mod tests {
             sys.stop().unwrap();
             sys.calls.borrow_mut().clear();
             sys.types("alice's");
-            install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+            install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
             assert!(started_then_staged(&sys), "{config}: {:?}", sys.calls());
             // A service that does not start: nerve keeps its password.
             sys.stop().unwrap();
             sys.starts.set(false);
             sys.calls.borrow_mut().clear();
             sys.types("alice's");
-            let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
-            assert!(e.contains("would be lost: nothing was changed"), "{e}");
+            let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+            assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
             assert!(
                 !sys.calls().iter().any(|c| c.starts_with("reset")),
                 "{:?}",
@@ -1784,14 +1834,85 @@ pub(crate) mod tests {
         sys.service.set(Some(true));
         *sys.vault_fails.borrow_mut() = true;
         sys.types("alice's");
-        let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("would be lost"), "{e}");
         *sys.vault_fails.borrow_mut() = false;
-        // Uninstall that keeps the data, with the service stopped.
+        // An uninstall that keeps the data does not start a node the owner
+        // stopped: it asks to start it, or for --forget-secrets.
         sys.stop().unwrap();
         sys.calls.borrow_mut().clear();
-        uninstall(&l, &l.paths, &sys, false, &mut Vec::new()).unwrap();
-        assert!(started_then_staged(&sys), "{:?}", sys.calls());
+        let e = uninstall(&l, &l.paths, &sys, false, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
+        assert!(
+            !sys.calls().iter().any(|c| c == "start"),
+            "{:?}",
+            sys.calls()
+        );
+        assert_eq!(sys.service.get(), Some(false));
+        let mut out = Vec::new();
+        uninstall(&l, &l.paths, &sys, false, true, &mut out).unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("lost"), "{out:?}");
+        assert!(
+            !sys.calls().iter().any(|c| c == "start"),
+            "{:?}",
+            sys.calls()
+        );
+    }
+
+    /// An install is how a node that does not start is repaired, so it is
+    /// not stopped by the service it cannot start: where an earlier run put
+    /// the entries aside completely (it failed after that, with nerve's old
+    /// password still the service's), it goes on without a start; else
+    /// `--forget-secrets` goes on and says what is lost. An uninstall that
+    /// keeps the data finds that stage too, with no start.
+    #[test]
+    fn a_service_that_cannot_start_does_not_stop_the_repair() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::write(
+            l.paths.config_file(),
+            "[machine]\nsecret_storage = \"keyring\"\n",
+        )
+        .unwrap();
+        let broken = |sys: &Fake| {
+            sys.stop().unwrap();
+            sys.starts.set(false);
+            sys.calls.borrow_mut().clear();
+            sys.types("alice's");
+        };
+        // Nothing put aside: refused, and the way past is named.
+        broken(&sys);
+        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
+        // The flag goes on and says what goes.
+        broken(&sys);
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, "alice", true, &mut out).unwrap();
+        let said = String::from_utf8_lossy(&out);
+        assert!(said.contains("are lost"), "{said}");
+        // What an earlier run put aside in full waits for the next start.
+        crate::secrets::vault::serve(&l.paths, "vault.stage", &serde_json::json!({})).unwrap();
+        assert!(crate::secrets::vault::staged_all(&l.paths));
+        broken(&sys);
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        let said = String::from_utf8_lossy(&out);
+        assert!(said.contains("put aside already"), "{said}");
+        assert!(
+            !sys.calls().iter().any(|c| c.starts_with("stage vault")),
+            "{:?}",
+            sys.calls()
+        );
+        broken(&sys);
+        let mut out = Vec::new();
+        uninstall(&l, &l.paths, &sys, false, false, &mut out).unwrap();
+        assert!(
+            !sys.calls().iter().any(|c| c == "start"),
+            "{:?}",
+            sys.calls()
+        );
     }
 
     #[test]
@@ -1804,7 +1925,7 @@ pub(crate) mod tests {
         std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("made the user nerve,"), "{out}");
         assert!(out.contains("Password of alice"), "{out}");
@@ -1902,7 +2023,7 @@ pub(crate) mod tests {
         let aside = l.bin.with_file_name("nerve-node.x1y2.del");
         std::fs::write(&aside, "old").unwrap();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
         assert!(!aside.exists());
         // The old program is removed, or moved aside where the Event Log
         // holds it, before the new one takes its place: written over, a
@@ -1934,7 +2055,7 @@ pub(crate) mod tests {
             .push(("bob".into(), "bob's".into()));
         sys.types("bob's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "bob", &mut out).unwrap();
+        install(&l, &sys, &exe, "bob", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("bob is the owner of the node now, in place of alice"),
@@ -1961,7 +2082,7 @@ pub(crate) mod tests {
         sys.types("new");
         let exe = l.bin.clone();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("Password of alice"), "{out}");
         assert!(out.contains("the program is at"), "{out}");
@@ -1993,7 +2114,7 @@ pub(crate) mod tests {
                 sys.types(typed);
             }
             let mut out = Vec::new();
-            install(&l, &sys, &exe, who, &mut out).unwrap();
+            install(&l, &sys, &exe, who, false, &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("no commands as you"), "{who}: {out}");
             assert!(out.contains(why), "{who}: {out}");
@@ -2005,7 +2126,7 @@ pub(crate) mod tests {
         let l = layout(&d.path().join("admin"));
         sys.types("bob's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "bob", &mut out).unwrap();
+        install(&l, &sys, &exe, "bob", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("Warning: bob is in the group Administrators")
@@ -2049,7 +2170,7 @@ pub(crate) mod tests {
         ] {
             let l = layout(&d.path().join(why.len().to_string()));
             sys.types("alice's");
-            let e = install(&l, sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+            let e = install(&l, sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
             assert!(e.contains(why), "{e}");
             assert!(!sys.calls().iter().any(|c| c.starts_with("put ")), "{e}");
             assert_eq!(sys.profile_service.get(), None, "{e}");
@@ -2070,7 +2191,7 @@ pub(crate) mod tests {
             .borrow_mut()
             .push(account("nerve", 1010, "someone"));
         let l = layout(d.path());
-        let e = install(&l, &sys, Path::new("x"), "alice", &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, Path::new("x"), "alice", false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("did not make it"), "{e}");
         assert!(!l.bin.exists());
         assert!(sys.calls().is_empty());
@@ -2081,11 +2202,25 @@ pub(crate) mod tests {
         for (what, e) in [
             (
                 "install",
-                install(&l, &not_admin, Path::new("x"), "alice", &mut Vec::new()),
+                install(
+                    &l,
+                    &not_admin,
+                    Path::new("x"),
+                    "alice",
+                    false,
+                    &mut Vec::new(),
+                ),
             ),
             (
                 "uninstall",
-                uninstall(&l, &by_hand(d.path()), &not_admin, false, &mut Vec::new()),
+                uninstall(
+                    &l,
+                    &by_hand(d.path()),
+                    &not_admin,
+                    false,
+                    false,
+                    &mut Vec::new(),
+                ),
             ),
         ] {
             let e = e.unwrap_err();
@@ -2105,7 +2240,7 @@ pub(crate) mod tests {
         std::fs::write(l.paths.config_file(), "version = 3\n").unwrap();
         sys.secured.borrow_mut().clear();
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, false, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
         assert!(!l.bin.exists());
         assert_eq!(sys.service.get(), None);
         assert!(sys.account(USER).unwrap().is_none());
@@ -2203,7 +2338,7 @@ pub(crate) mod tests {
         drop(store);
         std::fs::write(crate::grants::record_file(&l.paths), "[]").unwrap();
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, true, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, true, false, &mut out).unwrap();
         let call = format!(
             "remove grants n-lab,n-home of {}",
             l.paths.state_dir.display()
@@ -2263,7 +2398,7 @@ pub(crate) mod tests {
         drop(store);
         std::fs::write(crate::grants::record_file(&hand), "[]").unwrap();
         let mut out = Vec::new();
-        uninstall(&l, &hand, &sys, true, &mut out).unwrap();
+        uninstall(&l, &hand, &sys, true, false, &mut out).unwrap();
         let call = format!("remove grants n-lab of {}", hand.state_dir.display());
         assert!(sys.calls().contains(&call), "{:?}", sys.calls());
         let out = String::from_utf8(out).unwrap();
@@ -2322,7 +2457,7 @@ pub(crate) mod tests {
         paired(&l.paths, &["lab", "home"]);
         std::fs::remove_dir_all(&l.paths.state_dir).unwrap();
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, false, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
         let call = format!(
             "remove grants n-lab,n-home of {}",
             l.paths.state_dir.display()
@@ -2343,7 +2478,7 @@ pub(crate) mod tests {
         paired(&hand, &["lab"]);
         std::fs::remove_dir_all(&hand.state_dir).unwrap();
         let mut out = Vec::new();
-        uninstall(&l, &hand, &sys, true, &mut out).unwrap();
+        uninstall(&l, &hand, &sys, true, false, &mut out).unwrap();
         let call = format!("remove grants n-lab of {}", hand.state_dir.display());
         assert!(sys.calls().contains(&call), "{:?}", sys.calls());
         assert!(hand.config_file().exists() && !hand.state_dir.exists());
@@ -2364,7 +2499,7 @@ pub(crate) mod tests {
         let hand = by_hand(d.path());
         paired(&hand, &["lab"]);
         let mut out = Vec::new();
-        uninstall(&layout(d.path()), &hand, &sys, false, &mut out).unwrap();
+        uninstall(&layout(d.path()), &hand, &sys, false, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("(nerve.n-lab)"), "{out}");
         assert!(!out.contains("nothing to uninstall"), "{out}");
@@ -2381,7 +2516,7 @@ pub(crate) mod tests {
         paired(&hand, &["lab"]);
         sys.running.borrow_mut().push(hand.state_dir.clone());
         let mut out = Vec::new();
-        uninstall(&l, &hand, &sys, false, &mut out).unwrap();
+        uninstall(&l, &hand, &sys, false, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         let left = format!(
             "left the AppContainer profiles of the node run by hand ({}) (nerve.n-lab), since the node runs: once it stopped, install Nerve and uninstall it again",
@@ -2399,7 +2534,7 @@ pub(crate) mod tests {
         let l = installed(d.path(), &sys, "1.0.0");
         std::fs::write(l.paths.config_file(), "[[center]\n").unwrap();
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, true, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, true, false, &mut out).unwrap();
         let call = format!("remove grants  of {}", l.paths.state_dir.display());
         assert!(sys.calls().contains(&call), "{:?}", sys.calls());
         let out = String::from_utf8(out).unwrap();
@@ -2422,7 +2557,7 @@ pub(crate) mod tests {
         std::fs::write(crate::grants::record_file(&hand), "[]").unwrap();
         sys.away.borrow_mut().push(PathBuf::from(r"E:\proj"));
         let mut out = Vec::new();
-        uninstall(&l, &hand, &sys, true, &mut out).unwrap();
+        uninstall(&l, &hand, &sys, true, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         let left = format!(
             "left 1 folder grants of the node run by hand ({}) on, on drives that are not connected now (E:\\proj): connect their drives, then install Nerve and uninstall it again",
@@ -2436,7 +2571,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
-        uninstall(&l, &by_hand(d.path()), &sys, true, &mut Vec::new()).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, true, false, &mut Vec::new()).unwrap();
         for p in [
             &l.bin,
             &l.home,
@@ -2451,7 +2586,7 @@ pub(crate) mod tests {
         assert!(sys.account(USER).unwrap().is_none());
         // Nothing left, the source included: nothing is said to be removed.
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, true, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, true, false, &mut out).unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -2461,7 +2596,7 @@ pub(crate) mod tests {
             .borrow_mut()
             .push(account("nerve", 1010, "someone"));
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, true, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, true, false, &mut out).unwrap();
         assert!(sys.account(USER).unwrap().is_some());
         assert!(
             String::from_utf8(out)
@@ -2685,7 +2820,7 @@ pub(crate) mod tests {
         std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("put the Start menu entry in place"), "{out}");
         assert!(link.exists());
@@ -2719,7 +2854,7 @@ pub(crate) mod tests {
         assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
 
         let mut out = Vec::new();
-        uninstall(&l, &by_hand(d.path()), &sys, false, &mut out).unwrap();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -2743,7 +2878,7 @@ pub(crate) mod tests {
         let exe = d.path().join("Downloads/nerve-node-desktop.exe");
         std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(!out.contains("installed alone"), "{out}");
         assert!(!out.contains("CLI edition"), "{out}");

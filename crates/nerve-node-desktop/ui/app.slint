@@ -399,7 +399,6 @@ export component AppWindow inherits Window {
         if Perm.mode-open: ModeDialog { }
         if Perm.folder-open: FolderDialog { }
         if Perm.sudo-open: SudoDialog { }
-        if Perm.owner-password-open: OwnerPasswordDialog { }
         if Caps.edit-open: CapDialog { }
         if Prefs.proxy-open: ProxyDialog { }
         if Prefs.once-open: OnceDialog { }
@@ -409,6 +408,8 @@ export component AppWindow inherits Window {
         if Prefs.backup-open: BackupDialog { }
         if Prefs.restore-open: RestoreDialog { }
         if Store.setup-open: SetupDialog { }
+        // After the first-run steps, which ask for it too.
+        if Perm.owner-password-open: OwnerPasswordDialog { }
         if Store.elevate-open: ElevateDialog { }
         if Install.update-open: UpdateDialog { }
         if Install.uninstall-open: UninstallDialog { }

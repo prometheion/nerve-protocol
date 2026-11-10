@@ -37,6 +37,11 @@ pub const USER: &str = "nerve";
 /// The comment `install` gives that user. A `nerve` user without it was not
 /// made by `install`: install does not take it over, uninstall leaves it.
 pub const USER_MARK: &str = "Nerve node";
+/// What an install or an uninstall on Windows says when the service could
+/// not put the keys and the proxy's login of its Credential Manager aside
+/// and nothing was changed. The app offers to go on without them where it
+/// finds this text in the error (`--forget-secrets`).
+pub const SECRETS_KEPT: &str = "nothing was changed, and they would be lost";
 /// The systemd unit.
 pub const UNIT_NAME: &str = "nerve-node.service";
 

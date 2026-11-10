@@ -1151,6 +1151,17 @@ export component UninstallDialog inherits Dialog {
             VerticalLayout {
                 spacing: Space.xl;
                 UninstallChoice { }
+                Reveal {
+                    shown: Install.can-forget;
+                    CheckBox {
+                        text: "Go on without the keys and the proxy's login";
+                        detail: "The node's Credential Manager cannot put them aside. They are lost.";
+                        checked: Install.forget;
+                        toggled(on) => {
+                            Install.forget = on;
+                        }
+                    }
+                }
                 DialogButtons {
                     error: Install.error;
                     error-title: "Uninstalling did not finish";

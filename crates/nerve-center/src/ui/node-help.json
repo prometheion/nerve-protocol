@@ -50,6 +50,12 @@
                   "more": "Confirms --owner=root: you accept that nothing in Nerve holds those commands back.",
                   "name": "--accept-root-owner",
                   "optional": true
+                },
+                {
+                  "line": "Windows: go on although the keys and the proxy's login stay behind",
+                  "more": "Windows: install puts the keys and the proxy's login that the service's Credential Manager keeps aside before it gives the service's user a new password. Where the service cannot start to do that, install stops and changes nothing; with this flag it goes on, and they are lost and entered again afterwards.",
+                  "name": "--forget-secrets",
+                  "optional": true
                 }
               ],
               "line": "Install the node as a service (Linux: with sudo; Windows: as administrator)",
@@ -63,6 +69,12 @@
                   "line": "Delete the config and state folders too (keys, pairings, audit)",
                   "more": "Delete the config and state folders too: the keys, the pairings and the audit log.",
                   "name": "--purge",
+                  "optional": true
+                },
+                {
+                  "line": "Windows: go on although the keys and the proxy's login would be lost",
+                  "more": "Windows: an uninstall that keeps the data puts the keys and the proxy's login that the service's Credential Manager keeps aside first, which needs the node to run. Where it does not, uninstall stops and changes nothing; with this flag it goes on, and they are lost.",
+                  "name": "--forget-secrets",
                   "optional": true
                 }
               ],

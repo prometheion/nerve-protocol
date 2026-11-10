@@ -144,6 +144,11 @@ pub enum Cmd {
         /// Confirms --owner=root: you accept that nothing in Nerve holds those commands back.
         #[arg(long)]
         accept_root_owner: bool,
+        /// Windows: go on although the keys and the proxy's login stay behind
+        ///
+        /// Windows: install puts the keys and the proxy's login that the service's Credential Manager keeps aside before it gives the service's user a new password. Where the service cannot start to do that, install stops and changes nothing; with this flag it goes on, and they are lost and entered again afterwards.
+        #[arg(long)]
+        forget_secrets: bool,
     },
     /// Pair a first center and give it a folder, step by step
     ///
@@ -166,6 +171,11 @@ pub enum Cmd {
         /// Delete the config and state folders too: the keys, the pairings and the audit log.
         #[arg(long)]
         purge: bool,
+        /// Windows: go on although the keys and the proxy's login would be lost
+        ///
+        /// Windows: an uninstall that keeps the data puts the keys and the proxy's login that the service's Credential Manager keeps aside first, which needs the node to run. Where it does not, uninstall stops and changes nothing; with this flag it goes on, and they are lost.
+        #[arg(long)]
+        forget_secrets: bool,
     },
     /// Save the config and keys to a passphrase-protected file
     ///
@@ -1502,12 +1512,16 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Install {
             owner,
             accept_root_owner,
-        } => install::install(paths, owner, accept_root_owner, out).await,
+            forget_secrets,
+        } => install::install(paths, owner, accept_root_owner, forget_secrets, out).await,
         Cmd::Setup => setup::setup_cmd(paths, out).await,
         Cmd::Update { from } => install::update(from, out).await,
         Cmd::ServiceFiles { owner, polkit } => install::service_files(owner, polkit, out),
         Cmd::Service(c) => install::service(c, out).await,
-        Cmd::Uninstall { purge } => install::uninstall(paths, purge, out).await,
+        Cmd::Uninstall {
+            purge,
+            forget_secrets,
+        } => install::uninstall(paths, purge, forget_secrets, out).await,
     }
 }
 

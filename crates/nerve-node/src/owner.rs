@@ -1193,13 +1193,20 @@ impl Endpoint {
     }
 }
 
-/// The owner pipe's DACL in SDDL (Windows): SYSTEM, the administrators, the
-/// node's own account (`own`, which makes the pipe's further instances) and
-/// the owners. No AppContainer gets in: no entry names a package.
+/// The owner pipe's DACL in SDDL (Windows), also the provider pipe's:
+/// SYSTEM, the administrators, the node's own account (`own`, which makes
+/// the pipe's further instances) and the owners, who may read and write
+/// data and nothing else ([`nerve_service::win::pipe::CLIENT_RIGHTS`]): one
+/// that could make an instance of the pipe would be taken for the node by a
+/// client that checks the pipe's owner. No AppContainer gets in: no entry
+/// names a package.
 pub fn dacl_text(own: &str, owners: &[String]) -> String {
     let mut s = crate::pipe::dacl_text(own);
     for o in owners {
-        s.push_str(&format!("(A;;GA;;;{o})"));
+        s.push_str(&format!(
+            "(A;;{};;;{o})",
+            nerve_service::win::pipe::CLIENT_RIGHTS
+        ));
     }
     s
 }
@@ -1998,14 +2005,13 @@ mod win {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+    use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, RevertToSelf, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -2153,10 +2159,8 @@ mod win {
         let name = pipe_name();
         let mut busy = 0;
         let client = loop {
-            match ClientOptions::new()
-                .security_qos_flags(SECURITY_IDENTIFICATION)
-                .open(&name)
-            {
+            // Identification only, with the rights the pipe gives an owner.
+            match nerve_service::win::pipe::open_limited(&name) {
                 Ok(c) => break c,
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     return Err(nerve_transport::ctl::NOT_RUNNING.into());
@@ -2722,8 +2726,21 @@ mod tests {
         let d = dacl_text("S-1-5-21-1-2-3-1057", &["S-1-5-21-1-2-3-1056".into()]);
         assert_eq!(
             d,
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1057)(A;;GA;;;S-1-5-21-1-2-3-1056)"
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1057)(A;;0x12008b;;;S-1-5-21-1-2-3-1056)"
         );
+        // An owner makes no instance of the pipe: no GA, no GENERIC_WRITE,
+        // and not FILE_APPEND_DATA (0x4) in what it gets.
+        let owner_entry = d.split(')').find(|e| e.ends_with("1056")).unwrap();
+        assert!(
+            !owner_entry.contains("GA") && !owner_entry.contains("GW"),
+            "{d}"
+        );
+        let rights = owner_entry
+            .split(';')
+            .nth(2)
+            .unwrap()
+            .trim_start_matches("0x");
+        assert_eq!(u32::from_str_radix(rights, 16).unwrap() & 0x4, 0, "{d}");
         for other in ["WD", "BU", "AU", "IU", "AC", "S-1-15-"] {
             assert!(!d.contains(other), "{other}");
         }
@@ -2840,8 +2857,7 @@ mod tests {
             assert!(said.contains("exit code: 0\n"), "{said}");
             // The owner's own program opens it.
             let _second = crate::pipe::instance(&closed, &sd, false).unwrap();
-            tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(&closed)
+            nerve_service::win::pipe::open_limited(&closed)
                 .expect("the owner opens the owner pipe");
             nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
         });

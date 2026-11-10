@@ -14,6 +14,16 @@ pub fn dacl_text(own: &str) -> String {
     s
 }
 
+/// What a pipe's DACL gives a client that is not the node's own account (the
+/// owners of the owner and provider pipes), as SDDL rights:
+/// `FILE_GENERIC_READ | FILE_WRITE_DATA`. Not `GA`, and not `GENERIC_WRITE`:
+/// on a pipe `FILE_APPEND_DATA` is `FILE_CREATE_PIPE_INSTANCE`, and whoever
+/// holds it may make further server instances of the node's pipe, which all
+/// share the first one's descriptor, so that a client could not tell them
+/// from the node's. A client opens the pipe with exactly these rights
+/// (`open_limited`).
+pub const CLIENT_RIGHTS: &str = "0x12008b";
+
 /// Whether a pipe whose owner is `owner` may be the node's: SYSTEM, the
 /// administrators, or `node` (the account the node runs as). Another
 /// account cannot make an object one of them owns.
@@ -37,7 +47,7 @@ pub fn name_for(prefix: &str, dir: &str) -> String {
 #[cfg(windows)]
 pub use sys::{
     Descriptor, PIPE_BUSY, client_pid, foreign_owner, instance, node_owner_check, open_identified,
-    owner_of,
+    open_limited, owner_of,
 };
 
 #[cfg(windows)]
@@ -46,8 +56,10 @@ mod sys {
     use std::io;
     use std::os::windows::io::AsRawHandle;
 
+    use std::os::windows::io::FromRawHandle;
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-    use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
+
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
         SE_KERNEL_OBJECT,
@@ -55,6 +67,10 @@ mod sys {
     use windows_sys::Win32::Security::{
         GetLengthSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
         WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_WRITE_DATA, OPEN_EXISTING,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
     };
     use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 
@@ -178,6 +194,42 @@ mod sys {
             .open(name)
     }
 
+    /// What [`open_limited`] asks for: [`super::CLIENT_RIGHTS`].
+    const LIMITED: u32 = FILE_GENERIC_READ | FILE_WRITE_DATA;
+
+    /// Opens the pipe `name` for identification only, with just the rights
+    /// [`super::CLIENT_RIGHTS`] gives: tokio's client asks `GENERIC_WRITE`,
+    /// which a pipe that keeps its owners from making instances refuses.
+    pub fn open_limited(
+        name: &str,
+    ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+        use std::os::windows::io::IntoRawHandle;
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` ends in a NUL; the handle is the caller's alone and
+        // is handed to tokio, which closes it.
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                LIMITED,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                SECURITY_IDENTIFICATION | SECURITY_SQOS_PRESENT | FILE_FLAG_OVERLAPPED,
+                std::ptr::null_mut(),
+            )
+        };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let handle = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h as _) };
+        // SAFETY: an overlapped pipe handle, which tokio takes over.
+        unsafe {
+            tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+                handle.into_raw_handle(),
+            )
+        }
+    }
+
     /// The folder `%ProgramData%` stands for, as Windows keeps it: no
     /// variable of the caller's reaches it ([`crate::win::folders`]). The
     /// answer is still never taken as proof that no node runs ([`no_pipe`];
@@ -290,6 +342,20 @@ mod tests {
         for other in ["WD", "BU", "AU", "NU", "AC", "S-1-15-"] {
             assert!(!dacl_text(nerve).contains(other), "{other}");
         }
+    }
+
+    /// The rights an owner gets on a pipe are those [`open_limited`] asks
+    /// for: reading and writing data, never `FILE_APPEND_DATA` (which on a
+    /// pipe makes instances) nor the generic rights.
+    #[cfg(windows)]
+    #[test]
+    fn a_client_gets_what_it_opens_with_and_cannot_make_instances() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_APPEND_DATA, FILE_CREATE_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_WRITE_DATA,
+        };
+        let rights = u32::from_str_radix(CLIENT_RIGHTS.trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(rights, FILE_GENERIC_READ | FILE_WRITE_DATA);
+        assert_eq!(rights & (FILE_APPEND_DATA | FILE_CREATE_PIPE_INSTANCE), 0);
     }
 
     /// A pipe's name hides the folder, holds no case of it, and differs per

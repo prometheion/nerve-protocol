@@ -260,7 +260,7 @@ export global Perm {
     // commands that run as you (its status' `owner_password`). Where they
     // are turned on, and at the folder grants, the page asks for it, then
     // goes on with what it asked for (`owner-password-then`: "user",
-    // "as-owner" or "").
+    // "as-owner", "setup" for the first-run steps or "").
     in-out property <bool> owner-password-missing;
     in-out property <bool> owner-password-open;
     in-out property <string> owner-password;
@@ -590,6 +590,10 @@ export global Install {
     // The system's question for the rights is open.
     in-out property <bool> asking;
     in-out property <string> error;
+    // The error is that the node's keys and the proxy's login could not be
+    // put aside: the owner may go on without them (`forget`) with the next try.
+    in-out property <bool> can-forget;
+    in-out property <bool> forget;
     // The heading of the error when it is not that the step did not finish:
     // no file dialog could open.
     in-out property <string> error-title;

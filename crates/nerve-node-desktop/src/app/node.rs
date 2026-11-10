@@ -172,7 +172,7 @@ impl Ctl {
         );
     }
 
-    fn setup_next(self: &Rc<Self>) {
+    pub(super) fn setup_next(self: &Rc<Self>) {
         let Some((step, mode, center, pair_step, link, pair_name)) = self.with_store(|s| {
             (
                 s.get_setup_step(),
@@ -190,6 +190,11 @@ impl Ctl {
             // Back from the mode: the center is paired, on to its mode.
             0 if pair_step == 2 => self.setup_go(1),
             0 => self.pair(&link, &pair_name, pair_step == 1),
+            // Commands that run as the owner need the owner's Windows
+            // password (user mode, folder mode's grants): where the node
+            // has none that works, it is asked for first, and Continue goes
+            // on with the step once it is saved.
+            1 if mode == "user" && self.owner_password_first("setup") => {}
             1 => {
                 let off = self.with_store(|s| s.get_setup_no_network()) == Some(true);
                 let network = if off { "off" } else { "on" };
@@ -211,6 +216,9 @@ impl Ctl {
                 };
                 if folder.is_empty() {
                     return self.setup_go(3);
+                }
+                if self.owner_password_first("setup") {
+                    return;
                 }
                 let rights = format!("r{}{}", if w { "w" } else { "" }, if x { "x" } else { "" });
                 let add = vec!["folder".into(), "add".into(), folder, rights, at];

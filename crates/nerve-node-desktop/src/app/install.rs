@@ -60,6 +60,22 @@ fn adds_the_app(installed: bool, app: bool, windows: bool) -> bool {
     installed && !app && !windows
 }
 
+/// Whether an install or uninstall error says that the keys and the proxy's
+/// login could not be put aside, and the owner may go on without them.
+fn offers_forget(error: &str) -> bool {
+    error.contains(nerve_node::service::SECRETS_KEPT)
+}
+
+/// `args` of an install or uninstall, with the owner's choice to go on
+/// without the keys and the proxy's login of the service's Credential
+/// Manager.
+fn with_forget(mut args: Vec<String>, forget: bool) -> Vec<String> {
+    if forget {
+        args.push("--forget-secrets".into());
+    }
+    args
+}
+
 /// What a service command said, as the steps it did and what it warned
 /// about. Its advice for what comes next (`Next: …`) is the app's to give,
 /// in its own words: the app asked for root through pkexec, and opens its
@@ -184,6 +200,8 @@ impl Ctl {
                 "update" => "installed",
                 _ => "welcome",
             };
+            i.set_can_forget(offers_forget(&e));
+            i.set_forget(false);
             i.set_error(e.into());
             i.set_error_title(SharedString::new());
             i.set_step(back.into());
@@ -198,6 +216,17 @@ impl Ctl {
         args: Vec<String>,
         input: Option<String>,
     ) {
+        // The choice to go on without what could not be put aside holds for
+        // this run only.
+        let forget = self
+            .with_install(|i| {
+                let forget = i.get_can_forget() && i.get_forget();
+                i.set_can_forget(false);
+                i.set_forget(false);
+                forget
+            })
+            .unwrap_or(false);
+        let args = with_forget(args, forget);
         self.with_install(|i| {
             i.set_action(action.into());
             i.set_error(SharedString::new());
@@ -314,6 +343,8 @@ impl Ctl {
         self.with_install(|i| {
             i.set_action("uninstall".into());
             i.set_purge(false);
+            i.set_can_forget(false);
+            i.set_forget(false);
             i.set_error(SharedString::new());
             i.set_step("choose".into());
             if !i.get_shown() {
@@ -410,6 +441,25 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The way past a node that cannot put its keys aside is offered for
+    /// that error only, and becomes a flag of the command.
+    #[test]
+    fn going_on_without_the_keys_is_offered_for_their_error_only() {
+        let kept = format!(
+            "the service did not ({}): {}.",
+            "x",
+            nerve_node::service::SECRETS_KEPT
+        );
+        assert!(offers_forget(&kept));
+        assert!(!offers_forget("a user nerve exists already"));
+        let args = vec!["uninstall".to_string(), "--purge".to_string()];
+        assert_eq!(with_forget(args.clone(), false), args);
+        assert_eq!(
+            with_forget(args, true),
+            ["uninstall", "--purge", "--forget-secrets"]
+        );
+    }
 
     /// Only Linux takes a node installed alone over.
     #[test]

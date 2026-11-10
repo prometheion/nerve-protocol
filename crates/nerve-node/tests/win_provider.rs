@@ -226,9 +226,9 @@ async fn provider_program() {
         PathBuf::from(parts.next().unwrap()),
     );
     let write = |s: &str| std::fs::write(&log, format!("{s}\n")).unwrap();
-    // tokio's default, identification only: all the node needs to tell
-    // the program.
-    let client = match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe) {
+    // Identification only, and the rights the pipe gives a program of the
+    // owner: reading and writing data, not making instances.
+    let client = match nerve_service::win::pipe::open_limited(&pipe) {
         Ok(c) => c,
         Err(e) => return write(&format!("open: {e}")),
     };
@@ -323,6 +323,17 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
     // Another standard account may not open the pipe.
     let e = opens_as(&other, &other_pw, PIPE).expect_err("another account opened the pipe");
     assert_eq!(e.raw_os_error(), Some(5), "{e}");
+
+    // The owner (this program's account) may not make an instance of the
+    // owner pipe or the provider pipe: a provider that checks the pipe's
+    // owner would take it for the node's.
+    for name in [PIPE, nerve_node::owner::pipe_name().as_str()] {
+        let e = tokio::net::windows::named_pipe::ServerOptions::new()
+            .create(name)
+            .map(|_| ())
+            .expect_err("the owner made an instance of the node's pipe");
+        assert_eq!(e.raw_os_error(), Some(5), "{name}: {e}");
+    }
 
     // A process of a command the node runs is refused, though it runs the
     // allowed program under the allowed name: the pairing in user mode

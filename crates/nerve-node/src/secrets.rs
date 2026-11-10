@@ -1312,6 +1312,12 @@ pub(crate) mod vault {
     /// or none for one to delete.
     pub const PENDING: &str = "vault.pending";
 
+    /// The entry in [`PENDING`] that says it holds every entry of the node's
+    /// vault, not only what a call put there while no service ran
+    /// (`vault.stage` writes it). The service's start takes it away with the
+    /// rest.
+    const COMPLETE: &str = "\u{1}complete";
+
     /// What a read of the vault says while no service runs and nothing
     /// waits for it.
     pub const NOT_RUNNING: &str = "the node keeps this in the Credential Manager of its service account nerve, which only the running node reads: start the node on the app's Overview, then try again";
@@ -1339,6 +1345,14 @@ pub(crate) mod vault {
             .is_ok_and(|n| n.eq_ignore_ascii_case(crate::service::USER));
         #[cfg(all(not(windows), not(test)))]
         false
+    }
+
+    /// Whether [`PENDING`] holds every entry of the service's vault, as an
+    /// earlier `vault.stage` left it: a stopped service needs no start to
+    /// put them aside again, and one that cannot start loses none.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn staged_all(paths: &NodePaths) -> bool {
+        read_pending(paths).is_ok_and(|p| p.contains_key(COMPLETE))
     }
 
     /// Whether the service's vault may hold entries of the node at `paths`:
@@ -1531,6 +1545,7 @@ pub(crate) mod vault {
                     n += 1;
                 }
             }
+            p.insert(COMPLETE.into(), None);
             write_pending(paths, &p)?;
             return Ok(json!({"staged": n}));
         }
@@ -1561,7 +1576,8 @@ pub(crate) mod vault {
     /// service's, at its start, then deletes the file; what fails stays
     /// there for the next start and is said.
     pub fn take_pending(paths: &NodePaths) -> Result<usize, String> {
-        let p = read_pending(paths)?;
+        let mut p = read_pending(paths)?;
+        p.remove(COMPLETE);
         let mut left = Pending::new();
         let mut errors = Vec::new();
         let mut n = 0;
@@ -1995,15 +2011,27 @@ mod tests {
         drop(paired(&paths, SecretStorage::Keyring, &["home"]));
         let headers = [("X-Key".to_string(), "s3cret-value".to_string())];
         store_proxy_headers(&paths, &headers).unwrap();
+        // What one call put aside while no service ran is no stage of all.
+        for_tests::pretend_windows_service(&paths);
+        for_tests::pretend_service_runs(&paths, false);
+        vault::stage(&paths, "proxy:x", Some("v")).unwrap();
+        assert!(!vault::staged_all(&paths));
+        vault::unstage(&paths, "proxy:x").unwrap();
         let v = vault::serve(&paths, "vault.stage", &serde_json::json!({})).unwrap();
         assert_eq!(v["staged"], 3, "{v}");
+        assert!(vault::staged_all(&paths));
         let key = Key::Center("home").entry(&paths);
         let kept = store::get(key.account()).unwrap();
         assert!(kept.is_some());
         // The account's vault is gone with its old password.
         store::delete(key.account()).unwrap();
         store::delete(Entry::proxy(&paths).account()).unwrap();
-        vault::take_pending(&paths).unwrap();
+        // The mark is no entry: the service's start counts and puts the
+        // three only.
+        assert_eq!(vault::take_pending(&paths).unwrap(), 3);
+        // The service's start took it all, the mark too.
+        assert!(!vault::pending_file(&paths).exists());
+        assert!(!vault::staged_all(&paths));
         assert_eq!(store::get(key.account()).unwrap(), kept);
         assert!(
             store::get(Entry::proxy(&paths).account())

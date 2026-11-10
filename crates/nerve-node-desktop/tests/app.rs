@@ -1233,6 +1233,23 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 2));
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 1, "{}", store.get_pair_error());
+    // A node that has no Windows password of the owner (the installer
+    // asked none, or it failed) asks for it before user mode: Continue
+    // would otherwise switch to a mode whose commands all fail.
+    let perm = window.global::<Perm>();
+    perm.set_owner_password_missing(true);
+    store.set_setup_mode("user".into());
+    store.invoke_setup_next();
+    assert!(perm.get_owner_password_open());
+    assert_eq!(perm.get_owner_password_then(), "setup");
+    assert_eq!(store.get_setup_step(), 1);
+    assert_ne!(
+        config(&paths).center("studio-center").unwrap().policy.mode,
+        nerve_policy::Mode::User,
+        "the mode changed before the password"
+    );
+    perm.set_owner_password_open(false);
+    perm.set_owner_password_missing(false);
     // Folder mode with the network off: the folder step comes next.
     store.set_setup_mode("folder".into());
     store.set_setup_no_network(true);
@@ -1253,6 +1270,22 @@ fn the_app_drives_the_cli_end_to_end() {
     let work = dir.path().join("setup-work");
     std::fs::create_dir_all(&work).unwrap();
     store.set_setup_folder(work.display().to_string().into());
+    // Its grants are made as the owner: the password comes first here too.
+    perm.set_owner_password_missing(true);
+    store.invoke_setup_next();
+    assert!(perm.get_owner_password_open());
+    assert_eq!(store.get_setup_step(), 2);
+    assert!(
+        config(&paths)
+            .center("studio-center")
+            .unwrap()
+            .policy
+            .folders
+            .is_empty(),
+        "the folder was added before the password"
+    );
+    perm.set_owner_password_open(false);
+    perm.set_owner_password_missing(false);
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
     let folders = config(&paths)

@@ -43,6 +43,7 @@ pub(super) async fn install(
     paths: NodePaths,
     owner: Option<String>,
     accept_root_owner: bool,
+    forget_secrets: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let root = root_owner(owner.as_deref(), accept_root_owner, cfg!(windows))?;
@@ -52,9 +53,17 @@ pub(super) async fn install(
     #[cfg(windows)]
     let _ = root;
     #[cfg(windows)]
-    return crate::winsvc::install(&layout, &crate::win_host::WinHost, &exe, &invoker(), out);
+    return crate::winsvc::install(
+        &layout,
+        &crate::win_host::WinHost,
+        &exe,
+        &invoker(),
+        forget_secrets,
+        out,
+    );
     #[cfg(not(windows))]
     {
+        let _ = forget_secrets;
         use std::io::IsTerminal;
         let stdin = std::io::stdin();
         let mut input = std::io::BufReader::new(stdin.lock());
@@ -138,6 +147,7 @@ pub(super) async fn service(c: ServiceCmd, out: &mut dyn Write) -> Result<(), St
 pub(super) async fn uninstall(
     paths: NodePaths,
     purge: bool,
+    forget_secrets: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let layout = Layout::system();
@@ -159,9 +169,19 @@ pub(super) async fn uninstall(
         paths
     };
     #[cfg(windows)]
-    return crate::winsvc::uninstall(&layout, &by_hand, &crate::win_host::WinHost, purge, out);
+    return crate::winsvc::uninstall(
+        &layout,
+        &by_hand,
+        &crate::win_host::WinHost,
+        purge,
+        forget_secrets,
+        out,
+    );
     #[cfg(not(windows))]
-    crate::service::uninstall(&layout, &Host, purge, out)
+    {
+        let _ = forget_secrets;
+        crate::service::uninstall(&layout, &Host, purge, out)
+    }
 }
 
 /// Whether `install` may ask its questions (the keyring, root as the
@@ -248,6 +268,7 @@ mod tests {
                 Cmd::Install {
                     owner,
                     accept_root_owner,
+                    ..
                 } => root_owner(owner.as_deref(), accept_root_owner, false),
                 _ => unreachable!(),
             }

@@ -676,12 +676,13 @@ impl Ctl {
         );
     }
 
-    /// Whether the page asks for the owner's Windows password first, as the
+    /// Whether the app asks for the owner's Windows password first, as the
     /// node has none that works, before it goes on with `then` (see
-    /// [`Ctl::owner_password_save`]).
-    fn owner_password_first(self: &Rc<Self>, then: &str) -> bool {
+    /// [`Ctl::owner_password_save`]). Only a Windows node says it misses
+    /// one, so this needs no check of the system.
+    pub(super) fn owner_password_first(self: &Rc<Self>, then: &str) -> bool {
         let ask = self
-            .with_perm(|p| p.get_windows() && p.get_owner_password_missing())
+            .with_perm(|p| p.get_owner_password_missing())
             .unwrap_or(false);
         if ask {
             self.owner_password_ask(then);
@@ -729,6 +730,7 @@ impl Ctl {
                     match then.as_str() {
                         "user" => c.mode_pick("user"),
                         "as-owner" => c.as_owner_set(true),
+                        "setup" => c.setup_next(),
                         _ => {}
                     }
                 }

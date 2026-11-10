@@ -2046,7 +2046,13 @@ with 16 places of its own, and:
 
 - its DACL lets in SYSTEM, the administrators (elevated), the node's own
   account and the owner, as the owner pipe's; it refuses remote clients
-  (`PIPE_REJECT_REMOTE_CLIENTS`);
+  (`PIPE_REJECT_REMOTE_CLIENTS`). The owner gets `FILE_GENERIC_READ |
+  FILE_WRITE_DATA` (`0x12008b`) and nothing more, on both pipes: not `GA`
+  nor `GENERIC_WRITE`, as `FILE_APPEND_DATA` on a pipe is
+  `FILE_CREATE_PIPE_INSTANCE`. All instances of a pipe share the first
+  one's descriptor, so an owner that could make one would pass a provider's
+  check of the pipe's owner. A client opens the pipe with exactly those
+  rights (`CreateFileW`, not a generic read and write);
 - the client's token decides, read by identifying it
   (`ImpersonateNamedPipeClient`; the node keeps no SeImpersonatePrivilege,
   so it can identify a client but not act as it): the owner's account, SYSTEM, or a token

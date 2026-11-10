@@ -251,11 +251,22 @@ goes there waits in `config\keys\vault.pending`, sealed with DPAPI, and the
 service takes it at its start, under the keys' lock that whoever writes the
 file holds too. An install gives `nerve` a new password, after which Windows
 no longer opens what its Credential Manager kept: so the service first puts
-its entries aside the same way (`vault.stage`), started for it when it is
-stopped; where entries may be there (the keys with the keyring, the proxy's
-header values) and it cannot, the install changes nothing. Uninstall removes
+its entries aside the same way (`vault.stage`); the stage ends with a mark
+that says the file holds every entry, which the service's start takes away
+with the rest. An install starts a stopped service for it. Where entries may
+be there (the keys with the keyring, the proxy's header values) and the
+service cannot put them aside, the install changes nothing, unless the mark
+is there already: an install that failed half way, with `nerve`'s old
+password still the service's, goes on without a start, so that running it
+again repairs the node. A service that cannot start otherwise (the program is
+gone or damaged, `node.toml` does not parse) says so in the installer, which
+then offers **Go on without the keys and the proxy's login** (`install
+--forget-secrets`, for scripts): they are lost and entered again afterwards. Uninstall removes
 `nerve` and its Credential Manager with it; **Keep the data** puts the
-entries aside first, for a later install. While they wait in that file, the
+entries aside first, for a later install, and never starts a service the
+owner stopped: with the node stopped, it goes on only where the mark is
+there, or with the same choice in the uninstall dialog
+(`uninstall --forget-secrets`), or after the owner started the node. While they wait in that file, the
 keys and the proxy's values are in a file after all: sealed with the
 machine's DPAPI key, so its folder's ACL (`nerve`, SYSTEM, the
 administrators) is what keeps them, as it keeps the keys in files.
@@ -322,7 +333,9 @@ If your password changes, commands that run as you fail until you save the
 new one under **Settings**, **General**, **Account for commands**, or where the
 app asks for it: while the node has no password of yours that works
 (`status`'s `owner_password` is `missing` or `stale`), the app asks for it when
-you switch a pairing to `user` mode or to allowlist mode as you, when you turn
+you switch a pairing to `user` mode or to allowlist mode as you, when the
+first-run steps would set `user` mode or add a folder in `folder` mode (it
+asks first and goes on with the step once the password is saved), when you turn
 sudo on (sudo's password is yours, so the node keeps that one too), and on the
 folder grants' warning. The app hands it to the running node over the
 [control pipe](#the-control-pipe) (`owner.password`, the hidden `password`
@@ -985,7 +998,12 @@ Linux ([the spec](spec/node-local.md#providers-on-windows)):
 
 - Only your programs and an elevated administrator's get in, told by the
   client's token; the pipe refuses other accounts, `nerve-run`'s commands and
-  clients from the network.
+  clients from the network. You may read and write on the pipe, not make
+  instances of it: open it with `FILE_GENERIC_READ | FILE_WRITE_DATA` (a
+  client that asks `GENERIC_WRITE` or `FILE_APPEND_DATA`, which on a pipe
+  is the right to make instances, is refused). Otherwise an account that
+  could make an instance would be taken for the node by a provider that
+  checks the pipe's owner, as all instances share the first one's.
 - The node checks the program by its image: the path Windows names for the
   client's process must be the one you allowed. Where its own account may
   not open the process (yours, an elevated one), Windows names the image by
