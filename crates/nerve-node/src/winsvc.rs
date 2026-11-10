@@ -248,6 +248,15 @@ fn stage_vault(
     }
 }
 
+/// Stops the service after [`stage_vault`]. A service that does not stop
+/// goes on with its live vault, so the stage is dropped with the error: it
+/// would be written back over what the node changes meanwhile.
+fn stop_after_stage(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> {
+    sys.stop().inspect_err(|_| {
+        crate::secrets::vault::discard_pending(&layout.paths);
+    })
+}
+
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
 /// the administrators, read for the interactive and service users), and to
 /// the owner the right to start, stop and ask it, nothing more.
@@ -573,7 +582,7 @@ fn install_steps(
     stage_vault(layout, sys, steps, &how)?;
     // A running service holds the program and the folders' files.
     if sys.service()? == Some(true) {
-        sys.stop()?;
+        stop_after_stage(layout, sys)?;
         steps.did(format!(
             "stopped the service {SERVICE_NAME} to install over it"
         ));
@@ -858,7 +867,7 @@ fn uninstall_steps(
         stage_vault(layout, sys, steps, &how)?;
     }
     if sys.service()?.is_some() {
-        sys.stop()?;
+        stop_after_stage(layout, sys)?;
         sys.delete_service()?;
         steps.did(format!("stopped and removed the service {SERVICE_NAME}"));
     }
@@ -1268,6 +1277,10 @@ pub(crate) mod tests {
         reaching: RefCell<Vec<String>>,
         /// The running service cannot put its vault aside.
         vault_fails: RefCell<bool>,
+        /// Its stage is written, as the service's `vault.stage` writes it.
+        stages: Cell<bool>,
+        /// The service does not stop.
+        stop_fails: Cell<bool>,
         pub(crate) calls: RefCell<Vec<String>>,
         /// `None`: not registered; else whether it runs.
         service: Cell<Option<bool>>,
@@ -1316,6 +1329,8 @@ pub(crate) mod tests {
                 typed: RefCell::new(Vec::new()),
                 reaching: RefCell::new(Vec::new()),
                 vault_fails: RefCell::new(false),
+                stages: Cell::new(false),
+                stop_fails: Cell::new(false),
                 calls: RefCell::new(Vec::new()),
                 service: Cell::new(None),
                 starts: Cell::new(true),
@@ -1487,6 +1502,9 @@ pub(crate) mod tests {
         }
         fn stop(&self) -> Result<(), String> {
             self.call("stop");
+            if self.stop_fails.get() {
+                return Err("the service did not stop within a minute".into());
+            }
             if self.service.get().is_some() {
                 self.service.set(Some(false));
             }
@@ -1621,6 +1639,10 @@ pub(crate) mod tests {
             self.call(format!("stage vault {}", paths.config_dir.display()));
             match *self.vault_fails.borrow() {
                 true => Err("unknown method vault.stage".into()),
+                false if self.stages.get() => {
+                    crate::secrets::vault::serve(paths, "vault.stage", &serde_json::json!({}))
+                        .map(|v| v["staged"].as_u64().unwrap_or(0))
+                }
                 false => Ok(0),
             }
         }
@@ -1913,6 +1935,41 @@ pub(crate) mod tests {
             "{:?}",
             sys.calls()
         );
+    }
+
+    /// A service that does not stop after its entries were put aside goes on
+    /// running with its live vault: the stage is dropped, or the next start
+    /// or install would take it for current and write it over later changes.
+    #[test]
+    fn a_service_that_will_not_stop_leaves_no_stage_behind() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::write(
+            l.paths.config_file(),
+            "[machine]\nsecret_storage = \"keyring\"\n",
+        )
+        .unwrap();
+        sys.stages.set(true);
+        sys.service.set(Some(true));
+        sys.stop_fails.set(true);
+        sys.types("alice's");
+        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("did not stop"), "{e}");
+        assert!(sys.calls().iter().any(|c| c.starts_with("stage vault")));
+        assert!(!crate::secrets::vault::staged_all(&l.paths));
+        assert!(!crate::secrets::vault::pending_file(&l.paths).exists());
+        // The uninstall that keeps the data the same.
+        let e = uninstall(&l, &l.paths, &sys, false, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("did not stop"), "{e}");
+        assert!(!crate::secrets::vault::pending_file(&l.paths).exists());
+        // A stop that works keeps the stage for the new service.
+        sys.stop_fails.set(false);
+        sys.types("alice's");
+        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        assert!(sys.calls().iter().any(|c| c == "stop"));
+        assert!(crate::secrets::vault::staged_all(&l.paths));
     }
 
     #[test]

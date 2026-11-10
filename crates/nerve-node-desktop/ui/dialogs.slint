@@ -1135,6 +1135,8 @@ export component UninstallDialog inherits Dialog {
             Install.close();
         } else if (Install.step != "working") {
             Install.uninstall-open = false;
+            Install.can-forget = false;
+            Install.forget = false;
         }
     }
     enter => {
@@ -1170,6 +1172,8 @@ export component UninstallDialog inherits Dialog {
                         kind: ButtonKind.ghost;
                         clicked => {
                             Install.uninstall-open = false;
+                            Install.can-forget = false;
+                            Install.forget = false;
                         }
                     }
                     Button {

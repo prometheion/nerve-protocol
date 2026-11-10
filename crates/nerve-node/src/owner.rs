@@ -2863,6 +2863,69 @@ mod tests {
         });
     }
 
+    /// Windows: an owner whose token holds no administrators' rights opens
+    /// the owner pipe with the rights it gives (`open_limited`) and cannot
+    /// make an instance of it, which a client that checks the pipe's owner
+    /// would take for the node's. An elevated administrator keeps `GA` and
+    /// can: that is what gives the check its teeth (and it is not run where
+    /// the tests do not run elevated).
+    #[cfg(windows)]
+    #[test]
+    fn an_owner_opens_the_owner_pipe_and_makes_no_instance() {
+        use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+        /// Acts as the token until dropped.
+        struct Acting;
+        impl Acting {
+            fn token(t: &crate::win_user::Token) -> Acting {
+                // SAFETY: an open token of this process; the thread acts as it
+                // until RevertToSelf.
+                assert_ne!(
+                    unsafe { ImpersonateLoggedOnUser(t.raw()) },
+                    0,
+                    "{}",
+                    std::io::Error::last_os_error()
+                );
+                Acting
+            }
+        }
+        impl Drop for Acting {
+            fn drop(&mut self) {
+                // SAFETY: a plain call, ending the impersonation of this thread.
+                unsafe { RevertToSelf() };
+            }
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let me = crate::win_user::own_sid()
+                .map_err(|e| e.to_string())
+                .and_then(|s| crate::win_host::sid_text(&s))
+                .unwrap();
+            let name = format!(r"\\.\pipe\nerve-test-owner-rights-{}", std::process::id());
+            // The node is somebody else; this process is an owner.
+            let node = "S-1-5-21-1-2-3-1001";
+            let sd = crate::pipe::Descriptor::from_sddl(&dacl_text(node, &[me])).unwrap();
+            let _first = crate::pipe::instance(&name, &sd, true).unwrap();
+
+            if nerve_service::win::sid::is_admin() {
+                let _second = crate::pipe::instance(&name, &sd, false)
+                    .expect("an elevated administrator keeps GA on the pipe");
+            } else {
+                eprintln!("not elevated: the administrators' side of the check is skipped");
+            }
+            let owner = crate::win_user::restricted().unwrap();
+            let acting = Acting::token(&owner);
+            let made = crate::pipe::instance(&name, &sd, false).map(drop);
+            let opened = nerve_service::win::pipe::open_limited(&name).map(drop);
+            drop(acting);
+            let e = made.expect_err("an owner made an instance of the owner pipe");
+            assert_eq!(e.raw_os_error(), Some(5), "{e}");
+            opened.expect("an owner opens the owner pipe with the rights it gives");
+        });
+    }
+
     /// Run by [`no_appcontainer_opens_the_owner_pipe`] in a process of its
     /// own, in a folder granted to the container: writes a line to the pipe
     /// from cmd in the container.

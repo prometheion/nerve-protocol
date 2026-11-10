@@ -68,9 +68,10 @@ fn offers_forget(error: &str) -> bool {
 
 /// `args` of an install or uninstall, with the owner's choice to go on
 /// without the keys and the proxy's login of the service's Credential
-/// Manager.
-fn with_forget(mut args: Vec<String>, forget: bool) -> Vec<String> {
-    if forget {
+/// Manager. An update has no such flag: a choice left over from a dialog
+/// that was cancelled must not reach it.
+fn with_forget(action: &str, mut args: Vec<String>, forget: bool) -> Vec<String> {
+    if forget && matches!(action, "install" | "uninstall") {
         args.push("--forget-secrets".into());
     }
     args
@@ -226,7 +227,7 @@ impl Ctl {
                 forget
             })
             .unwrap_or(false);
-        let args = with_forget(args, forget);
+        let args = with_forget(action, args, forget);
         self.with_install(|i| {
             i.set_action(action.into());
             i.set_error(SharedString::new());
@@ -358,6 +359,8 @@ impl Ctl {
             i.set_action("update".into());
             i.set_source(0);
             i.set_file(SharedString::new());
+            i.set_can_forget(false);
+            i.set_forget(false);
             i.set_error(SharedString::new());
             i.set_error_title(SharedString::new());
             i.set_step("choose".into());
@@ -454,11 +457,15 @@ mod tests {
         assert!(offers_forget(&kept));
         assert!(!offers_forget("a user nerve exists already"));
         let args = vec!["uninstall".to_string(), "--purge".to_string()];
-        assert_eq!(with_forget(args.clone(), false), args);
+        assert_eq!(with_forget("uninstall", args.clone(), false), args);
         assert_eq!(
-            with_forget(args, true),
+            with_forget("uninstall", args.clone(), true),
             ["uninstall", "--purge", "--forget-secrets"]
         );
+        // The update refuses the flag: a tick left from a cancelled dialog
+        // stays out of it.
+        let update = vec!["update".to_string()];
+        assert_eq!(with_forget("update", update.clone(), true), update);
     }
 
     /// Only Linux takes a node installed alone over.

@@ -1355,6 +1355,16 @@ pub(crate) mod vault {
         read_pending(paths).is_ok_and(|p| p.contains_key(COMPLETE))
     }
 
+    /// Drops what a `vault.stage` wrote, for an install or an uninstall that
+    /// could not stop the service after it: the service goes on running
+    /// with its live vault, which `vault.set` and `vault.delete` change from
+    /// then on, and a stage kept would be written back over those changes at
+    /// its next start (or taken for current by the next install).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn discard_pending(paths: &NodePaths) {
+        let _ = std::fs::remove_file(pending_file(paths));
+    }
+
     /// Whether the service's vault may hold entries of the node at `paths`:
     /// its keys, where `node.toml` says the keyring, and the proxy's header
     /// values, which are there whatever it says. A config that cannot be

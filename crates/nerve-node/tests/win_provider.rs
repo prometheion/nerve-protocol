@@ -24,6 +24,7 @@
 //! as the provider `wintest`, and takes both away again.
 #![cfg(windows)]
 
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -33,14 +34,17 @@ use nerve_conformance::wire::Conn;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
 use nerve_policy::config::AllowedProvider;
+use nerve_service::win::sid::well_known_sid;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows_sys::Win32::Security::{
-    ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
-    RevertToSelf,
+    CreateRestrictedToken, ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE,
+    LOGON32_PROVIDER_DEFAULT, LogonUserW, PSID, RevertToSelf, SID_AND_ATTRIBUTES,
+    WinBuiltinAdministratorsSid,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_WRITE_DATA};
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessWithLogonW, GetExitCodeProcess,
     LOGON_WITH_PROFILE, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
@@ -129,10 +133,17 @@ fn start_as(user: &str, password: &str, exe: &Path, name: &str, log: &Path) -> S
     }
 }
 
-/// Whether `user` with `password` may open `pipe`: tried as that account's
-/// logon on a thread of its own, without a process of its own.
-fn opens_as(user: &str, password: &str, pipe: &str) -> std::io::Result<()> {
-    let (user, password, pipe) = (user.to_string(), password.to_string(), pipe.to_string());
+/// Runs `f` on a thread that acts as `user`'s logon, without a process of
+/// its own. With `without_admins` the logon's token is first made one whose
+/// Administrators group only denies: what an owner who is an administrator
+/// has outside an elevated process, whichever token the logon gave.
+fn acting_as<R: Send + 'static>(
+    user: &str,
+    password: &str,
+    without_admins: bool,
+    f: impl FnOnce() -> R + Send + 'static,
+) -> R {
+    let (user, password) = (user.to_string(), password.to_string());
     std::thread::spawn(move || {
         let mut token: HANDLE = std::ptr::null_mut();
         // SAFETY: NUL-terminated strings ("." is this machine), a place for
@@ -147,24 +158,82 @@ fn opens_as(user: &str, password: &str, pipe: &str) -> std::io::Result<()> {
                 &mut token,
             );
             assert_ne!(ok, 0, "{user}: {}", std::io::Error::last_os_error());
+            let mut acts = token;
+            if without_admins {
+                let admins = well_known_sid(WinBuiltinAdministratorsSid).unwrap();
+                let deny = [SID_AND_ATTRIBUTES {
+                    Sid: admins.as_ptr() as PSID,
+                    Attributes: 0,
+                }];
+                let ok = CreateRestrictedToken(
+                    token,
+                    0,
+                    1,
+                    deny.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    &mut acts,
+                );
+                assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+            }
             assert_ne!(
-                ImpersonateLoggedOnUser(token),
+                ImpersonateLoggedOnUser(acts),
                 0,
                 "{}",
                 std::io::Error::last_os_error()
             );
-            let r = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&pipe)
-                .map(drop);
+            let r = f();
             RevertToSelf();
+            if acts != token {
+                CloseHandle(acts);
+            }
             CloseHandle(token);
             r
         }
     })
     .join()
     .unwrap()
+}
+
+/// Whether `user` with `password` may open `pipe` with exactly the rights
+/// the pipe gives an owner (`FILE_GENERIC_READ | FILE_WRITE_DATA`, as
+/// `open_limited` asks): refused with 5 only for an account that is not in
+/// the pipe's DACL, not for the rights it asks.
+fn opens_as(user: &str, password: &str, pipe: &str) -> std::io::Result<()> {
+    let pipe = pipe.to_string();
+    acting_as(user, password, false, move || {
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ | FILE_WRITE_DATA)
+            .open(&pipe)
+            .map(drop)
+    })
+}
+
+/// What `create` says of making an instance of `pipe` and what opening it
+/// says, as `user`'s logon without the administrators' rights.
+fn instance_and_open_as_owner(
+    user: &str,
+    password: &str,
+    pipe: &str,
+) -> (std::io::Result<()>, std::io::Result<()>) {
+    let pipe = pipe.to_string();
+    acting_as(user, password, true, move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _in = rt.enter();
+        let made = tokio::net::windows::named_pipe::ServerOptions::new()
+            .create(&pipe)
+            .map(drop);
+        let opened = std::fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ | FILE_WRITE_DATA)
+            .open(&pipe)
+            .map(drop);
+        (made, opened)
+    })
 }
 
 /// The first line the provider at `log` wrote: the node's answer to its
@@ -320,19 +389,25 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
         .expect_err("a remote client got in");
     eprintln!("a remote client: {e}");
 
-    // Another standard account may not open the pipe.
+    // Another standard account may not open the pipe, though it asks only
+    // for the rights an owner gets; the owner does open it with them.
     let e = opens_as(&other, &other_pw, PIPE).expect_err("another account opened the pipe");
     assert_eq!(e.raw_os_error(), Some(5), "{e}");
+    opens_as(&owner, &owner_pw, PIPE).expect("the owner opens the provider pipe");
 
-    // The owner (this program's account) may not make an instance of the
-    // owner pipe or the provider pipe: a provider that checks the pipe's
-    // owner would take it for the node's.
-    for name in [PIPE, nerve_node::owner::pipe_name().as_str()] {
-        let e = tokio::net::windows::named_pipe::ServerOptions::new()
-            .create(name)
-            .map(|_| ())
-            .expect_err("the owner made an instance of the node's pipe");
+    // The owner may not make an instance of the owner pipe or the provider
+    // pipe: a provider that checks the pipe's owner would take it for the
+    // node's. That holds for a token without the administrators' rights,
+    // which keep `GA` on both pipes (this program, elevated, makes one).
+    let node_pipe = nerve_node::owner::pipe_name();
+    for name in [PIPE, node_pipe.as_str()] {
+        let (made, opened) = instance_and_open_as_owner(&owner, &owner_pw, name);
+        let e = made.expect_err("the owner made an instance of the node's pipe");
         assert_eq!(e.raw_os_error(), Some(5), "{name}: {e}");
+        opened.unwrap_or_else(|e| panic!("{name}: the owner cannot open it: {e}"));
+        let sd = nerve_service::win::pipe::Descriptor::from_sddl("D:P(A;;GA;;;SY)").unwrap();
+        nerve_service::win::pipe::instance(name, &sd, false)
+            .unwrap_or_else(|e| panic!("{name}: an elevated administrator keeps GA: {e}"));
     }
 
     // A process of a command the node runs is refused, though it runs the

@@ -1140,7 +1140,11 @@ fn the_app_drives_the_cli_end_to_end() {
     // The update's file the same: its dialog says it under a heading of
     // its own, since no update ran.
     let update = window.global::<Install>();
+    // A tick left from an uninstall that was cancelled does not reach it.
+    update.set_can_forget(true);
+    update.set_forget(true);
     update.invoke_ask_update();
+    assert!(!update.get_can_forget() && !update.get_forget());
     update.invoke_choose_file();
     assert!(update.get_error().contains("xdg-desktop-portal"));
     assert_eq!(update.get_error_title(), "No file dialog");
