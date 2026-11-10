@@ -2043,6 +2043,7 @@ async fn install_package(
 /// another account put in `/tmp` under that name, is never taken: what root
 /// writes into it could be swapped before the package manager reads it.
 fn fresh_dir(parent: &Path, names: impl IntoIterator<Item = String>) -> Result<PathBuf, String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

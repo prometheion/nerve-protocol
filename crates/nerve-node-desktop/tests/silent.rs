@@ -39,7 +39,12 @@ fn a_silent_install_runs_install_without_a_window_or_a_question() {
         std::thread::sleep(Duration::from_millis(50));
     };
     let mut err = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
     assert!(!status.success(), "{status}");
     assert!(
         err.contains("install needs root: run `sudo nerve-node install`"),

@@ -2,7 +2,8 @@
 //! conformance fake center pairs with it and may not turn sudo on; the
 //! installed program, as the app runs it, turns it on with the owner's
 //! password; the center runs commands with and without sudo, and a restart
-//! of the service turns it off. It needs a Windows test machine: Nerve installed as a service (the
+//! of the service turns it off. The owner's password reaches the running
+//! node as the app hands it over (`password`). It needs a Windows test machine: Nerve installed as a service (the
 //! app's `install`, as CI's `windows-installed` job runs it) whose owner, the
 //! account that installed it, is an administrator, an elevated terminal, and
 //! that account and its password in `NERVE_WIN_SUDO_ACCOUNT` and
@@ -111,8 +112,13 @@ async fn state(conn: &mut Conn<TcpStream>) -> String {
 /// `sudo on` of the installed program, with the password on stdin, as the
 /// app runs it.
 fn cli_on(layout: &Layout, password: &str) -> std::process::Output {
+    with_input(layout, &["sudo", "on"], password)
+}
+
+/// The installed program's `args`, with `password` on stdin.
+fn with_input(layout: &Layout, args: &[&str], password: &str) -> std::process::Output {
     let mut child = Command::new(&layout.bin)
-        .args(["sudo", "on"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -206,6 +212,28 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     .expect("the owner's edit");
     // The running node took the pairing and the rules at once, and dialed.
     let mut conn = linked(&mut center).await;
+
+    // The owner's password, as the app hands it to `password` where the
+    // node has none that works: the running node checks it with a logon,
+    // refuses a wrong one, and stores the right one.
+    let o = with_input(&layout, &["password"], "not-the-password");
+    assert!(!o.status.success(), "{o:?}");
+    let o = with_input(&layout, &["password"], &password);
+    assert!(o.status.success(), "{o:?}");
+    let said = String::from_utf8_lossy(&o.stdout).to_lowercase();
+    assert!(
+        said.contains(&format!(
+            "the node has the password of {}",
+            account.to_lowercase()
+        )),
+        "{said}"
+    );
+    let o = Command::new(&layout.bin)
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
+    assert_eq!(v["owner_password"], "stored", "{v}");
 
     // Off: the sudo list names the command, yet it is refused.
     assert_eq!(state(&mut conn).await, "off");
