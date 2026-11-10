@@ -578,6 +578,21 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
             );
         }
     }
+    // The closed folder is refused for being closed.
+    let e = call(
+        &mut conn_a,
+        "fs",
+        "list",
+        json!({"path": nerve_policy::paths::to_wire(&closed)}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        e.message
+            .contains(&format!("{} is closed to {A}'s commands", closed.display())),
+        "{}",
+        e.message
+    );
 
     // A project whose files are linked to a store outside it, as pnpm's
     // `node_modules`: its `rw` grant goes on, and the commands run. The
@@ -843,6 +858,21 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     .expect("a's read of the protected entry");
     assert_ne!(r["exit_code"], 0, "{r}");
     assert!(!out(&r).contains("kept"), "{r}");
+    // A command in the entry is refused for it: the folder's grant leaves
+    // it out.
+    let e = run_in(&mut conn_a, &keep, "Get-ChildItem")
+        .await
+        .unwrap_err();
+    assert!(
+        e.message
+            .contains(&format!("may not open {}", keep.display()))
+            && e.message.contains(&format!(
+                "it is protected, and the grant of {} (r) leaves it out",
+                mine.display()
+            )),
+        "{}",
+        e.message
+    );
 
     // The owner's Documents folder redirected (as OneDrive's backup does):
     // PowerShell's profiles there are protected as in the usual place, read
@@ -1367,6 +1397,21 @@ async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed
         },
     )
     .await;
+    // A call into the link, and one below it, is refused at once: nothing
+    // opens the link to say why either.
+    let started = Instant::now();
+    let in_it = run_in(&mut conn, &sub, "Write-Output no").await;
+    let wire = nerve_policy::paths::to_wire(&sub.join("x"));
+    let below = call(&mut conn, "fs", "read", json!({ "path": wire })).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "two calls took {:?}: the node followed the link to the other machine",
+        started.elapsed()
+    );
+    for e in [in_it, below] {
+        let e = e.unwrap_err();
+        assert!(!e.message.contains("may not open"), "{}", e.message);
+    }
 
     forget(&paths).await;
     let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();
@@ -1430,12 +1475,22 @@ async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_
     // Each of these calls looks at the pairing's folders (the sync, the
     // protected list) as the service's account.
     let started = Instant::now();
-    let _ = run_in(&mut conn, &g, "Write-Output no owner").await;
+    let e = run_in(&mut conn, &g, "Write-Output no owner")
+        .await
+        .unwrap_err();
     let _ = run_in(&mut conn, &g, "Write-Output still no owner").await;
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "two calls took {:?}: the node followed the link to the other machine",
         started.elapsed()
+    );
+    // The folder's grant could not go on without the owner, which the
+    // refusal says, without the node opening the folder to find out.
+    assert!(
+        e.message
+            .contains(&format!("the grant of {} (rwx) is not on", g.display())),
+        "{}",
+        e.message
     );
 
     forget(&paths).await;

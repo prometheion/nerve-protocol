@@ -2436,6 +2436,90 @@ pub struct Refused<'a> {
     pub account: &'a str,
 }
 
+/// Why a path in a granted folder has no grant of its own: the grants of a
+/// folder that holds a protected entry or a folder of the node's own go on
+/// its other entries (`exec::container_grants`), and none on the entry.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LeftOut {
+    /// A protected entry, or a path inside one.
+    Protected,
+    /// A folder of the node's own, or a path inside one.
+    Own,
+}
+
+/// A pairing's `folders` as [`refused_text`] takes them: as the owner
+/// wrote them, with `~` the `home` of the rules. A folder the sync could not
+/// resolve or grant is one of them all the same, so that its path is told
+/// as one whose grant is not on, not as one outside the pairing's folders.
+#[cfg(any(windows, test))]
+pub fn spelled(folders: &[nerve_policy::config::Folder], home: &Path) -> Vec<(PathBuf, Access)> {
+    folders
+        .iter()
+        .filter_map(|f| Some((nerve_policy::protected::expand(home, &f.path)?, f.access)))
+        .collect()
+}
+
+/// The refusal `message` of a pairing's call, of kind `kind`, for the path
+/// the center gave (`given`, which is `path` on this machine) with why the
+/// pairing's container may not open it (`why`, [`refused`]), or `None` where
+/// it stays as it is. Only "Access is denied" of that path is looked into:
+/// any other refusal (one that is not found, a link to another machine)
+/// says why already. `open` opens a path as the container does; it goes up
+/// from `path` past what is not there, as the resolve looks at the way, and
+/// is done with (dropped) before `why` looks. Nothing is opened where
+/// `remote` finds that a link on the way may lead to another machine
+/// (opening it would connect there): the why is then told of `path` with
+/// the resolve's own error.
+#[cfg(any(windows, test))]
+pub fn explained(
+    kind: &str,
+    message: &str,
+    given: &str,
+    path: &Path,
+    remote: impl FnOnce() -> bool,
+    open: impl FnMut(&Path) -> io::Result<()>,
+    why: impl FnOnce(&Path, &Result<(), String>) -> String,
+) -> Option<String> {
+    if kind != "bad_path" || !message.starts_with(given) || !message.contains("(os error 5)") {
+        return None;
+    }
+    let (at, opened) = if remote() {
+        let error = message[given.len()..].trim_start_matches(": ");
+        (path.to_path_buf(), Err(error.to_string()))
+    } else {
+        probed(path, open)?
+    };
+    let why = why(&at, &opened);
+    // Where it opened, the error of its name is kept.
+    Some(match opened {
+        Err(_) => format!("{given}: {why}"),
+        Ok(()) => format!("{message}: {why}"),
+    })
+}
+
+/// Where `open` is refused on `path`, or on the deepest part of it that is
+/// there: that part and the error; the path itself with `Ok` where it
+/// opens. `None` where something else ends the look (a part opens, the
+/// rest is not there; another error).
+#[cfg(any(windows, test))]
+fn probed(
+    path: &Path,
+    mut open: impl FnMut(&Path) -> io::Result<()>,
+) -> Option<(PathBuf, Result<(), String>)> {
+    let mut at = path;
+    loop {
+        match open(at) {
+            Ok(()) => return (at == path).then(|| (at.to_path_buf(), Ok(()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => at = at.parent()?,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return Some((at.to_path_buf(), Err(e.to_string())));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// The deepest of `places` that holds `path`.
 #[cfg(any(windows, test))]
 fn deepest<'a, T>(
@@ -2461,12 +2545,15 @@ where
 /// of the grants; `listed` reads, for a grant recorded as on, whether the
 /// folder's own list carries the entries of the container and of the
 /// account (the container opens a folder only where both may).
+/// `left_out` tells a path that the grants of a folder around it leave out
+/// on purpose.
 #[cfg(any(windows, test))]
 pub fn refused_text(
     who: &Refused,
     path: &Path,
     opened: &Result<(), String>,
     folders: &[(PathBuf, Access)],
+    left_out: impl Fn(&Path) -> Option<LeftOut>,
     record: &Result<Vec<Grant>, String>,
     listed: impl FnOnce(&Grant) -> Result<(bool, bool), String>,
 ) -> String {
@@ -2492,6 +2579,23 @@ pub fn refused_text(
             "{first}; {} is closed to {center}'s commands",
             folder.display()
         );
+    }
+    // No grant goes on such a path, whatever the record says of the folder.
+    // A protected entry the owner added as a folder of its own is granted
+    // whole, as that folder.
+    match left_out(path) {
+        Some(LeftOut::Own) => {
+            return format!(
+                "{first}; it is in a folder of the node's own, which no pairing's commands reach"
+            );
+        }
+        Some(LeftOut::Protected) if left_out(folder).is_none() => {
+            return format!(
+                "{first}; it is protected, and the grant of {} ({access}) leaves it out: add it to {center}'s folders on its own for its commands to reach it",
+                folder.display()
+            );
+        }
+        _ => {}
     }
     let record = match record {
         Ok(r) => r,
@@ -2544,30 +2648,72 @@ pub fn refused(
     path: &Path,
     opened: &Result<(), String>,
     folders: &[(PathBuf, Access)],
+    left_out: impl Fn(&Path) -> Option<LeftOut>,
 ) -> String {
     let record = read_record(&record_file(paths));
     let all = record.clone().unwrap_or_default();
     let run = run_sid(paths).filter(|s| !s.is_empty());
-    refused_text(who, path, opened, folders, &record, |g| {
-        use nerve_sandbox::appcontainer;
-        let _as = act_as(owner).map_err(|e| e.to_string())?;
-        let on = |name: &str, access: Access| {
-            appcontainer::look(&g.path, name, masks_of(access))
-                .map(|(_, granted)| granted)
-                .map_err(|e| e.to_string())
-        };
-        let has_container = on(&g.container, g.access)?;
-        // The account's grant there is the union of every pairing's
-        // ([`wanted_on`]).
-        let has_account = match run.as_deref().and_then(|sid| {
-            all.iter()
-                .find(|r| r.container == sid && same_path(&r.path, &g.path))
-        }) {
-            Some(r) => on(&r.container, r.access)?,
-            None => false,
-        };
-        Ok((has_container, has_account))
+    refused_text(who, path, opened, folders, left_out, &record, |g| {
+        let acting = act_as(owner).map_err(|e| e.to_string())?;
+        listed_on(
+            g,
+            &all,
+            run.as_deref(),
+            |p| remote_here(p, acting.is_some()),
+            |p, name, access| {
+                nerve_sandbox::appcontainer::look(p, name, masks_of(access))
+                    .map(|(_, granted)| granted)
+            },
+        )
     })
+}
+
+/// Where the links on `path`'s way lead to another machine, looked at as
+/// this thread acts: as the owner (`as_owner`), who may look at the whole
+/// way, as [`not_remote`] does; else as the node's own account, which may
+/// not look into the owner's folders, so that a part of the way it cannot
+/// look at is an error: Windows follows a link there all the same.
+#[cfg(windows)]
+pub(crate) fn remote_here(path: &Path, as_owner: bool) -> io::Result<Option<PathBuf>> {
+    if as_owner {
+        Ok(nerve_policy::paths::remote_link(path))
+    } else {
+        nerve_policy::paths::remote_link_checked(path)
+    }
+}
+
+/// [`refused`]'s look at grant `g`, recorded as on: whether the folder's
+/// list carries the entries of its container and of the command account
+/// (`run`, whose grant is the one of `all` on that folder), each read with
+/// `on` (path, the entry's container or SID, its flags). Nothing is read
+/// where `remote` finds a link to another machine on the way, which a read
+/// would follow (as `not_remote` says: a folder replaced by such a link since
+/// the sync).
+#[cfg(any(windows, test))]
+fn listed_on(
+    g: &Grant,
+    all: &[Grant],
+    run: Option<&str>,
+    remote: impl FnOnce(&Path) -> io::Result<Option<PathBuf>>,
+    on: impl Fn(&Path, &str, Access) -> io::Result<bool>,
+) -> Result<(bool, bool), String> {
+    if let Some(link) = remote(&g.path).map_err(|e| e.to_string())? {
+        return Err(format!(
+            "{} is a link to another machine, which the node does not follow",
+            link.display()
+        ));
+    }
+    let has_container = on(&g.path, &g.container, g.access).map_err(|e| e.to_string())?;
+    // The account's grant there is the union of every pairing's
+    // ([`wanted_on`]).
+    let has_account = match run.and_then(|sid| {
+        all.iter()
+            .find(|r| r.container == sid && same_path(&r.path, &g.path))
+    }) {
+        Some(r) => on(&g.path, &r.container, r.access).map_err(|e| e.to_string())?,
+        None => false,
+    };
+    Ok((has_container, has_account))
 }
 
 #[cfg(test)]
@@ -2621,8 +2767,10 @@ mod tests {
     /// closed one, in one whose grant is not on (none recorded, one that
     /// stopped part way, or only one of a folder around it), under one whose
     /// folder lacks an entry (the container's, the account's, both), under
-    /// one that is on in full, and with no record to read. One that opens
-    /// is refused for its name.
+    /// one that is on in full, and with no record to read. A path the grants
+    /// of its folder leave out (a protected entry, a folder of the node's
+    /// own) says so, whatever the record; a protected entry the owner added
+    /// as a folder is that folder. One that opens is refused for its name.
     #[test]
     fn a_path_the_container_may_not_open_says_why() {
         let who = Refused {
@@ -2635,7 +2783,17 @@ mod tests {
             (PathBuf::from("/w"), Access::parse("r").unwrap()),
             (PathBuf::from("/w/a"), Access::parse("rwx").unwrap()),
             (PathBuf::from("/w/a/closed"), Access::NONE),
+            (PathBuf::from("/w/kept"), Access::parse("rwx").unwrap()),
         ];
+        let left_out = |p: &Path| {
+            if within(p, Path::new("/w/a/own")) {
+                Some(LeftOut::Own)
+            } else if within(p, Path::new("/w/a/.ssh")) || within(p, Path::new("/w/kept")) {
+                Some(LeftOut::Protected)
+            } else {
+                None
+            }
+        };
         let on = vec![
             grant("c1", "/w", "r"),
             grant("c1", "/w/a", "rwx"),
@@ -2648,7 +2806,7 @@ mod tests {
                     record: &Result<Vec<Grant>, String>,
                     path: &Path,
                     listed: Result<(bool, bool), String>| {
-            refused_text(&who, path, opened, &folders, record, |g| {
+            refused_text(&who, path, opened, &folders, left_out, record, |g| {
                 assert_eq!(g.path, Path::new("/w/a"), "the deepest grant");
                 listed
             })
@@ -2671,6 +2829,33 @@ mod tests {
                 Ok((true, true))
             ),
             "nerve-run in wina's AppContainer c1 may not open /w/a/closed/k (Access is denied. (os error 5)); /w/a/closed is closed to wina's commands"
+        );
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                Path::new("/w/a/.ssh/id"),
+                Ok((true, true))
+            ),
+            "nerve-run in wina's AppContainer c1 may not open /w/a/.ssh/id (Access is denied. (os error 5)); it is protected, and the grant of /w/a (rwx) leaves it out: add it to wina's folders on its own for its commands to reach it"
+        );
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                Path::new("/w/a/own/state"),
+                Ok((true, true))
+            ),
+            "nerve-run in wina's AppContainer c1 may not open /w/a/own/state (Access is denied. (os error 5)); it is in a folder of the node's own, which no pairing's commands reach"
+        );
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                Path::new("/w/kept/k"),
+                Ok((true, true))
+            ),
+            "nerve-run in wina's AppContainer c1 may not open /w/kept/k (Access is denied. (os error 5)); the grant of /w/kept (rwx) is not on: the node's log says why under \"folder grants\", and Sync folders (`nerve-node folder sync`) tries again"
         );
         let mut stopped = grant("c1", "/w/a", "rwx");
         stopped.unfinished = true;
@@ -2723,6 +2908,239 @@ mod tests {
             text(&Ok(()), &Ok(on), path, Ok((true, true))).starts_with(
                 "nerve-run in wina's AppContainer c1 opens /w/a/x, but Windows does not give it the path's full name; the grant of /w/a (rwx) is on,"
             )
+        );
+    }
+
+    /// Only "Access is denied" of the call's own path is looked into: not
+    /// another kind of refusal, one of another path, or one that says why
+    /// already (a link to another machine, a path not found). Nothing is
+    /// opened where the links on the way may lead to another machine: the
+    /// why is told of the path with the resolve's error then. The
+    /// look goes up past what is not there to the part that is refused, and
+    /// is done with before the why is asked for; the why follows the path
+    /// as the center gave it, or the error of a name where the path opens.
+    #[test]
+    fn a_refusal_is_looked_into_only_where_access_is_denied_and_nothing_leads_away() {
+        use std::cell::{Cell, RefCell};
+        let given = "/c/w/a/x";
+        let path = Path::new("/w/a/x");
+        let denied = format!("{given}: Access is denied. (os error 5)");
+        let never_remote = || -> bool { panic!("looked for links") };
+        let never_open = |_: &Path| -> io::Result<()> { panic!("opened") };
+        let never_why = |_: &Path, _: &Result<(), String>| -> String { panic!("asked why") };
+        for (kind, message) in [
+            ("forbidden", denied.as_str()),
+            ("bad_path", "/c/w/b: Access is denied. (os error 5)"),
+            (
+                "bad_path",
+                "/c/w/a/x: /w/a/x is a link to another machine, which is not followed",
+            ),
+            (
+                "bad_path",
+                "/c/w/a/x: The system cannot find the file specified. (os error 2)",
+            ),
+        ] {
+            assert_eq!(
+                explained(
+                    kind,
+                    message,
+                    given,
+                    path,
+                    never_remote,
+                    never_open,
+                    never_why
+                ),
+                None,
+                "{kind}: {message}"
+            );
+        }
+        let told = RefCell::new(None);
+        assert_eq!(
+            explained(
+                "bad_path",
+                &denied,
+                given,
+                path,
+                || true,
+                never_open,
+                |at, opened| {
+                    *told.borrow_mut() = Some((at.to_path_buf(), opened.clone()));
+                    "why".to_string()
+                }
+            ),
+            Some(format!("{given}: why"))
+        );
+        assert_eq!(
+            told.take(),
+            Some((
+                PathBuf::from("/w/a/x"),
+                Err("Access is denied. (os error 5)".into())
+            ))
+        );
+
+        /// Marks when the `open` that holds it is dropped.
+        struct Held<'a>(&'a Cell<bool>);
+        impl Drop for Held<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let refuse = |kind: io::ErrorKind| io::Error::new(kind, format!("{kind:?}"));
+        // What `open` answers per path, and which it was asked for.
+        let look = |answers: Vec<(&'static str, io::ErrorKind)>, ok: bool| {
+            let asked = RefCell::new(Vec::new());
+            let dropped = Cell::new(false);
+            let told = RefCell::new(None);
+            let said = {
+                let held = Held(&dropped);
+                let (asked, answers) = (&asked, &answers);
+                let open = move |p: &Path| {
+                    let _held = &held;
+                    asked.borrow_mut().push(p.to_path_buf());
+                    match answers.iter().find(|(at, _)| Path::new(at) == p) {
+                        Some((_, kind)) => Err(refuse(*kind)),
+                        None if ok => Ok(()),
+                        None => Err(refuse(io::ErrorKind::Other)),
+                    }
+                };
+                explained(
+                    "bad_path",
+                    &denied,
+                    given,
+                    path,
+                    || false,
+                    open,
+                    |at, opened| {
+                        assert!(dropped.get(), "the container's look is done with first");
+                        *told.borrow_mut() = Some((at.to_path_buf(), opened.clone()));
+                        "why".to_string()
+                    },
+                )
+            };
+            (said, asked.into_inner(), told.into_inner())
+        };
+        use io::ErrorKind::{NotFound, PermissionDenied};
+        assert_eq!(
+            look(vec![("/w/a/x", PermissionDenied)], true),
+            (
+                Some(format!("{given}: why")),
+                vec![PathBuf::from("/w/a/x")],
+                Some((PathBuf::from("/w/a/x"), Err("PermissionDenied".into())))
+            )
+        );
+        assert_eq!(
+            look(vec![("/w/a/x", NotFound), ("/w/a", PermissionDenied)], true),
+            (
+                Some(format!("{given}: why")),
+                vec![PathBuf::from("/w/a/x"), PathBuf::from("/w/a")],
+                Some((PathBuf::from("/w/a"), Err("PermissionDenied".into())))
+            )
+        );
+        assert_eq!(
+            look(vec![("/w/a/x", NotFound)], true),
+            (
+                None,
+                vec![PathBuf::from("/w/a/x"), PathBuf::from("/w/a")],
+                None
+            )
+        );
+        assert_eq!(
+            look(vec![], false),
+            (None, vec![PathBuf::from("/w/a/x")], None)
+        );
+        assert_eq!(
+            look(vec![], true),
+            (
+                Some(format!("{denied}: why")),
+                vec![PathBuf::from("/w/a/x")],
+                Some((PathBuf::from("/w/a/x"), Ok(())))
+            )
+        );
+    }
+
+    /// A grant recorded as on is looked at in its folder's list, for the
+    /// container's entry and the command account's (its grant there, of
+    /// any pairing's flags): not where a link on the way leads to another
+    /// machine, or where that cannot be told, since the look would follow it.
+    #[test]
+    fn a_grant_is_looked_at_only_where_nothing_leads_to_another_machine() {
+        use std::cell::RefCell;
+        let g = grant("c1", "/w/a", "rwx");
+        let all = vec![
+            g.clone(),
+            grant("S-1-5-21-9", "/w/a", "rw"),
+            grant("S-1-5-21-1", "/w/b", "rwx"),
+            grant("S-1-5-21-1", "/w/a", "rwx"),
+        ];
+        let never = |_: &Path, _: &str, _: Access| -> io::Result<bool> { panic!("looked") };
+        assert_eq!(
+            listed_on(
+                &g,
+                &all,
+                Some("S-1-5-21-1"),
+                |_| Ok(Some("/w".into())),
+                never
+            ),
+            Err("/w is a link to another machine, which the node does not follow".into())
+        );
+        assert_eq!(
+            listed_on(
+                &g,
+                &all,
+                Some("S-1-5-21-1"),
+                |_| Err(io::Error::other("/w cannot be looked at")),
+                never
+            ),
+            Err("/w cannot be looked at".into())
+        );
+        let asked = RefCell::new(Vec::new());
+        let on = |p: &Path, name: &str, access: Access| {
+            asked
+                .borrow_mut()
+                .push((p.to_path_buf(), name.to_string(), access.to_string()));
+            Ok(name == "S-1-5-21-1")
+        };
+        assert_eq!(
+            listed_on(&g, &all, Some("S-1-5-21-1"), |_| Ok(None), on),
+            Ok((false, true))
+        );
+        assert_eq!(
+            asked.take(),
+            [
+                ("/w/a".into(), "c1".into(), "rwx".into()),
+                ("/w/a".into(), "S-1-5-21-1".into(), "rwx".into())
+            ]
+        );
+        assert_eq!(
+            listed_on(&g, &all, None, |_| Ok(None), on),
+            Ok((false, false))
+        );
+        assert_eq!(asked.take().len(), 1);
+    }
+
+    /// A pairing's folders are told as the owner wrote them, `~` the home of
+    /// the rules; one that names no place is left out.
+    #[test]
+    fn a_pairings_folders_are_spelled_with_its_home() {
+        let folder = |path: &str, access: &str| nerve_policy::config::Folder {
+            path: path.into(),
+            access: Access::parse(access).unwrap(),
+        };
+        assert_eq!(
+            spelled(
+                &[
+                    folder("~", "r"),
+                    folder("~/proj", "rwx"),
+                    folder("/srv/data", "rw"),
+                    folder("proj", "rwx"),
+                ],
+                Path::new("/home/o")
+            ),
+            [
+                (PathBuf::from("/home/o"), Access::parse("r").unwrap()),
+                (PathBuf::from("/home/o/proj"), Access::parse("rwx").unwrap()),
+                (PathBuf::from("/srv/data"), Access::parse("rw").unwrap()),
+            ]
         );
     }
 
