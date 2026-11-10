@@ -521,14 +521,15 @@ impl FileJob {
 
 /// Whether `cmd` reads this process's input: the questions of `setup` and
 /// of `config set machine.secret_storage keyring`, the question of `center
-/// add` without `--yes`, what `proxy set` takes from stdin, and the schema
-/// `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
+/// add` without `--yes`, what `proxy set` takes from stdin, the schema
+/// `cap add` or `cap edit` takes from it, and the owner's Windows password
+/// that `password` reads. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
     use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
-        Cmd::Setup => true,
+        Cmd::Setup | Cmd::Password => true,
         Cmd::Config(c) => crate::cli::moves_keys_to_keyring(c),
         Cmd::Cap {
             cmd: Some(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }),
@@ -2662,6 +2663,8 @@ mod tests {
         }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
+        // The app hands the owner's Windows password to `password` on stdin.
+        assert!(reads_input(&cli(&["password"]).cmd));
         // So does the move of the keys into a keyring, which offers one.
         assert!(reads_input(
             &cli(&["config", "set", "machine.secret_storage", "keyring"]).cmd

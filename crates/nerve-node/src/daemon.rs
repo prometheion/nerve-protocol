@@ -2375,8 +2375,8 @@ impl Daemon {
             acl_tried: Mutex::default(),
         });
         shared.tell_confinement(&cfg);
-        // A file that says on starts off: on Linux the password lives in
-        // memory only; Windows holds the one kept with DPAPI (crate::winsudo).
+        // A file that says on starts off: the password lives in memory
+        // only, on Windows too (crate::winsudo).
         shared.settle_sudo();
         // The profile of a pairing's container goes with the pairing, by the
         // node's note of the pairings it had (crate::grants::note_pairings).

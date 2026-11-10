@@ -565,7 +565,7 @@
             {
               "args": [],
               "line": "Turn sudo on; the password stays in memory only",
-              "more": "Turn sudo on; asks for your sudo password and keeps it in memory only (on Windows the password of the account commands run as, kept with DPAPI).",
+              "more": "Turn sudo on; asks for your sudo password (on Windows the password of the account commands run as) and keeps it in memory only, so a restart turns sudo off.",
               "name": "sudo on",
               "usage": "nerve-node sudo on"
             },

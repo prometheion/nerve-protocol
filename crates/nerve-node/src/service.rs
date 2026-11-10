@@ -2021,10 +2021,12 @@ async fn install_package(
     }
     let old = std::fs::read(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
     // In a folder of root's own, which the package manager reads as root.
-    let dir = std::env::temp_dir().join(format!("nerve-update-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    nerve_transport::files::create_private_dir(&dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    let names = (0..16).map(|i| format!("nerve-update-{}-{stamp:x}-{i}", std::process::id()));
+    let dir = fresh_dir(&std::env::temp_dir(), names)?;
     let file = dir.join(&asset);
     let r = write_file(&file, &bytes, 0o644).and_then(|()| sys.install_package(package, &file));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2034,6 +2036,31 @@ async fn install_package(
         old: Some(old),
         version: old_v,
     })
+}
+
+/// A folder this process makes under `parent`, 0700, at the first of
+/// `names` that is free. One that is there already, a folder or a link that
+/// another account put in `/tmp` under that name, is never taken: what root
+/// writes into it could be swapped before the package manager reads it.
+fn fresh_dir(parent: &Path, names: impl IntoIterator<Item = String>) -> Result<PathBuf, String> {
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    for name in names {
+        let dir = parent.join(name);
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!(
+        "{}: every name for a folder of the update is taken",
+        parent.display()
+    ))
 }
 
 /// What `update` asks the new program besides `service-files`: the owner the
@@ -5119,6 +5146,28 @@ pub(crate) mod tests {
             Layout::of_package(&DESKTOP, None).bin,
             Layout::of(&DESKTOP).bin
         );
+    }
+
+    /// The folder an update writes the release's package into is one it
+    /// made: a name that another account took first, with a folder or a
+    /// link of its own, is passed over and left as it is.
+    #[cfg(unix)]
+    #[test]
+    fn the_package_goes_into_a_folder_the_update_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let theirs = d.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::create_dir(d.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(&theirs, d.path().join("b")).unwrap();
+        let names = ["a", "b", "c"].map(String::from);
+        let dir = fresh_dir(d.path(), names.clone()).unwrap();
+        assert_eq!(dir, d.path().join("c"));
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
+        let e = fresh_dir(d.path(), names).unwrap_err();
+        assert!(e.contains("every name"), "{e}");
     }
 
     /// The app from a package (#212): install leaves the package's program

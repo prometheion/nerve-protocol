@@ -647,7 +647,7 @@ pub enum LogCmd {
 pub enum SudoCmd {
     /// Turn sudo on; the password stays in memory only
     ///
-    /// Turn sudo on; asks for your sudo password and keeps it in memory only (on Windows the password of the account commands run as, kept with DPAPI).
+    /// Turn sudo on; asks for your sudo password (on Windows the password of the account commands run as) and keeps it in memory only, so a restart turns sudo off.
     On,
     /// Turn sudo off and forget the password.
     Off,
