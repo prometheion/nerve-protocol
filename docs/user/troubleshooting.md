@@ -38,21 +38,6 @@ The file was moved there (`mv`) and kept its own access list. Press
 </details>
 
 <details>
-<summary>On Windows a call says <code>nerve-run in …'s AppContainer … may not open …</code></summary>
-
-The rest of the message says why:
-
-| Message | Fix |
-|---|---|
-| `… it is in none of …'s folders` | `nerve-node folder add <path> <rights>` |
-| `… is closed to …'s commands` | The folder has no flags: give it some, or leave it closed |
-| `… the grant of … is not on` | The node's log says why under `folder grants` (often your Windows password changed: save it again under **Settings › General › Account for commands**), then **Sync folders** |
-| `… has no entry for …` | **Sync folders** under **Permissions › Folders**, or `nerve-node folder sync` |
-| `… Windows refused it for another reason`, `… does not give it the path's full name` | Report the message with the node's log |
-
-</details>
-
-<details>
 <summary>The action checker refuses a call</summary>
 
 | Message | Fix |

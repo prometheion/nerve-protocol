@@ -1132,3 +1132,21 @@ restart the node (**Restart** on the app's **Overview**). With the node
 stopped, folder changes go to `node.toml` as every other change does. A
 panic in that state makes the app stop the service, as for any node that does
 not take it.
+
+## A path a pairing's container may not open (Windows)
+
+A call says `nerve-run in <center>'s AppContainer <container> may not open
+<path> (<error>)`: the path did not resolve as the command account in its
+container (an `exec.run` cwd, an `fs` call's `path`). The rest of the message
+says why (`grants::refused`, from the node's record and the folder's own
+permission list):
+
+| Message | Fix |
+|---|---|
+| `… it is in none of …'s folders` | `nerve-node folder add <path> <rights>` |
+| `… is closed to …'s commands` | The folder has no flags: give it some, or leave it closed |
+| `… the grant of … is not on` | The node's log says why under `folder grants` (often the owner's Windows password changed: save it again under Settings › General › Account for commands), then Sync folders |
+| `… has no entry for …` | Sync folders under Permissions › Folders, or `nerve-node folder sync` |
+| `… Windows refused it for another reason`, `… does not give it the path's full name` | Report the message with the node's log |
+
+The installed tests print the same, with the folder's list and the record, when a first command in a granted folder fails.
