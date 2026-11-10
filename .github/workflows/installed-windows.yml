@@ -195,16 +195,27 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           [Environment]::OSVersion.VersionString
+          $nt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          "$($nt.ProductName) $($nt.DisplayVersion) build $($nt.CurrentBuild).$($nt.UBR)"
           'EnableLUA: ' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA
           whoami /all
+          # Who may pass through folders they may not open (a command's
+          # container passes C:\ and the owner's folders so) and log on.
+          secedit /export /areas USER_RIGHTS /cfg "$env:RUNNER_TEMP/rights.inf" | Out-Null
+          Get-Content "$env:RUNNER_TEMP/rights.inf" | Select-String 'SeChangeNotifyPrivilege|SeBatchLogonRight|SeImpersonatePrivilege'
           $log = 'C:\ProgramData\Nerve\state\log.jsonl'
           if (Test-Path $log) { Get-Content $log -Tail 300 }
+          # The node's record of the folder grants it put on.
+          Get-Content 'C:\ProgramData\Nerve\state\grants.json' -ErrorAction SilentlyContinue
           Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'nerve-node' } -MaxEvents 50 |
             Format-List TimeCreated, Message
           icacls C:\
           Get-ChildItem C:\ -Directory -Filter 'nerve-w2-*' | ForEach-Object {
-            icacls $_.FullName
-            Get-ChildItem $_.FullName -Directory | ForEach-Object { icacls $_.FullName }
+            @($_) + @(Get-ChildItem $_.FullName -Directory -Recurse -Depth 1) | ForEach-Object {
+              icacls $_.FullName
+              $acl = Get-Acl -LiteralPath $_.FullName
+              "owner $($acl.Owner): $($acl.Sddl)"
+            }
           }
           exit 0
       # Chrome and a Node.js with WebSocket come with the image; the web UI

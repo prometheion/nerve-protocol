@@ -2427,6 +2427,149 @@ fn apply_in(
     s
 }
 
+/// Whose call could not open a path ([`refused_text`]): the pairing
+/// `center`, its AppContainer `container` and the account it runs as.
+#[cfg(any(windows, test))]
+pub struct Refused<'a> {
+    pub center: &'a str,
+    pub container: &'a str,
+    pub account: &'a str,
+}
+
+/// The deepest of `places` that holds `path`.
+#[cfg(any(windows, test))]
+fn deepest<'a, T>(
+    places: impl IntoIterator<Item = &'a T>,
+    at: impl Fn(&T) -> &Path,
+    path: &Path,
+) -> Option<&'a T>
+where
+    T: 'a,
+{
+    places
+        .into_iter()
+        .filter(|p| within(path, at(p)))
+        .max_by_key(|p| nerve_policy::paths::depth(at(p)))
+}
+
+/// Why a path of a pairing's call does not resolve in its container, for
+/// the call's error: which account, in which container, could not open
+/// which path (`opened`: the error of opening it as the resolve does; `Ok`
+/// where it opens and only its name was not given), what the pairing's
+/// `folders` (as the owner spelled them, `~` expanded) and the folder
+/// grants hold for it, and what the owner can do. `record` is the record
+/// of the grants; `listed` reads, for a grant recorded as on, whether the
+/// folder's own list carries the entries of the container and of the
+/// account (the container opens a folder only where both may).
+#[cfg(any(windows, test))]
+pub fn refused_text(
+    who: &Refused,
+    path: &Path,
+    opened: &Result<(), String>,
+    folders: &[(PathBuf, Access)],
+    record: &Result<Vec<Grant>, String>,
+    listed: impl FnOnce(&Grant) -> Result<(bool, bool), String>,
+) -> String {
+    let (center, container, account) = (who.center, who.container, who.account);
+    let first = match opened {
+        Err(e) => format!(
+            "{account} in {center}'s AppContainer {container} may not open {} ({e})",
+            path.display()
+        ),
+        Ok(()) => format!(
+            "{account} in {center}'s AppContainer {container} opens {}, but Windows does not give it the path's full name",
+            path.display()
+        ),
+    };
+    let Some((folder, access)) = deepest(folders, |f| &f.0, path) else {
+        return format!(
+            "{first}; it is in none of {center}'s folders: add it to them for its commands to reach it"
+        );
+    };
+    let access = *access;
+    if access == Access::NONE {
+        return format!(
+            "{first}; {} is closed to {center}'s commands",
+            folder.display()
+        );
+    }
+    let record = match record {
+        Ok(r) => r,
+        Err(e) => {
+            return format!("{first}; the node cannot read its record of the folder grants ({e})");
+        }
+    };
+    // The grant that gives the folder's flags there: one on the folder, or
+    // on an entry of it where the folder is split around a protected one.
+    let mine = record.iter().filter(|g| g.container == container);
+    let granted = deepest(mine, |g| &g.path, path)
+        .filter(|g| within(&g.path, folder))
+        .filter(|g| !g.unfinished);
+    let Some(g) = granted else {
+        return format!(
+            "{first}; the grant of {} ({access}) is not on: the node's log says why under \"folder grants\", and Sync folders (`nerve-node folder sync`) tries again",
+            folder.display()
+        );
+    };
+    let (on, access) = (g.path.display(), g.access);
+    match listed(g) {
+        Err(e) => format!(
+            "{first}; the grant of {on} ({access}) is on by the node's record, and the folder's permission list cannot be read ({e})"
+        ),
+        Ok((true, true)) => format!(
+            "{first}; the grant of {on} ({access}) is on, with the entries of both {container} and {account} in the folder's permission list: Windows refused it for another reason; report this message with the node's log"
+        ),
+        Ok((has_container, has_account)) => {
+            let missing = match (has_container, has_account) {
+                (false, false) => format!("{container} and {account}"),
+                (false, true) => container.to_string(),
+                _ => account.to_string(),
+            };
+            format!(
+                "{first}; the grant of {on} ({access}) is on by the node's record, but the folder's permission list has no entry for {missing}: Sync folders (`nerve-node folder sync`) puts it on again"
+            )
+        }
+    }
+}
+
+/// [`refused_text`] on the installed service, for the command account in
+/// the pairing's container (`who`): the record is the node's, and the
+/// folder's list is read as the `owner`, whose folders they are, as the
+/// sync reads it.
+#[cfg(windows)]
+pub fn refused(
+    paths: &NodePaths,
+    owner: Option<&crate::service::Account>,
+    who: &Refused,
+    path: &Path,
+    opened: &Result<(), String>,
+    folders: &[(PathBuf, Access)],
+) -> String {
+    let record = read_record(&record_file(paths));
+    let all = record.clone().unwrap_or_default();
+    let run = run_sid(paths).filter(|s| !s.is_empty());
+    refused_text(who, path, opened, folders, &record, |g| {
+        use nerve_sandbox::appcontainer;
+        let _as = act_as(owner).map_err(|e| e.to_string())?;
+        let on = |name: &str, access: Access| {
+            appcontainer::look(&g.path, name, masks_of(access))
+                .map(|(_, granted)| granted)
+                .map_err(|e| e.to_string())
+        };
+        let has_container = on(&g.container, g.access)?;
+        // The account's grant there is the union of every pairing's
+        // ([`wanted_on`]).
+        let has_account = match run.as_deref().and_then(|sid| {
+            all.iter()
+                .find(|r| r.container == sid && same_path(&r.path, &g.path))
+        }) {
+            Some(r) => on(&r.container, r.access)?,
+            None => false,
+        };
+        Ok((has_container, has_account))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2470,6 +2613,117 @@ mod tests {
             let e = read_record(&file).unwrap_err();
             assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
         }
+    }
+
+    /// A path a pairing's container may not open is refused with who could
+    /// not open what, what its folders and the folder grants hold for it
+    /// (the deepest folder's), and what to do: outside its folders, in a
+    /// closed one, in one whose grant is not on (none recorded, one that
+    /// stopped part way, or only one of a folder around it), under one whose
+    /// folder lacks an entry (the container's, the account's, both), under
+    /// one that is on in full, and with no record to read. One that opens
+    /// is refused for its name.
+    #[test]
+    fn a_path_the_container_may_not_open_says_why() {
+        let who = Refused {
+            center: "wina",
+            container: "c1",
+            account: "nerve-run",
+        };
+        let denied: Result<(), String> = Err("Access is denied. (os error 5)".into());
+        let folders = [
+            (PathBuf::from("/w"), Access::parse("r").unwrap()),
+            (PathBuf::from("/w/a"), Access::parse("rwx").unwrap()),
+            (PathBuf::from("/w/a/closed"), Access::NONE),
+        ];
+        let on = vec![
+            grant("c1", "/w", "r"),
+            grant("c1", "/w/a", "rwx"),
+            grant("c1", "/w/a/closed", ""),
+            grant("c2", "/v/b", "rwx"),
+            grant("S-1-5-21-1", "/w/a", "rwx"),
+        ];
+        let path = Path::new("/w/a/x");
+        let text = |opened: &Result<(), String>,
+                    record: &Result<Vec<Grant>, String>,
+                    path: &Path,
+                    listed: Result<(bool, bool), String>| {
+            refused_text(&who, path, opened, &folders, record, |g| {
+                assert_eq!(g.path, Path::new("/w/a"), "the deepest grant");
+                listed
+            })
+        };
+        let first = "nerve-run in wina's AppContainer c1 may not open /w/a/x (Access is denied. (os error 5)); ";
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                Path::new("/v/b"),
+                Ok((true, true))
+            ),
+            "nerve-run in wina's AppContainer c1 may not open /v/b (Access is denied. (os error 5)); it is in none of wina's folders: add it to them for its commands to reach it"
+        );
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                Path::new("/w/a/closed/k"),
+                Ok((true, true))
+            ),
+            "nerve-run in wina's AppContainer c1 may not open /w/a/closed/k (Access is denied. (os error 5)); /w/a/closed is closed to wina's commands"
+        );
+        let mut stopped = grant("c1", "/w/a", "rwx");
+        stopped.unfinished = true;
+        for record in [
+            vec![grant("c2", "/w/a", "rwx")],
+            vec![stopped],
+            vec![grant("c1", "/w", "r")],
+        ] {
+            assert_eq!(
+                text(&denied, &Ok(record), path, Ok((true, true))),
+                format!(
+                    "{first}the grant of /w/a (rwx) is not on: the node's log says why under \"folder grants\", and Sync folders (`nerve-node folder sync`) tries again"
+                )
+            );
+        }
+        for (listed, missing) in [
+            ((false, true), "c1"),
+            ((true, false), "nerve-run"),
+            ((false, false), "c1 and nerve-run"),
+        ] {
+            assert_eq!(
+                text(&denied, &Ok(on.clone()), path, Ok(listed)),
+                format!(
+                    "{first}the grant of /w/a (rwx) is on by the node's record, but the folder's permission list has no entry for {missing}: Sync folders (`nerve-node folder sync`) puts it on again"
+                )
+            );
+        }
+        assert_eq!(
+            text(&denied, &Ok(on.clone()), path, Ok((true, true))),
+            format!(
+                "{first}the grant of /w/a (rwx) is on, with the entries of both c1 and nerve-run in the folder's permission list: Windows refused it for another reason; report this message with the node's log"
+            )
+        );
+        assert_eq!(
+            text(
+                &denied,
+                &Ok(on.clone()),
+                path,
+                Err("Access is denied".into())
+            ),
+            format!(
+                "{first}the grant of /w/a (rwx) is on by the node's record, and the folder's permission list cannot be read (Access is denied)"
+            )
+        );
+        assert_eq!(
+            text(&denied, &Err("garbage".into()), path, Ok((true, true))),
+            format!("{first}the node cannot read its record of the folder grants (garbage)")
+        );
+        assert!(
+            text(&Ok(()), &Ok(on), path, Ok((true, true))).starts_with(
+                "nerve-run in wina's AppContainer c1 opens /w/a/x, but Windows does not give it the path's full name; the grant of /w/a (rwx) is on,"
+            )
+        );
     }
 
     /// A grant as the record holds it, without the object's id and the

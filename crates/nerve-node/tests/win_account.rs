@@ -184,6 +184,24 @@ fn open_folder(p: &Path, owner_sid: &str) {
     assert!(ok, "icacls /setowner {p:?}");
 }
 
+/// What the machine holds of `folder` while its pairing's command failed
+/// there, before the test takes the pairing and its grants away: the
+/// folder's owner and permission list, and the node's record of its grants.
+fn shown(folder: &Path, paths: &nerve_node::NodePaths) -> String {
+    let said = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "$a = Get-Acl -LiteralPath '{}'; 'owner ' + $a.Owner; $a.Sddl; icacls '{0}'",
+            folder.display()
+        ))
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_else(|e| e.to_string());
+    let record = nerve_node::grants::record_file(paths);
+    let kept = std::fs::read_to_string(&record).unwrap_or_else(|e| e.to_string());
+    format!("{said}\n{}:\n{kept}", record.display())
+}
+
 /// The profile folder of the account `sid`, as Windows has it.
 fn owner_profile(sid: &str) -> PathBuf {
     let said = Command::new("powershell")
@@ -427,7 +445,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         "Set-Content -Path ok.txt -Value ok; Get-Content ok.txt; whoami; $env:USERPROFILE",
     )
     .await
-    .expect("a command in its folder");
+    .unwrap_or_else(|e| panic!("a command in its folder: {e:?}\n{}", shown(&a, &paths)));
     let said = out(&r);
     assert_eq!(r["exit_code"], 0, "{r}");
     assert!(
@@ -442,6 +460,16 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     // b's, so it does not resolve.
     let e = run_in(&mut conn_a, &b, "Get-ChildItem").await.unwrap_err();
     assert_eq!(e.kind().as_str(), "bad_path", "{}", e.message);
+    // It says who may not open which folder, and why.
+    let who = format!(
+        "nerve-run in {A}'s AppContainer {container_a} may not open {}",
+        b.display()
+    );
+    assert!(
+        e.message.contains(&who) && e.message.contains(&format!("in none of {A}'s folders")),
+        "{}",
+        e.message
+    );
     let audit = std::fs::read_to_string(paths.audit_log()).unwrap();
     assert!(
         audit
@@ -1227,7 +1255,7 @@ async fn a_command_the_folder_sync_refuses_is_in_the_audit_log() {
     let (_center, mut conn) = pair_d(&paths, vec![folder(&g, "rwx")]).await;
     let r = run_in(&mut conn, &g, "Write-Output fine")
         .await
-        .expect("a command in its folder");
+        .unwrap_or_else(|e| panic!("a command in its folder: {e:?}\n{}", shown(&g, &paths)));
     assert!(out(&r).contains("fine"), "{r}");
 
     // The record the node keeps of its grants is garbage; the owner's next
@@ -1301,7 +1329,7 @@ async fn a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed
     // The folder is granted, as an ordinary folder.
     let r = run_in(&mut conn, &g, "Write-Output fine")
         .await
-        .expect("a command in its folder");
+        .unwrap_or_else(|e| panic!("a command in its folder: {e:?}\n{}", shown(&g, &paths)));
     assert!(out(&r).contains("fine"), "{r}");
 
     // It is replaced by a link to a share.

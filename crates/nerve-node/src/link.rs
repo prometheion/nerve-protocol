@@ -2461,11 +2461,14 @@ impl Link {
             let _as = act_as(known.as_ref(), boxed.as_deref())?;
             FsCall::parse(a, &inv.args)
         };
-        let call = parsed.inspect_err(|e| {
-            if let Some(Value::String(given)) = inv.args.get("path") {
-                self.audit_bad_path(inv, given, e);
-            }
-        })?;
+        let path = inv.args.get("path").and_then(Value::as_str);
+        let call = parsed
+            .map_err(|e| self.why_refused(&entry, known.as_ref(), path, e))
+            .inspect_err(|e| {
+                if let Some(given) = path {
+                    self.audit_bad_path(inv, given, e);
+                }
+            })?;
         // Taken before the gate: whenever the gate judged by the
         // folders, the walk below does too, even if `until` passes
         // in between. Where the node reads as the command account,
@@ -2939,6 +2942,93 @@ impl Link {
         }
     }
 
+    /// `e`, the refusal of a path of this pairing's call (`given`, as the
+    /// center wrote it) that did not resolve as the command account in its
+    /// container on Windows, with why (crate::grants::refused): which
+    /// account could not open which path, whether the folder grants hold it
+    /// and are on, and what the owner can do. "Access is denied" alone
+    /// does not tell a folder outside the pairing's from a grant that is
+    /// not on. Any other error stays as it is.
+    fn why_refused(
+        &self,
+        entry: &CenterEntry,
+        account: Option<&crate::service::Account>,
+        given: Option<&str>,
+        e: RpcError,
+    ) -> RpcError {
+        #[cfg(windows)]
+        {
+            let run = account.filter(|a| a.name.eq_ignore_ascii_case(crate::account::RUN_USER));
+            let (Some(run), Some(container), Some(given)) = (run, self.boxed(), given) else {
+                return e;
+            };
+            // Only the refusal of that path: its error names it first.
+            if e.kind().as_str() != "bad_path" || !e.message.starts_with(given) {
+                return e;
+            }
+            let Ok(path) = nerve_policy::paths::parse_device_path(given) else {
+                return e;
+            };
+            // Opened as the resolve opens it, without asking its name: no
+            // right asked for, a folder too. (`fs::metadata` would read it
+            // from its folder's listing where the open is refused.)
+            let opened = match act_as(Some(run), Some(&container)) {
+                Ok(_as) => {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+                    std::fs::OpenOptions::new()
+                        .access_mode(0)
+                        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                        .open(&path)
+                        .map(drop)
+                }
+                Err(_) => return e,
+            };
+            let denied = match &opened {
+                Err(x) => x.kind() == std::io::ErrorKind::PermissionDenied,
+                Ok(()) => e.message.contains("(os error 5)"),
+            };
+            if !denied {
+                return e;
+            }
+            let who = crate::grants::Refused {
+                center: &entry.name,
+                container: &container,
+                account: &run.name,
+            };
+            let opened = opened.map_err(|x| x.to_string());
+            // Its folders as the owner wrote them: whether the sync could
+            // resolve them or not.
+            let home = self.shared.rules_home(&self.shared.config());
+            let folders: Vec<_> = entry
+                .policy
+                .folders
+                .iter()
+                .filter_map(|f| Some((nerve_policy::protected::expand(&home, &f.path)?, f.access)))
+                .collect();
+            let why = crate::grants::refused(
+                &self.shared.paths,
+                self.account().as_ref(),
+                &who,
+                &path,
+                &opened,
+                &folders,
+            );
+            // Where it opened, the error of its name is kept.
+            let mut e = e;
+            e.message = match opened {
+                Err(_) => format!("{given}: {why}"),
+                Ok(()) => format!("{}: {why}", e.message),
+            };
+            e
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (entry, account, given);
+            e
+        }
+    }
+
     /// Writes one entry of this center's calls to the audit log.
     fn audit(
         &self,
@@ -3386,6 +3476,8 @@ impl Link {
             let _as = act_as(looks_as.as_ref(), self.boxed().as_deref())?;
             RunCall::parse(&inv.args, &start_in)
         };
+        let cwd = inv.args.get("cwd").and_then(Value::as_str);
+        let rc = rc.map_err(|e| self.why_refused(entry, looks_as.as_ref(), cwd, e));
         // A folder that does not resolve as the account (on Windows one the
         // pairing's container may not look into, another pairing's) is
         // refused and in the audit, as a file call's path is, once the
