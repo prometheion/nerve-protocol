@@ -80,6 +80,7 @@ AutoReqProv: no
 %global debug_package %{nil}
 %global __strip /bin/true
 %global _build_id_links none
+%global source_date_epoch_from_changelog 0
 
 %description
 $description

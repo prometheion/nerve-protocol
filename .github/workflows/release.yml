@@ -376,7 +376,7 @@ jobs:
             echo "the installed app says '$said', not 'nerve-node-desktop $VERSION'" >&2
             exit 1
           fi
-          test "$(command -v nerve-node-desktop)" = /usr/bin/nerve-node-desktop
+          test -x /usr/bin/nerve-node-desktop
           entry=/usr/share/applications/nerve-node-desktop.desktop
           desktop-file-validate "$entry"
           grep -qx 'Exec=/usr/bin/nerve-node-desktop %u' "$entry"

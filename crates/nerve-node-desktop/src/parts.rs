@@ -333,8 +333,9 @@ pub fn package_root_main(args: &[String]) -> i32 {
     }
 }
 
-/// The desktop entry (freedesktop Desktop Entry 1.5): the menu's "Nerve",
-/// which opens `bin`, also with a `nerve://` link.
+/// The desktop entry: the menu's "Nerve", which opens `bin`, also with a
+/// `nerve://` link. Desktop Entry 1.4, the newest that the
+/// desktop-file-validate of Ubuntu 22.04 takes; it uses nothing newer.
 pub fn desktop_entry(bin: &Path) -> String {
     let exec = bin.display().to_string();
     // Exec quotes a path with a space or a quote in it, escaping as the
@@ -354,7 +355,7 @@ pub fn desktop_entry(bin: &Path) -> String {
     format!(
         "[Desktop Entry]
 Type=Application
-Version=1.5
+Version=1.4
 Name=Nerve
 GenericName=Nerve node
 Comment=Decide what your Nerve centers may do on this machine

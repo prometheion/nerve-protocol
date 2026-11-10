@@ -739,6 +739,19 @@ mod tests {
             "{:?}",
             steps.done
         );
+        // The same bytes as before (the package again): restarted all the
+        // same.
+        p.placed = Some(Placed {
+            old: Some(old.clone()),
+            version: Version::parse_of("svc", "svc 1.0.0"),
+        });
+        let restarts = |sys: &Fake| sys.calls().iter().filter(|c| c.contains("restart")).count();
+        let before = restarts(&sys);
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let r = update(&p, &sys, None, &|| sys.started(), &mut steps).await;
+        assert_eq!(r, Ok(true), "{:?}", steps.done);
+        assert_eq!(restarts(&sys), before + 1);
         // Placed by the update itself, which knows the old one.
         std::fs::copy(newer(&at), &at.bin).unwrap();
         p.placed = Some(Placed {
