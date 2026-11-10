@@ -1141,10 +1141,15 @@ container (an `exec.run` cwd, an `fs` call's `path`) with "Access is denied".
 The rest of the message says why (`grants::refused`, from the node's record
 and the folder's own permission list). The node opens the path as the
 container to find the part it may not open (for a path that is not there yet,
-the deepest part that is), but only once it has looked at the links on the
-way as the owner (as the node itself, strictly, where it cannot act as the
-owner): where one may lead to another machine, nothing is opened, and the
-message names the path with the resolve's own error. Any other refusal (a
+the deepest part that is), but only for a path in a folder of the pairing
+that has flags and is not left out (anywhere else the message says why
+without opening anything, so a call does not learn what the container may
+not list), and only once it has looked at the links on the way as the owner
+(as the node itself, strictly, where it cannot act as the owner): where one
+may lead to another machine, nothing is opened, and the message names the
+path with the resolve's own error. The path and the pairing's folders are
+compared where they lead for the owner (a link on the way, a `..`), as the
+record holds them. Any other refusal (a
 path that is not there, a link to another machine) keeps its own message.
 
 | Message | Fix |
@@ -1152,8 +1157,10 @@ path that is not there, a link to another machine) keeps its own message.
 | `… it is in none of …'s folders` | `nerve-node folder add <path> <rights>` |
 | `… is closed to …'s commands` | The folder has no flags: give it some, or leave it closed |
 | `… it is protected, and the grant of … leaves it out` | A protected entry in a granted folder gets no grant: add it as a folder of its own, or leave it protected |
+| `… goes on the entries of …, not on … itself, because it holds a protected entry` (or `a folder of the node's own`) | None: a granted folder around a protected entry is split, and its levels down to the entry get no grant; a command uses what is inside them |
 | `… it is in a folder of the node's own` | None: no pairing reaches the node's own folders |
 | `… the grant of … is not on` | The node's log says why under `folder grants` (often the owner's Windows password changed: save it again under Settings › General › Account for commands), then Sync folders |
+| `… the node cannot read its record of the folder grants`, `… the folder's permission list cannot be read` | Sync folders; if it stays, report the node's log |
 | `… has no entry for …` | Sync folders under Permissions › Folders, or `nerve-node folder sync` |
 | `… Windows refused it for another reason`, `… does not give it the path's full name` | Report the message with the node's log |
 

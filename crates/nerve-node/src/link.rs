@@ -2968,6 +2968,39 @@ impl Link {
             };
             let owner = self.account();
             let boxed = container.clone();
+            // Its folders as the owner wrote them (whether the sync could
+            // resolve them or not), and what their grants leave out; looked
+            // up once, when a refusal needs them.
+            let known = std::cell::LazyCell::new(|| {
+                let home = self.shared.rules_home(&self.shared.config());
+                (
+                    crate::grants::spelled(&entry.policy.folders, &home),
+                    self.protected(entry),
+                    self.own(),
+                )
+            });
+            let left_out = |p: &std::path::Path| {
+                let (_, protected, own) = &*known;
+                if own.iter().any(|o| nerve_policy::paths::within(p, o)) {
+                    Some(LeftOut::Own)
+                } else if protected.in_entry(p, false) {
+                    Some(LeftOut::Protected)
+                } else if own.iter().any(|o| nerve_policy::paths::within(o, p)) {
+                    Some(LeftOut::HoldsOwn)
+                } else if protected.holds_entry(p, true) {
+                    Some(LeftOut::HoldsProtected)
+                } else {
+                    None
+                }
+            };
+            // Where a path leads, as the owner sees it (who may look at the
+            // whole way, as the sync does); a path that does not resolve
+            // there stays as it is.
+            let real = |p: &std::path::Path| {
+                let _acting = crate::grants::act_as(owner.as_ref()).ok().flatten();
+                nerve_policy::paths::resolve(p).unwrap_or_else(|_| p.to_path_buf())
+            };
+            let probe = || crate::grants::probeable(&path, &known.0, &real, left_out);
             // The links on the way are looked at as the owner, who may look
             // at the whole way (as the sync does), before anything opens
             // the path.
@@ -3002,20 +3035,7 @@ impl Link {
                     center: &entry.name,
                     container: &boxed,
                     account: &run.name,
-                };
-                // Its folders as the owner wrote them: whether the sync could
-                // resolve them or not.
-                let home = self.shared.rules_home(&self.shared.config());
-                let folders = crate::grants::spelled(&entry.policy.folders, &home);
-                let (protected, own) = (self.protected(entry), self.own());
-                let left_out = |p: &std::path::Path| {
-                    if own.iter().any(|o| nerve_policy::paths::within(p, o)) {
-                        Some(LeftOut::Own)
-                    } else if protected.in_entry(p, false) {
-                        Some(LeftOut::Protected)
-                    } else {
-                        None
-                    }
+                    real: &real,
                 };
                 crate::grants::refused(
                     &self.shared.paths,
@@ -3023,7 +3043,7 @@ impl Link {
                     &who,
                     at,
                     opened,
-                    &folders,
+                    &known.0,
                     left_out,
                 )
             };
@@ -3033,6 +3053,7 @@ impl Link {
                 &e.message,
                 given,
                 &path,
+                probe,
                 remote,
                 open,
                 why,
