@@ -535,9 +535,8 @@ The node has a key per center and the key for the MAC above.
   config folder and `config.key` in the state folder.
 - `keyring`: the system keyring, the Credential Manager on Windows and the
   Secret Service (GNOME Keyring, KWallet) on Linux. No copy stays in a file.
-  Not on the node installed as a service on Windows: it runs as `nerve`,
-  whose Credential Manager the commands you run as an administrator cannot
-  reach, so it keeps its keys in files
+  On the node installed as a service on Windows, the Credential Manager of
+  its account `nerve`, which the service reads and writes itself
   ([service](windows.md#the-node-as-a-service-on-windows)).
 
 ```sh
@@ -857,7 +856,7 @@ removed only with a change of the format, which the changelog names under
   is installed), `"present"` (whether it is there) and `"version"`. It needs
   no root. `config get machine.secret_storage` also has `"keyring"`:
   `{"usable": true}`, or `"usable": false` with `"reason"`
-  (`"windows-service"`, or `"no-answer"`: no keyring
+  (`"no-answer"`: no keyring
   answers for the account the node runs as) and `"why"` in words.
 - `center add` without `--yes` prints what you would confirm
   (`{"paired": false, "preview": {...}, "check": {...}}`) and pairs nothing;

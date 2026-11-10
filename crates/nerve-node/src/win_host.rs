@@ -623,6 +623,10 @@ impl WinSystem for WinHost {
         Ok(())
     }
 
+    fn stage_vault(&self, paths: &crate::paths::NodePaths) -> Result<u64, String> {
+        crate::secrets::vault::stage_in_service(paths)
+    }
+
     fn delete_service(&self) -> Result<(), String> {
         let s = the_service()?;
         // SAFETY: an open service; it goes once every handle is closed.

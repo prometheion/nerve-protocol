@@ -250,33 +250,26 @@ folder>`, and moves with the other keys. It replaces the key once the center
 took it, and goes when the center refuses it or the pairing is removed.
 
 The header values of a proxy, and the password of an `http://` one, are in
-the keyring either way (§2), except on the installed node on Windows, which
-takes none (§2, Proxy).
+the keyring either way (§2).
 
-One kind of node keeps its keys in files whatever is asked: the installed
-node on Windows (the service, which runs as `nerve`). The Credential Manager
-is one per account, and the CLI that writes the config there runs as an
-administrator, so a move into the keyring would put the keys in that
-administrator's Credential Manager, out of the service's reach. The node
-counts as installed on the folders `install` uses, in any spelling of their
-case, or when it runs as `nerve`. On Linux the keys may be in the keyring on
-every kernel; a node run by hand then runs no `folder` mode command (§1, the
-paragraphs on the session bus below).
-
-On that node:
-
-- A change to `keyring` is refused before anything moves, by whatever
-  writes the config (`config set`, `config accept`); `node.toml` and the
-  keys stay as they were. This refusal comes before the count of running
-  commands below, as it holds whatever runs. A running node does not reload a
-  file another writer saved with `keyring`.
-- `config accept` refuses a file that says `keyring`, even when the keys are
-  in the keyring already, so nothing would move.
-- `install`, and the node at its start, refuse a `node.toml` that says
-  `keyring`. The message names the file and the command that moves the keys
-  into files, with `--config-dir` and `--state-dir` of the folders it
-  refused, so it works whether or not a service is registered yet. It is run
-  as the administrator whose Credential Manager holds them.
+On the installed node on Windows (the service, which runs as `nerve`; the
+node counts as installed on the folders `install` uses, in any spelling of
+their case) the keyring is the Credential Manager of `nerve`, as it is one
+per account. The service reads and writes it itself; any other process (the
+CLI and the app of an administrator) asks the running service over its
+control pipe (`vault.get`, `vault.set`, `vault.delete` with an entry's
+`account`; one that is not this node's is refused). While no service runs,
+a write waits in `<config>/keys/vault.pending`, sealed with DPAPI for the
+machine, and a read finds what waits there, or says to start the node; the
+service takes the file into its Credential Manager at its start, before it
+reads a key. `install` gives `nerve` a new password, after which Windows no
+longer opens what it kept: first the running service copies its entries
+into that file (`vault.stage`); a service that cannot, with the keys in the
+keyring, makes the install change nothing. `uninstall` with the data kept
+does the same before it removes `nerve`, whose Credential Manager goes with
+it. A restore into that node writes there as well. On Linux the keys may be
+in the keyring on every kernel; a node run by hand then runs no `folder`
+mode command (§1, the paragraphs on the session bus below).
 
 `setup` asks nowhere where the keys go: they stay in files, and
 `config set machine.secret_storage keyring` moves them, offering at a
@@ -903,22 +896,9 @@ unreadable entry, or one without a value for a named header, stops the link
 with a status that names the entry, and the node does not dial directly
 instead (fail closed).
 
-The installed node on Windows (§1, where the keys are: the folders `install`
-uses, or the account `nerve`) takes no header value and no password either,
-though its keyring answers. The service runs as `nerve`, the Credential
-Manager is one per account, and `proxy set` runs as an administrator, so the
-values would be in the administrator's Credential Manager, out of the
-service's reach. The node keeps no proxy secret in a file, so there is nowhere
-else for them. `proxy set` with a header or a password refuses before it asks
-the keyring, and changes nothing (`node.toml`, the keyring); a proxy without
-either works, and its `proxy set` deletes the entry of an earlier call, as it
-does anywhere. Reading is as consistent: with headers named in `node.toml`
-(set before the install) the link stops with `bad proxy:` and the same reason
-(in the center's status and in the log; on Windows `status` asks the node over
-its pipe, as on Linux), and
-`proxy` shows it, both without asking the keyring: an entry may be in the
-administrator's Credential Manager, but the service does not find it, so
-`proxy` must not call the values good.
+On the installed node on Windows the entry is in the Credential Manager of
+the service's account, which the CLI reaches through the running service
+(§2, where the keys are).
 
 A `node.toml` that holds header values (`headers = { Name = "value" }`) or a
 user name and password in `connection.proxy` is refused on load, without the values in the message: take them out of the

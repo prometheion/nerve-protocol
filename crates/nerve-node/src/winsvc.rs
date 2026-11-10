@@ -169,6 +169,30 @@ pub trait WinSystem {
     /// Writes `sid` as the owner, and gives it the right to start, stop and
     /// ask the service ([`service_dacl`]).
     fn put_owner(&self, sid: &str) -> Result<(), String>;
+    /// Asks the running service to copy its entries in its Credential
+    /// Manager aside for its next start (`vault.stage`,
+    /// crate::secrets::vault); how many it copied.
+    fn stage_vault(&self, paths: &NodePaths) -> Result<u64, String>;
+}
+
+/// [`WinSystem::stage_vault`] before nerve's vault becomes unreadable (a new
+/// password) or goes (uninstall). A service that cannot do it is fine where
+/// the config keeps nothing there; else nothing changes.
+fn stage_vault(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
+    let keyring = crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring;
+    match sys.stage_vault(&layout.paths) {
+        Ok(0) => Ok(()),
+        Ok(n) => {
+            steps.did(format!(
+                "the service put the {n} entries of its Credential Manager aside, sealed, for its next start"
+            ));
+            Ok(())
+        }
+        Err(e) if keyring => Err(format!(
+            "the running service did not put the keys in its Credential Manager aside ({e}), and they would be lost: nothing was changed. Choose Files under Settings › Network › Keys, then try again"
+        )),
+        Err(_) => Ok(()),
+    }
 }
 
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
@@ -483,15 +507,12 @@ fn install_steps(
     invoker: &str,
     steps: &mut Steps,
 ) -> Result<(), String> {
-    // The service would look for keys in the keyring in the Credential
-    // Manager of nerve, and they are in that of whoever moved them there.
-    if crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring {
-        return Err(crate::secrets::keyring_refused(
-            &layout.paths,
-            crate::secrets::NoKeyring::WindowsService,
-            "install changed nothing",
-            "install again with the installer, and pair the centers again",
-        ));
+    // The install gives nerve a new password, after which Windows no longer
+    // opens what its Credential Manager kept: the running service copies
+    // its entries aside first, sealed, and takes them back at its start
+    // (crate::secrets::vault).
+    if sys.service()? == Some(true) {
+        stage_vault(layout, sys, steps)?;
     }
     // A running service holds the program and the folders' files.
     if sys.service()? == Some(true) {
@@ -768,6 +789,11 @@ fn uninstall_steps(
     purge: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
+    // The Credential Manager of nerve goes with the account: kept data keeps
+    // its entries aside, sealed, for a later install's service to take.
+    if !purge && sys.service()? == Some(true) {
+        stage_vault(layout, sys, steps)?;
+    }
     if sys.service()?.is_some() {
         sys.stop()?;
         sys.delete_service()?;
@@ -1177,6 +1203,8 @@ pub(crate) mod tests {
         typed: RefCell<Vec<String>>,
         /// The accounts that can open the node's folders.
         reaching: RefCell<Vec<String>>,
+        /// The running service cannot put its vault aside.
+        vault_fails: RefCell<bool>,
         pub(crate) calls: RefCell<Vec<String>>,
         /// `None`: not registered; else whether it runs.
         service: Cell<Option<bool>>,
@@ -1224,6 +1252,7 @@ pub(crate) mod tests {
                 passwords: RefCell::new(vec![("alice".into(), "alice's".into())]),
                 typed: RefCell::new(Vec::new()),
                 reaching: RefCell::new(Vec::new()),
+                vault_fails: RefCell::new(false),
                 calls: RefCell::new(Vec::new()),
                 service: Cell::new(None),
                 starts: Cell::new(true),
@@ -1522,6 +1551,14 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        fn stage_vault(&self, paths: &NodePaths) -> Result<u64, String> {
+            self.call(format!("stage vault {}", paths.config_dir.display()));
+            match *self.vault_fails.borrow() {
+                true => Err("unknown method vault.stage".into()),
+                false => Ok(0),
+            }
+        }
+
         fn remove_grants(&self, paths: &NodePaths, node_ids: &[String]) -> crate::grants::Synced {
             // The record is in the state folder, which a purge deletes.
             let recorded = crate::grants::record_file(paths).exists();
@@ -1635,46 +1672,43 @@ pub(crate) mod tests {
         assert_ne!(p, new_password());
     }
 
-    /// A node.toml that keeps the keys in the keyring is refused before
-    /// install changes anything: the service, as nerve, would not find
-    /// keys that are in another account's Credential Manager.
+    /// The install gives nerve a new password, after which Windows no
+    /// longer opens its Credential Manager: the running service puts its
+    /// entries aside first. Where it cannot and the keys are there, nothing
+    /// changes; with the keys in files it does not matter.
     #[test]
-    fn install_refuses_keys_in_the_keyring() {
+    fn install_has_the_service_put_its_vault_aside_first() {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
-        let l = layout(d.path());
-        // Left by a node run on these folders before.
-        std::fs::create_dir_all(&l.paths.config_dir).unwrap();
-        std::fs::create_dir_all(&l.paths.state_dir).unwrap();
+        let l = installed(d.path(), &sys, "1.0.0");
+        sys.calls.borrow_mut().clear();
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        sys.types("alice's");
+        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        let calls = sys.calls();
+        let staged = calls.iter().position(|c| c.starts_with("stage vault"));
+        let stopped = calls.iter().position(|c| c == "stop");
+        assert!(staged.is_some() && staged < stopped, "{calls:?}");
+        // A service that cannot, with the keys in its Credential Manager.
         std::fs::write(
             l.paths.config_file(),
             "[machine]\nsecret_storage = \"keyring\"\n",
         )
         .unwrap();
-        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
-        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        *sys.vault_fails.borrow_mut() = true;
+        sys.calls.borrow_mut().clear();
+        sys.types("alice's");
         let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
-        assert!(e.contains("install changed nothing"), "{e}");
-        assert!(e.contains("Credential Manager"), "{e}");
-        // It names the folders to delete, and no command for a terminal.
-        let folders = format!(
-            "delete {} and {}",
-            l.paths.config_dir.display(),
-            l.paths.state_dir.display()
-        );
-        assert!(e.contains(&folders), "{e}");
-        assert!(!e.contains("nerve-node "), "{e}");
-        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
-        assert!(sys.secured.borrow().is_empty());
-        assert!(!l.bin.exists());
-        let a = audit_events(&l);
-        assert_eq!(a.len(), 1);
+        assert!(e.contains("would be lost: nothing was changed"), "{e}");
         assert!(
-            a[0]["error"].as_str().unwrap().contains("keyring"),
-            "{}",
-            a[0]
+            !sys.calls().iter().any(|c| c == "stop"),
+            "{:?}",
+            sys.calls()
         );
+        // With the keys in files it goes on.
+        std::fs::write(l.paths.config_file(), "").unwrap();
+        sys.types("alice's");
+        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
     }
 
     #[test]

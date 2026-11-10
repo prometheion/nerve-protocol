@@ -4964,31 +4964,6 @@ mod tests {
         daemon.stop().await;
     }
 
-    /// The installed node on Windows runs as `nerve`: a value an
-    /// administrator's `proxy set` left in the Credential Manager is not
-    /// found by the service, so the status says why, and neither the proxy
-    /// nor the center is dialled.
-    #[tokio::test]
-    async fn on_the_installed_node_on_windows_header_values_stop_the_link_and_say_why() {
-        let (d, paths, center, proxy) = behind_a_proxy().await;
-        let headers = [("X-Key".to_string(), "s3cret-value".to_string())];
-        crate::secrets::store_proxy_headers(&paths, &headers).unwrap();
-        crate::secrets::for_tests::pretend_windows_service(&paths);
-        let daemon = start(&d, &paths).await;
-        let status = settled_status(&daemon).await;
-        assert!(status.starts_with("bad proxy: "), "{status}");
-        assert!(
-            status.contains("not to that of nerve")
-                && status.contains("Settings › Network › Proxy"),
-            "{status}"
-        );
-        assert!(!status.contains("s3cret"), "{status}");
-        let quiet = Duration::from_millis(300);
-        assert!(tokio::time::timeout(quiet, proxy.accept()).await.is_err());
-        assert!(tokio::time::timeout(quiet, center.accept()).await.is_err());
-        daemon.stop().await;
-    }
-
     #[tokio::test]
     async fn the_link_sends_the_values_from_the_keyring_to_the_proxy() {
         let (d, paths, center, proxy) = behind_a_proxy().await;

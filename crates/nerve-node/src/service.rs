@@ -984,18 +984,6 @@ fn install_steps(
     invoker: &str,
     steps: &mut Steps,
 ) -> Result<(), String> {
-    // Keys in the keyring where they may not be there (an old Landlock):
-    // the installed node would not start, so install changes nothing.
-    if crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring
-        && let Some(n) = crate::secrets::no_keyring(&layout.paths)
-    {
-        return Err(crate::secrets::keyring_refused(
-            &layout.paths,
-            n,
-            "install changed nothing",
-            "run `sudo nerve-node install` again, and pair the centers again",
-        ));
-    }
     // Asked before anything changes.
     let root = match root {
         RootOwner::Accepted => Chosen::Root,

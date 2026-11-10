@@ -205,17 +205,6 @@ fn keyring_turns_commands_off(
 /// (drop_removed); a stopped node cannot tell what the file had before, so
 /// it switches off and takes along none.
 async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
-    // Keys already in the keyring move nowhere when the file is taken, so
-    // the settings store alone would not refuse it.
-    if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
-        && let Some(n) = crate::secrets::no_keyring(paths)
-    {
-        return Err(format!(
-            "{} says machine.secret_storage = \"keyring\", but {}. So the file was not accepted: change it to `secret_storage = \"file\"` and accept it again, which takes keys found in the keyring into files",
-            paths.config_file().display(),
-            n.why()
-        ));
-    }
     // On Windows over the control pipe: a file signed here would be ahead of
     // the node that runs, which would then refuse every change.
     match crate::cli::node_call(paths, "config.accept", json!({"user": changed_by()})).await {
@@ -412,7 +401,7 @@ fn table_at<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::tests::{json_of, load, run, setup, setup_with};
+    use crate::cli::tests::{json_of, load, run, setup};
 
     #[test]
     fn config_get_set_by_dotted_key() {
@@ -582,9 +571,9 @@ mod tests {
         );
     }
 
-    /// The installed node on Windows keeps its keys in files: `config set`
-    /// refuses the keyring and changes nothing, and setup does not ask
-    /// where the keys go but takes keys left in the keyring into files.
+    /// `config get machine.secret_storage` says whether the keyring can
+    /// hold the keys: on the installed node on Windows its service
+    /// account's Credential Manager can.
     #[test]
     fn config_get_says_whether_the_keyring_can_hold_the_keys() {
         let (_d, paths) = setup(&["home"]);
@@ -596,56 +585,13 @@ mod tests {
         .unwrap();
         let v: Value = serde_json::from_str(said.trim()).unwrap();
         assert_eq!(v["value"], "file");
-        assert_eq!(v["keyring"]["usable"], false, "{v}");
-        assert_eq!(v["keyring"]["reason"], "windows-service");
-        assert!(
-            v["keyring"]["why"]
-                .as_str()
-                .unwrap()
-                .contains("Credential Manager")
-        );
+        // The service account's Credential Manager answers.
+        assert_eq!(v["keyring"]["usable"], true, "{v}");
+        assert!(v["keyring"].get("reason").is_none(), "{v}");
         // Another key says nothing of it.
         let said = run(&paths, &["--json", "config", "get", "log.level"]).unwrap();
         let v: Value = serde_json::from_str(said.trim()).unwrap();
         assert!(v.get("keyring").is_none(), "{v}");
-    }
-
-    #[test]
-    fn the_installed_node_on_windows_keeps_its_keys_in_files() {
-        let (_d, paths) = setup(&["home"]);
-        let key = nerve_transport::keys::NodeKey::generate().unwrap();
-        crate::secrets::store_center_key(&paths, SecretStorage::File, "home", &key).unwrap();
-        let set = |to: &str| run(&paths, &["config", "set", "machine.secret_storage", to]);
-        // Moved there before it was the installed node.
-        set("keyring").unwrap();
-        crate::secrets::for_tests::pretend_windows_service(&paths);
-        let (r, out) = setup_with(&paths, "\n\n\n");
-        r.unwrap();
-        assert!(!out.contains("Where the node keeps its keys"), "{out}");
-        assert!(
-            out.contains("Warning: the installed node on Windows"),
-            "{out}"
-        );
-        assert!(out.contains("the node's keys are in files now"), "{out}");
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        assert_eq!(config_key_at(&paths), (true, false));
-        assert!(paths.key_file("home").exists());
-        let e = set("keyring").unwrap_err();
-        assert!(e.contains("cannot be \"keyring\""), "{e}");
-        assert!(
-            e.contains(
-                "go to the Credential Manager of the account that put them there, not to that of nerve"
-            ),
-            "{e}"
-        );
-        assert!(e.contains("nothing was changed"), "{e}");
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
-        assert_eq!(config_key_at(&paths), (true, false));
-        // Asked again, setup leaves the files as they are.
-        let (r, out) = setup_with(&paths, "\n\n\n");
-        r.unwrap();
-        assert!(!out.contains("are in files now"), "{out}");
-        assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
     }
 
     /// Where no keyring answers, `config set machine.secret_storage

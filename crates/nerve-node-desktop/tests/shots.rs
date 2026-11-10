@@ -751,7 +751,7 @@ fn every_page_light_and_dark() {
     // refused, and a setting by its name.
     let usable = store.get_keyring_usable();
     store.set_keyring_usable(false);
-    store.set_keyring_why(nerve_node_desktop::view::no_keyring("windows-service").into());
+    store.set_keyring_why(nerve_node_desktop::view::no_keyring("no-answer").into());
     prefs.set_tab(1);
     shots.take("settings-keys-no-keyring");
     prefs.set_tab(3);

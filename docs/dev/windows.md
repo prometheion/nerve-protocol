@@ -22,7 +22,7 @@ Debian 12, Fedora 36 and later) and fontconfig.
 | `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, as `nerve-run` in the pairing's AppContainer ([the account](#the-account-commands-run-as-on-windows)) |
 | `allowlist` and `user` mode run commands | Yes | Yes: `allowlist` as `nerve-run` in the pairing's AppContainer, or as you with `--as-owner`; `user` as you. Each in a Job Object |
 | Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with your administrator token ([sudo on Windows](#sudo-on-windows)) |
-| [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter | The AppContainer without its network capabilities, while the Windows Firewall service runs |
+| [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter; name lookups still work | The AppContainer without its network capabilities, while the Windows Firewall service runs; name lookups fail too |
 | Control socket | Yes | A [control pipe](#the-control-pipe): every change at once |
 | [Limits per command](#limits-per-command) | A cgroup | The command's job object |
 | [Providers](capabilities.md#capability-providers-in-use) | Yes | On the installed service's provider pipe ([providers on Windows](#providers-on-windows)) |
@@ -239,24 +239,23 @@ service, and the owners and their rights with it.
 The service takes every change at once over its
 [control pipe](#the-control-pipe).
 
-The installed node on Windows keeps its keys in files. The service runs as
-`nerve`, and the Credential Manager is one per account: keys put in the
-keyring would be in the Credential Manager of the account that put them
-there, where the service does not find them. The app's first-run steps
-leave the keys alone, and the keyring under **Settings**, **Keys** is
-refused and changes nothing. A `node.toml` that keeps the keys in the keyring is refused by the
-install, before it changes anything, and the service does not start with
-one: those keys are out of the service's reach. If the keys are still in
-files in `config\keys` (the line in `node.toml` was changed), set the line
-back to `"file"` and nothing is lost. Otherwise delete the node's folders
-(with **Settings**, **App**, **Uninstall** and **Delete the data**, where
-Nerve is installed; that deletes the audit log too, so copy
-`state\audit.jsonl` aside first) and pair the centers again.
-
-The same account problem keeps the proxy's values out of reach: the installed
-node on Windows takes a proxy only if it needs no header and no password.
-A proxy with either is refused and changes nothing
-([proxy](#a-proxy-for-the-service-on-windows)).
+The installed node keeps its keys in files by default. Under **Settings**,
+**Keys** they can go into the Credential Manager instead: the one of the
+service's own account `nerve` (Q8), as the Credential Manager is one per
+account. The service writes and reads it itself; the CLI and the app of an
+administrator ask the running service over its
+[control pipe](#the-control-pipe) (`vault.get`, `vault.set`, `vault.delete`,
+for this node's entries only), never their own. The proxy's header values and
+password live there too. While no service runs (a restore, an install), what
+goes there waits in `config\keys\vault.pending`, sealed with DPAPI, and the
+service takes it at its start. An install gives `nerve` a new password, after
+which Windows no longer opens what its Credential Manager kept: so the
+running service first puts its entries aside the same way (`vault.stage`);
+with the keys in the Credential Manager and a service that cannot, the
+install changes nothing. Uninstall removes `nerve` and its Credential Manager
+with it; **Keep the data** puts the entries aside first, for a later install.
+`nerve-run`'s commands do not reach that Credential Manager: it is another
+account's.
 
 ### The account commands run as on Windows
 
@@ -938,8 +937,8 @@ container and `nerve-run` may open.
   session could not use it. The container has none of the capabilities for
   your sign-in credentials or certificates (code), so it should not reach
   network shares as you; not checked. With the node's keys in the
-  Credential Manager (`machine.secret_storage = keyring`) `folder` mode runs
-  no command on Windows (code, [keys](settings-and-config.md#where-the-node-keeps-its-keys)).
+  Credential Manager (`machine.secret_storage = keyring`), they are in that of
+  `nerve`, which commands of `nerve-run`, another account, do not reach.
   Checked: a blob protected with DPAPI for the machine can be opened by the
   command. A blob for your user could not be made in the test session, so
   that is not checked. The node's own keys are files in folders that get no
@@ -1040,25 +1039,12 @@ not the only way to those rights: see the administrator above.
 
 ## A proxy for the service on Windows
 
-The installed node on Windows runs as the account `nerve`, and the Credential
-Manager is one per account. A header value or a password would go to the
-Credential Manager of the account that sets the proxy, where the service does
-not find it. The node keeps them nowhere else (not in a file), so the
-installed node on Windows takes a proxy that needs neither: set it in the
-[desktop app](desktop.md) under **Settings**, **Network**, **Proxy**, as
-`http://proxy.example:3128`.
-
-A proxy with a header, or with a user name and password in the URL, is
-refused there and changes nothing. If the proxy needs a login, the installed
-node on Windows cannot use it.
-
-A header in `node.toml` is not read by the service: the link stays down. The
-app's **Overview** shows it as `bad proxy:` with the reason, which it asks the
-running node over its [control pipe](#the-control-pipe). The
-service's [log](logging.md#the-log-as-the-owner-reads-it) has the reason as an `error` line with `bad proxy:`, in
-`C:\ProgramData\Nerve\state\log.jsonl`. Set the proxy again without the header,
-or remove it; either deletes the old entry from the Credential Manager of the
-account that does it.
+A proxy with a header, or with a user name and password in the URL, works on
+the installed node as on Linux: set it in the [desktop app](desktop.md)
+under **Settings**, **Network**, **Proxy**. Its values go into the
+Credential Manager of the service's account `nerve`, through the running
+service ([keys above](#the-node-as-a-service-on-windows)); a backup takes
+them into its own encryption, and a restore puts them back there.
 
 ## A relay on Windows
 

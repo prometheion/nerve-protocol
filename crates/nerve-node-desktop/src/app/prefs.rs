@@ -892,8 +892,15 @@ impl Ctl {
             .filter(|a| !a.is_empty())
             .or_else(|| self.with_install(|i| i.get_account().to_string()))
             .unwrap_or_default();
+        // A running node with an owner takes it at once, over its pipe;
+        // else the install takes it, and the user of the app as the owner.
+        let runs = {
+            let st = self.status.borrow();
+            st["daemon"] == "running" && st["owner"].is_string()
+        };
+        let args = vec![if runs { "password" } else { "install" }.into()];
         self.account_change(
-            vec!["install".into()],
+            args,
             Some(password),
             format!("The service has the new password of {account}"),
         );

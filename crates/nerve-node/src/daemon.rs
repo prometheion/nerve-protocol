@@ -2221,20 +2221,15 @@ impl Daemon {
             nerve_transport::files::create_private_dir(dir)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        // Where the keys may not be in the keyring, a node.toml that keeps
-        // them there is refused: the installed node on Windows would look
-        // in the Credential Manager of its own account, which holds none of
-        // them.
-        if crate::secrets::stated_storage(&paths) == SecretStorage::Keyring
-            && let Some(n) = crate::secrets::no_keyring(&paths)
-        {
-            let then = n.then_at_start();
-            return Err(crate::secrets::keyring_refused(
-                &paths,
-                n,
-                "the node does not start",
-                then,
-            ));
+        // The installed node on Windows takes into the Credential Manager
+        // of its own account what was written for it while it did not run
+        // (a restore, an install): before anything reads a key.
+        if crate::secrets::windows_service(&paths) {
+            match crate::secrets::vault::take_pending(&paths) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("took {n} entries into the Credential Manager"),
+                Err(e) => tracing::error!("{e}"),
+            }
         }
         // Keys in the keyring of the node's own session: the system-wide
         // environment of the login can have given that session another
@@ -2894,6 +2889,20 @@ pub(crate) async fn pipe_control(
         "sudo.on" => sudo_on(shared, params, false).await,
         #[cfg(windows)]
         "owner.password" => owner_password(shared, params).await,
+        // The service's own Credential Manager, for the CLI and the app of
+        // an administrator (crate::secrets::vault).
+        "vault.get" | "vault.set" | "vault.delete" | "vault.stage" => {
+            let (s, method) = (shared.clone(), method.to_string());
+            match tokio::task::spawn_blocking(move || {
+                crate::secrets::vault::serve(&s.paths, &method, &params)
+            })
+            .await
+            {
+                Ok(Ok(v)) => Reply::Ok(v),
+                Ok(Err(e)) => Reply::Err(e),
+                Err(e) => Reply::Err(e.to_string()),
+            }
+        }
         m => control(shared, m, params, false),
     }
 }
@@ -3949,25 +3958,30 @@ mod tests {
             .unwrap();
     }
 
-    /// The installed node on Windows does not start with its keys in the
-    /// keyring: they are in the Credential Manager of whoever moved them
-    /// there, and the message says how to get them back into files.
+    /// The installed node on Windows starts with its keys in the keyring,
+    /// its service account's, and takes first what was written for it while
+    /// it did not run (a restore, an install).
     #[tokio::test]
-    async fn the_installed_node_on_windows_refuses_keys_in_the_keyring() {
+    async fn the_installed_node_on_windows_takes_what_waits_for_its_vault_at_its_start() {
         let d = tempfile::tempdir().unwrap();
         let log = Log::new(Level::Info);
         let opts = options(&d, &log);
         let paths = opts.paths.clone();
         keys_in_the_keyring(&paths);
         crate::secrets::for_tests::pretend_windows_service(&paths);
-        let Err(e) = Daemon::start(opts).await else {
-            panic!("the node started");
-        };
-        assert!(e.contains("the node does not start"), "{e}");
-        assert!(e.contains("Credential Manager"), "{e}");
-        assert!(e.contains("Settings › App › Uninstall"), "{e}");
-        assert!(e.contains("install Nerve again with the installer"), "{e}");
-        assert!(!e.contains("Restart-Service"), "{e}");
+        let entry = crate::secrets::Entry::proxy(&paths);
+        crate::secrets::vault::set(&paths, entry.account(), "{}").unwrap();
+        assert!(crate::secrets::vault::pending_file(&paths).exists());
+        crate::secrets::for_tests::pretend_service_account(&paths);
+        let daemon = Daemon::start(opts).await.expect("the node starts");
+        assert!(!crate::secrets::vault::pending_file(&paths).exists());
+        assert_eq!(
+            crate::secrets::store::get(entry.account())
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
+        daemon.stop().await;
     }
 
     fn options(d: &tempfile::TempDir, log: &Arc<Log>) -> NodeOptions {

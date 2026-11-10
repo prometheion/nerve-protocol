@@ -972,7 +972,7 @@ export component RestoreDialog inherits Dialog {
     }
     CheckBox {
         text: "Keep its keys in files";
-        detail: "When this machine cannot use the system keyring.";
+        detail: Install.windows ? "Else they go into the node's Credential Manager when it starts." : "When this machine cannot use the system keyring.";
         checked: Prefs.restore-in-files;
         toggled(on) => {
             Prefs.restore-in-files = on;

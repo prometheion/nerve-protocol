@@ -549,12 +549,10 @@ pub fn rule_hint(text: &str, listing: &Value, center: &str) -> (String, bool) {
 }
 
 /// Why the keys cannot go into the system keyring here, by the `reason` of
-/// `config get machine.secret_storage --json`.
-pub fn no_keyring(reason: &str) -> &'static str {
-    match reason {
-        "windows-service" => "Not on Windows: the service would not find them in a keyring.",
-        _ => "No keyring answers for the node's account.",
-    }
+/// `config get machine.secret_storage --json`: no keyring answers (on
+/// Windows the service account's Credential Manager always does).
+pub fn no_keyring(_reason: &str) -> &'static str {
+    "No keyring answers for the node's account."
 }
 
 /// What the app shows after `center rotate-key` gave `name` this machine's
