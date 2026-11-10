@@ -188,6 +188,25 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # What the node and the runner say when an installed test failed: what
+      # passes on a test machine may meet another Windows here.
+      - name: The node's log and the test folders, after a failure
+        if: failure()
+        run: |
+          $ErrorActionPreference = 'Continue'
+          [Environment]::OSVersion.VersionString
+          'EnableLUA: ' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA
+          whoami /all
+          $log = 'C:\ProgramData\Nerve\state\log.jsonl'
+          if (Test-Path $log) { Get-Content $log -Tail 300 }
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'nerve-node' } -MaxEvents 50 |
+            Format-List TimeCreated, Message
+          icacls C:\
+          Get-ChildItem C:\ -Directory -Filter 'nerve-w2-*' | ForEach-Object {
+            icacls $_.FullName
+            Get-ChildItem $_.FullName -Directory | ForEach-Object { icacls $_.FullName }
+          }
+          exit 0
       # Chrome and a Node.js with WebSocket come with the image; the web UI
       # smoke test drives the one with the other.
       - name: The center as a Windows service
