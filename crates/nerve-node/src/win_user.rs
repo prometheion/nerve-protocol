@@ -293,6 +293,64 @@ pub(crate) fn own_sid() -> io::Result<Vec<u8>> {
     }
 }
 
+/// The SID of this machine's own accounts (`S-1-5-21-…`), as its security
+/// policy names it: every local account's SID is it and the account's
+/// number, an account of a domain or of Microsoft Entra ID has another.
+pub fn machine_sid() -> Result<String, String> {
+    use windows_sys::Win32::Foundation::STATUS_SUCCESS;
+    use windows_sys::Win32::Security::Authentication::Identity::{
+        LSA_HANDLE, LSA_OBJECT_ATTRIBUTES, LsaClose, LsaFreeMemory, LsaNtStatusToWinError,
+        LsaOpenPolicy, LsaQueryInformationPolicy, POLICY_ACCOUNT_DOMAIN_INFO,
+        POLICY_VIEW_LOCAL_INFORMATION, PolicyAccountDomainInformation,
+    };
+    static SID: OnceLock<String> = OnceLock::new();
+    if let Some(s) = SID.get() {
+        return Ok(s.clone());
+    }
+    let said = |st| {
+        // SAFETY: plain conversion.
+        let code = unsafe { LsaNtStatusToWinError(st) };
+        format!(
+            "cannot read the SID of this machine: {}",
+            io::Error::from_raw_os_error(code as i32)
+        )
+    };
+    // SAFETY: zeroed object attributes are what LsaOpenPolicy takes.
+    let attrs: LSA_OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
+    let mut policy: LSA_HANDLE = 0;
+    // SAFETY: this machine's policy, a place for the handle; every account
+    // may read this part of it.
+    let st = unsafe {
+        LsaOpenPolicy(
+            std::ptr::null(),
+            &attrs,
+            POLICY_VIEW_LOCAL_INFORMATION as u32,
+            &mut policy,
+        )
+    };
+    if st != STATUS_SUCCESS {
+        return Err(said(st));
+    }
+    let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: an open policy and a place for the buffer, which LSA
+    // allocates; its SID is copied before it is freed, and the policy is
+    // closed once.
+    let sid = unsafe {
+        let st = LsaQueryInformationPolicy(policy, PolicyAccountDomainInformation, &mut buf);
+        LsaClose(policy);
+        if st != STATUS_SUCCESS {
+            return Err(said(st));
+        }
+        let sid = (*buf.cast::<POLICY_ACCOUNT_DOMAIN_INFO>()).DomainSid;
+        let bytes =
+            std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize).to_vec();
+        LsaFreeMemory(buf);
+        bytes
+    };
+    let text = crate::win_host::sid_text(&sid)?;
+    Ok(SID.get_or_init(|| text).clone())
+}
+
 /// The name of the account this process runs as.
 pub fn current_user() -> Result<String, String> {
     let mut buf = vec![0u16; 257];
@@ -331,8 +389,10 @@ pub fn lookup(name: &str) -> Result<Option<Account>, String> {
         let uid = rid(info.usri23_user_sid);
         let found = from_wide(info.usri23_name);
         let home = profile_dir(info.usri23_user_sid).unwrap_or_else(|| {
-            let drive = std::env::var_os("SystemDrive").unwrap_or_else(|| "C:".into());
-            PathBuf::from(format!("{}\\Users", drive.to_string_lossy())).join(&found)
+            // The Windows folder's drive, not the variable's.
+            let windows = nerve_service::win::folders::windows_dir();
+            let drive = nerve_service::win::folders::drive_of(&windows.to_string_lossy());
+            PathBuf::from(format!("{drive}\\Users")).join(&found)
         });
         Account {
             name: found,

@@ -96,10 +96,17 @@ pub trait WinSystem {
     /// Removes the account, its rights and its profile; what Windows
     /// keeps of the profile until it restarts, said.
     fn remove_account(&self, name: &str) -> Result<Option<String>, String>;
-    /// Makes `dir` when it is missing and lets only `owner`, SYSTEM and the
-    /// administrators open it (only the latter two for `None`); what is
-    /// below inherits that. A link in place of the folder is refused.
-    fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String>;
+    /// Makes `dir` when it is missing, with the DACL `sddl` (and the owner
+    /// it names) from its first moment, or gives the folder there that
+    /// DACL; one another account owns is refused, as is a link in its place
+    /// (nerve_service::win::dacl::private_folder).
+    fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String>;
+    /// Refuses `dir` unless it is a folder, no link, that SYSTEM or the
+    /// administrators own (nerve_service::win::dacl::admins_folder).
+    fn admins_own(&self, dir: &Path) -> Result<(), String>;
+    /// The SID of this machine's own accounts (`S-1-5-21-…`), which each
+    /// local account's SID begins with.
+    fn machine_sid(&self) -> Result<String, String>;
     /// The service: `None` when it is not registered, else whether it runs.
     fn service(&self) -> Result<Option<bool>, String>;
     /// The service's state for `status`; `None` when it is not
@@ -255,6 +262,73 @@ fn stop_after_stage(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> 
     sys.stop().inspect_err(|_| {
         crate::secrets::vault::discard_pending(&layout.paths);
     })
+}
+
+/// The DACL of the node's folders in SDDL: full control for the account
+/// with the SID `account` (nerve's; none where uninstall keeps the data),
+/// SYSTEM and the administrators, inherited below and nothing from above.
+/// The administrators own them, so a folder there already that another
+/// account owns is refused, not taken: its owner could change its DACL
+/// again and read what the node writes there, the owner's password among
+/// it (security-1), as the center's folders are made.
+pub fn folder_dacl(account: Option<&str>) -> String {
+    use nerve_service::win::dacl::{dacl_text, owned_by_admins};
+    owned_by_admins(&dacl_text(account))
+}
+
+/// The SID of the local account with the number `rid` on the machine whose
+/// accounts' SIDs begin with `machine`.
+pub fn local_sid(machine: &str, rid: u32) -> String {
+    format!("{machine}-{rid}")
+}
+
+/// The folders the installed node checks before it starts on `paths`: its
+/// config and state folders and the folders they are in, which SYSTEM or the
+/// administrators must own, as `install` left them. One put in their place
+/// since (another account's, or a link) is refused, not read.
+pub fn own_folders(paths: &NodePaths) -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for dir in [&paths.config_dir, &paths.state_dir] {
+        for d in dir.parent().into_iter().chain(Some(dir.as_path())) {
+            if !d.as_os_str().is_empty() && !all.iter().any(|a: &PathBuf| a == d) {
+                all.push(d.to_path_buf());
+            }
+        }
+    }
+    all
+}
+
+/// Runs `check` on each of [`own_folders`]; the first refusal.
+pub fn check_folders(
+    paths: &NodePaths,
+    check: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    own_folders(paths).iter().try_for_each(|d| check(d))
+}
+
+/// Refuses the install before it changes anything where one of the node's
+/// folders is there already and another account than SYSTEM or the
+/// administrators owns it (one a standard account made in `ProgramData`
+/// first), or the folder they go in is not SYSTEM's or the administrators'.
+fn check_install_folders(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> {
+    if let Some(up) = layout.home.parent() {
+        sys.admins_own(up).map_err(|e| {
+            format!(
+                "{e}; the node's folders go only in a folder of SYSTEM's or the administrators'"
+            )
+        })?;
+    }
+    for dir in [
+        &layout.home,
+        &layout.paths.config_dir,
+        &layout.paths.state_dir,
+    ] {
+        if dir.symlink_metadata().is_ok() {
+            sys.admins_own(dir)
+                .map_err(|e| format!("{e}; delete it, then install again"))?;
+        }
+    }
+    Ok(())
 }
 
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
@@ -549,6 +623,9 @@ pub fn install(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // Before anything is written, the audit log too: a folder another
+    // account owns is not written in.
+    check_install_folders(layout, sys)?;
     let mut steps = Steps {
         done: Vec::new(),
         out,
@@ -609,12 +686,18 @@ fn install_steps(
             ));
         }
     }
+    // The folder above first: what is made in it after is made in a folder
+    // only the administrators and nerve may write.
+    let node = sys
+        .account(USER)?
+        .ok_or_else(|| format!("Windows made no user {USER}"))?;
+    let dacl = folder_dacl(Some(&local_sid(&sys.machine_sid()?, node.uid)));
     for dir in [
         &layout.home,
         &layout.paths.config_dir,
         &layout.paths.state_dir,
     ] {
-        sys.secure(dir, Some(USER))?;
+        sys.secure(dir, &dacl)?;
     }
     steps.did(format!(
         "{} and {} are open to {USER} and the administrators only",
@@ -907,7 +990,7 @@ fn uninstall_steps(
         }
     } else if folders.iter().any(|d| d.exists()) {
         for dir in folders.iter().filter(|d| d.exists()) {
-            sys.secure(dir, None)?;
+            sys.secure(dir, &folder_dacl(None))?;
         }
         steps.did(format!(
             "kept {} with the stored password, and {} (only administrators can open them now; an uninstall that deletes the data deletes them)",
@@ -1292,8 +1375,10 @@ pub(crate) mod tests {
         program: RefCell<Option<PathBuf>>,
         /// What the program said each time the service started it.
         started: RefCell<Vec<String>>,
-        /// The folders and whom they were opened to.
-        secured: RefCell<Vec<(PathBuf, Option<String>)>>,
+        /// The folders and the DACLs they got.
+        secured: RefCell<Vec<(PathBuf, String)>>,
+        /// The folders another account owns: refused.
+        pub(crate) foreign: RefCell<Vec<PathBuf>>,
         /// Granted folders on drives that are not connected.
         away: RefCell<Vec<PathBuf>>,
         /// The message file of the Event Log source, while it is registered.
@@ -1338,6 +1423,7 @@ pub(crate) mod tests {
                 program: RefCell::new(None),
                 started: RefCell::new(Vec::new()),
                 secured: RefCell::new(Vec::new()),
+                foreign: RefCell::new(Vec::new()),
                 away: RefCell::new(Vec::new()),
                 event_source: RefCell::new(None),
                 removed: RefCell::new(Vec::new()),
@@ -1463,12 +1549,31 @@ pub(crate) mod tests {
             self.accounts.borrow_mut().retain(|a| a.name != name);
             Ok(None)
         }
-        fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String> {
+        fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
+            // As private_folder: one there already only where SYSTEM or the
+            // administrators own it.
+            if dir.exists() {
+                self.admins_own(dir)?;
+            }
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             self.secured
                 .borrow_mut()
-                .push((dir.to_path_buf(), owner.map(str::to_string)));
+                .push((dir.to_path_buf(), sddl.to_string()));
             Ok(())
+        }
+        /// The folders of [`Fake::foreign`] are another account's; the
+        /// others the administrators'.
+        fn admins_own(&self, dir: &Path) -> Result<(), String> {
+            if self.foreign.borrow().iter().any(|f| f == dir) {
+                return Err(format!(
+                    "{}: another account (S-1-5-21-1-2-3-1002) owns it",
+                    dir.display()
+                ));
+            }
+            Ok(())
+        }
+        fn machine_sid(&self) -> Result<String, String> {
+            Ok("S-1-5-21-1-2-3".into())
         }
         fn service(&self) -> Result<Option<bool>, String> {
             Ok(self.service.get())
@@ -2051,12 +2156,16 @@ pub(crate) mod tests {
             out.contains("registered the source nerve-node in the Windows Event Log"),
             "{out}"
         );
-        // The folders are nerve's; the program is in place.
+        // The folders are nerve's (its SID), the administrators own them,
+        // and the folder above is made first; the program is in place.
         let secured = sys.secured.borrow().clone();
+        let nerve = format!(
+            "O:BAD:P(A;OICI;FA;;;S-1-5-21-1-2-3-{})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+            sys.account(USER).unwrap().unwrap().uid
+        );
         assert_eq!(
             secured,
-            [&l.home, &l.paths.config_dir, &l.paths.state_dir]
-                .map(|d| (d.clone(), Some(USER.to_string())))
+            [&l.home, &l.paths.config_dir, &l.paths.state_dir].map(|d| (d.clone(), nerve.clone()))
         );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 1.0.0\n");
         // The password is stored, not in clear.
@@ -2240,6 +2349,88 @@ pub(crate) mod tests {
         );
     }
 
+    /// A folder of the node's that another account made before the install
+    /// (any standard account may make one in `ProgramData`, and keeps it
+    /// as its owner) is refused before anything changes, the audit log
+    /// included, with what to do; so is a folder above them that is not
+    /// SYSTEM's or the administrators' (security-1, windows-2). Uninstall's
+    /// kept folders are refused the same way.
+    #[test]
+    fn install_refuses_folders_another_account_owns() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for dir in [&l.home, &l.paths.config_dir, &l.paths.state_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+            *sys.foreign.borrow_mut() = vec![dir.clone()];
+            let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+            assert!(
+                e.starts_with(&format!("{}: another account", dir.display())),
+                "{e}"
+            );
+            assert!(e.ends_with("; delete it, then install again"), "{e}");
+            assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+            assert!(audit_events(&l).is_empty());
+        }
+        let above = l.home.parent().unwrap().to_path_buf();
+        *sys.foreign.borrow_mut() = vec![above.clone()];
+        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        assert!(
+            e.starts_with(&format!("{}: another account", above.display())),
+            "{e}"
+        );
+        assert!(e.ends_with("SYSTEM's or the administrators'"), "{e}");
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        // The administrators' folders are taken.
+        sys.foreign.borrow_mut().clear();
+        sys.types("alice's");
+        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        // A kept folder that another account owns now is not given the
+        // administrators' DACL as if it were theirs.
+        *sys.foreign.borrow_mut() = vec![l.paths.state_dir.clone()];
+        let e = uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("another account"), "{e}");
+    }
+
+    /// The folders the service checks at its start: config and state and
+    /// the folder they are in, once each.
+    #[test]
+    fn the_service_checks_its_folders_and_the_one_above() {
+        let l = layout(Path::new("/x"));
+        assert_eq!(
+            own_folders(&l.paths),
+            [&l.home, &l.paths.config_dir, &l.paths.state_dir].map(|d| d.clone())
+        );
+        let apart = NodePaths::new("/a/config", "/b/state");
+        assert_eq!(
+            own_folders(&apart),
+            ["/a", "/a/config", "/b", "/b/state"].map(PathBuf::from)
+        );
+        // Each is checked, and the first refusal ends the check.
+        let seen = RefCell::new(Vec::new());
+        check_folders(&l.paths, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen.borrow().len(), 3);
+        seen.borrow_mut().clear();
+        let e = check_folders(&l.paths, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            if *d == l.paths.config_dir {
+                Err("no".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e, "no");
+        assert_eq!(*seen.borrow(), [l.home.clone(), l.paths.config_dir.clone()]);
+    }
+
     #[test]
     fn install_refuses_a_user_it_did_not_make_and_needs_an_administrator() {
         let d = tempfile::tempdir().unwrap();
@@ -2324,7 +2515,10 @@ pub(crate) mod tests {
         assert!(l.paths.config_dir.join(SECRET_FILE).exists());
         assert_eq!(
             sys.secured.borrow().clone(),
-            [&l.paths.config_dir, &l.home, &l.paths.state_dir].map(|d| (d.clone(), None))
+            [&l.paths.config_dir, &l.home, &l.paths.state_dir].map(|d| (
+                d.clone(),
+                "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
+            ))
         );
         let events: Vec<_> = audit_events(&l)
             .iter()

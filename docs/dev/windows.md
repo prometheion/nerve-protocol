@@ -188,6 +188,14 @@ The install does this, and the installer shows each step:
    that the install did not make is refused.
 2. Makes the folders and gives them an access list of their own: `nerve`,
    SYSTEM and the administrators, nothing inherited from the folders above.
+   The administrators own them. A folder that is there already is taken
+   only from SYSTEM or the administrators: one another account made (any
+   standard account may make a folder in `C:\ProgramData`), one a program
+   of yours made without **Run as administrator**, and a link in its place
+   are refused before the install changes anything; delete it and install
+   again. The folder they are in must be SYSTEM's or the administrators'
+   too. The service checks the config and state folders, and the folder
+   they are in, again at each start.
 3. Makes the local user `nerve-run`, which commands from centers run as
    ([the account](#the-account-commands-run-as-on-windows)), with a long
    random password stored with DPAPI in the config folder, and its profile.
@@ -235,6 +243,16 @@ uninstall, turning sudo on and the `machine.*` settings that pick the
 account (also a restore that would change them), the app asks Windows for an
 administrator's rights, with the UAC prompt. Uninstalling removes the
 service, and the owners and their rights with it.
+
+The install, update, uninstall and restore take `C:\ProgramData` and
+`C:\Program Files` from Windows, not from the variables `ProgramData` and
+`ProgramFiles`, and the proxy and the trusted certificates (`HTTPS_PROXY`,
+`SSL_CERT_FILE` and the like) from the machine's environment, as the
+[center's commands](#the-center-as-a-windows-service) do: the app's
+elevated broker takes your account's own variables, which any program of
+yours may set, and every command it runs takes the machine's instead. An
+elevated command refuses the folders `NERVE_NODE_CONFIG_DIR` and
+`NERVE_NODE_STATE_DIR` would name.
 
 The service takes every change at once over its
 [control pipe](#the-control-pipe).

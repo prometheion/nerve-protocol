@@ -49,6 +49,30 @@ pub fn refuse_old_names(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Res
     }
 }
 
+/// Refuses the folders an administrator's command on Windows (`elevated`)
+/// would take from [`CONFIG_DIR_VAR`] or [`STATE_DIR_VAR`] where `var` finds
+/// them set: an elevated process takes the account's own variables, which
+/// its unelevated programs may set, so a restore or `sudo on` would act on a
+/// folder of theirs instead of the installed node's (windows-2), as the
+/// center refuses its state variable.
+pub fn refuse_folder_variables(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    elevated: bool,
+) -> Result<(), String> {
+    if !elevated {
+        return Ok(());
+    }
+    match [CONFIG_DIR_VAR, STATE_DIR_VAR]
+        .into_iter()
+        .find(|k| var(k).is_some_and(|v| !v.is_empty()))
+    {
+        None => Ok(()),
+        Some(k) => Err(format!(
+            "{k} is set, and an administrator's command takes the variables of the account's other programs too; clear the variable"
+        )),
+    }
+}
+
 impl NodePaths {
     pub fn new(config_dir: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> NodePaths {
         NodePaths {
@@ -838,6 +862,25 @@ mod tests {
             e.starts_with("rename NERVE_CONFIG_DIR to NERVE_NODE_CONFIG_DIR"),
             "{e}"
         );
+    }
+
+    /// An administrator's command on Windows takes no folder from the
+    /// account's variables; any other command does (windows-2).
+    #[test]
+    fn an_elevated_command_takes_no_folder_from_a_variable() {
+        let only = |names: &'static [&'static str]| {
+            move |k: &str| names.contains(&k).then(|| std::ffi::OsString::from("/x"))
+        };
+        assert!(refuse_folder_variables(only(&[]), true).is_ok());
+        assert!(refuse_folder_variables(only(&["PATH"]), true).is_ok());
+        for (k, set) in [
+            (CONFIG_DIR_VAR, only(&[CONFIG_DIR_VAR])),
+            (STATE_DIR_VAR, only(&[STATE_DIR_VAR])),
+        ] {
+            let e = refuse_folder_variables(set, true).unwrap_err();
+            assert!(e.starts_with(&format!("{k} is set")), "{e}");
+            assert!(refuse_folder_variables(set, false).is_ok());
+        }
     }
 
     /// One pipe per state folder, the same for every spelling of it.

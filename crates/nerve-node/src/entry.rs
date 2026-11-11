@@ -71,6 +71,11 @@ pub fn main() -> i32 {
     }
     let matches = crate::cli::help_pages(crate::cli::Cli::command(), program).get_matches();
     let cli = crate::cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    #[cfg(windows)]
+    // SAFETY: nothing here has started another thread.
+    if let Err(e) = unsafe { settle_environment(&cli) } {
+        return failed(cli.json, &e);
+    }
     // An owner of the installed node, who may not open its folders, has
     // the running node run the command (crate::owner).
     if let Some(code) = crate::owner::forward_if_needed(&cli) {
@@ -82,7 +87,16 @@ pub fn main() -> i32 {
     match crate::cli::service_log(&cli) {
         Some(Ok(log)) => {
             let json = cli.json;
-            return crate::win_service::serve(Box::new(move || run(cli)), log, json);
+            // The folders must still be the administrators' that install
+            // made: one put in their place since (another account's, or a
+            // link) is not read (security-1).
+            let paths =
+                crate::paths::NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
+            let body = move || {
+                crate::winsvc::check_folders(&paths, crate::win_host::check_own_folder)?;
+                run(cli)
+            };
+            return crate::win_service::serve(Box::new(body), log, json);
         }
         Some(Err(e)) => return failed(cli.json, &e),
         None => {}
@@ -92,6 +106,23 @@ pub fn main() -> i32 {
         Ok(()) => 0,
         Err(e) => failed(json, &e),
     }
+}
+
+/// An administrator's command on Windows takes the proxy and the trusted
+/// certificates from the machine, and no folder from the variables of the
+/// account, which its unelevated programs may set (windows-2).
+///
+/// # Safety
+///
+/// Changes the environment: call it before this process starts another
+/// thread.
+#[cfg(windows)]
+unsafe fn settle_environment(cli: &crate::cli::Cli) -> Result<(), String> {
+    if crate::cli::takes_machine_environment(&cli.cmd) {
+        // SAFETY: the caller's promise.
+        unsafe { nerve_service::win::folders::take_machine_environment() };
+    }
+    crate::paths::refuse_folder_variables(|k| std::env::var_os(k), crate::win_host::is_admin())
 }
 
 /// Says the error `e` of a command; its exit code.
@@ -117,4 +148,50 @@ fn run(cli: crate::cli::Cli) -> Result<(), String> {
         .map_err(|e| format!("cannot start the runtime: {e}"))?;
     let mut out = std::io::stdout();
     rt.block_on(crate::cli::execute(cli, &mut out))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use clap::Parser;
+
+    use nerve_service::win::folders::{STEERING, is_steering};
+
+    /// Prints the steering variables that `update` keeps, for
+    /// [`an_update_takes_the_machine_s_proxy`].
+    #[test]
+    #[ignore = "run by an_update_takes_the_machine_s_proxy, in a process of its own"]
+    fn print_the_steering_variables_of_update() {
+        let cli = crate::cli::Cli::try_parse_from(["nerve-node", "update"]).unwrap();
+        // SAFETY: a process of its own, run with `--test-threads=1`, that
+        // reads these variables nowhere else.
+        let _ = unsafe { super::settle_environment(&cli) };
+        let left: Vec<_> = std::env::vars_os()
+            .filter(|(k, _)| is_steering(k))
+            .collect();
+        println!("steering: {left:?}");
+    }
+
+    /// The elevated `update` downloads the program the service runs: it
+    /// takes the machine's proxy and trusted certificates, never the
+    /// account's variables, which its unelevated programs may set
+    /// (windows-2). Set for a process of its own.
+    #[test]
+    fn an_update_takes_the_machine_s_proxy() {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([
+            "--exact",
+            "entry::tests::print_the_steering_variables_of_update",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        for k in STEERING {
+            c.env(k, "decoy-from-the-account");
+        }
+        let o = c.output().unwrap();
+        let said = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{said}");
+        assert!(said.contains("steering: ["), "{said}");
+        assert!(!said.contains("decoy-from-the-account"), "{said}");
+    }
 }

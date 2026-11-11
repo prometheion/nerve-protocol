@@ -53,7 +53,7 @@ pub use help::{
     help_pages, top_help,
 };
 pub(crate) use install::service_status;
-pub use install::{BY_HAND, service_log};
+pub use install::{BY_HAND, service_log, takes_machine_environment};
 // For crate::service's tests.
 #[cfg(all(test, unix))]
 pub(crate) use install::terminal_input;

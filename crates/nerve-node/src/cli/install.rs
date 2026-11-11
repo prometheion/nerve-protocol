@@ -20,6 +20,19 @@ pub fn service_log(cli: &Cli) -> Option<Result<PathBuf, String>> {
     })
 }
 
+/// Whether `cmd` takes the machine's proxy and trusted certificates in place
+/// of the account's variables on Windows
+/// (nerve_service::win::folders::take_machine_environment): the commands an
+/// administrator runs elevated, which take the account's own variables,
+/// which its unelevated programs may set (windows-2). `update` downloads
+/// the program the service runs with them.
+pub fn takes_machine_environment(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Install { .. } | Cmd::Update { .. } | Cmd::Uninstall { .. } | Cmd::Restore { .. }
+    )
+}
+
 /// Why `run` does not start a node outside the service on Windows: there
 /// the desktop app is the only way to the node, and the node runs only as
 /// the service the app installs and starts.
@@ -253,6 +266,31 @@ mod tests {
             let e = run(&paths, cmd).unwrap_err();
             assert!(e.contains("leave out --config-dir and --state-dir"), "{e}");
             assert!(!e.contains("not done"), "{e}");
+        }
+    }
+
+    /// The administrator's commands on Windows take the machine's proxy
+    /// and trusted certificates: install, update (which downloads the
+    /// program), uninstall and restore; the others keep the account's
+    /// (windows-2).
+    #[test]
+    fn the_administrator_s_commands_take_the_machine_s_environment() {
+        use clap::Parser;
+        let cmd = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("nerve-node").chain(args.iter().copied()))
+                .unwrap()
+                .cmd
+        };
+        for args in [
+            &["install"][..],
+            &["update"],
+            &["uninstall", "--purge"],
+            &["restore", "b.nerve"],
+        ] {
+            assert!(takes_machine_environment(&cmd(args)), "{args:?}");
+        }
+        for args in [&["status"][..], &["backup", "b.nerve"], &["sudo", "on"]] {
+            assert!(!takes_machine_environment(&cmd(args)), "{args:?}");
         }
     }
 

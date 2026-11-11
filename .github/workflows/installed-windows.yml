@@ -10,6 +10,8 @@
 # runner), then runs:
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
+# - an install over a folder in C:\ProgramData\Nerve that the standard
+#   account made first, which the install refuses before it changes anything;
 # - with the node installed again by that account, its owner: the sudo
 #   switch end to end, refused from a center and off after a restart of the
 #   service (crates/nerve-node/tests/win_sudo.rs), a provider on the provider
@@ -147,6 +149,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # A renamed test matches nothing, and the run then ends well.
           if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the install test did not run' }
+      # Any standard account may make a folder in ProgramData and stays its
+      # owner, so it could open again what the node writes there: the install
+      # refuses such a folder before it changes anything, and says what to do
+      # (security-1). The app's install above deleted the node's folders.
+      - name: The install refuses a folder another account made
+        run: |
+          $data = 'C:\ProgramData\Nerve'
+          if (Test-Path $data) { throw "$data is there before the test" }
+          $secure = ConvertTo-SecureString $env:NERVE_WIN_STD_PASSWORD -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential(".\$env:NERVE_WIN_STD_ACCOUNT", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'mkdir', "$data\config" `
+            -Credential $cred -WorkingDirectory "$env:SystemRoot" -Wait
+          $owner = (Get-Acl "$data\config").Owner
+          if ($owner -notlike "*\$env:NERVE_WIN_STD_ACCOUNT") { throw "the folder is $owner's" }
+          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
+          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $said
+          if ($code -eq 0) { throw 'the install took the folder' }
+          if ($said -notmatch 'another account \(S-1-5-21-[0-9-]+\) owns it.*delete it, then install again') {
+            throw 'the install did not say whose the folder is and what to do'
+          }
+          if (Get-LocalUser nerve -ErrorAction SilentlyContinue) { throw 'the refused install made the user nerve' }
+          if (Get-Service nerve-node -ErrorAction SilentlyContinue) { throw 'the refused install registered the service' }
+          Remove-Item -LiteralPath $data -Recurse -Force
       # As the app's install runs for that account's owner: the broker names
       # the owner by SID, and the password goes on stdin.
       - name: The node installed by the account, nerve-run for commands

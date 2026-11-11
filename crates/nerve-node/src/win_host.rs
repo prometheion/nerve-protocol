@@ -123,6 +123,20 @@ pub fn firewall_runs() -> bool {
         .is_some_and(|st| st.dwCurrentState == SERVICE_RUNNING)
 }
 
+/// One of the folders the service checks at its start
+/// (crate::winsvc::own_folders): there, and SYSTEM's or the administrators'.
+pub fn check_own_folder(dir: &Path) -> Result<(), String> {
+    if dir.symlink_metadata().is_err() {
+        return Err(format!(
+            "{}: it is not there; {}",
+            dir.display(),
+            crate::winsvc::INSTALL_AGAIN
+        ));
+    }
+    nerve_service::win::dacl::admins_folder(dir)
+        .map_err(|e| format!("{e}; delete it, then install Nerve again with its installer"))
+}
+
 /// The node's service with every right; an error when it is not there.
 fn the_service() -> Result<Scm, String> {
     the_service_for(SERVICE_ALL_ACCESS)
@@ -459,8 +473,16 @@ impl WinSystem for WinHost {
         }))
     }
 
-    fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String> {
-        nerve_service::win::dacl::secure(dir, owner)
+    fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
+        nerve_service::win::dacl::private_folder(dir, sddl)
+    }
+
+    fn admins_own(&self, dir: &Path) -> Result<(), String> {
+        nerve_service::win::dacl::admins_folder(dir)
+    }
+
+    fn machine_sid(&self) -> Result<String, String> {
+        win_user::machine_sid()
     }
 
     fn service(&self) -> Result<Option<bool>, String> {
@@ -1006,7 +1028,9 @@ mod tests {
 
     /// The folder gets the DACL, what is in it inherits it, and a junction
     /// below it is not followed: the folder it leads to keeps its own. A
-    /// junction in place of the folder is refused. Needs an administrator.
+    /// junction in place of the folder is refused, and the administrators
+    /// own the folder. Needs an elevated administrator, whose new folders
+    /// the administrators own.
     #[test]
     fn secure_sets_the_dacl_and_follows_no_junction() {
         let d = tempfile::tempdir().unwrap();
@@ -1019,13 +1043,19 @@ mod tests {
         junction(&top.join("j"), &outside);
         let before = icacls(&outside.join("f"));
         let me = win_user::current_user().unwrap();
-        WinHost.secure(&top, Some(&me)).unwrap();
+        let sid = sid_text(&win_user::own_sid().unwrap()).unwrap();
+        WinHost
+            .secure(&top, &crate::winsvc::folder_dacl(Some(&sid)))
+            .unwrap();
         let acl = icacls(&top.join("sub/f"));
         assert!(acl.contains(&format!("\\{me}:(I)(F)")), "{acl}");
         assert_eq!(acl.lines().filter(|l| l.contains(":(")).count(), 3, "{acl}");
         assert_eq!(icacls(&outside.join("f")), before);
+        WinHost.admins_own(&top).unwrap();
         junction(&d.path().join("link"), &outside);
-        let e = WinHost.secure(&d.path().join("link"), None).unwrap_err();
+        let e = WinHost
+            .secure(&d.path().join("link"), &crate::winsvc::folder_dacl(None))
+            .unwrap_err();
         assert!(e.contains("is a link"), "{e}");
         assert_eq!(icacls(&outside.join("f")), before);
     }
@@ -1153,5 +1183,15 @@ mod tests {
         assert_eq!(a.uid, win_user::own_uid());
         assert!(a.home.is_dir(), "{:?}", a.home);
         assert_eq!(win_user::lookup("no-such-account-x").unwrap(), None);
+    }
+
+    /// A local account's SID is the machine's and its number: this
+    /// account's (a local one, as on the test machines and the runner).
+    #[test]
+    fn a_local_account_s_sid_is_the_machine_s() {
+        let machine = WinHost.machine_sid().unwrap();
+        assert!(machine.starts_with("S-1-5-21-"), "{machine}");
+        let own = sid_text(&win_user::own_sid().unwrap()).unwrap();
+        assert_eq!(crate::winsvc::local_sid(&machine, win_user::own_uid()), own);
     }
 }

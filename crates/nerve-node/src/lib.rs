@@ -39,6 +39,10 @@ pub mod owner;
 pub mod pair;
 pub mod paths;
 pub use nerve_service::prompt;
+// The machine's own folders and environment, which the desktop app's
+// elevated parts take too.
+#[cfg(windows)]
+pub use nerve_service::win::folders;
 // Providers attach over the control socket, which is Unix's; the pipe on
 // Windows takes none yet.
 #[cfg_attr(not(unix), allow(dead_code))]

@@ -460,6 +460,15 @@ fn shut_out_the_user() -> Result<(), String> {
 /// The broker's start: `__desktop-broker`, on Windows with the pipe's name,
 /// the app's process id and the SID of the app's user. The exit code.
 pub fn main(args: &[String]) -> i32 {
+    // The commands it runs elevated take the proxy and the trusted
+    // certificates from the machine, not from the variables of the app's
+    // account, which UAC gave this process and its unelevated programs may
+    // set (windows-2); they inherit what this sets.
+    #[cfg(windows)]
+    // SAFETY: called first in `main`, before this process starts a thread.
+    unsafe {
+        nerve_node::folders::take_machine_environment()
+    };
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(_) => return 1,
