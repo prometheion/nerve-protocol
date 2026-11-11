@@ -1045,8 +1045,9 @@ mod tests {
     /// The folder gets the DACL, what is in it inherits it, and a junction
     /// below it is not followed: the folder it leads to keeps its own. A
     /// junction in place of the folder is refused, and the administrators
-    /// own the folder. Needs an elevated administrator, whose new folders
-    /// the administrators own.
+    /// own the folder. Needs an elevated administrator; the folder is given
+    /// to the administrators first, since the built-in Administrator (CI)
+    /// owns what it makes itself, which `secure` refuses.
     #[test]
     fn secure_sets_the_dacl_and_follows_no_junction() {
         let d = tempfile::tempdir().unwrap();
@@ -1060,6 +1061,12 @@ mod tests {
         let before = icacls(&outside.join("f"));
         let me = win_user::current_user().unwrap();
         let sid = sid_text(&win_user::own_sid().unwrap()).unwrap();
+        let given = std::process::Command::new("icacls")
+            .arg(&top)
+            .args(["/setowner", "*S-1-5-32-544", "/T"])
+            .output()
+            .unwrap();
+        assert!(given.status.success(), "{given:?}");
         WinHost
             .secure(&top, &crate::winsvc::folder_dacl(Some(&sid)))
             .unwrap();

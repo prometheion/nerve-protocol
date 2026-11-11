@@ -251,11 +251,16 @@ pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
     #[cfg(unix)]
     return read_password(out, "proxy password: ");
     #[cfg(windows)]
-    return crate::winsvc::WinSystem::read_password(
+    return match crate::winsvc::WinSystem::read_password(
         &crate::win_host::WinHost,
         "proxy password: ",
         out,
-    );
+    ) {
+        // A blank line is no proxy password: the reader's words for it are
+        // about a Windows account, which a proxy's login is not.
+        Err(e) if e == crate::account::BLANK_PASSWORD => Ok(String::new()),
+        r => r,
+    };
 }
 
 pub(super) const PROXY_AUTHORIZATION: &str = "Proxy-Authorization";
