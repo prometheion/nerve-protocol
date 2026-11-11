@@ -508,6 +508,25 @@ pub fn local_rid(sid: &str, machine: &str) -> Option<u32> {
     sid.strip_prefix(machine)?.strip_prefix('-')?.parse().ok()
 }
 
+/// The owner an install names: the app's user when its broker named one,
+/// else the account that runs the install. The app's user stays the owner
+/// when no name is found for its SID (the SID stands in for the name), so
+/// that [`local_rid`] still refuses a domain or Entra account; the elevating
+/// administrator never takes its place.
+pub fn app_or_own_owner(
+    app: Option<String>,
+    name_of: impl Fn(&str) -> Option<String>,
+    own: impl FnOnce() -> Option<(String, String)>,
+) -> Option<(String, String)> {
+    match app {
+        Some(sid) => {
+            let name = name_of(&sid).unwrap_or_else(|| sid.clone());
+            Some((sid, name))
+        }
+        None => own(),
+    }
+}
+
 /// Why the account `name` cannot own the node: it is no local account of
 /// this machine (Q1: refused in 0.1.0, by its SID).
 pub fn not_local(name: &str) -> String {
@@ -1392,6 +1411,21 @@ pub(crate) mod tests {
     use nerve_policy::audit::AuditLog;
     use nerve_policy::settings::SettingsStore;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn the_apps_user_is_the_owner_even_when_its_sid_has_no_name() {
+        let own = || Some(("S-1-5-21-1-2-3-500".to_string(), "Admin".to_string()));
+        let none = |_: &str| None;
+        let found = app_or_own_owner(Some("S-1-12-1-9".into()), none, own);
+        assert_eq!(found, Some(("S-1-12-1-9".into(), "S-1-12-1-9".into())));
+        let named = |_: &str| Some("Eve".to_string());
+        let found = app_or_own_owner(Some("S-1-5-21-1-2-3-1001".into()), named, own);
+        assert_eq!(found, Some(("S-1-5-21-1-2-3-1001".into(), "Eve".into())));
+        assert_eq!(
+            app_or_own_owner(None, none, own),
+            Some(("S-1-5-21-1-2-3-500".into(), "Admin".into()))
+        );
+    }
 
     #[test]
     fn a_stale_sudo_password_is_tried_once_until_sudo_is_turned_on_again() {

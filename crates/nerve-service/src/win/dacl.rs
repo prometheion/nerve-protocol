@@ -926,6 +926,68 @@ mod tests {
         assert!(admins_folder(&d.path().join("none")).is_err());
     }
 
+    /// The walk below a folder finds what another account owns, takes what
+    /// `allowed` takes, and does not follow a junction out of the folder
+    /// (round 3, security 1). Setting an owner needs an administrator.
+    #[cfg(windows)]
+    #[test]
+    fn the_walk_below_a_folder_finds_what_another_account_owns() {
+        use crate::win::sid::is_admin;
+        if !is_admin() {
+            eprintln!("note: not an administrator, so no owner can be set; nothing checked");
+            return;
+        }
+        let run = |program: &str, args: &[&str]| {
+            let o = std::process::Command::new(program)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{program} {args:?}: {o:?}");
+        };
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("top");
+        let sub = top.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("ours"), b"x").unwrap();
+        // Owned by this account or the administrators: nothing foreign.
+        assert_eq!(foreign_below(&top, |_| false).unwrap(), None);
+
+        // A junction to a folder with a foreign file is not followed.
+        let outside = d.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let theirs = outside.join("theirs");
+        std::fs::write(&theirs, b"x").unwrap();
+        run(
+            "icacls",
+            &[&theirs.display().to_string(), "/setowner", "*S-1-5-32-545"],
+        );
+        run(
+            "cmd",
+            &[
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                &top.join("link").display().to_string(),
+                &outside.display().to_string(),
+            ],
+        );
+        assert_eq!(foreign_below(&top, |_| false).unwrap(), None);
+
+        // A file another account owns, deep below, is found with its owner,
+        // unless `allowed` takes that owner.
+        let planted = sub.join("planted");
+        std::fs::write(&planted, b"x").unwrap();
+        run(
+            "icacls",
+            &[&planted.display().to_string(), "/setowner", "*S-1-5-32-545"],
+        );
+        let (path, owner) = foreign_below(&top, |_| false).unwrap().unwrap();
+        assert_eq!(path, planted);
+        assert_eq!(crate::win::sid::sid_text(&owner).unwrap(), "S-1-5-32-545");
+        assert_eq!(foreign_below(&top, |_| true).unwrap(), None);
+    }
+
     /// The folder that is held gets the private list through the held
     /// handle, whatever list it came with (a folder swapped in under the
     /// name), and cannot be renamed while held (round 5, security 1).

@@ -285,10 +285,12 @@ fn windows_reread(command: &[String]) -> Option<String> {
     if stem != "powershell" && stem != "pwsh" {
         return None;
     }
-    // PowerShell's options take `-`, `--` or `/` and may be shortened.
+    // PowerShell's options take `-` or `/` and may be shortened. Only pwsh
+    // knows `--`; Windows PowerShell 5.1 takes such a word as the command.
     let option = |e: &str| {
         let name = e
             .strip_prefix("--")
+            .filter(|_| stem == "pwsh")
             .or_else(|| e.strip_prefix(['-', '/']))?
             .to_ascii_lowercase();
         (!name.is_empty()).then_some(name)
@@ -1186,6 +1188,8 @@ mod tests {
             // start the command, `-File` and its value included: a prefix
             // shorter than the minimum form, an option of pwsh only, and
             // one that keeps PowerShell waiting.
+            &["powershell", "--NoProfile", "-File", "s.ps1", "{text}"],
+            &["powershell", "--File", "s.ps1", "{text}"],
             &["powershell", "-n", "-File", "s.ps1", "{text}"],
             &["powershell", "-no", "-File", "s.ps1", "{text}"],
             &["powershell", "-non", "-File", "s.ps1", "{text}"],

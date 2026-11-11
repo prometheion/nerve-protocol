@@ -598,16 +598,14 @@ impl WinSystem for WinHost {
     }
 
     fn owner_sid(&self) -> Option<(String, String)> {
-        // The app's broker names its user; the name says the SID is one.
-        if let Some(sid) = crate::cli::desktop_user()
-            && let Ok(name) = win_user::name_of_sid(&sid)
-        {
-            return Some((sid, name));
-        }
-        let sid = win_user::own_sid().ok()?;
-        let sid = sid_text(&sid).ok()?;
-        let name = win_user::current_user().ok()?;
-        Some((sid, name))
+        crate::winsvc::app_or_own_owner(
+            crate::cli::desktop_user(),
+            |sid| win_user::name_of_sid(sid).ok(),
+            || {
+                let sid = sid_text(&win_user::own_sid().ok()?).ok()?;
+                Some((sid, win_user::current_user().ok()?))
+            },
+        )
     }
 
     fn owner(&self) -> Result<Option<(String, String)>, String> {
