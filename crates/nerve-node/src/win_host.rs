@@ -725,7 +725,7 @@ impl WinSystem for WinHost {
         let password = line.trim_end_matches(['\n', '\r']).to_string();
         line.clear();
         if password.is_empty() {
-            return Err("no password given".into());
+            return Err(crate::winsvc::BLANK_PASSWORD.into());
         }
         Ok(password)
     }
@@ -1064,7 +1064,12 @@ mod tests {
     /// text.
     #[test]
     fn dpapi_round_trip() {
-        let plain = crate::winsvc::secret("alice", "not a real password");
+        let plain = crate::winsvc::Secret {
+            sid: "S-1-5-21-1-2-3-1001".into(),
+            name: "alice".into(),
+            password: "not a real password".into(),
+        }
+        .text();
         let sealed = win_user::protect(&plain).unwrap();
         assert!(!sealed.windows(4).any(|w| w == b"real"));
         assert_eq!(win_user::unprotect(&sealed).unwrap(), plain);

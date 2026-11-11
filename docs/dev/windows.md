@@ -230,6 +230,16 @@ The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
 the app's **Log** page shows. When it does not start, the Event Viewer says
 why, and the log has the rest.
 
+The owner must be a local account of this machine: an account of a domain
+or of Microsoft Entra ID is refused by its SID, before the install changes
+anything, and so is its password in the app (support for them comes after
+0.1.0). The node knows the owner by its SID, never by a name: it finds the
+local account of that name and takes it only where the SID is the
+owner's, and the stored password names the SID too. A name is what Windows
+takes, blanks and letters beyond ASCII included (`Max Müller`). Windows
+lets no program log on to an account without a password, so an owner
+without one gets no commands as itself until it has one; the app says so.
+
 The install also makes the user who ran it the owner of the node: its SID
 goes into the service's registry key
 (`HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters`, value

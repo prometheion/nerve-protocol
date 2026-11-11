@@ -340,8 +340,10 @@ pub const ROOT_OWNER_NOTE: &str = "root is the owner: commands of user mode, and
 pub fn admin_owner(owner: Option<&str>) -> Option<String> {
     #[cfg(windows)]
     {
+        // The owner by the SID the service's key names, not whichever
+        // account has its name.
         let name = owner?;
-        let a = crate::win_user::lookup(name).ok().flatten()?;
+        let a = crate::win_user::service_owner().ok().flatten()?;
         (!crate::win_user::admin_groups(&a).is_empty()).then(|| name.to_string())
     }
     #[cfg(not(windows))]

@@ -705,7 +705,12 @@ impl Ctl {
         let Some(password) = self.with_perm(|p| p.get_owner_password().to_string()) else {
             return;
         };
+        // Not left out without a word: Windows takes no blank password
+        // (inv-1).
         if password.is_empty() {
+            self.with_perm(|p| {
+                p.set_owner_password_error(nerve_node::account::BLANK_PASSWORD.into())
+            });
             return;
         }
         self.with_perm(|p| {

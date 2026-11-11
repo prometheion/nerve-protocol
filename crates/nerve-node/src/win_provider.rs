@@ -210,9 +210,9 @@ fn resolved(allowed: &Path, owners: &[String]) -> Result<PathBuf, String> {
     std::fs::canonicalize(allowed).or_else(|mine| {
         let mut why = mine.to_string();
         for sid in owners {
-            let account = crate::win_user::name_of_sid(sid).and_then(|n| {
-                crate::win_user::lookup(&n)?.ok_or_else(|| format!("no account {n}"))
-            });
+            // By the owner's SID, not by a name another account may have.
+            let account = crate::win_user::lookup_sid(sid)
+                .and_then(|a| a.ok_or_else(|| format!("no local account has the SID {sid}")));
             let as_owner = account.and_then(|a| {
                 let _as =
                     crate::win_user::FsAs::new(&a).map_err(|e| format!("as {}: {e}", a.name))?;

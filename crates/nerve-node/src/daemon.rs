@@ -688,6 +688,11 @@ fn grants_walk(params: &Value) -> AclWalk {
 /// How long a looked-up account is used before it is looked up again.
 const ACCOUNT_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The key the owner found by its SID is kept under among the accounts
+/// looked up by name: no account name holds a NUL.
+#[cfg(windows)]
+const OWNER_BY_SID: &str = "\0owner";
+
 /// How often a folder grant that failed is tried again, at most: by a
 /// command of `nerve-run` or a change of the config, and at once at the
 /// node's start. The owner may have fixed what stopped it (a closed folder
@@ -1315,13 +1320,22 @@ impl Shared {
 
     /// The account `name`, looked up at most every [`ACCOUNT_FRESH`].
     fn account_named(&self, name: &str) -> Result<Option<crate::service::Account>, String> {
-        if let Some((at, a)) = lock(&self.account_cache).get(name)
+        self.account_cached(name, || crate::account::lookup(name))
+    }
+
+    /// What `look` finds, kept under `key` for [`ACCOUNT_FRESH`].
+    fn account_cached(
+        &self,
+        key: &str,
+        look: impl FnOnce() -> Result<Option<crate::service::Account>, String>,
+    ) -> Result<Option<crate::service::Account>, String> {
+        if let Some((at, a)) = lock(&self.account_cache).get(key)
             && at.elapsed() < ACCOUNT_FRESH
         {
             return Ok(a.clone());
         }
-        let a = crate::account::lookup(name)?;
-        lock(&self.account_cache).insert(name.to_string(), (std::time::Instant::now(), a.clone()));
+        let a = look()?;
+        lock(&self.account_cache).insert(key.to_string(), (std::time::Instant::now(), a.clone()));
         Ok(a)
     }
 
@@ -1330,7 +1344,16 @@ impl Shared {
         cfg: &NodeConfig,
         as_owner: bool,
     ) -> Result<Option<crate::service::Account>, String> {
-        let cached = |name: &str| self.account_named(name);
+        let cached = |name: &str| {
+            // On Windows the owner is the SID the service's key names, not
+            // whichever local account has its name; one of a domain or of
+            // Microsoft Entra ID is refused (windows-1, windows-3).
+            #[cfg(windows)]
+            if as_owner {
+                return self.account_cached(OWNER_BY_SID, crate::win_user::service_owner);
+            }
+            self.account_named(name)
+        };
         crate::account::for_commands(
             as_owner,
             self.owner_name(cfg).as_deref(),

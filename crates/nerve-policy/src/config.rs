@@ -173,6 +173,19 @@ pub fn valid_account_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
+/// Whether `name` can be the name of a local Windows account, as Windows
+/// takes one: 1 to 20 characters, none of `" / \ [ ] : ; | = , + * ? < >`
+/// nor a control character, and more than dots and blanks. Blanks and
+/// letters beyond ASCII are fine: a Windows set up with a local account
+/// names it as the person typed it (`Max Müller`, `Jürgen`).
+pub fn valid_windows_account_name(name: &str) -> bool {
+    (1..=20).contains(&name.encode_utf16().count())
+        && !name
+            .chars()
+            .any(|c| c.is_control() || "\"/\\[]:;|=,+*?<>".contains(c))
+        && !name.chars().all(|c| c == '.' || c == ' ')
+}
+
 /// The sudo switch. Off, no command runs through `sudo`, whatever the rules
 /// say. On, a `sudo` command runs only when the sudo allow list names it, in
 /// every mode.
@@ -1552,6 +1565,51 @@ impl CenterPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Windows account's name follows Windows' rule, not the Linux one:
+    /// blanks and umlauts are fine, the characters Windows refuses are not,
+    /// and it has at most 20 characters, counted as Windows counts them
+    /// (windows-1).
+    #[test]
+    fn a_windows_account_name_follows_windows_rule() {
+        for ok in [
+            "alice",
+            "Max Müller",
+            "Jürgen",
+            "José",
+            "a.b-c_d",
+            "Åsa Öberg",
+            "李小龙",
+            "x".repeat(20).as_str(),
+        ] {
+            assert!(valid_windows_account_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "a:b",
+            "a\\b",
+            "a/b",
+            "a\"b",
+            "a[b",
+            "a]b",
+            "a;b",
+            "a|b",
+            "a=b",
+            "a,b",
+            "a+b",
+            "a*b",
+            "a?b",
+            "a<b",
+            "a>b",
+            "a\tb",
+            "...",
+            " . ",
+            "x".repeat(21).as_str(),
+        ] {
+            assert!(!valid_windows_account_name(bad), "{bad:?}");
+        }
+        assert!(!valid_account_name("Max Müller"));
+    }
 
     #[test]
     fn names_start_and_end_with_a_letter_or_digit() {

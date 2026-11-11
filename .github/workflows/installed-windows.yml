@@ -29,7 +29,9 @@
 #   (crates/nerve-node/tests/win_account.rs), and in smaller tests of
 #   it, a command the folder sync refuses in the audit log and a granted
 #   folder that becomes a link to another machine (also where the node
-#   cannot log on as the owner). The install makes
+#   cannot log on as the owner), and with the node installed again by a
+#   standard account named with a blank and an umlaut, that owner's folder
+#   and commands. The install makes
 #   nerve-run and its profile itself, by a logon that loads it, as nobody
 #   signs in on a runner;
 # - the administrator's batch logon (nerve-node's
@@ -221,6 +223,37 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # A local account named as a Windows set up offline names it, with a
+      # blank and an umlaut, installs the node again and owns it: its folder
+      # is granted and user mode runs as it (windows-1). A standard account:
+      # an owner need not be an administrator.
+      - name: An owner with a blank and an umlaut in its name
+        run: |
+          $name = "Nerve M$([char]0x00FC)ller"
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $pw = [Convert]::ToBase64String($bytes) + 'a1!'
+          "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -PasswordNeverExpires | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential(".\$name", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
+            -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
+          $sid = (Get-LocalUser $name).SID.Value
+          $env:NERVE_DESKTOP_USER_SID = $sid
+          $pw | & dist/nerve-node-desktop.exe install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The name comes back in the console's code page: its ASCII start.
+          if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install-umlaut.log" -Pattern 'run commands as Nerve M')) {
+            throw 'the install stored no password of the owner'
+          }
+          $env:NERVE_WIN_UMLAUT_ACCOUNT = $name
+          $env:NERVE_WIN_UMLAUT_SID = $sid
+          $test = 'an_owner_with_a_blank_and_an_umlaut_in_the_name_runs_commands_as_itself'
+          $said = & dist/tests/win_account.exe --ignored --exact --nocapture --test-threads=1 $test 2>&1 |
+            Tee-Object -Append "$env:RUNNER_TEMP/installed.log" | Out-String
+          Write-Host $said
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($said -notmatch 'test result: ok\. 1 passed') { throw "no test ran for $test" }
       # What the node and the runner say when an installed test failed: what
       # passes on a test machine may meet another Windows here.
       - name: The node's log and the test folders, after a failure

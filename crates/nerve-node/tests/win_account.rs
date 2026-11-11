@@ -30,7 +30,10 @@
 //! - a command the node's folder sync refuses is in the audit log;
 //! - a granted folder that is a link to another machine is not followed
 //!   by a call of its pairing, nor left changed by the folder sync, also
-//!   while the node cannot log on as the owner.
+//!   while the node cannot log on as the owner;
+//! - an owner with a blank and an umlaut in its name gets its folder
+//!   granted and its commands of user mode run as itself (installed again
+//!   by that account, `NERVE_WIN_UMLAUT_ACCOUNT` and `NERVE_WIN_UMLAUT_SID`).
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -253,9 +256,11 @@ fn run_password(config: &Path) -> String {
         LocalFree(plain.pbData.cast());
         v
     };
-    let at = bytes.iter().position(|&b| b == 0).unwrap();
-    assert_eq!(&bytes[..at], b"nerve-run");
-    String::from_utf8(bytes[at + 1..].to_vec()).unwrap()
+    // JSON with its format, nerve-run's SID, its name and its password.
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["format"], 1);
+    assert_eq!(v["name"], "nerve-run");
+    v["password"].as_str().unwrap().to_string()
 }
 
 /// A logon of `name` with `password`, as `kind` (LOGON32_LOGON_*).
@@ -1514,4 +1519,57 @@ async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_
     forget(&paths).await;
     let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An owner whose local account is named as a Windows set up offline names
+/// it, with a blank and an umlaut (the job makes `Nerve Müller` and installs
+/// the node again as it): a folder in its profile is granted to a pairing in
+/// folder mode, which the node does as the owner, and a command of user mode
+/// runs as the owner, by its SID (windows-1). The node had refused such a
+/// name, so neither worked.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service by NERVE_WIN_UMLAUT_ACCOUNT on a Windows test machine"]
+async fn an_owner_with_a_blank_and_an_umlaut_in_the_name_runs_commands_as_itself() {
+    let paths = Layout::of(&APP).paths.clone();
+    let owner = env("NERVE_WIN_UMLAUT_ACCOUNT");
+    let owner_sid = env("NERVE_WIN_UMLAUT_SID");
+    assert!(owner.contains(' ') && !owner.is_ascii(), "{owner}");
+    let mine = owner_profile(&owner_sid).join("nerve-umlaut");
+    let _ = std::fs::remove_dir_all(&mine);
+    std::fs::create_dir_all(&mine).unwrap();
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&mine, "rwx")]).await;
+    let r = run_in(
+        &mut conn,
+        &mine,
+        "Set-Content -Path ok.txt -Value ok; Get-Content ok.txt",
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "a command in the owner's folder: {e:?}\n{}",
+            shown(&mine, &paths)
+        )
+    });
+    assert!(out(&r).contains("ok"), "{r}");
+    assert!(mine.join("ok.txt").is_file());
+
+    // User mode runs the command as the owner, whose SID it says (its name
+    // would come back in the console's code page).
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(D).expect("paired").policy.mode = nerve_policy::Mode::User;
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_home(
+        &mut conn,
+        "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("a command as the owner: {e:?}"));
+    assert_eq!(r["exit_code"], 0, "{r}");
+    assert!(out(&r).contains(&owner_sid), "{r}");
+
+    forget(&paths).await;
+    let _ = std::fs::remove_dir_all(&mine);
 }

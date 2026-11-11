@@ -70,7 +70,6 @@ pub(super) async fn install(
         &layout,
         &crate::win_host::WinHost,
         &exe,
-        &invoker(),
         forget_secrets,
         out,
     );
