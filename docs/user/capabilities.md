@@ -33,11 +33,6 @@ argument. No shell reads the command, so `;` and `$(...)` in a value are
 just characters. Put `--` before arguments that name files or text: a value
 that starts with `-` is taken only after it.
 
-On Windows, `cmd`, a `.bat` or `.cmd` file and PowerShell without `-File`
-would read a value again as commands, so a command of theirs with a
-`{field}` is refused. Put the command in a script and run it with
-`powershell -NoProfile -File script.ps1 {field}`.
-
 ```sh
 nerve-node cap add logs.tail --effect read \
   --params '{"type": "object", "required": ["path", "lines"],
