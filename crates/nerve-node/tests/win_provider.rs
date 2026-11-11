@@ -236,6 +236,20 @@ fn instance_and_open_as_owner(
     })
 }
 
+/// The first line written at `log` within [`WAIT`], if one is.
+fn said_within(log: &Path) -> Option<String> {
+    let until = Instant::now() + WAIT;
+    while Instant::now() < until {
+        if let Ok(s) = std::fs::read_to_string(log)
+            && let Some(l) = s.lines().next()
+        {
+            return Some(l.to_string());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    None
+}
+
 /// The first line the provider at `log` wrote: the node's answer to its
 /// hello, or why it could not ask. One that `started` ended before it
 /// wrote is said with its exit code.
@@ -424,10 +438,12 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
         .expect("the owner's edit");
     let log = dir.join("command.log");
     let _ = std::fs::remove_file(&log);
+    // A program that ends before it wrote says so in the log, with its
+    // exit code.
     let command = format!(
-        "$env:{PROVIDER} = '{NAME}|{PIPE}|{}'; & '{}' --ignored --exact --nocapture provider_program; exit 0",
-        log.display(),
-        exe.display()
+        "$env:{PROVIDER} = '{NAME}|{PIPE}|{log}'; & '{exe}' --ignored --exact --nocapture provider_program; if (-not (Test-Path '{log}')) {{ \"the program ended with $LASTEXITCODE before it wrote\" | Set-Content '{log}' }}; exit 0",
+        log = log.display(),
+        exe = exe.display()
     );
     let r = conn
         .call(
@@ -437,7 +453,8 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
         )
         .await
         .expect("an answer");
-    let first = said(&log, None);
+    let first = said_within(&log)
+        .unwrap_or_else(|| panic!("{} stays empty; the command: {r:?}", log.display()));
     assert!(
         first.contains("comes from a command the node runs"),
         "{first}; {r:?}"
