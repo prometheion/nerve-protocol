@@ -130,6 +130,8 @@ pub struct Args {
     )]
     pub listen: String,
     /// The URL put into pairing links; https://<host name>:<port> by default.
+    /// `{port}` in it stands for the port the center listens on for nodes
+    /// (for a `--listen` with port 0).
     #[arg(long, env = "NERVE_CENTER_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP, on a loopback --listen only
@@ -369,10 +371,11 @@ impl Args {
         self.ui.eq_ignore_ascii_case("off")
     }
 
-    /// The public URL, from the flag or from the host name and the port.
+    /// The public URL, from the flag (with `{port}` as `port`) or from the
+    /// host name and the port.
     pub fn public_url(&self, port: u16) -> String {
         if let Some(u) = &self.public_url {
-            return u.clone();
+            return u.replace("{port}", &port.to_string());
         }
         if self.plain_loopback {
             return format!("http://127.0.0.1:{port}");
@@ -688,6 +691,15 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(a.public_url(9), "http://127.0.0.1:9");
+        // A URL given names the port the center got for a --listen of
+        // port 0 (#40, shared-2).
+        let given = |url: &str| {
+            Args::try_parse_from(["nerve-center", "--public-url", url])
+                .unwrap()
+                .public_url(4711)
+        };
+        assert_eq!(given("https://127.0.0.1:{port}"), "https://127.0.0.1:4711");
+        assert_eq!(given("https://c.example:7443"), "https://c.example:7443");
         assert!(a.ui_off());
         // The web UI always logs in with the owner token: there is no
         // password of its own and no switch to turn the login off.

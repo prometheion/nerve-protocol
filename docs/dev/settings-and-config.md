@@ -945,7 +945,7 @@ cat ~/.local/state/nerve-center/owner-token
 | `--name` | `NERVE_CENTER_NAME` | `nerve-center` | Name shown to nodes and in the web UI |
 | `--state-dir` | `NERVE_CENTER_STATE_DIR` | see [install](#where-files-live) | Identity, paired machines, statistics |
 | `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | Where nodes connect |
-| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links |
+| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links; `{port}` in it is the port the center got (for a `--listen` with port 0) |
 | `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | Plain HTTP for nodes; only with a loopback `--listen` |
 | `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | Web UI address, or `off` |
 | `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off`, `http` (HTTP MCP at `127.0.0.1:7481`) or the address of the HTTP MCP endpoint |
@@ -956,7 +956,9 @@ cat ~/.local/state/nerve-center/owner-token
 `nerve-center --help` prints the same list.
 
 Set `--public-url` when nodes reach the center under another name than its
-host name, such as a DNS name or a forwarded port.
+host name, such as a DNS name or a forwarded port. The start line in the log
+names the public URL, the address the center listens on for nodes, the HTTP
+MCP URL and the web UI: with ports 0 this is where a script reads them.
 
 ### TLS
 

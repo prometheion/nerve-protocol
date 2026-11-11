@@ -48,7 +48,12 @@ pub(super) async fn install(
 ) -> Result<(), String> {
     let root = root_owner(owner.as_deref(), accept_root_owner, cfg!(windows))?;
     let layout = Layout::system();
-    owner_check(&[&paths, &layout.paths]).await?;
+    root_then_owner_check(
+        "install",
+        crate::rights::full_rights(),
+        &[&paths, &layout.paths],
+    )
+    .await?;
     let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;
     #[cfg(windows)]
     let _ = root;
@@ -97,10 +102,20 @@ pub(super) async fn install(
     }
 }
 
+/// [`owner_check`] for `what`, which needs root on Linux: said first, as
+/// an owner without root cannot reach the installed node's control socket,
+/// and its "Permission denied" would hide the cause.
+async fn root_then_owner_check(what: &str, root: bool, paths: &[&NodePaths]) -> Result<(), String> {
+    if cfg!(target_os = "linux") && !root {
+        return Err(crate::service::needs_root(what));
+    }
+    owner_check(paths).await
+}
+
 /// `update`: the installed node from a newer release.
 pub(super) async fn update(from: Option<PathBuf>, out: &mut dyn Write) -> Result<(), String> {
     let layout = Layout::system();
-    owner_check(&[&layout.paths]).await?;
+    root_then_owner_check("update", crate::rights::full_rights(), &[&layout.paths]).await?;
     #[cfg(windows)]
     return crate::winsvc::update(&layout, &crate::win_host::WinHost, from.as_deref(), out).await;
     #[cfg(not(windows))]
@@ -159,7 +174,7 @@ pub(super) async fn uninstall(
     if let Some(app) = crate::service::app_beside(&layout) {
         return crate::service::hand_over_uninstall(&app, purge, out);
     }
-    owner_check(&[&layout.paths]).await?;
+    root_then_owner_check("uninstall", crate::rights::full_rights(), &[&layout.paths]).await?;
     // The node run by hand: the one named, or the one in this
     // user's default folders.
     #[cfg(windows)]
@@ -237,6 +252,27 @@ fn root_owner(
 mod tests {
     use super::*;
     use crate::cli::tests::{run, setup};
+
+    /// Without root, `install`, `update` and `uninstall` say on Linux that
+    /// they need it before they ask the node, whose control socket such an
+    /// owner cannot reach: they said only "Permission denied" (#40, node-3).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_service_commands_say_they_need_root_first() {
+        let (_d, paths) = setup(&[]);
+        for what in ["install", "update", "uninstall"] {
+            assert_eq!(
+                root_then_owner_check(what, false, &[&paths])
+                    .await
+                    .unwrap_err(),
+                format!("{what} needs root: run `sudo nerve-node {what}`")
+            );
+        }
+        // With root the node is asked; none runs here.
+        root_then_owner_check("update", true, &[&paths])
+            .await
+            .unwrap();
+    }
 
     /// install, update and uninstall work on the installed node only, so
     /// they take no folders; none says it is not done.

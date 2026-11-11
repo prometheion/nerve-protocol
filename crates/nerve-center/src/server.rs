@@ -98,6 +98,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     }
 
     let mut mcp = None;
+    let mut mcp_url = None;
     let told = |mode: &str, url: Option<String>, pin: Option<String>| {
         if let Some(p) = &page {
             p.set_mcp(mode, url, pin);
@@ -118,7 +119,12 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
             true => format!("{}/mcp", crate::config::address_url(at)),
             false => format!("http://{}/mcp", server.local_addr()),
         };
-        told("http", Some(url), tls.then(|| center.pin()).flatten());
+        told(
+            "http",
+            Some(url.clone()),
+            tls.then(|| center.pin()).flatten(),
+        );
+        mcp_url = Some(url);
         if !has_token {
             center.log().record(
                 Level::Warn,
@@ -165,11 +171,12 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         Level::Info,
         None,
         &format!(
-            "nerve-center {}: center {} ({}) for nodes at {}{}",
+            "nerve-center {}: center {} ({}) for nodes at {} (listening on {nodes}){}{}",
             env!("CARGO_PKG_VERSION"),
             center.name(),
             center.id(),
             center.public_url(),
+            mcp_url.map(|u| format!(", MCP at {u}")).unwrap_or_default(),
             ui.map(|u| format!(
                 ", web UI at {}://{u}",
                 if is_loopback(&u.to_string()) {

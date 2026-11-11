@@ -785,9 +785,47 @@ async fn forward_file(
         Ok(c) => c,
         Err(e) => return fail(json, &not_reached(&e)),
     };
-    send_file(conn, &args, cwd, &file, pass.text(), &mut io)
+    let code = send_file(conn, &args, cwd, &file, pass.text(), &mut io)
         .await
-        .unwrap_or_else(|e| fail(json, &e))
+        .unwrap_or_else(|e| fail(json, &e));
+    // The node starts again once the restore ended, and a command right
+    // after it would be told that the node does not run.
+    if code == 0 && file.backup.is_none() {
+        back_again(
+            || async { connect(paths).await.is_ok() },
+            RESTART_WAIT,
+            io.err,
+        )
+        .await;
+    }
+    code
+}
+
+/// How long an owner's restore waits for the node to answer again.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits until the node `answers` again, at most `wait`; says so when it
+/// does not by then.
+async fn back_again<F, Fut>(mut answers: F, wait: std::time::Duration, err: &mut dyn Write) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let until = tokio::time::Instant::now() + wait;
+    loop {
+        if answers().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= until {
+            let _ = writeln!(
+                err,
+                "The node has not answered since the restore yet: `{} status` says when it runs again.",
+                crate::edition::get().program
+            );
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// The client's side of an owner's `backup` or `restore` on `conn`: `file`
@@ -2182,6 +2220,39 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+    /// An owner's restore returns once the node, which starts again after
+    /// it, answers: a `status` right after it said that the node does not
+    /// run (#40, node-4). One that does not answer in time is said.
+    #[tokio::test]
+    async fn a_restore_waits_until_the_node_answers_again() {
+        let mut asked = 0;
+        let mut err = Vec::new();
+        let back = super::back_again(
+            || {
+                asked += 1;
+                let up = asked > 2;
+                async move { up }
+            },
+            std::time::Duration::from_secs(30),
+            &mut err,
+        )
+        .await;
+        assert!(back);
+        assert_eq!(asked, 3);
+        assert!(err.is_empty());
+
+        let started = std::time::Instant::now();
+        let wait = std::time::Duration::from_millis(500);
+        let back = super::back_again(|| async { false }, wait, &mut err).await;
+        assert!(!back);
+        assert!(started.elapsed() >= wait);
+        let said = String::from_utf8(err).unwrap();
+        assert!(
+            said.contains("has not answered since the restore"),
+            "{said}"
+        );
+    }
+
     /// The program the node starts for the owner, written a moment ago and
     /// still open for writing (#168), starts once it is closed: Linux says
     /// "Text file busy" until then.
