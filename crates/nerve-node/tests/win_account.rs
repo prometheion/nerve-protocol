@@ -1482,8 +1482,8 @@ async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_
     let (g, sub) = (base.join("g"), base.join("g").join(format!("sub{id}")));
     std::fs::create_dir_all(&sub).unwrap();
 
-    let stored = paths.config_dir.join("command-account.dpapi");
-    let away = paths.config_dir.join("command-account.dpapi.away");
+    let stored = paths.config_dir.join("owner-password.dpapi");
+    let away = paths.config_dir.join("owner-password.dpapi.away");
     std::fs::rename(&stored, &away).expect("the owner's stored password");
     let _undo = NoOwner(stored, away);
     assert!(NoOwner::restart(), "Restart-Service nerve-node");

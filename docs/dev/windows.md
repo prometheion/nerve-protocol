@@ -198,13 +198,14 @@ The install does this, and the installer shows each step:
    they are in, again at each start.
 3. Makes the local user `nerve-run`, which commands from centers run as
    ([the account](#the-account-commands-run-as-on-windows)), with a long
-   random password stored with DPAPI in the config folder, and its profile.
+   random password stored with DPAPI in the config folder
+   (`run-account.dpapi`), and its profile.
    It is no administrator, may log on as a batch job (its commands) and as
    a service (step 6) only, and does not show on the sign-in screen. A
    `nerve-run` that the install did not make is refused, and so is one that
    can open the node's folders or your registry.
 4. Stores your password (**Your Windows password**) with DPAPI in the config
-   folder, for the commands that run as you: `user` mode, `allowlist` mode
+   folder (`owner-password.dpapi`), for the commands that run as you: `user` mode, `allowlist` mode
    with `--as-owner`, and sudo; and for the permission entries of `folder`
    and `allowlist` mode, which the node changes on your folders as you. A
    stored password that still works is not asked for again.
@@ -300,6 +301,12 @@ machine's DPAPI key, so its folder's ACL (`nerve`, SYSTEM, the
 administrators) is what keeps them, as it keeps the keys in files.
 `nerve-run`'s commands do not reach that Credential Manager: it is another
 account's.
+
+The three sealed files (`owner-password.dpapi`, `run-account.dpapi`,
+`keys\vault.pending`) hold JSON with a `format` (1) inside the seal; the two
+password files name the account by its SID, its name and its password. A
+file of another format is refused with what it is, not guessed at, so a
+later version that changes one can tell old from new.
 
 ### The account commands run as on Windows
 

@@ -3,7 +3,7 @@
 //! (with SYSTEM and the administrators) may open the node's config, keys and
 //! state; every command runs as the owner instead, the account that ran
 //! `install`, logged on with the password `install` stored with DPAPI in the
-//! config folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
+//! config folder ([`crate::winsvc::OWNER_SECRET_FILE`]). To start a process with that
 //! account's token the service keeps two privileges,
 //! SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege; the command
 //! gets none of them, since it gets the account's own token.
@@ -1014,7 +1014,7 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     let again = crate::account::NO_ACCOUNT_INSTALL;
     let file = SECRET
         .get()
-        .map(|d| d.join(crate::winsvc::SECRET_FILE))
+        .map(|d| d.join(crate::winsvc::OWNER_SECRET_FILE))
         .ok_or_else(|| format!("no password of {} is stored; {again}", account.name))?;
     let blob = match std::fs::read(&file) {
         Ok(b) => b,
@@ -1060,7 +1060,7 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
 pub fn owner_password_state() -> &'static str {
     let blob = SECRET
         .get()
-        .and_then(|d| std::fs::read(d.join(crate::winsvc::SECRET_FILE)).ok());
+        .and_then(|d| std::fs::read(d.join(crate::winsvc::OWNER_SECRET_FILE)).ok());
     crate::winsvc::owner_password_state(blob.as_deref(), &nerve_transport::sync::lock(&STALE))
 }
 

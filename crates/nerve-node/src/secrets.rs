@@ -1309,8 +1309,12 @@ pub(crate) mod vault {
 
     /// The file in the config folder's `keys` that holds, sealed, what goes
     /// into the service's vault once it runs: each entry with its new text,
-    /// or none for one to delete.
+    /// or none for one to delete, with [`PENDING_FORMAT`].
     pub const PENDING: &str = "vault.pending";
+
+    /// The format of what [`PENDING`] holds inside its seal. One of another
+    /// format is refused, not guessed at (arch-8).
+    pub const PENDING_FORMAT: u64 = 1;
 
     /// The entry in [`PENDING`] that says it holds every entry of the node's
     /// vault, not only what a call put there while no service ran
@@ -1429,10 +1433,22 @@ pub(crate) mod vault {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Pending::new()),
             Err(e) => return Err(format!("{}: {e}", file.display())),
         };
-        unseal(&sealed)
+        let unread = || format!("{} cannot be read", file.display());
+        let v: Value = unseal(&sealed)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .ok_or_else(|| format!("{} cannot be read", file.display()))
+            .ok_or_else(unread)?;
+        match v["format"].as_u64() {
+            Some(PENDING_FORMAT) => {}
+            Some(f) => {
+                return Err(format!(
+                    "{} is of format {f}, which this version does not know",
+                    file.display()
+                ));
+            }
+            None => return Err(unread()),
+        }
+        serde_json::from_value(v["entries"].clone()).map_err(|_| unread())
     }
 
     fn write_pending(paths: &NodePaths, p: &Pending) -> Result<(), String> {
@@ -1448,7 +1464,8 @@ pub(crate) mod vault {
             nerve_transport::files::create_private_dir(dir)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let plain = serde_json::to_vec(p).map_err(|e| e.to_string())?;
+        let plain = serde_json::to_vec(&json!({"format": PENDING_FORMAT, "entries": p}))
+            .map_err(|e| e.to_string())?;
         nerve_transport::files::write_private(&file, &seal(&plain)?)
             .map_err(|e| format!("{}: {e}", file.display()))
     }
@@ -1788,6 +1805,32 @@ mod tests {
         vault::stage(&paths, "proxy:y", None).unwrap();
         // The lock went with the write.
         assert!(KeysLock::try_take_soon(&paths).unwrap().is_some());
+    }
+
+    /// What waits for the service carries its format inside the seal, and
+    /// one of another format is refused with why, not taken as empty
+    /// (arch-8). The seal is DPAPI's on Windows only, so the test reads the
+    /// file as it is elsewhere.
+    #[cfg(not(windows))]
+    #[test]
+    fn what_waits_for_the_service_names_its_format() {
+        let (_d, paths) = node();
+        let mine = KeysLock::try_take(&paths).unwrap().unwrap();
+        vault::stage(&paths, "proxy:x", Some("v")).unwrap();
+        drop(mine);
+        let file = vault::pending_file(&paths);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(v["format"], vault::PENDING_FORMAT);
+        assert_eq!(v["entries"]["proxy:x"], "v");
+        std::fs::write(&file, r#"{"format": 2, "entries": {"proxy:x": "v"}}"#).unwrap();
+        let e = vault::take_pending(&paths).unwrap_err();
+        assert!(
+            e.ends_with("is of format 2, which this version does not know"),
+            "{e}"
+        );
+        std::fs::write(&file, r#"{"proxy:x": "v"}"#).unwrap();
+        let e = vault::take_pending(&paths).unwrap_err();
+        assert!(e.ends_with("cannot be read"), "{e}");
     }
 
     /// A lock this process holds (a restore's) is no node's: the stopped

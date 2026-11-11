@@ -7,7 +7,7 @@
 //! ([`crate::account::RUN_USER`]), which `install` makes with a random
 //! password stored with DPAPI ([`RUN_SECRET_FILE`]); those that run as the
 //! owner, the account that ran `install`, with the owner's password, asked
-//! once and stored the same way ([`SECRET_FILE`]) ([`crate::win_user`]).
+//! once and stored the same way ([`OWNER_SECRET_FILE`]) ([`crate::win_user`]).
 //!
 //! What these commands do to the machine beyond the node's files (accounts,
 //! the service control manager, DPAPI, a logon) goes through [`WinSystem`],
@@ -33,8 +33,8 @@ pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Ne
 /// runs when the owner's password is saved.
 pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save your password under Settings › General › Account for commands, which installs the node again";
 /// The file in the config folder that holds the owner's password, for the
-/// commands that run as the owner, encrypted with DPAPI.
-pub const SECRET_FILE: &str = "command-account.dpapi";
+/// commands that run as the owner, encrypted with DPAPI ([`Secret`]).
+pub const OWNER_SECRET_FILE: &str = "owner-password.dpapi";
 /// The file in the config folder that holds the password of the command
 /// account [`crate::account::RUN_USER`], encrypted with DPAPI.
 pub const RUN_SECRET_FILE: &str = "run-account.dpapi";
@@ -431,7 +431,7 @@ fn remove_grants(
     }
 }
 
-/// The format of what a password file ([`SECRET_FILE`],
+/// The format of what a password file ([`OWNER_SECRET_FILE`],
 /// [`RUN_SECRET_FILE`]) holds inside DPAPI's seal. One of another format is
 /// refused, not guessed at: a later version that changes it says so.
 pub const SECRET_FORMAT: u64 = 1;
@@ -589,7 +589,7 @@ pub const NO_OWNER_PASSWORD: &str = "this node has no owner, whose password the 
 /// The owner's password the app gives the running node where the stored
 /// one is missing or no longer works (`owner.password` on its control
 /// pipe): checked as `install` checks it, a logon of the owner that must
-/// not open the node's folders, then stored with DPAPI in [`SECRET_FILE`],
+/// not open the node's folders, then stored with DPAPI in [`OWNER_SECRET_FILE`],
 /// in place of the old one. The owner's name.
 pub fn save_owner_password(
     paths: &NodePaths,
@@ -611,7 +611,7 @@ pub fn save_owner_password(
             at.display()
         ));
     }
-    let file = paths.config_dir.join(SECRET_FILE);
+    let file = paths.config_dir.join(OWNER_SECRET_FILE);
     let secret = Secret {
         sid,
         name: a.name.clone(),
@@ -919,7 +919,7 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
             .ok_or("this account has no SID the node can name")?;
         let a = usable_owner(sys, &sid, &name)?;
         let own = p.own();
-        let file = p.config_dir.join(SECRET_FILE);
+        let file = p.config_dir.join(OWNER_SECRET_FILE);
         let stored = std::fs::read(&file)
             .ok()
             .and_then(|b| sys.unprotect(&b).ok())
@@ -1402,7 +1402,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
-        let file = l.paths.config_dir.join(SECRET_FILE);
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
         let blob = std::fs::read(&file).unwrap();
         let mut stale = StalePassword::default();
         assert_eq!(owner_password_state(None, &stale), "missing");
@@ -1433,7 +1433,7 @@ pub(crate) mod tests {
         // The new one is stored, and the state is stored again.
         assert_eq!(save_owner_password(&l.paths, &sys, "new").unwrap(), "alice");
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("alice".into(), "new".into()))
         );
         let fresh = std::fs::read(&file).unwrap();
@@ -2005,6 +2005,12 @@ pub(crate) mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+        // The owner's password is named as the owner's, not as the
+        // command account's.
+        assert_eq!(
+            (OWNER_SECRET_FILE, RUN_SECRET_FILE),
+            ("owner-password.dpapi", "run-account.dpapi")
+        );
         let p = new_password();
         assert!(p.len() >= 32 && p.starts_with("Nn1-"), "{p}");
         assert_ne!(p, new_password());
@@ -2313,7 +2319,7 @@ pub(crate) mod tests {
         );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 1.0.0\n");
         // The password is stored, not in clear.
-        let file = l.paths.config_dir.join(SECRET_FILE);
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
         let blob = std::fs::read(&file).unwrap();
         assert!(!blob.windows(7).any(|w| w == b"alice's"));
         assert_eq!(
@@ -2385,7 +2391,7 @@ pub(crate) mod tests {
             Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()))
         );
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("bob".into(), "bob's".into()))
         );
     }
@@ -2405,7 +2411,7 @@ pub(crate) mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("Password of alice"), "{out}");
         assert!(out.contains("the program is at"), "{out}");
-        let blob = std::fs::read(l.paths.config_dir.join(SECRET_FILE)).unwrap();
+        let blob = std::fs::read(l.paths.config_dir.join(OWNER_SECRET_FILE)).unwrap();
         assert_eq!(
             Secret::read(&sys.unprotect(&blob).unwrap())
                 .unwrap()
@@ -2448,7 +2454,10 @@ pub(crate) mod tests {
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("no commands as you"), "{who}: {out}");
             assert!(out.contains(why), "{who}: {out}");
-            assert!(!l.paths.config_dir.join(SECRET_FILE).exists(), "{who}");
+            assert!(
+                !l.paths.config_dir.join(OWNER_SECRET_FILE).exists(),
+                "{who}"
+            );
             // The command account is there all the same.
             assert!(l.paths.config_dir.join(RUN_SECRET_FILE).exists(), "{who}");
         }
@@ -2465,7 +2474,7 @@ pub(crate) mod tests {
             "{out}"
         );
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("bob".into(), "bob's".into()))
         );
     }
@@ -2495,7 +2504,7 @@ pub(crate) mod tests {
         assert!(out.contains("run commands as Max Müller"), "{out}");
         assert!(!out.contains("no commands as you"), "{out}");
         assert_eq!(
-            stored_secret(&sys, &l, SECRET_FILE),
+            stored_secret(&sys, &l, OWNER_SECRET_FILE),
             Some(Secret {
                 sid: "S-1-5-21-1-2-3-1005".into(),
                 name: "Max Müller".into(),
@@ -2542,7 +2551,7 @@ pub(crate) mod tests {
         // for the local alice.
         *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1001".into(), "alice".into()));
         let l = installed(d.path(), &sys, "1.0.0");
-        let file = l.paths.config_dir.join(SECRET_FILE);
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
         std::fs::remove_file(&file).unwrap();
         sys.put_owner("S-1-5-21-9-8-7-1001").unwrap();
         let e = save_owner_password(&l.paths, &sys, "alice's").unwrap_err();
@@ -2789,7 +2798,7 @@ pub(crate) mod tests {
             std::fs::read_to_string(l.paths.config_file()).unwrap(),
             "version = 3\n"
         );
-        assert!(l.paths.config_dir.join(SECRET_FILE).exists());
+        assert!(l.paths.config_dir.join(OWNER_SECRET_FILE).exists());
         assert_eq!(
             sys.secured.borrow().clone(),
             [&l.paths.config_dir, &l.home, &l.paths.state_dir].map(|d| (
@@ -3105,7 +3114,7 @@ pub(crate) mod tests {
             &l.home,
             &l.paths.config_dir,
             &l.paths.state_dir,
-            &l.paths.config_dir.join(SECRET_FILE),
+            &l.paths.config_dir.join(OWNER_SECRET_FILE),
         ] {
             assert!(!p.exists(), "{p:?}");
         }
@@ -3152,7 +3161,7 @@ pub(crate) mod tests {
             l.paths.config_file(),
             l.paths.key_file("lab"),
             l.paths.config_key(),
-            l.paths.config_dir.join(SECRET_FILE),
+            l.paths.config_dir.join(OWNER_SECRET_FILE),
             l.paths.audit_log(),
         ]
         .into_iter()

@@ -271,7 +271,7 @@ that exists; `--overwrite` does.
 | `node.toml` as the node reads it: pairings with their `url`, `pin`, `center_id` and `node_id`, modes, folders, rules, relay and proxy settings | The key of the config's MAC: a node that restores makes its own |
 | The node key of every center, the relay's TLS key, the password of an `https://` proxy (the keys in `keys/`) | The sudo password. It is not stored anywhere, so a node restores with `sudo` off |
 | The proxy's header values | The audit log, the [log](logging.md#the-log-as-the-owner-reads-it), the control socket |
-| | On Windows, `command-account.dpapi`: DPAPI ties it to the machine |
+| | On Windows, `owner-password.dpapi` (your password) and `run-account.dpapi` (`nerve-run`'s): DPAPI ties them to the machine, and the install makes `nerve-run`'s again |
 
 The node can run while you back it up.
 
