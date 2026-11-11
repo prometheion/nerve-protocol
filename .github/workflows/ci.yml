@@ -2,14 +2,14 @@
 # the whole test suite, on Linux and on Windows, the tests that differ on
 # musl, the C library of the released Linux programs, those programs built
 # as the release builds them and installed on Ubuntu 22.04 and 24.04 (x86_64
-# and arm64) and Debian 12, with the node's keys in the system keyring, the
+# and arm64), Ubuntu 26.04, Debian 12 and 13, with the node's keys in the system keyring, the
 # real-machine tests and the center as a service, on kernels older than 7.1
 # (6.8 and 7.0), and the desktop app's own install. A test
 # that skips says why, and a job fails on a skip that .github/test-skips.txt
 # does not give it (docs/dev/building.md). The release workflow runs
 # the same fmt, clippy and tests on Linux before it builds anything
-# (docs/dev/releasing.md), but nothing there runs the Windows tests: its
-# Windows job only builds.
+# (docs/dev/releasing.md); for Windows it runs the install test of
+# `windows-installed` on the programs it built, not the whole suite.
 #
 # The Windows job runs the same `cargo test --workspace`, so the tests that are
 # compiled only on Windows run there: grants, the integrity level, the service
@@ -387,21 +387,8 @@ jobs:
           cargo build --locked -p nerve-node-desktop -p nerve-center
           mkdir -p dist/tests
           cp target/debug/nerve-node-desktop.exe target/debug/nerve-center.exe dist/
-          exe() {
-            cargo test --locked "$@" --no-run --message-format=json \
-              | python -c 'import json,sys; [e] = [m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable") and m["profile"]["test"]]; print(e)'
-          }
-          cp "$(exe -p nerve-node-desktop --test real)" dist/tests/real.exe
-          cp "$(exe -p nerve-node --test win_sudo)" dist/tests/win_sudo.exe
-          cp "$(exe -p nerve-node --test win_limits)" dist/tests/win_limits.exe
-          cp "$(exe -p nerve-node --test win_account)" dist/tests/win_account.exe
-          cp "$(exe -p nerve-node --test win_provider)" dist/tests/win_provider.exe
-          cp "$(exe -p nerve-node --test win_vault)" dist/tests/win_vault.exe
-          cp "$(exe -p nerve-center --test win_service)" dist/tests/win_service.exe
-          cp "$(exe -p nerve-node --lib)" dist/tests/nerve_node_lib.exe
-          cp "$(exe -p nerve-sandbox --lib)" dist/tests/nerve_sandbox_lib.exe
-          cp "$(exe -p nerve-service --lib)" dist/tests/nerve_service_lib.exe
-          ls -l dist dist/tests
+          .github/scripts/windows-test-programs.sh dist/tests
+          ls -l dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-programs

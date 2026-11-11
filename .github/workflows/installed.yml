@@ -9,10 +9,10 @@
 # folder mode as `nerve-run`, the web UI, `uninstall --purge`) and
 # .github/scripts/center-service-end-to-end.sh (the center as a service). The
 # programs are static, so one build of each architecture serves every
-# distribution. Ubuntu 22.04 and 24.04 are GitHub's own runners. Debian 12 has
-# no runner: it is a container of debian:12 with systemd as its init, on an
-# Ubuntu 24.04 runner (.github/scripts/systemd-container.sh), so it shares that
-# runner's kernel. The runners are disposable virtual machines: the scripts may
+# distribution. Ubuntu 22.04 and 24.04 are GitHub's own runners. Debian 12,
+# Debian 13 and Ubuntu 26.04 have none here: each is a container of its image
+# with systemd as its init, on an Ubuntu 24.04 runner
+# (.github/scripts/systemd-container.sh), so it shares that runner's kernel. The runners are disposable virtual machines: the scripts may
 # install the programs, make accounts and a keyring, and break them.
 #
 # The kernels are GitHub's, not the ones the distributions ship (6.8 on
@@ -75,6 +75,16 @@ jobs:
             arch: x86_64
             landlock: 6
             image: debian:12
+          - name: Debian 13 x86_64
+            runner: ubuntu-24.04
+            arch: x86_64
+            landlock: 6
+            image: debian:13
+          - name: Ubuntu 26.04 x86_64
+            runner: ubuntu-24.04
+            arch: x86_64
+            landlock: 6
+            image: ubuntu:26.04
     env:
       SUFFIX: ${{ matrix.arch }}-linux
     steps:

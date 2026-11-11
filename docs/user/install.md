@@ -147,7 +147,7 @@ The installed center sees no GPU: its local model runs on the CPU
 
 | | |
 |---|---|
-| Tested | Ubuntu 22.04 and 24.04, Debian 12 on x86_64; Ubuntu 24.04 on aarch64 |
+| Tested | Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13 on x86_64; Ubuntu 24.04 on aarch64 |
 | Expected to work | Fedora, Arch Linux, other distributions with systemd |
 | As a service | systemd, polkit, cgroup v2, a file system with ACLs (ext4, XFS, Btrfs) |
 | Not as a service | Alpine with OpenRC, Void with runit, WSL 1: run the node by hand |

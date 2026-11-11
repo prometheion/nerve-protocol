@@ -12,9 +12,12 @@
 # that were built (the ones that will be released), on a runner of their own
 # architecture, and `installed` installs and drives them on the distributions
 # Nerve supports (.github/workflows/installed.yml); the desktop app's .deb and
-# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`). `publish` is the only job
+# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`). With the
+# input `windows`, `windows-installed` installs and drives the Windows programs
+# the release built (.github/workflows/installed-windows.yml), as CI does with
+# its debug ones. `publish` is the only job
 # that may write: it tags the commit and publishes the release only after
-# every check, build, the conformance run and the install test passed, so a
+# every check, build, the conformance run and the install tests passed, so a
 # failed run leaves no tag. Tags are never moved or reused.
 #
 # No secrets: nothing is signed (the node's `update` checks a download against
@@ -437,7 +440,7 @@ jobs:
         run: cargo test --locked -p nerve-conformance --no-fail-fast
 
   # The binaries to be released, installed and driven on Ubuntu 22.04 and
-  # 24.04 (x86_64 and arm64) and Debian 12, with the scripts of the commit
+  # 24.04 (x86_64 and arm64), Ubuntu 26.04, Debian 12 and 13, with the scripts of the commit
   # being released.
   installed:
     needs: [check, linux]
@@ -456,6 +459,12 @@ jobs:
       TARGET: x86_64-pc-windows-msvc
       SUFFIX: x86_64-windows
     steps:
+      # As in CI's `windows` job: the Windows image would check out with CRLF
+      # line endings, and the programs embed pages and texts of the checkout.
+      - name: Check out with LF line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.check.outputs.sha }}
@@ -496,17 +505,51 @@ jobs:
           name: nerve-${{ env.SUFFIX }}
           path: dist/*
           if-no-files-found: error
+      # For `windows-installed`: the programs just built, under the names its
+      # steps run them by, and the test programs of the same commit (debug
+      # builds, as CI's; what they install and drive is the release's).
+      - name: The programs and the test programs of the install test
+        run: |
+          mkdir -p installed/tests
+          for b in nerve-center nerve-node-desktop; do
+            cp "dist/$b-$SUFFIX.exe" "installed/$b.exe"
+          done
+          .github/scripts/windows-test-programs.sh installed/tests
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-release-programs
+          path: installed/*.exe
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-release-tests
+          path: installed/tests/*
+          if-no-files-found: error
+          retention-days: 3
+
+  # The Windows programs of the release installed and driven on a runner of
+  # their own, with the scripts of the commit being released: the tag waits
+  # for it, as for the Linux install test (owner, 2026-11-11).
+  windows-installed:
+    needs: [check, windows]
+    if: ${{ inputs.windows }}
+    uses: ./.github/workflows/installed-windows.yml
+    with:
+      programs: windows-release-programs
+      tests: windows-release-tests
+      ref: ${{ needs.check.outputs.sha }}
 
   # No checkout and no build: only the artifacts of the jobs above and the API.
   # The release is made as a draft with its files first, then the tag, then the
   # draft is published, so that the step most likely to fail (the upload) runs
   # before there is a tag. If anything here fails, the last step removes the
   # draft and the tag this run created, and nothing else (see there). The
-  # Windows job is skipped without the input `windows`, which would skip this
+  # Windows jobs are skipped without the input `windows`, which would skip this
   # job too, so it says itself what it needs: every other job passed, and the
-  # Windows job passed with the input or was skipped without it.
+  # Windows jobs passed with the input or were skipped without it.
   publish:
-    needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, windows, conformance, installed]
+    needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, windows, windows-installed, conformance, installed]
     if: >-
       ${{ !cancelled()
       && needs.check.result == 'success'
@@ -516,7 +559,8 @@ jobs:
       && needs.desktop-packages-test.result == 'success'
       && needs.conformance.result == 'success'
       && needs.installed.result == 'success'
-      && needs.windows.result == (inputs.windows && 'success' || 'skipped') }}
+      && needs.windows.result == (inputs.windows && 'success' || 'skipped')
+      && needs.windows-installed.result == (inputs.windows && 'success' || 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

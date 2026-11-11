@@ -6,6 +6,7 @@
 
 - The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
 - `--public-url` of the center takes `{port}` for the port it listens on for nodes, for a `--listen` with port 0. Its start line in the log also names that address and the HTTP MCP URL.
+- The node and the center are installed and tested on Ubuntu 26.04 and Debian 13 too, before each release.
 
 ### Fixed
 
