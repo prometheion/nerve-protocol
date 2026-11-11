@@ -240,7 +240,7 @@ jobs:
           } catch { $started = $false }
           Start-Sleep -Seconds 5
           $status = (Get-Service nerve-node).Status
-          icacls $state /setowner 'BUILTIN\Administrators' | Out-Null
+          icacls $state /setowner '*S-1-5-32-544' | Out-Null
           if ($started -or $status -eq 'Running') { throw "the service started on a folder of $std" }
           Start-Service nerve-node -ErrorAction Stop
           if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the service does not start on the administrators'' folder' }
