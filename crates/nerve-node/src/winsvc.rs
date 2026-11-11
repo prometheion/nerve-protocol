@@ -2548,6 +2548,12 @@ pub(crate) mod tests {
         let e = save_owner_password(&l.paths, &sys, "alice's").unwrap_err();
         assert_eq!(e, not_local("alice"));
         assert!(!file.exists());
+        // The SID decides before the name: a name of another directory need
+        // not be one this machine takes.
+        assert_eq!(
+            usable_owner(&sys, "S-1-12-1-1-2-3-4", "max.mustermann@corp.example").unwrap_err(),
+            not_local("max.mustermann@corp.example")
+        );
     }
 
     /// The SID decides who is local: this machine's and one number more.
