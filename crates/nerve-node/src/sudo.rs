@@ -5,10 +5,9 @@
 //! starts with the switch off. It is never part of a document, a result or
 //! the audit log, and every outgoing frame is scrubbed of it.
 //!
-//! On Windows the password is the one of the account the commands run as,
-//! checked by a logon that must hold the Administrators group, and the node
-//! also keeps it with DPAPI in its config folder, which a restart reads
-//! again (crate::winsudo).
+//! On Windows the password is the owner's Windows password, checked by a
+//! logon that must hold the Administrators group, and held in memory only
+//! as well; no center turns the switch on there (crate::winsudo).
 
 use nerve_policy::config::Sudo;
 use nerve_policy::{SetError, Writer};
@@ -38,6 +37,25 @@ impl Drop for Secret {
 
 /// Why a center may not turn the switch on while root is the owner.
 pub const ROOT_SUDO: &str = "root is the owner of this node, and sudo checks no password of root's, so no center turns sudo on here; root does, with `nerve-node sudo on` on this machine";
+
+/// Why a center may not turn the switch on for a node on Windows: the
+/// password is the owner's Windows password.
+pub const WINDOWS_SUDO: &str = "on Windows sudo takes the owner's Windows password, which does not go through a center; turn sudo on in the Nerve app on this machine, under Permissions › Sudo";
+
+/// Whether a center may turn the switch on: not where the password shows
+/// nothing (root as the owner, whom `sudo -v` asks for none) and not on
+/// Windows (`windows`), where it is the owner's Windows password, which
+/// should not pass through a web page and the relay. Only the owner turns
+/// it on there, at the machine.
+pub fn center_may_turn_on(windows: bool, root_owner: bool) -> Result<(), &'static str> {
+    if windows {
+        return Err(WINDOWS_SUDO);
+    }
+    if root_owner {
+        return Err(ROOT_SUDO);
+    }
+    Ok(())
+}
 
 /// What stands in for the password where it would have appeared.
 pub const REDACTED: &str = "[redacted]";
@@ -147,11 +165,11 @@ impl Shared {
         }
         // `sudo -v` as root takes any password, so with root as the owner
         // a password shows nothing: only root itself turns the switch on,
-        // at the node (`nerve-node sudo on`), never a center.
-        if let Writer::Center(_) = by
-            && crate::owner::is_root(self.owner_name(&self.config()).as_deref())
-        {
-            return Err(SetError::Forbidden(ROOT_SUDO.into()));
+        // at the node (`nerve-node sudo on`), never a center. On Windows
+        // the owner turns it on in the app.
+        if let Writer::Center(_) = by {
+            let root = crate::owner::is_root(self.owner_name(&self.config()).as_deref());
+            center_may_turn_on(cfg!(windows), root).map_err(|e| SetError::Forbidden(e.into()))?;
         }
         if password.expose().is_empty() || password.expose().contains('\n') {
             return Err(SetError::Invalid(
@@ -183,8 +201,6 @@ impl Shared {
             let r = store.set_sudo(by, Sudo::On);
             if r.is_err() {
                 *lock(&self.sudo) = None;
-                #[cfg(windows)]
-                let _ = crate::winsudo::forget(&self.paths);
             }
             r
         };
@@ -197,19 +213,19 @@ impl Shared {
 
     /// [`Shared::sudo_switch_on`]'s check on Windows (crate::winsudo): the
     /// installed node, and a logon of `account` with `password` that holds
-    /// the Administrators group. The password is then kept with DPAPI.
+    /// the Administrators group. The node then holds it in memory only.
     #[cfg(windows)]
     async fn windows_check(
         &self,
         account: Option<&crate::service::Account>,
         password: &Secret,
     ) -> Result<(), SetError> {
-        let (account, paths) = (account.cloned(), self.paths.clone());
+        let account = account.cloned();
         let pw = Secret::new(password.expose().to_string());
         // A logon takes a moment; it does not hold up the other links.
         tokio::task::spawn_blocking(move || {
             let host = crate::win_host::WinHost;
-            let name = crate::winsudo::take(&paths, &host, account.as_ref(), pw.expose())?;
+            let name = crate::winsudo::take(&host, account.as_ref(), pw.expose())?;
             tracing::warn!("{}", crate::winsudo::warning(&name));
             Ok::<(), String>(())
         })
@@ -228,12 +244,6 @@ impl Shared {
                 ));
             }
         }
-        // The kept password goes first: a node that stops now starts with
-        // none (crate::winsudo).
-        #[cfg(windows)]
-        if let Err(e) = crate::winsudo::forget(&self.paths) {
-            tracing::warn!("cannot remove the kept sudo password: {e}");
-        }
         let r = {
             let mut store = lock(&self.store);
             *lock(&self.sudo) = None;
@@ -247,33 +257,12 @@ impl Shared {
 
     /// Brings the config and the held password in line: a config that says
     /// on without a password (a restart, an edited file) is switched off; a
-    /// config that says off drops the password. On Windows the password kept
-    /// with DPAPI is held first, and one held that is no longer kept is
-    /// dropped (crate::winsudo).
+    /// config that says off drops the password. On every platform, so a
+    /// restarted node has the switch off.
     pub fn settle_sudo(&self) {
         let mut store = lock(&self.store);
         let on = store.config().machine.sudo == Sudo::On;
         let mut held = lock(&self.sudo);
-        #[cfg(windows)]
-        {
-            use crate::winsudo::{Settle, kept, settle, stored};
-            let user = self.owner.clone();
-            match settle(on, held.is_some(), on && kept(&self.paths)) {
-                Settle::Load => {
-                    let host = crate::win_host::WinHost;
-                    if let Some(pw) = stored(&self.paths, &host, user.as_deref()) {
-                        self.log_secret(Some(&pw));
-                        *held = Some(Secret::new(pw));
-                        *lock(&self.sudo_for) = user;
-                    }
-                }
-                Settle::Drop => {
-                    *held = None;
-                    self.log_secret(None);
-                }
-                Settle::Nothing => {}
-            }
-        }
         if on && held.is_none() {
             drop(held);
             if let Err(e) = store.set_sudo(Writer::Local, Sudo::Off) {
@@ -291,6 +280,19 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A center turns the switch on only where its password shows the
+    /// owner's right to sudo: never for root as the owner, never on
+    /// Windows, where it is the owner's Windows password.
+    #[test]
+    fn a_center_turns_sudo_on_only_on_linux_for_an_owner_that_is_not_root() {
+        assert_eq!(center_may_turn_on(false, false), Ok(()));
+        assert_eq!(center_may_turn_on(false, true), Err(ROOT_SUDO));
+        for root in [false, true] {
+            assert_eq!(center_may_turn_on(true, root), Err(WINDOWS_SUDO));
+        }
+        assert!(WINDOWS_SUDO.contains("in the Nerve app on this machine"));
+    }
 
     #[test]
     fn scrubs_plain_and_escaped_copies() {

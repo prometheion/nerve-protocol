@@ -1705,12 +1705,22 @@ async function sealSudo(offer, password) {
 }
 
 // The machine's sudo switch: on only with a password its `sudo -v` accepts.
+// A Windows machine takes no password from here: sudo takes the owner's
+// Windows password there, which only the app on the machine asks for.
 function sudoSwitch(n) {
   const label = el("span", { class: "meta" }, "Sudo: …");
-  // On Windows sudo takes the password of the account commands run as.
-  const what = n.platform === "windows" ? "password of the account commands run as" : "sudo password";
-  const pw = el("input", { type: "password", class: "input", autocomplete: "off", placeholder: what, "aria-label": `Sudo password of ${n.name}` });
   const show = (on) => { label.textContent = on === "on" ? "Sudo: on" : "Sudo: off"; };
+  const off = btn("Turn sudo off", "", act(async () => {
+    const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: false });
+    show(r.sudo);
+    notify(`Sudo is off for ${n.name}.`);
+  }));
+  if (n.platform === "windows") {
+    return { show, row: el("div", { class: "actions" }, label,
+      el("span", { class: "meta" }, "Turn it on in the Nerve app on that machine, Permissions, Sudo."), off) };
+  }
+  const what = "sudo password";
+  const pw = el("input", { type: "password", class: "input", autocomplete: "off", placeholder: what, "aria-label": `Sudo password of ${n.name}` });
   const on = btn("Turn sudo on", "", act(async () => {
     const password = pw.value;
     pw.value = "";
@@ -1720,11 +1730,6 @@ function sudoSwitch(n) {
     const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: true, sealed });
     show(r.sudo);
     notify(`Sudo is on for ${n.name}: sudo commands on the sudo allow list run. Only the machine's owner adds to that list, on the machine.`);
-  }));
-  const off = btn("Turn sudo off", "", act(async () => {
-    const r = await api("POST", "/api/nodes/sudo", { id: n.id, on: false });
-    show(r.sudo);
-    notify(`Sudo is off for ${n.name}.`);
   }));
   return { show, row: el("div", { class: "actions" }, label, pw, on, off) };
 }

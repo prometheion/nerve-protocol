@@ -468,12 +468,6 @@ pub fn input_for(
         && crate::cli::proxy_wants_password(url)
         && !headers.iter().any(|h| h == "-")
     {
-        // The installed node on Windows takes no proxy password, so it is
-        // not asked for one first (round 4, security 1).
-        #[cfg(windows)]
-        if crate::secrets::windows_service(&crate::service::Layout::system().paths) {
-            return Err(crate::secrets::proxy_windows_refusal());
-        }
         return Ok(Input::Text(format!("{}\n", ask()?)));
     }
     Ok(if reads_input(cmd) {
@@ -527,14 +521,15 @@ impl FileJob {
 
 /// Whether `cmd` reads this process's input: the questions of `setup` and
 /// of `config set machine.secret_storage keyring`, the question of `center
-/// add` without `--yes`, what `proxy set` takes from stdin, and the schema
-/// `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
+/// add` without `--yes`, what `proxy set` takes from stdin, the schema
+/// `cap add` or `cap edit` takes from it, and the owner's Windows password
+/// that `password` reads. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
     use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
-        Cmd::Setup => true,
+        Cmd::Setup | Cmd::Password => true,
         Cmd::Config(c) => crate::cli::moves_keys_to_keyring(c),
         Cmd::Cap {
             cmd: Some(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }),
@@ -1198,13 +1193,20 @@ impl Endpoint {
     }
 }
 
-/// The owner pipe's DACL in SDDL (Windows): SYSTEM, the administrators, the
-/// node's own account (`own`, which makes the pipe's further instances) and
-/// the owners. No AppContainer gets in: no entry names a package.
+/// The owner pipe's DACL in SDDL (Windows), also the provider pipe's:
+/// SYSTEM, the administrators, the node's own account (`own`, which makes
+/// the pipe's further instances) and the owners, who may read and write
+/// data and nothing else ([`nerve_service::win::pipe::CLIENT_RIGHTS`]): one
+/// that could make an instance of the pipe would be taken for the node by a
+/// client that checks the pipe's owner. No AppContainer gets in: no entry
+/// names a package.
 pub fn dacl_text(own: &str, owners: &[String]) -> String {
     let mut s = crate::pipe::dacl_text(own);
     for o in owners {
-        s.push_str(&format!("(A;;GA;;;{o})"));
+        s.push_str(&format!(
+            "(A;;{};;;{o})",
+            nerve_service::win::pipe::CLIENT_RIGHTS
+        ));
     }
     s
 }
@@ -2003,14 +2005,13 @@ mod win {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+    use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, RevertToSelf, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -2158,10 +2159,8 @@ mod win {
         let name = pipe_name();
         let mut busy = 0;
         let client = loop {
-            match ClientOptions::new()
-                .security_qos_flags(SECURITY_IDENTIFICATION)
-                .open(&name)
-            {
+            // Identification only, with the rights the pipe gives an owner.
+            match nerve_service::win::pipe::open_limited(&name) {
                 Ok(c) => break c,
                 Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     return Err(nerve_transport::ctl::NOT_RUNNING.into());
@@ -2668,6 +2667,8 @@ mod tests {
         }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
+        // The app hands the owner's Windows password to `password` on stdin.
+        assert!(reads_input(&cli(&["password"]).cmd));
         // So does the move of the keys into a keyring, which offers one.
         assert!(reads_input(
             &cli(&["config", "set", "machine.secret_storage", "keyring"]).cmd
@@ -2704,21 +2705,11 @@ mod tests {
             input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
         };
         let set = ["proxy", "set", "http://u@h:1"];
-        // The installed node on Windows takes no proxy password, so a
-        // terminal is not asked for one there.
-        #[cfg(windows)]
-        {
-            let e = input_for(&cli(&set).cmd, true, || Ok("pw".into()));
-            assert!(matches!(e, Err(e) if e == crate::secrets::proxy_windows_refusal()));
-        }
-        #[cfg(not(windows))]
-        {
-            assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
-            assert!(!terminal_of(&input(&set, true), true));
-            // A password not given ends it here.
-            let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
-            assert!(matches!(e, Err(e) if e == "no password given"));
-        }
+        assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
+        assert!(!terminal_of(&input(&set, true), true));
+        // A password not given ends it here.
+        let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
+        assert!(matches!(e, Err(e) if e == "no password given"));
         assert!(matches!(input(&set, false), Input::Stdin));
         let headers = ["proxy", "set", "http://u@h:1", "--header", "-"];
         assert!(matches!(input(&headers, true), Input::Stdin));
@@ -2735,8 +2726,21 @@ mod tests {
         let d = dacl_text("S-1-5-21-1-2-3-1057", &["S-1-5-21-1-2-3-1056".into()]);
         assert_eq!(
             d,
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1057)(A;;GA;;;S-1-5-21-1-2-3-1056)"
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1057)(A;;0x12008b;;;S-1-5-21-1-2-3-1056)"
         );
+        // An owner makes no instance of the pipe: no GA, no GENERIC_WRITE,
+        // and not FILE_APPEND_DATA (0x4) in what it gets.
+        let owner_entry = d.split(')').find(|e| e.ends_with("1056")).unwrap();
+        assert!(
+            !owner_entry.contains("GA") && !owner_entry.contains("GW"),
+            "{d}"
+        );
+        let rights = owner_entry
+            .split(';')
+            .nth(2)
+            .unwrap()
+            .trim_start_matches("0x");
+        assert_eq!(u32::from_str_radix(rights, 16).unwrap() & 0x4, 0, "{d}");
         for other in ["WD", "BU", "AU", "IU", "AC", "S-1-15-"] {
             assert!(!d.contains(other), "{other}");
         }
@@ -2853,10 +2857,72 @@ mod tests {
             assert!(said.contains("exit code: 0\n"), "{said}");
             // The owner's own program opens it.
             let _second = crate::pipe::instance(&closed, &sd, false).unwrap();
-            tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(&closed)
+            nerve_service::win::pipe::open_limited(&closed)
                 .expect("the owner opens the owner pipe");
             nerve_sandbox::appcontainer::remove_profile(&name).unwrap();
+        });
+    }
+
+    /// Windows: an owner whose token holds no administrators' rights opens
+    /// the owner pipe with the rights it gives (`open_limited`) and cannot
+    /// make an instance of it, which a client that checks the pipe's owner
+    /// would take for the node's. An elevated administrator keeps `GA` and
+    /// can: that is what gives the check its teeth (and it is not run where
+    /// the tests do not run elevated).
+    #[cfg(windows)]
+    #[test]
+    fn an_owner_opens_the_owner_pipe_and_makes_no_instance() {
+        use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+        /// Acts as the token until dropped.
+        struct Acting;
+        impl Acting {
+            fn token(t: &crate::win_user::Token) -> Acting {
+                // SAFETY: an open token of this process; the thread acts as it
+                // until RevertToSelf.
+                assert_ne!(
+                    unsafe { ImpersonateLoggedOnUser(t.raw()) },
+                    0,
+                    "{}",
+                    std::io::Error::last_os_error()
+                );
+                Acting
+            }
+        }
+        impl Drop for Acting {
+            fn drop(&mut self) {
+                // SAFETY: a plain call, ending the impersonation of this thread.
+                unsafe { RevertToSelf() };
+            }
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let me = crate::win_user::own_sid()
+                .map_err(|e| e.to_string())
+                .and_then(|s| crate::win_host::sid_text(&s))
+                .unwrap();
+            let name = format!(r"\\.\pipe\nerve-test-owner-rights-{}", std::process::id());
+            // The node is somebody else; this process is an owner.
+            let node = "S-1-5-21-1-2-3-1001";
+            let sd = crate::pipe::Descriptor::from_sddl(&dacl_text(node, &[me])).unwrap();
+            let _first = crate::pipe::instance(&name, &sd, true).unwrap();
+
+            if nerve_service::win::sid::is_admin() {
+                let _second = crate::pipe::instance(&name, &sd, false)
+                    .expect("an elevated administrator keeps GA on the pipe");
+            } else {
+                eprintln!("not elevated: the administrators' side of the check is skipped");
+            }
+            let owner = crate::win_user::restricted().unwrap();
+            let acting = Acting::token(&owner);
+            let made = crate::pipe::instance(&name, &sd, false).map(drop);
+            let opened = nerve_service::win::pipe::open_limited(&name).map(drop);
+            drop(acting);
+            let e = made.expect_err("an owner made an instance of the owner pipe");
+            assert_eq!(e.raw_os_error(), Some(5), "{e}");
+            opened.expect("an owner opens the owner pipe with the rights it gives");
         });
     }
 

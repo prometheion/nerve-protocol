@@ -773,6 +773,9 @@ pub(crate) struct Shared {
     pub program_wait: Duration,
     /// The capability providers attached now (crate::provider).
     pub providers: crate::provider::Providers,
+    /// Windows: why the installed node serves no provider pipe, which the
+    /// status says (another process may hold its name).
+    pub provider_pipe_lost: std::sync::OnceLock<String>,
     /// Linux: the installed node's provider socket, the only place it
     /// takes a provider's hello (crate::provider::serve); `None` for a node
     /// run by hand, which takes it on the control socket.
@@ -1891,6 +1894,16 @@ impl Shared {
         Value::Null
     }
 
+    /// What `status` says of the owner's stored Windows password on the
+    /// installed node; `None` on a node run by hand and elsewhere.
+    fn owner_password(&self) -> Option<&'static str> {
+        #[cfg(windows)]
+        if self.service {
+            return Some(crate::win_user::owner_password_state());
+        }
+        None
+    }
+
     pub fn status(&self) -> Value {
         let cfg = self.config();
         // What the last sync of the folders' ACLs left, on the installed
@@ -1959,6 +1972,10 @@ impl Shared {
             "confinement": self.confinement.describe(),
             "running": self.running.load(Ordering::Relaxed),
             "sudo": if self.sudo_on() { "on" } else { "off" },
+            // The owner's stored Windows password, for the commands that
+            // run as the owner and the folder grants: missing, stale or
+            // stored (crate::winsvc::owner_password_state); none elsewhere.
+            "owner_password": self.owner_password(),
             // This process found no keyring and does not look again
             // (crate::secrets::store::failed): setup restarts it after it
             // installed one.
@@ -1971,6 +1988,7 @@ impl Shared {
             "network_rules": self.network_held(),
             "command_limits": crate::cgroup::status(&cfg.limits.command, &self.cgroups),
             "providers": self.providers.status(),
+            "provider_pipe_warning": self.provider_pipe_lost.get(),
             "folder_access": grants,
             // What nerve-run may read of the owner's home without Landlock.
             "home_warning": self.home_warning(&cfg),
@@ -2207,21 +2225,6 @@ impl Daemon {
             nerve_transport::files::create_private_dir(dir)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        // Where the keys may not be in the keyring, a node.toml that keeps
-        // them there is refused: the installed node on Windows would look
-        // in the Credential Manager of its own account, which holds none of
-        // them.
-        if crate::secrets::stated_storage(&paths) == SecretStorage::Keyring
-            && let Some(n) = crate::secrets::no_keyring(&paths)
-        {
-            let then = n.then_at_start();
-            return Err(crate::secrets::keyring_refused(
-                &paths,
-                n,
-                "the node does not start",
-                then,
-            ));
-        }
         // Keys in the keyring of the node's own session: the system-wide
         // environment of the login can have given that session another
         // user's folders again since `setup` put it right (a reboot).
@@ -2251,6 +2254,18 @@ impl Daemon {
                     })?
             }
         };
+        // The installed node on Windows takes into the Credential Manager
+        // of its own account what was written for it while it did not run
+        // (a restore, an install): before anything reads a key, and under
+        // the keys' lock, which whoever writes that file holds too
+        // (crate::secrets::vault).
+        if crate::secrets::windows_service(&paths) {
+            match crate::secrets::vault::take_pending(&paths) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("took {n} entries into the Credential Manager"),
+                Err(e) => tracing::error!("{e}"),
+            }
+        }
         let open_to_bus = Arc::new(AtomicUsize::new(0));
         let mut store = SettingsStore::open_with(
             paths.config_file(),
@@ -2350,6 +2365,7 @@ impl Daemon {
             grace: opts.resume_grace,
             program_wait: opts.program_wait,
             providers: Default::default(),
+            provider_pipe_lost: Default::default(),
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
@@ -2366,8 +2382,8 @@ impl Daemon {
             acl_tried: Mutex::default(),
         });
         shared.tell_confinement(&cfg);
-        // A file that says on starts off: on Linux the password lives in
-        // memory only; Windows holds the one kept with DPAPI (crate::winsudo).
+        // A file that says on starts off: the password lives in memory
+        // only, on Windows too (crate::winsudo).
         shared.settle_sudo();
         // The profile of a pairing's container goes with the pairing, by the
         // node's note of the pairings it had (crate::grants::note_pairings).
@@ -2399,7 +2415,23 @@ impl Daemon {
             }
             None => None,
         };
-        #[cfg(not(target_os = "linux"))]
+        // On Windows the provider pipe, for the owners `install` named.
+        #[cfg(windows)]
+        let providers = match endpoint.as_ref().map(|e| &e.owners) {
+            Some(crate::owner::Owners::Sids(owners)) => {
+                match crate::win_provider::serve(shared.clone(), owners.clone()) {
+                    Ok(task) => Some((task, PathBuf::from(crate::provider::PIPE_NAME))),
+                    Err(e) => {
+                        let why = crate::provider::pipe_lost(&e);
+                        tracing::error!("{why}");
+                        let _ = shared.provider_pipe_lost.set(why);
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        #[cfg(not(any(target_os = "linux", windows)))]
         let providers = None;
         // The web UI is the installed node's, for the owners of its
         // endpoint; it listens only while the config says so.
@@ -2864,7 +2896,53 @@ pub(crate) async fn pipe_control(
         // Checking the password takes a logon, so it cannot block inside
         // `control`.
         "sudo.on" => sudo_on(shared, params, false).await,
+        #[cfg(windows)]
+        "owner.password" => owner_password(shared, params).await,
+        // The service's own Credential Manager, for the CLI and the app of
+        // an administrator (crate::secrets::vault).
+        "vault.get" | "vault.set" | "vault.delete" | "vault.stage" => {
+            let (s, method) = (shared.clone(), method.to_string());
+            match tokio::task::spawn_blocking(move || {
+                crate::secrets::vault::serve(&s.paths, &method, &params)
+            })
+            .await
+            {
+                Ok(Ok(v)) => Reply::Ok(v),
+                Ok(Err(e)) => Reply::Err(e),
+                Err(e) => Reply::Err(e.to_string()),
+            }
+        }
         m => control(shared, m, params, false),
+    }
+}
+
+/// `owner.password {password}`: the owner's Windows password, where the
+/// stored one is missing or no longer works (crate::winsvc::save_owner_password),
+/// for the commands that run as the owner and the folder grants, which are
+/// brought in line with it at once.
+#[cfg(windows)]
+async fn owner_password(shared: &Arc<Shared>, params: Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let Some(password) = params.get("password").and_then(Value::as_str) else {
+        return Reply::Err("password is missing".into());
+    };
+    let password = crate::sudo::Secret::new(password.to_string());
+    let s = shared.clone();
+    // A logon takes a moment; it does not hold up the other requests.
+    let r = tokio::task::spawn_blocking(move || {
+        let name = crate::winsvc::save_owner_password(
+            &s.paths,
+            &crate::win_host::WinHost,
+            password.expose(),
+        )?;
+        let synced = s.sync_grants().json(0);
+        Ok::<Value, String>(json!({"owner": name, "grants": synced}))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Reply::Ok(v),
+        Ok(Err(e)) => Reply::Err(e),
+        Err(e) => Reply::Err(e.to_string()),
     }
 }
 
@@ -3476,6 +3554,29 @@ fn given_in_home(cfg: &NodeConfig, home: &std::path::Path) -> Vec<PathBuf> {
 mod every_platform {
     use super::*;
 
+    /// The Windows twin of `tests::a_stopped_node_holds_no_control_endpoint`
+    /// (Linux): right after `stop`, a call over the control pipe finds no
+    /// node, as the CLI must to write node.toml itself. A few rounds, on a
+    /// runtime whose other thread could drop the pipe's task late.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_node_takes_no_call_on_its_pipe() {
+        for _ in 0..5 {
+            let d = tempfile::tempdir().unwrap();
+            let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+            let mut opts = NodeOptions::new(paths.clone());
+            opts.home = d.path().to_path_buf();
+            // CI runs the tests as an administrator, which a node refuses
+            // to run as without machine.allow_root; not what this tests.
+            opts.full_rights = Some(false);
+            let daemon = Daemon::start(opts).await.unwrap();
+            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
+            daemon.stop().await;
+            let r = crate::pipe::call(&paths, "status", json!({})).await;
+            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
+        }
+    }
+
     /// On Windows the node notes its pairings' containers at its start,
     /// before its first sync could (crate::grants::note_pairings): `center
     /// rm` right after the start then finds the node removing the profile of
@@ -3821,6 +3922,51 @@ mod tests {
         (d, Daemon::start(opts).await.unwrap())
     }
 
+    /// A center is refused the sudo switch for a root owner before its
+    /// password is looked at, as on Windows (where the same line comes
+    /// first): an empty password would answer `Invalid` if the refusal
+    /// came later. Otherwise a center could try the owner's password.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_center_is_refused_the_sudo_switch_before_its_password_counts() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+        let mut opts = NodeOptions::new(paths);
+        opts.home = d.path().to_path_buf();
+        opts.owner = Some(crate::service::ROOT.into());
+        let daemon = Daemon::start(opts).await.unwrap();
+        let s = daemon.shared.clone();
+        lock(&s.store)
+            .update(|c| {
+                c.centers.push(nerve_policy::CenterEntry {
+                    name: "home".into(),
+                    url: "http://127.0.0.1:1".into(),
+                    pin: None,
+                    center_id: "id-home".into(),
+                    node_id: "n".into(),
+                    settings: nerve_policy::config::SettingsGrant::Write,
+                    paused: true,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: Default::default(),
+                    capabilities: Vec::new(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let r = s
+            .sudo_switch_on(nerve_policy::Writer::Center("home"), String::new())
+            .await;
+        assert!(
+            matches!(r, Err(nerve_policy::SetError::Forbidden(_))),
+            "{r:?}"
+        );
+    }
+
     /// Once `stop` returns, the stopped node holds no control endpoint. On
     /// Windows the control pipe lives as long as an instance the endpoint's
     /// task holds, so a CLI started right after `stop` could open it and be
@@ -3856,23 +4002,6 @@ mod tests {
         assert!(!held(), "the stopped node still holds its control socket");
     }
 
-    /// Its Windows twin: right after `stop`, a call over the control pipe
-    /// finds no node, as the CLI must to write node.toml itself. A few
-    /// rounds, on a runtime whose other thread could drop the pipe's task
-    /// late.
-    #[cfg(windows)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_stopped_node_takes_no_call_on_its_pipe() {
-        for _ in 0..5 {
-            let (_d, daemon) = daemon().await;
-            let paths = daemon.shared.paths.clone();
-            assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
-            daemon.stop().await;
-            let r = crate::pipe::call(&paths, "status", json!({})).await;
-            assert_eq!(r, Err(nerve_transport::ctl::NOT_RUNNING.to_string()));
-        }
-    }
-
     /// A node.toml that keeps the keys in the keyring, made before.
     fn keys_in_the_keyring(paths: &NodePaths) {
         let mut store = SettingsStore::open_with(
@@ -3889,25 +4018,56 @@ mod tests {
             .unwrap();
     }
 
-    /// The installed node on Windows does not start with its keys in the
-    /// keyring: they are in the Credential Manager of whoever moved them
-    /// there, and the message says how to get them back into files.
+    /// The installed node on Windows starts with its keys in the keyring,
+    /// its service account's, and takes first what was written for it while
+    /// it did not run (a restore, an install).
     #[tokio::test]
-    async fn the_installed_node_on_windows_refuses_keys_in_the_keyring() {
+    async fn the_installed_node_on_windows_takes_what_waits_for_its_vault_at_its_start() {
         let d = tempfile::tempdir().unwrap();
         let log = Log::new(Level::Info);
         let opts = options(&d, &log);
         let paths = opts.paths.clone();
         keys_in_the_keyring(&paths);
         crate::secrets::for_tests::pretend_windows_service(&paths);
-        let Err(e) = Daemon::start(opts).await else {
-            panic!("the node started");
-        };
-        assert!(e.contains("the node does not start"), "{e}");
-        assert!(e.contains("Credential Manager"), "{e}");
-        assert!(e.contains("Settings › App › Uninstall"), "{e}");
-        assert!(e.contains("install Nerve again with the installer"), "{e}");
-        assert!(!e.contains("Restart-Service"), "{e}");
+        let entry = crate::secrets::Entry::proxy(&paths);
+        crate::secrets::vault::set(&paths, entry.account(), "{}").unwrap();
+        assert!(crate::secrets::vault::pending_file(&paths).exists());
+        crate::secrets::for_tests::pretend_service_account(&paths);
+        let daemon = Daemon::start(opts).await.expect("the node starts");
+        assert!(!crate::secrets::vault::pending_file(&paths).exists());
+        assert_eq!(
+            crate::secrets::store::get(entry.account())
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
+        daemon.stop().await;
+    }
+
+    /// What waits for the vault is taken under the keys' lock: while
+    /// another holds it (a restore staging its keys), the start waits and
+    /// leaves the file alone.
+    #[tokio::test]
+    async fn the_installed_node_on_windows_takes_what_waits_only_under_the_keys_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let log = Log::new(Level::Info);
+        let opts = options(&d, &log);
+        let paths = opts.paths.clone();
+        keys_in_the_keyring(&paths);
+        crate::secrets::for_tests::pretend_windows_service(&paths);
+        let entry = crate::secrets::Entry::proxy(&paths);
+        crate::secrets::vault::set(&paths, entry.account(), "{}").unwrap();
+        let file = crate::secrets::vault::pending_file(&paths);
+        crate::secrets::for_tests::pretend_service_account(&paths);
+        let held = crate::secrets::HeldByANode::take(&paths);
+        let start = tokio::spawn(Daemon::start(opts));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(file.exists());
+        assert!(!start.is_finished());
+        drop(held);
+        let daemon = start.await.unwrap().expect("the node starts");
+        assert!(!file.exists());
+        daemon.stop().await;
     }
 
     fn options(d: &tempfile::TempDir, log: &Arc<Log>) -> NodeOptions {
@@ -5471,10 +5631,21 @@ mod tests {
             ("sudo.off", json!({})),
             ("sudo.status", json!({})),
             ("owner.check", json!({})),
+            // The node's keys and the owner's password: a command's job
+            // gets neither, and nothing is staged for the next start.
+            (
+                "vault.get",
+                json!({"account": crate::secrets::Entry::proxy(&s.paths).account()}),
+            ),
+            ("vault.set", json!({"account": "x", "value": "x"})),
+            ("vault.delete", json!({"account": "x"})),
+            ("vault.stage", json!({})),
+            ("owner.password", json!({"password": "x"})),
         ] {
             let e = call(4242, method, params).await.unwrap_err();
-            assert_eq!(e, FROM_A_COMMAND);
+            assert_eq!(e, FROM_A_COMMAND, "{method}");
         }
+        assert!(!crate::secrets::vault::pending_file(&s.paths).exists());
         assert_eq!(s.config().version, before);
         // From the owner's CLI: made, saved and answered.
         let v = call(1000, add.method(), add.params(Some("home")))

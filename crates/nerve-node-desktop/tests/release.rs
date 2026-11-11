@@ -24,7 +24,8 @@ fn job(name: &str) -> String {
 
 /// The releases before 0.1.0 publish the Linux programs only: the input `windows`,
 /// off by default, gates the Windows job, and the publish job then counts
-/// five programs and names no Windows program in its footer. 0.1.0 turns it
+/// seven files (five programs, the app's .deb and .rpm) and names no
+/// Windows program in its footer. 0.1.0 turns it
 /// on, and the Windows job builds the app and the center, no `nerve-node`.
 #[test]
 fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
@@ -75,6 +76,8 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
         "check",
         "linux",
         "desktop-linux",
+        "desktop-packages",
+        "desktop-packages-test",
         "conformance",
         "installed",
     ] {
@@ -83,11 +86,11 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
             "{need}: {publish}"
         );
     }
-    // Two Linux programs on each of two machines and the Linux desktop app;
-    // Windows' two only with the switch.
-    assert!(publish.contains("want=5\n"), "{publish}");
+    // Two Linux programs on each of two machines and the Linux desktop app,
+    // also as a .deb and an .rpm; Windows' two only with the switch.
+    assert!(publish.contains("want=7\n"), "{publish}");
     assert!(
-        publish.contains("if [ \"$WINDOWS\" = true ]; then\n            want=7"),
+        publish.contains("if [ \"$WINDOWS\" = true ]; then\n            want=9"),
         "{publish}"
     );
     let footers: Vec<&str> = publish
@@ -111,6 +114,113 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
         switch_on,
         "the first footer is the one with Windows: {publish}"
     );
+}
+
+/// The Linux desktop app comes as a .deb and an .rpm too (#212): packed
+/// with the system's tools from the program the release built, with the
+/// dependencies it links, installed on Ubuntu 22.04 and 24.04 and Fedora
+/// before anything is published, and listed in SHA256SUMS under the names
+/// the app's update looks for.
+#[test]
+fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
+    use nerve_node::service::Package;
+    let packages = job("desktop-packages");
+    for line in [
+        "needs: [check, desktop-linux]",
+        "name: nerve-desktop-x86_64-linux",
+        "install -y --no-install-recommends rpm libfontconfig1",
+        ".github/scripts/desktop-packages.sh program/nerve-node-desktop-x86_64-linux dist",
+        "name: nerve-desktop-packages",
+    ] {
+        assert!(packages.contains(line), "{line}: {packages}");
+    }
+    // The names the update finds in SHA256SUMS.
+    let app = nerve_node_desktop::parts::PROGRAM;
+    for (kind, name) in [
+        (Package::Deb, "dist/nerve-node-desktop_${VERSION}_amd64.deb"),
+        (
+            Package::Rpm,
+            "dist/nerve-node-desktop-${VERSION}.x86_64.rpm",
+        ),
+    ] {
+        assert!(packages.contains(name), "{name}: {packages}");
+        assert_eq!(
+            format!("dist/{}", kind.asset(app, "${VERSION}")),
+            name,
+            "{kind:?}"
+        );
+    }
+    let test = job("desktop-packages-test");
+    for line in [
+        "needs: desktop-packages",
+        "- image: ubuntu:22.04\n            kind: deb",
+        "- image: ubuntu:24.04\n            kind: deb",
+        "kind: rpm",
+        "container: ${{ matrix.image }}",
+        "said=$(nerve-node-desktop --version)",
+        "desktop-file-validate \"$entry\"",
+        "grep -qx 'Exec=/usr/bin/nerve-node-desktop %u' \"$entry\"",
+        "dnf install -y \"./dist/nerve-node-desktop-${VERSION}.x86_64.rpm\"",
+    ] {
+        assert!(test.contains(line), "{line}: {test}");
+    }
+    assert!(test.contains("- image: fedora:"), "{test}");
+    // Both are released and in SHA256SUMS: the publish job takes the
+    // `nerve-*` artifacts, and its list of files takes both names.
+    let publish = job("publish");
+    assert!(publish.contains("pattern: nerve-*"), "{publish}");
+    assert!(
+        publish.contains("files=(nerve-center-* nerve-node-*)"),
+        "{publish}"
+    );
+    for kind in [Package::Deb, Package::Rpm] {
+        assert!(kind.asset(app, "1.2.3").starts_with("nerve-node-"));
+    }
+    // The system's tools, no cargo tool; the dependencies the app links;
+    // the files the program writes, and the package's script that leaves
+    // the service to an update that installs the package itself.
+    let script = include_str!("../../../.github/scripts/desktop-packages.sh");
+    for needed in [
+        "dpkg-deb -Zxz --root-owner-group --build",
+        "rpmbuild -bb",
+        "Depends: libc6 (>= 2.35), libfontconfig1",
+        "Requires: glibc >= 2.35",
+        "Requires: fontconfig",
+        "Architecture: amd64",
+        "--target x86_64",
+        "\"$out/nerve-node-desktop_${version}_amd64.deb\"",
+        "\"$out/nerve-node-desktop-$version.x86_64.rpm\"",
+        "update --from=/usr/bin/nerve-node-desktop",
+    ] {
+        assert!(script.contains(needed), "{needed}");
+    }
+    assert!(script.contains(&format!(
+        "\"$bin\" {} ",
+        nerve_node_desktop::parts::PACKAGE_ROOT_ARG
+    )));
+    assert!(script.contains(&format!("${{{}:-}}", nerve_node::service::UPDATING_VAR)));
+    for tool in ["cargo-deb", "cargo-generate-rpm", "cargo install"] {
+        assert!(!RELEASE.contains(tool) && !script.contains(tool), "{tool}");
+    }
+    // The install page puts the package first for the desktop app.
+    let install = include_str!("../../../docs/user/install.md");
+    let app = install
+        .split("\n## The desktop app\n")
+        .nth(1)
+        .expect("install.md has the desktop app")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let first = app.lines().find(|l| l.starts_with("1. ")).unwrap();
+    assert!(
+        first.contains("package") && first.contains(".deb") && first.contains(".rpm"),
+        "{first}"
+    );
+    let deb = app.find("apt install ./nerve-node-desktop_").unwrap();
+    let plain = app
+        .find("nerve-node-desktop-x86_64-linux")
+        .expect("install.md names the plain program");
+    assert!(deb < plain, "the package comes first in install.md: {app}");
 }
 
 /// The user guide is Linux only until 0.1.0 (Q9 of the PR 6 plan): it names

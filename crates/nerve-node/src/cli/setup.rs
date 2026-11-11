@@ -68,8 +68,8 @@ pub(super) fn keyring_of(
 /// `config set machine.secret_storage keyring` at a terminal (`input`):
 /// where no keyring answers for the node's keys, offers to install one, and
 /// a node that found none before is restarted once it answers. Nothing for
-/// keys that are there already, or where they may not be (the installed
-/// node on Windows, which `config set` refuses).
+/// keys that are there already, or for the installed node on Windows, whose
+/// service account's Credential Manager always answers.
 pub(super) async fn offer_keyring(
     paths: &NodePaths,
     machine: Option<&dyn crate::service::System>,
@@ -79,7 +79,7 @@ pub(super) async fn offer_keyring(
 ) -> Result<(), String> {
     let (now, _) = read_config(paths).await?;
     if now.machine.secret_storage == SecretStorage::Keyring
-        || crate::secrets::no_keyring(paths).is_some()
+        || crate::secrets::windows_service(paths)
     {
         return Ok(());
     }
@@ -158,34 +158,14 @@ async fn setup_steps(
     steps: &mut Vec<String>,
 ) -> Result<(), String> {
     // Keys in a keyring that does not answer: nothing can be read, so that
-    // comes first, also where the keys may not stay there, so that they can go
-    // into files below. The installed node on Windows asks none: the keyring
-    // setup reaches is not the service's.
-    let no_keyring = crate::secrets::no_keyring(paths);
+    // comes first. The installed node on Windows asks none: its keyring is
+    // its service account's, which the service reads.
     if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
-        && no_keyring != Some(crate::secrets::NoKeyring::WindowsService)
+        && !crate::secrets::windows_service(paths)
     {
         let me = crate::keyring_setup::me()?;
         crate::keyring_setup::ensure(keyring, &me, terminal.then_some(&mut *input), out)?;
         after_keyring_answers(paths, machine, out).await?;
-    }
-    // Where the keys may not be in the keyring (the installed node on
-    // Windows), keys left there go into files.
-    if let Some(n) = no_keyring
-        && read_config(paths).await?.0.machine.secret_storage == SecretStorage::Keyring
-    {
-        let _ = writeln!(out, "Warning: {}.", n.why());
-        edit(paths, |c| {
-            c.machine.secret_storage = SecretStorage::File;
-            Ok(())
-        })
-        .await?;
-        let step = format!(
-            "the node's keys are in {} now",
-            storage_place(SecretStorage::File)
-        );
-        let _ = writeln!(out, "{step}");
-        steps.push(step);
     }
     // The node's name and where its keys go keep their defaults: `config
     // set node.name` and `config set machine.secret_storage` change them.
@@ -425,14 +405,6 @@ fn home_of_invoker(
     match root || for_owner {
         true => account_home().unwrap_or(home),
         false => home,
-    }
-}
-
-/// How setup names where the keys are.
-fn storage_place(s: SecretStorage) -> &'static str {
-    match s {
-        SecretStorage::File => "files",
-        SecretStorage::Keyring => "the system keyring",
     }
 }
 

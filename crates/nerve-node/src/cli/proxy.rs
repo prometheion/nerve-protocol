@@ -671,89 +671,44 @@ mod tests {
         }
     }
 
-    /// The installed node on Windows runs as `nerve`, whose Credential
-    /// Manager is not the administrator's that `proxy set` writes to. So
-    /// a header or a password is refused, with the keyring left alone and
-    /// nothing changed; a proxy that needs neither works, and its call
-    /// takes an entry left by an earlier `proxy set` away.
+    /// On the installed node on Windows `proxy set` of an administrator puts
+    /// a header value and a password into the Credential Manager of the
+    /// service's account, through the running service, never its own; a
+    /// proxy that needs neither takes the entry away again.
     #[test]
-    fn on_the_installed_node_on_windows_proxy_set_refuses_header_values_and_a_password() {
+    fn on_the_installed_node_on_windows_proxy_set_keeps_its_values_in_the_services_vault() {
         let (_d, paths) = setup(&["home"]);
-        // Set as an administrator before the node was installed.
+        crate::secrets::for_tests::pretend_windows_service(&paths);
+        crate::secrets::for_tests::pretend_service_runs(&paths, true);
         run(
             &paths,
             &[
                 "proxy",
                 "set",
-                "http://127.0.0.1:3128",
+                "http://alice:pa55w0rd@127.0.0.1:3129",
                 "--header",
-                "X-Old: o1d-value",
+                "X-Key: s3cret-value",
             ],
         )
         .unwrap();
-        crate::secrets::for_tests::pretend_windows_service(&paths);
-        let before = std::fs::read_to_string(paths.config_file()).unwrap();
-        let held = keyring_entry(&paths);
-        assert!(held.is_some());
-        let asked = crate::secrets::store::calls();
-        for args in [
-            &[
-                "proxy",
-                "set",
-                "http://127.0.0.1:3129",
-                "--header",
-                "X-Key: s3cret-value",
-            ][..],
-            &["proxy", "set", "http://alice:pa55w0rd@127.0.0.1:3129"],
-        ] {
-            let e = run(&paths, args).unwrap_err();
-            assert!(
-                e.contains(
-                    "go to the Credential Manager of the account that put them there, not to that of nerve"
-                ),
-                "{e}"
-            );
-            assert!(e.contains("nothing was changed"), "{e}");
-            assert!(e.contains("Settings › Network › Proxy"), "{e}");
-            assert!(!e.contains("s3cret") && !e.contains("pa55w0rd"), "{e}");
-            assert!(!e.contains("alice"), "{e}");
-        }
-        // The keyring was not asked, and node.toml and the old entry stayed.
-        assert_eq!(crate::secrets::store::calls(), asked);
-        assert_eq!(
-            std::fs::read_to_string(paths.config_file()).unwrap(),
-            before
-        );
-        assert_eq!(keyring_entry(&paths), held);
-
-        // The entry an administrator's keyring holds is not what the service
-        // reads, so `proxy` does not call it good.
-        let ls = run(&paths, &["proxy"]).unwrap();
-        assert!(ls.contains("header X-Old\n"), "{ls}");
-        assert!(!ls.contains("its value is in the system keyring"), "{ls}");
-        assert!(ls.contains("the link cannot use this proxy"), "{ls}");
-        assert!(ls.contains("the service does not find them"), "{ls}");
-        assert!(!ls.contains("o1d-value"), "{ls}");
-
-        // A proxy that needs neither works, and takes the old entry away.
-        let next = format!("the change is in node.toml; it {NEXT_START}\n");
-        let out = run(&paths, &["proxy", "set", "http://127.0.0.1:3129"]).unwrap();
-        assert_eq!(out, format!("proxy http://127.0.0.1:3129\n{next}"));
         let cfg = load(&paths);
-        assert_eq!(
-            cfg.connection.proxy.as_deref(),
-            Some("http://127.0.0.1:3129")
+        assert_eq!(cfg.connection.headers.len(), 2, "{:?}", cfg.connection);
+        let held = keyring_entry(&paths).expect("the service's vault holds them");
+        assert!(
+            held.contains("s3cret-value") && held.contains("Basic "),
+            "{held}"
         );
-        assert!(cfg.connection.headers.is_empty());
+        let toml = std::fs::read_to_string(paths.config_file()).unwrap();
+        assert!(
+            !toml.contains("s3cret") && !toml.contains("pa55w0rd"),
+            "{toml}"
+        );
+        let ls = run(&paths, &["proxy"]).unwrap();
+        assert!(ls.contains("its value is in the system keyring"), "{ls}");
+        assert!(!ls.contains("s3cret"), "{ls}");
+        run(&paths, &["proxy", "set", "http://127.0.0.1:3129"]).unwrap();
         assert_eq!(keyring_entry(&paths), None);
-        assert_eq!(
-            run(&paths, &["proxy"]).unwrap(),
-            "proxy http://127.0.0.1:3129\n"
-        );
-        assert_eq!(
-            run(&paths, &["proxy", "off"]).unwrap(),
-            format!("no proxy\n{next}")
-        );
+        run(&paths, &["proxy", "off"]).unwrap();
     }
 
     fn files_below(dir: &Path) -> Vec<PathBuf> {

@@ -110,8 +110,7 @@ In this order:
    text is noted; when one write fails, the earlier ones are put back, and
    nothing else has been written.
 8. The config is written signed, the record is raised, an audit entry
-   (`config`, `restored`) is made. On Windows `sudo.dpapi`, which holds the
-   administrator's password only while the switch is on, is deleted.
+   (`config`, `restored`) is made.
 9. Keys the replaced config kept and the new one does not name are deleted,
    and every key left in the place the keys moved away from.
 
@@ -270,9 +269,9 @@ that exists; `--overwrite` does.
 | In the backup | Not in it |
 |---|---|
 | `node.toml` as the node reads it: pairings with their `url`, `pin`, `center_id` and `node_id`, modes, folders, rules, relay and proxy settings | The key of the config's MAC: a node that restores makes its own |
-| The node key of every center, the relay's TLS key, the password of an `https://` proxy (the keys in `keys/`) | The sudo password. It is not stored anywhere, so a node restores with `sudo` off. On Windows the restore also deletes `sudo.dpapi`, which holds that password only while the switch is on |
+| The node key of every center, the relay's TLS key, the password of an `https://` proxy (the keys in `keys/`) | The sudo password. It is not stored anywhere, so a node restores with `sudo` off |
 | The proxy's header values | The audit log, the [log](logging.md#the-log-as-the-owner-reads-it), the control socket |
-| | On Windows, `sudo.dpapi` and `command-account.dpapi`: DPAPI ties them to the machine |
+| | On Windows, `command-account.dpapi`: DPAPI ties it to the machine |
 
 The node can run while you back it up.
 

@@ -218,12 +218,12 @@ fn collect(
             &mut report,
         );
     }
-    // The header values are in the keyring whatever `secret_storage` says,
-    // except on the installed node on Windows, which takes none.
-    if !cfg.connection.headers.is_empty() && !secrets::windows_service(paths) {
+    // The header values are in the keyring whatever `secret_storage` says
+    // (on the installed node on Windows, its service's).
+    if !cfg.connection.headers.is_empty() {
         let entry = Entry::proxy(paths);
         let got = if consent {
-            match secrets::store::get(entry.account()) {
+            match secrets::vault::get(paths, entry.account()) {
                 Ok(Some(t)) => Fetch::Text(t),
                 Ok(None) => Fetch::Missing,
                 Err(e) => {
@@ -422,7 +422,7 @@ pub struct RestoreReport {
     /// Things the owner should know, one line each.
     pub notes: Vec<String>,
     /// The notes that ask the owner to set something again, by their
-    /// index in `notes`: what (`proxy`, `sudo`, `sudo-file`, `pin`,
+    /// index in `notes`: what (`proxy`, `sudo`, `pin`,
     /// `relay`) and for which center. A program words these itself, with
     /// its own way to do it (`restore --json`).
     pub fixes: Vec<(usize, &'static str, Option<String>)>,
@@ -445,7 +445,16 @@ enum Target {
     /// A `node.toml` this node cannot read (changed outside the owner's path,
     /// or its keys are out of reach).
     Unreadable(String),
+    /// The `node.toml` of the installed node on Windows whose keys are in
+    /// the Credential Manager of its service, which reads them only while it
+    /// runs; a restore runs with it stopped. Read without its MAC: enough to
+    /// tell whether the backup is of this node.
+    Sealed(Box<NodeConfig>),
 }
+
+/// What a restore into a [`Target::Sealed`] node says: it told the node by
+/// a config whose MAC it could not check.
+const SEALED: &str = "the node here keeps its keys in the Credential Manager of its service, which reads them only while it runs, so the restore compared the backup with the node's pairings without checking its config's MAC";
 
 fn inspect(paths: &NodePaths) -> Target {
     if !paths.config_file().exists() {
@@ -453,6 +462,10 @@ fn inspect(paths: &NodePaths) -> Target {
     }
     match SettingsStore::peek_with(&paths.config_file(), &NodeSecrets::new(paths)) {
         Ok(c) => Target::Node(Box::new(c)),
+        Err(e) if e.contains(secrets::vault::NOT_RUNNING) => match secrets::stated_config(paths) {
+            Ok(c) => Target::Sealed(Box::new(c)),
+            Err(_) => Target::Unreadable(e),
+        },
         Err(e) => Target::Unreadable(e),
     }
 }
@@ -463,7 +476,7 @@ fn inspect(paths: &NodePaths) -> Target {
 pub fn root_only_change(paths: &NodePaths, b: &Parsed) -> Option<&'static str> {
     let here = match inspect(paths) {
         Target::Node(c) => *c,
-        Target::Empty | Target::Unreadable(_) => NodeConfig::default(),
+        Target::Empty | Target::Unreadable(_) | Target::Sealed(_) => NodeConfig::default(),
     };
     crate::owner::root_only_change(&here, &b.cfg)
 }
@@ -499,6 +512,9 @@ fn names(cfg: &NodeConfig) -> String {
 enum Undo<'a> {
     Key(Key<'a>, SecretStorage, Option<String>),
     Headers(Option<String>),
+    /// An entry staged for the stopped Windows service, whose vault could
+    /// not be read: what it held stays, so only the staged change goes.
+    Staged(String),
 }
 
 /// Puts the backup's config and keys in place of the node at `paths`.
@@ -532,7 +548,7 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
 
     let target = inspect(paths);
     match &target {
-        Target::Node(here) if !opts.replace && !same_node(here, &b.cfg) => {
+        Target::Node(here) | Target::Sealed(here) if !opts.replace && !same_node(here, &b.cfg) => {
             return Err(format!(
                 "the node here is paired with {} and the backup is of a node paired with {}: they are not the same node, and a restore would replace the one here. If you mean that, add --replace",
                 names(here),
@@ -550,24 +566,13 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
     let mut cfg = b.cfg.clone();
     let to = opts.secret_storage.unwrap_or(cfg.machine.secret_storage);
     cfg.machine.secret_storage = to;
-    if to == SecretStorage::Keyring
-        && let Some(n) = secrets::no_keyring(paths)
-    {
-        return Err(format!(
-            "this node cannot keep its keys in the system keyring: {}. Restore with --secret-storage file",
-            n.why()
-        ));
-    }
-    if secrets::windows_service(paths) && !cfg.connection.headers.is_empty() {
-        return Err(format!(
-            "the backup's config names header values for the proxy, but {}. Restore with --without-proxy, or remove the proxy from the backup's node first, or restore on a node that is not the installed one on Windows",
-            secrets::PROXY_WINDOWS_SERVICE
-        ));
-    }
     let mut report = RestoreReport {
         centers: cfg.centers.iter().map(|c| c.name.clone()).collect(),
         ..RestoreReport::default()
     };
+    if matches!(target, Target::Sealed(_)) {
+        report.notes.push(SEALED.into());
+    }
     if opts.without_proxy && had_proxy {
         report.notes.push(
             "the proxy is left out of the restored config, with its pin, password and header values: set it again on this machine with `nerve-node proxy set`, which needs the address, the `--pin` of an https:// proxy and its login. For a relay, `nerve-node relay token <name>` on the relay prints the command with a new token and the pin".into(),
@@ -678,8 +683,10 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
     };
     cfg.version = cfg.version.max(last).max(here) + 1;
 
-    // Out of the keyring a restore writes to, before anything is written.
-    secrets::get(paths, to, Key::Config)?;
+    // Out of the keyring a restore writes to, before anything is written
+    // (the installed node on Windows, stopped, has it written for its
+    // start).
+    before(paths, secrets::get(paths, to, Key::Config))?;
 
     let mut undo: Vec<Undo> = Vec::new();
     let old = match &target {
@@ -707,24 +714,6 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
             "the version {} of node.toml is not recorded: {e}. The node records it at its next start",
             cfg.version
         ));
-    }
-    // The sudo switch is off now, and on the installed node on Windows the
-    // administrator's password it kept is at rest in the config folder, with
-    // DPAPI, only while the switch is on (`sudo off` removes it).
-    if cfg!(windows) && crate::winsudo::kept(paths) {
-        match crate::winsudo::forget(paths) {
-            Ok(()) => report.notes.push(format!(
-                "{} is deleted: the sudo switch is off, so the administrator's password it held is not kept",
-                crate::winsudo::SUDO_FILE
-            )),
-            Err(e) => {
-                report.notes.push(format!(
-                    "the sudo switch is off, but the administrator's password it held could not be deleted ({e}): delete {}, or run `nerve-node sudo on` and `sudo off`",
-                    crate::winsudo::SUDO_FILE
-                ));
-                report.fix("sudo-file", None);
-            }
-        }
     }
     let _ = AuditLog::new(paths.audit_log()).config(
         "restored",
@@ -760,24 +749,24 @@ fn write_keys<'a>(
     // The key must be in `to` itself. Reading it the way the node does would
     // fall back to the file where a move of the keys never finished, and sign
     // the config with a key that the clean-up of the old place then deletes.
-    let mac = match secrets::get(paths, to, Key::Config)? {
-        Some(t) => {
-            MacKey::from_text(&t).map_err(|e| format!("{} here: {e}", Key::Config.what()))?
-        }
+    let account = |key: Key| key.entry(paths).account().to_string();
+    let was = before(paths, secrets::get(paths, to, Key::Config))?;
+    let mac = match was.text() {
+        Some(t) => MacKey::from_text(t).map_err(|e| format!("{} here: {e}", Key::Config.what()))?,
         None => {
             let (mac, text) = MacKey::generate();
-            undo.push(Undo::Key(Key::Config, to, None));
+            undo.push(was.undo(account(Key::Config), |t| Undo::Key(Key::Config, to, t)));
             secrets::put(paths, to, Key::Config, &text)?;
             mac
         }
     };
     let mut put = |key: Key<'a>, text: &str| -> Result<(), String> {
-        let prev = secrets::get(paths, to, key)?;
+        let was = before(paths, secrets::get(paths, to, key))?;
         // Already as it should be: nothing to write, nothing to put back.
-        if prev.as_deref() == Some(text) {
+        if was.text() == Some(text) {
             return Ok(());
         }
-        undo.push(Undo::Key(key, to, prev));
+        undo.push(was.undo(account(key), |t| Undo::Key(key, to, t)));
         secrets::put(paths, to, key, text)
     };
     // What is here already for `key`: in `to`, else in the other place. A
@@ -894,13 +883,20 @@ fn write_keys<'a>(
                         put(key, text)?;
                     }
                 }
-                None => {
-                    if let Some(prev) = secrets::get(paths, to, key)? {
+                None => match before(paths, secrets::get(paths, to, key))? {
+                    Was::Known(Some(prev)) => {
                         undo.push(Undo::Key(key, to, Some(prev)));
                         secrets::delete(paths, to, key)?;
                         gone = true;
                     }
-                }
+                    Was::Known(None) => {}
+                    // Whatever the stopped service holds is not carried:
+                    // its deletion waits for its start.
+                    Was::Sealed => {
+                        undo.push(Undo::Staged(account(key)));
+                        secrets::delete(paths, to, key)?;
+                    }
+                },
             }
             // A keyring that does not answer holds no copy to read.
             if let Some(prev) = secrets::get(paths, other, key).ok().flatten() {
@@ -941,10 +937,10 @@ fn write_keys<'a>(
         // be asked stops the restore. Where it does, they are the same
         // proxy's whatever the keyring says, and the note is all there is.
         let account = Entry::proxy(paths);
-        let here = if same {
-            secrets::store::get(account.account()).ok().flatten()
+        let here = if same || secrets::vault::through_service(paths) {
+            secrets::vault::get(paths, account.account()).ok().flatten()
         } else {
-            secrets::store::get(account.account()).map_err(|e| {
+            secrets::vault::get(paths, account.account()).map_err(|e| {
                 let how = "start or unlock the keyring (on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install one)";
                 format!(
                     "cannot read the proxy's header values in the system keyring (entry {account}) to check whose they are: {e}. Restore with --without-proxy and set the proxy again on this machine; or {how}; or take the proxy's header values off the node you back up (`nerve-node proxy off` there, then back it up again)"
@@ -980,7 +976,7 @@ fn write_keys<'a>(
     }
     if let Some(map) = &b.proxy_headers {
         let account = Entry::proxy(paths);
-        let prev = secrets::store::get(account.account())
+        let was = before(paths, secrets::vault::get(paths, account.account()))
             .map_err(|e| {
                 format!(
                     "cannot read the keyring entry {account}: {e}. The backup holds the header values, and they go into that keyring: give the machine a keyring that answers, or restore with --without-proxy and set the proxy again"
@@ -988,10 +984,50 @@ fn write_keys<'a>(
             })?;
         let headers: Vec<(String, String)> =
             map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        undo.push(Undo::Headers(prev));
+        undo.push(was.undo(account.account().to_string(), Undo::Headers));
         secrets::store_proxy_headers(paths, &headers)?;
     }
     Ok(mac)
+}
+
+/// What a key held before the restore, for putting it back.
+enum Was {
+    Known(Option<String>),
+    /// On the installed node on Windows, stopped for the restore: what its
+    /// service's Credential Manager holds cannot be read
+    /// (crate::secrets::vault). It stays there unless a change is staged.
+    Sealed,
+}
+
+impl Was {
+    /// The text it held, where that is known.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Was::Known(t) => t.as_deref(),
+            Was::Sealed => None,
+        }
+    }
+
+    /// How a change of `account` is put back: what it held is written
+    /// again, or the change staged for the stopped service is taken back.
+    fn undo<'a>(self, account: String, known: impl FnOnce(Option<String>) -> Undo<'a>) -> Undo<'a> {
+        match self {
+            Was::Known(t) => known(t),
+            Was::Sealed => Undo::Staged(account),
+        }
+    }
+}
+
+fn before(paths: &NodePaths, read: Result<Option<String>, String>) -> Result<Was, String> {
+    match read {
+        Err(e)
+            if secrets::vault::through_service(paths)
+                && e.ends_with(secrets::vault::NOT_RUNNING) =>
+        {
+            Ok(Was::Sealed)
+        }
+        r => r.map(Was::Known),
+    }
 }
 
 /// Puts back what the keys held before, last first. A key that cannot be put
@@ -1006,10 +1042,13 @@ fn roll_back(paths: &NodePaths, undo: Vec<Undo>) {
                 let _ = secrets::delete(paths, place, key);
             }
             Undo::Headers(Some(text)) => {
-                let _ = secrets::store::set(Entry::proxy(paths).account(), &text);
+                let _ = secrets::vault::set(paths, Entry::proxy(paths).account(), &text);
             }
             Undo::Headers(None) => {
                 let _ = secrets::remove_proxy_headers(paths);
+            }
+            Undo::Staged(account) => {
+                let _ = secrets::vault::unstage(paths, &account);
             }
         }
     }
@@ -1066,7 +1105,6 @@ fn forget_old(
     }
     if !old.connection.headers.is_empty()
         && new.connection.headers.is_empty()
-        && !secrets::windows_service(paths)
         && let Err(e) = secrets::remove_proxy_headers(paths)
     {
         notes.push(format!(
@@ -1478,29 +1516,118 @@ mod tests {
         assert!(!to.config_file().exists() && !to.key_file("home").exists());
     }
 
+    /// The installed node on Windows, stopped for the restore: what goes
+    /// into its service's Credential Manager (the keys, with the config's
+    /// keyring, and the proxy's header values) waits, sealed, and its next
+    /// start takes it.
     #[test]
-    fn a_node_that_cannot_use_the_keyring_is_not_restored_into_it() {
+    fn a_restore_into_the_installed_node_on_windows_waits_for_its_service() {
         let (_a, from) = node();
-        paired(&from, SecretStorage::Keyring, &["home"]);
+        let keys = paired(&from, SecretStorage::Keyring, &["home"]);
+        secrets::store_proxy_headers(&from, &[("X-Token".into(), "tok-value".into())]).unwrap();
+        let mut s = open_store(&from);
+        s.update(|c| {
+            c.connection.proxy = Some("http://proxy.example:3128".into());
+            c.connection.headers = vec!["X-Token".into()];
+            Ok(())
+        })
+        .unwrap();
+        drop(s);
         let (_f, parsed, _) = roundtrip(&from, true);
         let (_b, to) = node();
         secrets::for_tests::pretend_windows_service(&to);
-        let err = restore(&to, &parsed, &RestoreOpts::default())
+        restore(&to, &parsed, &RestoreOpts::default()).unwrap();
+        assert_eq!(config(&to).machine.secret_storage, SecretStorage::Keyring);
+        // Nothing is in the vault yet: the service does not run.
+        assert!(
+            secrets::store::get(Entry::proxy(&to).account())
+                .unwrap()
+                .is_none()
+        );
+        let file = secrets::vault::pending_file(&to);
+        let sealed = std::fs::read(&file).unwrap();
+        assert!(!sealed.is_empty());
+        // Its start takes them, into its own vault.
+        secrets::vault::take_pending(&to).unwrap();
+        assert!(!file.exists());
+        secrets::for_tests::pretend_service_account(&to);
+        assert_eq!(
+            &key_text(&to, SecretStorage::Keyring, "home"),
+            &keys["home"]
+        );
+        assert_eq!(
+            secrets::proxy_headers(&to, &["X-Token".into()]).unwrap(),
+            vec![("X-Token".to_string(), "tok-value".to_string())]
+        );
+    }
+
+    /// The installed node on Windows that keeps its keys in its service's
+    /// vault, stopped as a restore wants it: its config cannot be checked
+    /// without the service, so the restore tells the node by the config's
+    /// pairings alone, as for any other node, says so, and leaves the keys
+    /// for the service's start.
+    #[test]
+    fn a_restore_into_a_stopped_windows_service_that_holds_its_keys_goes_on() {
+        let (_a, from) = node();
+        let keys = paired(&from, SecretStorage::Keyring, &["home"]);
+        let (_f, parsed, _) = roundtrip(&from, true);
+        let (_b, to) = node();
+        secrets::for_tests::pretend_windows_service(&to);
+        secrets::for_tests::pretend_service_runs(&to, true);
+        paired(&to, SecretStorage::Keyring, &["other"]);
+        secrets::for_tests::pretend_service_runs(&to, false);
+        assert!(matches!(inspect(&to), Target::Sealed(_)));
+        // Another node's backup asks for --replace.
+        let e = restore(&to, &parsed, &RestoreOpts::default())
             .err()
             .unwrap();
-        assert!(err.contains("--secret-storage file"), "{err}");
-        assert!(!to.config_file().exists());
-        // With files it works.
-        restore(
-            &to,
-            &parsed,
-            &RestoreOpts {
-                secret_storage: Some(SecretStorage::File),
-                ..RestoreOpts::default()
-            },
-        )
-        .unwrap();
-        assert!(to.key_file("home").exists());
+        assert!(e.contains("not the same node"), "{e}");
+        assert!(!secrets::vault::pending_file(&to).exists());
+        let replace = RestoreOpts {
+            replace: true,
+            ..RestoreOpts::default()
+        };
+        let r = restore(&to, &parsed, &replace).unwrap();
+        assert!(r.notes.iter().any(|n| n == SEALED), "{:?}", r.notes);
+        assert!(secrets::vault::pending_file(&to).exists());
+        secrets::vault::take_pending(&to).unwrap();
+        secrets::for_tests::pretend_service_account(&to);
+        assert_eq!(config(&to).centers[0].name, "home");
+        assert_eq!(
+            &key_text(&to, SecretStorage::Keyring, "home"),
+            &keys["home"]
+        );
+    }
+
+    /// A restore into the stopped Windows service that fails after its keys
+    /// were staged takes back only what it staged: the keys in the
+    /// service's vault, which it could not read, stay for the old config.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_into_a_stopped_windows_service_leaves_its_vault() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_b, to) = node();
+        secrets::for_tests::pretend_windows_service(&to);
+        secrets::for_tests::pretend_service_runs(&to, true);
+        let keys = paired(&to, SecretStorage::Keyring, &["home"]);
+        let (_f, parsed, _) = roundtrip(&to, true);
+        secrets::for_tests::pretend_service_runs(&to, false);
+        assert!(matches!(inspect(&to), Target::Sealed(_)));
+        // node.toml cannot be written; the pending file can.
+        std::fs::create_dir_all(to.config_dir.join("keys")).unwrap();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&to.config_dir, mode(0o500)).unwrap();
+        let r = restore(&to, &parsed, &RestoreOpts::default());
+        std::fs::set_permissions(&to.config_dir, mode(0o700)).unwrap();
+        let e = r.err().unwrap();
+        assert!(e.contains("nothing was restored"), "{e}");
+        secrets::vault::take_pending(&to).unwrap();
+        secrets::for_tests::pretend_service_account(&to);
+        assert_eq!(config(&to).centers[0].name, "home");
+        assert_eq!(
+            &key_text(&to, SecretStorage::Keyring, "home"),
+            &keys["home"]
+        );
     }
 
     #[test]
@@ -2891,23 +3018,6 @@ mod tests {
         assert!(notes.contains("proxy's password"), "{notes}");
         assert!(notes.contains("header values"), "{notes}");
         assert_eq!(r.no_key, ["home"]);
-    }
-
-    /// The sudo password the installed node on Windows keeps with DPAPI is at
-    /// rest only while the switch is on.
-    #[cfg(windows)]
-    #[test]
-    fn a_restore_deletes_the_dpapi_password_of_the_sudo_switch() {
-        let (_a, from) = node();
-        paired(&from, SecretStorage::File, &["home"]);
-        let (_f, parsed, _) = roundtrip(&from, false);
-        let (_b, to) = node();
-        let file = to.config_dir.join(crate::winsudo::SUDO_FILE);
-        std::fs::create_dir_all(&to.config_dir).unwrap();
-        std::fs::write(&file, b"sealed password").unwrap();
-        let r = restore(&to, &parsed, &RestoreOpts::default()).unwrap();
-        assert!(!file.exists());
-        assert!(r.notes.iter().any(|n| n.contains("sudo.dpapi")), "{r:?}");
     }
 
     #[test]

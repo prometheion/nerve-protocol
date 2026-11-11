@@ -8,7 +8,7 @@ same way and so the owner knows what each setting does.
 
 | What | Default | Override |
 |---|---|---|
-| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
+| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows, on the installed node, also `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
 | control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_NODE_STATE_DIR` |
 
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
@@ -250,33 +250,33 @@ folder>`, and moves with the other keys. It replaces the key once the center
 took it, and goes when the center refuses it or the pairing is removed.
 
 The header values of a proxy, and the password of an `http://` one, are in
-the keyring either way (§2), except on the installed node on Windows, which
-takes none (§2, Proxy).
+the keyring either way (§2).
 
-One kind of node keeps its keys in files whatever is asked: the installed
-node on Windows (the service, which runs as `nerve`). The Credential Manager
-is one per account, and the CLI that writes the config there runs as an
-administrator, so a move into the keyring would put the keys in that
-administrator's Credential Manager, out of the service's reach. The node
-counts as installed on the folders `install` uses, in any spelling of their
-case, or when it runs as `nerve`. On Linux the keys may be in the keyring on
-every kernel; a node run by hand then runs no `folder` mode command (§1, the
-paragraphs on the session bus below).
-
-On that node:
-
-- A change to `keyring` is refused before anything moves, by whatever
-  writes the config (`config set`, `config accept`); `node.toml` and the
-  keys stay as they were. This refusal comes before the count of running
-  commands below, as it holds whatever runs. A running node does not reload a
-  file another writer saved with `keyring`.
-- `config accept` refuses a file that says `keyring`, even when the keys are
-  in the keyring already, so nothing would move.
-- `install`, and the node at its start, refuse a `node.toml` that says
-  `keyring`. The message names the file and the command that moves the keys
-  into files, with `--config-dir` and `--state-dir` of the folders it
-  refused, so it works whether or not a service is registered yet. It is run
-  as the administrator whose Credential Manager holds them.
+On the installed node on Windows (the service, which runs as `nerve`; the
+node counts as installed on the folders `install` uses, in any spelling of
+their case) the keyring is the Credential Manager of `nerve`, as it is one
+per account. The service reads and writes it itself; any other process (the
+CLI and the app of an administrator) asks the running service over its
+control pipe (`vault.get`, `vault.set`, `vault.delete` with an entry's
+`account`; one that is not this node's is refused). While no service runs,
+a write waits in `<config>/keys/vault.pending`, sealed with DPAPI for the
+machine, and a read finds what waits there, or says to start the node; the
+service takes the file into its Credential Manager at its start, under the
+keys' lock and before it reads a key; whoever writes the file holds that
+lock too. `install` gives `nerve` a new password, after which Windows no
+longer opens what it kept: first the service copies its entries into that
+file (`vault.stage`), started for it when it is stopped and may hold
+entries (the keys with `keyring`, the proxy's header values with either);
+one that cannot makes the install change nothing. `uninstall` with the data
+kept does the same before it removes `nerve`, whose Credential Manager goes
+with it. A restore into that node writes there as well; it tells the node
+by the pairings of a `node.toml` it reads without the MAC (the MAC key is
+in the stopped service's vault), and one that fails takes back only what it
+put in the file. While entries wait there, the keys and the proxy's values
+are in a file, sealed with the machine's DPAPI key: the config folder's ACL
+(`nerve`, SYSTEM, the administrators) keeps them then. On Linux the keys may be
+in the keyring on every kernel; a node run by hand then runs no `folder`
+mode command (§1, the paragraphs on the session bus below).
 
 `setup` asks nowhere where the keys go: they stay in files, and
 `config set machine.secret_storage keyring` moves them, offering at a
@@ -288,9 +288,8 @@ its key is in does not check, and is refused like any changed file.
 
 With `keyring` and no keyring that answers, the node does not start, and a
 command that reads the config refuses. The message names the entry and the
-keyring's error. Nothing falls back to a file. On Linux the sudo password is
-never at rest, whatever the setting; on Windows the node keeps it with DPAPI
-in `sudo.dpapi` in the config folder, whatever the setting (§4).
+keyring's error. Nothing falls back to a file. The sudo password is never at
+rest, whatever the setting (§4).
 
 A change of the setting moves the keys once, through the settings store, in
 whatever writes the config (the running node, else the CLI):
@@ -329,7 +328,8 @@ that move in the file. `center rm` deletes the center's key in both places
 while `keys.moving` is there, since the start that finishes the move no
 longer looks for a removed center.
 
-With `keyring` the MAC key is in no file that a process can read. The check
+With `keyring` the MAC key is in no file that a process can read (on the
+installed node on Windows, but while it waits in `vault.pending`, above). The check
 still stands on that key: a process that can write both folders can still
 set `file` with a key of its own, and a process of the node's user can ask
 the keyring for its entries over the user's D-Bus session.
@@ -904,22 +904,9 @@ unreadable entry, or one without a value for a named header, stops the link
 with a status that names the entry, and the node does not dial directly
 instead (fail closed).
 
-The installed node on Windows (§1, where the keys are: the folders `install`
-uses, or the account `nerve`) takes no header value and no password either,
-though its keyring answers. The service runs as `nerve`, the Credential
-Manager is one per account, and `proxy set` runs as an administrator, so the
-values would be in the administrator's Credential Manager, out of the
-service's reach. The node keeps no proxy secret in a file, so there is nowhere
-else for them. `proxy set` with a header or a password refuses before it asks
-the keyring, and changes nothing (`node.toml`, the keyring); a proxy without
-either works, and its `proxy set` deletes the entry of an earlier call, as it
-does anywhere. Reading is as consistent: with headers named in `node.toml`
-(set before the install) the link stops with `bad proxy:` and the same reason
-(in the center's status and in the log; on Windows `status` asks the node over
-its pipe, as on Linux), and
-`proxy` shows it, both without asking the keyring: an entry may be in the
-administrator's Credential Manager, but the service does not find it, so
-`proxy` must not call the values good.
+On the installed node on Windows the entry is in the Credential Manager of
+the service's account, which the CLI reaches through the running service
+(§2, where the keys are).
 
 A `node.toml` that holds header values (`headers = { Name = "value" }`) or a
 user name and password in `connection.proxy` is refused on load, without the values in the message: take them out of the
@@ -1675,19 +1662,18 @@ run as, which must be an administrator. `sudo on` checks it with a logon of
 that account as a batch job (`LogonUserW`, `LOGON32_LOGON_BATCH`), which UAC
 does not filter: the logon must succeed and its token must hold the
 Administrators group enabled; else the switch stays as it was. The node then
-keeps the password with DPAPI in the config folder (`sudo.dpapi`, like the
-command account's password), and holds it in memory as on Linux. A restart
-holds the kept password again when `machine.sudo` says on and the file is
-the current account's. A sudo command runs what followed `sudo` in the
+holds the password in memory only, as on Linux: a restart starts with the
+switch off. A center may not turn the switch on for a Windows node
+(`settings.sudo` with `on` is `forbidden`, as for root as the owner): the
+password is the owner's Windows password, which only the app on the machine
+takes. A sudo command runs what followed `sudo` in the
 shell, started with a fresh batch logon's full token (`CreateProcessAsUserW`)
 with the account's own environment, in a job like every command; the check
 that the account cannot open the node's folders does not apply to it.
 `sudo.on` and `sudo.off` reach the running service over the control pipe,
-as over the socket on Linux: the service checks the password, keeps it in
-the file and sets `machine.sudo` at once, or removes the file and drops the
-password. `sudo on` needs the running node; `sudo off` without one removes
-the file and sets the switch off in the signed file. `uninstall` removes the
-file.
+as over the socket on Linux: the service checks the password, holds it and
+sets `machine.sudo` at once, or drops the password. `sudo on` needs the
+running node; `sudo off` without one sets the switch off in the signed file.
 
 ## 5. Control socket
 
@@ -2012,8 +1998,8 @@ new one.
 A local program, such as a desktop app, can add capabilities to the node
 without talking to a center: it attaches as a **provider**, on the installed
 node to its provider socket `/run/nerve-node/provider.sock`, on a node run by
-hand to its control socket. Linux only for now: the node tells which program
-asks from `/proc/<pid>/exe`, and Windows' pipes take no provider.
+hand to its control socket. On Windows the installed node takes it on its
+provider pipe `\\.\pipe\nerve-node-provider` ([below](#providers-on-windows)).
 
 ### Who may attach
 
@@ -2050,6 +2036,55 @@ provider socket takes `hello` only, and the installed node's control socket
 takes no `hello` (`refused: the installed node takes a provider's hello on
 /run/nerve-node/provider.sock only`): root, who may connect there too, would
 meet a check that reads as the node and holds no pidfd.
+
+### Providers on Windows
+
+The installed node serves the provider pipe `\\.\pipe\nerve-node-provider`
+beside its owner pipe (a fixed name, as the owner, who may be no
+administrator, cannot look into the node's folders). It takes `hello` only,
+with 16 places of its own, and:
+
+- its DACL lets in SYSTEM, the administrators (elevated), the node's own
+  account and the owner, as the owner pipe's; it refuses remote clients
+  (`PIPE_REJECT_REMOTE_CLIENTS`). The owner gets `FILE_GENERIC_READ |
+  FILE_WRITE_DATA` (`0x12008b`) and nothing more, on both pipes: not `GA`
+  nor `GENERIC_WRITE`, as `FILE_APPEND_DATA` on a pipe is
+  `FILE_CREATE_PIPE_INSTANCE`. All instances of a pipe share the first
+  one's descriptor, so an owner that could make one would pass a provider's
+  check of the pipe's owner. A client opens the pipe with exactly those
+  rights (`CreateFileW`, not a generic read and write);
+- the client's token decides, read by identifying it
+  (`ImpersonateNamedPipeClient`; the node keeps no SeImpersonatePrivilege,
+  so it can identify a client but not act as it): the owner's account, SYSTEM, or a token
+  that holds the Administrators group in effect. Another account, `nerve-run`
+  and an administrator's filtered token are told `refused: only the owner's
+  programs and the administrators' attach a provider to the node`;
+- a process in the job of a command the node runs is refused, as on the
+  control pipe;
+- the name is global and fixed, and Windows lets any account make a pipe of
+  a name nobody holds: while the node is stopped another account could, and
+  a node that then cannot make its own runs without it and says why in
+  `status` (`provider_pipe_warning`). So a provider checks the pipe before
+  `hello`, as the CLI checks the control pipe (`pipe::check_owner`): it
+  opens it with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` and talks
+  only to a pipe whose owner (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`)
+  is SYSTEM, the Administrators or `nerve`;
+- the program is told by the image of the client's process
+  (`GetNamedPipeClientProcessId`, then `QueryFullProcessImageNameW`) against
+  the entry's path once resolved, compared without `\\?\` and in any case.
+  The node reads both as itself. Where its account may not open the process
+  (the owner's, an administrator's elevated one), it asks Windows for the
+  image by the process id (`NtQuerySystemInformation`,
+  `SystemProcessIdInformation`), which needs no handle of the process, and
+  turns the NT path into the drive letter's (`QueryDosDeviceW`). A path it
+  may not open (in the owner's folders) it resolves as the owner, with the
+  logon the owner's stored password gives, as the folder grants do; without
+  that password such a program is refused.
+
+A provider runs as whoever started it, outside the node's containers, as on
+Linux. A call it gets is decided as on Linux; a path it is handed is walked as
+for a program of another account than the walk's (a folder the walk may not
+list refuses the call).
 
 The provider sends one request, `hello`, with the control socket's token on
 a node run by hand (the provider socket takes none, and ignores one):

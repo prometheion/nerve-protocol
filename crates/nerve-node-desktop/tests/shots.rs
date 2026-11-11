@@ -714,17 +714,10 @@ fn every_page_light_and_dark() {
     caps.invoke_program_allow();
     shots.take("capabilities-program-refused");
     caps.set_program_error("".into());
-    // A node by hand, and Windows: why their commands, or their programs
-    // too, are not offered there.
+    // A node by hand: why its commands are not offered there.
     store.set_installed(false);
     caps.invoke_refresh();
     shots.take("capabilities-by-hand");
-    let (programs, config) = nerve_node_desktop::view::caps_notes(true, true);
-    caps.set_windows(true);
-    caps.set_programs_note(programs.into());
-    caps.set_config_note(config.into());
-    shots.take_full("capabilities-windows", 2300);
-    caps.set_windows(false);
     store.set_installed(true);
 
     // The log the running node wrote.
@@ -758,7 +751,7 @@ fn every_page_light_and_dark() {
     // refused, and a setting by its name.
     let usable = store.get_keyring_usable();
     store.set_keyring_usable(false);
-    store.set_keyring_why(nerve_node_desktop::view::no_keyring("windows-service").into());
+    store.set_keyring_why(nerve_node_desktop::view::no_keyring("no-answer").into());
     prefs.set_tab(1);
     shots.take("settings-keys-no-keyring");
     prefs.set_tab(3);

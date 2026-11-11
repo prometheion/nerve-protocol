@@ -116,6 +116,9 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         if let Some(why) = v["processes_warning"].as_str() {
             warnings.push(why.into());
         }
+        if let Some(why) = v["provider_pipe_warning"].as_str() {
+            warnings.push(why.into());
+        }
         if v["keyring_failed"] == true {
             warnings.push(
                 "The node found no keyring at its start. Restart it once the keyring runs.".into(),
@@ -406,6 +409,15 @@ pub fn grant_errors_for(errors: &[String], folders: &[String], home: &Path) -> V
         .collect()
 }
 
+/// Whether the node on Windows has no working copy of the owner's
+/// password (its status' `owner_password`: missing, or stale after a logon
+/// refused it), which the commands that run as the owner and the folder
+/// grants need: the app asks for it where they are turned on. Other nodes
+/// say nothing of it.
+pub fn owner_password_missing(status: &Value) -> bool {
+    matches!(status["owner_password"].as_str(), Some("missing" | "stale"))
+}
+
 /// The node's folder-grant errors (`status`'s `folder_access`) split by
 /// whether they are about access `nerve-run` keeps although it should have
 /// lost it (`stale`: folders whose entries could not be taken off, or the
@@ -540,12 +552,10 @@ pub fn rule_hint(text: &str, listing: &Value, center: &str) -> (String, bool) {
 }
 
 /// Why the keys cannot go into the system keyring here, by the `reason` of
-/// `config get machine.secret_storage --json`.
-pub fn no_keyring(reason: &str) -> &'static str {
-    match reason {
-        "windows-service" => "Not on Windows: the service would not find them in a keyring.",
-        _ => "No keyring answers for the node's account.",
-    }
+/// `config get machine.secret_storage --json`: no keyring answers (on
+/// Windows the service account's Credential Manager always does).
+pub fn no_keyring(_reason: &str) -> &'static str {
+    "No keyring answers for the node's account."
 }
 
 /// What the app shows after `center rotate-key` gave `name` this machine's
@@ -693,7 +703,6 @@ pub fn restored(said: &Value, started: &str) -> String {
         let line = match s(&n["fix"]) {
             "proxy" => "The proxy is not restored whole: set it again under Settings, Network, Proxy.".into(),
             "sudo" => "Sudo is off: its password is in no backup. Turn it on again on the Permissions page.".into(),
-            "sudo-file" => "Sudo is off, but the administrator's password it kept could not be deleted: turn sudo on and off again on the Permissions page.".into(),
             "pin" => format!("The pin of {center} here differed from the backup's, and the restore took the backup's. If the node does not link to {center}, set center.{center}.pin under Settings, Advanced."),
             "relay" => "The relay's TLS key was not in the backup: turn the relay on again on the Relay page; the nodes behind it need new links.".into(),
             _ => full_sentence(s(&n["text"])),
@@ -907,23 +916,15 @@ pub fn programs(v: &Value) -> Vec<ProgramRow> {
         .collect()
 }
 
-/// Why this machine offers no programs as providers, and why no
-/// capabilities of node.toml, for the Capabilities page ("" where it
-/// does): Windows offers neither yet, and a node run by hand has no
-/// nerve-run, which every capability of node.toml runs as.
-pub fn caps_notes(windows: bool, installed: bool) -> (String, String) {
-    let programs = if windows {
-        "Windows offers no programs as providers yet; they come with later work on the node for Windows."
-    } else {
-        ""
-    };
-    if !installed {
-        return (
-            programs.into(),
-            "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into(),
-        );
+/// Why this machine offers no capabilities of node.toml, for the
+/// Capabilities page ("" where it does): a node run by hand has no
+/// nerve-run, which every capability of node.toml runs as. Programs attach
+/// as providers on Linux and Windows alike.
+pub fn config_note(installed: bool) -> String {
+    if installed {
+        return String::new();
     }
-    (programs.into(), String::new())
+    "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into()
 }
 
 /// The word `cap set` takes for a switch.
@@ -1744,6 +1745,23 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The app asks for the owner's Windows password only where the node
+    /// has none that works; a node that says nothing of it needs none.
+    #[test]
+    fn the_owner_password_is_asked_for_where_the_node_has_none_that_works() {
+        use serde_json::json;
+        for (state, ask) in [
+            (json!("missing"), true),
+            (json!("stale"), true),
+            (json!("stored"), false),
+            (json!(null), false),
+        ] {
+            let st = json!({"owner_password": state});
+            assert_eq!(super::owner_password_missing(&st), ask, "{st}");
+        }
+        assert!(!super::owner_password_missing(&json!({})));
+    }
+
     #[test]
     fn a_pairing_link_goes_on_the_input_and_not_in_the_arguments() {
         let link = "nerve://pair?center=https%3A%2F%2Fc.example&code=SECRETCODE&pin=x";
@@ -2040,6 +2058,11 @@ mod tests {
         // The Linux node's note that pairings see each other's commands.
         let v = json!({"daemon": "running", "locked": false, "centers": [],
             "processes_warning": "commands of different pairings can read each other"});
+        let (st, _) = status(&v, NOW);
+        assert_eq!(st.warnings.row_count(), 1);
+        // The Windows node that runs without its provider pipe.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "provider_pipe_warning": "no program of yours attaches as a provider"});
         let (st, _) = status(&v, NOW);
         assert_eq!(st.warnings.row_count(), 1);
     }
@@ -2549,19 +2572,10 @@ mod tests {
             ("desk", "/usr/bin/desk", "attached")
         );
         assert_eq!(p[1].attached, "");
-        // Windows offers no programs yet, but capabilities of node.toml
-        // (#149); a node run by hand none of node.toml.
-        let (programs, config) = caps_notes(true, true);
-        assert!(
-            programs.contains("Windows") && config.is_empty(),
-            "{config}"
-        );
-        let (programs, config) = caps_notes(false, false);
-        assert!(
-            programs.is_empty() && config.contains("runs by hand"),
-            "{config}"
-        );
-        assert_eq!(caps_notes(false, true), (String::new(), String::new()));
+        // A node run by hand offers no capabilities of node.toml; the
+        // installed one does, on Linux and Windows.
+        assert!(config_note(false).contains("runs by hand"));
+        assert_eq!(config_note(true), "");
     }
 
     /// The dialog's command line splits as `cap` writes one, so an edit

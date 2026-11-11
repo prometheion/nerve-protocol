@@ -1,5 +1,6 @@
 // The first-run steps, as `nerve-node setup` asks them in a terminal: the
-// first center and its mode. The machine's name and where the keys live
+// first center, its mode and its network, and in folder mode a folder. The
+// machine's name and where the keys live
 // keep their defaults, which Settings changes. Each step runs its own
 // command when the owner goes on, so the steps can stop anywhere and be
 // taken again.
@@ -8,16 +9,19 @@ import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Store } from "store.slint";
 import {
     Button, ButtonKind, Banner, Dialog, Field, TextField, InfoRow, OptionTile, Steps, Reveal,
+    Chip, CheckBox, Code,
 } from "widgets.slint";
 
 export component SetupDialog inherits Dialog {
     title: Store.setup-step == 0 ? "Pair your first center"
         : Store.setup-step == 1 ? "What may " + Store.setup-center + " do?"
+        : Store.setup-step == 2 ? "A folder for " + Store.setup-center
         : "This machine is set up";
     subtitle: Store.setup-step == 0 && Store.pair-step == 1 ? "Check that this is your center."
         : Store.setup-step == 0 && Store.pair-step == 2 ? ""
         : Store.setup-step == 0 ? "Paste the link the center's web UI shows under Pair a machine."
         : Store.setup-step == 1 ? "You can change it any time under Permissions."
+        : Store.setup-step == 2 ? "Its commands work in it. Add more under Permissions › Folders."
         : Store.service-state == "stopped" ? "Start the service to link this machine to its centers."
         : "The node links this machine to its centers.";
     card-width: 580px;
@@ -35,7 +39,7 @@ export component SetupDialog inherits Dialog {
     // step says all in its title.
     VerticalLayout {
         Reveal {
-            shown: Store.setup-step < 2 || Store.setup-error != "";
+            shown: Store.setup-step < 3 || Store.setup-error != "";
             Reveal {
                 shown: Store.setup-step == 0 && Store.pair-step == 0;
                 VerticalLayout {
@@ -141,6 +145,55 @@ export component SetupDialog inherits Dialog {
                     }
                 }
             }
+            Reveal {
+                shown: Store.setup-step == 1;
+                gap: Space.md;
+                HorizontalLayout {
+                    alignment: start;
+                    Chip {
+                        text: "No network for its commands";
+                        label: "No network for its commands";
+                        on: Store.setup-no-network;
+                        toggled(on) => {
+                            Store.setup-no-network = on;
+                        }
+                    }
+                }
+            }
+
+            Reveal {
+                shown: Store.setup-step == 2;
+                VerticalLayout {
+                    spacing: Space.md;
+                    HorizontalLayout {
+                        spacing: Space.md;
+                        if Store.setup-folder != "": Code {
+                            text: Store.setup-folder;
+                        }
+                        Button {
+                            text: Store.setup-folder == "" ? "Choose a folder" : "Another";
+                            icon: @image-url("icons/folder.svg");
+                            clicked => {
+                                Store.setup-folder-choose();
+                            }
+                        }
+                    }
+                    CheckBox {
+                        text: "Write";
+                        checked: Store.setup-folder-write;
+                        toggled(on) => {
+                            Store.setup-folder-write = on;
+                        }
+                    }
+                    CheckBox {
+                        text: "Run programs";
+                        checked: Store.setup-folder-execute;
+                        toggled(on) => {
+                            Store.setup-folder-execute = on;
+                        }
+                    }
+                }
+            }
 
 
             Reveal {
@@ -163,7 +216,7 @@ export component SetupDialog inherits Dialog {
             VerticalLayout {
                 alignment: center;
                 Steps {
-                    count: 3;
+                    count: 4;
                     current: Store.setup-step;
                 }
             }
@@ -181,7 +234,7 @@ export component SetupDialog inherits Dialog {
                     Store.setup-back();
                 }
             }
-            if Store.setup-step < 2: Button {
+            if Store.setup-step < 3: Button {
                 text: Store.setup-step == 0 ? "Not now" : "Skip";
                 kind: ButtonKind.ghost;
                 enabled: !Store.setup-busy && !Store.pair-busy;
@@ -190,7 +243,7 @@ export component SetupDialog inherits Dialog {
                 }
             }
             Button {
-                text: Store.setup-step == 2 ? (Store.service-state == "stopped" ? "Start the service" : "Done")
+                text: Store.setup-step == 3 ? (Store.service-state == "stopped" ? "Start the service" : "Done")
                     : Store.setup-step == 0 && Store.pair-step == 1 ? "Pair"
                     : "Continue";
                 kind: ButtonKind.primary;

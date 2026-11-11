@@ -489,8 +489,8 @@ mod tests {
     #[test]
     fn center_rm_names_the_profile_that_goes_with_the_last_grant() {
         let (d, paths, _, profile) = granted_home();
-        // A node that runs holds the lock.
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        // A node that runs holds the lock, in another process.
+        let held = crate::secrets::HeldByANode::take(&paths);
         let e = run(&paths, &["center", "rm"]).unwrap_err();
         drop(held);
         assert!(e.contains(crate::pipe::NO_PIPE), "{e}");

@@ -1,7 +1,9 @@
 //! The sudo switch on Windows, end to end on the installed service: the
-//! conformance fake center pairs with it, turns sudo on with the password of
-//! the account the commands run as, and runs commands with and without
-//! sudo. It needs a Windows test machine: Nerve installed as a service (the
+//! conformance fake center pairs with it and may not turn sudo on; the
+//! installed program, as the app runs it, turns it on with the owner's
+//! password; the center runs commands with and without sudo, and a restart
+//! of the service turns it off. The owner's password reaches the running
+//! node as the app hands it over (`password`). It needs a Windows test machine: Nerve installed as a service (the
 //! app's `install`, as CI's `windows-installed` job runs it) whose owner, the
 //! account that installed it, is an administrator, an elevated terminal, and
 //! that account and its password in `NERVE_WIN_SUDO_ACCOUNT` and
@@ -15,7 +17,8 @@
 //! which the running node takes at once, and restarts it.
 #![cfg(windows)]
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use nerve_conformance::fake_center::{self, FakeCenter};
@@ -106,6 +109,25 @@ async fn state(conn: &mut Conn<TcpStream>) -> String {
     v["sudo"].as_str().unwrap_or_default().to_string()
 }
 
+/// `sudo on` of the installed program, with the password on stdin, as the
+/// app runs it.
+fn cli_on(layout: &Layout, password: &str) -> std::process::Output {
+    with_input(layout, &["sudo", "on"], password)
+}
+
+/// The installed program's `args`, with `password` on stdin.
+fn with_input(layout: &Layout, args: &[&str], password: &str) -> std::process::Output {
+    let mut child = Command::new(&layout.bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{password}").unwrap();
+    child.wait_with_output().unwrap()
+}
+
 async fn on(conn: &mut Conn<TcpStream>, password: &str) -> Result<Value, RpcError> {
     let v = invoke(conn, "settings", "sudo-offer", json!({}))
         .await
@@ -147,7 +169,6 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     let password = env("NERVE_WIN_SUDO_PASSWORD");
     let layout = Layout::of(&APP);
     let paths = layout.paths.clone();
-    let kept = paths.config_dir.join("sudo.dpapi");
     let mut center = FakeCenter::start(false).await.unwrap();
     // What an earlier run paired goes first.
     nerve_node::cli::edit(&paths, |cfg| {
@@ -192,6 +213,28 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     // The running node took the pairing and the rules at once, and dialed.
     let mut conn = linked(&mut center).await;
 
+    // The owner's password, as the app hands it to `password` where the
+    // node has none that works: the running node checks it with a logon,
+    // refuses a wrong one, and stores the right one.
+    let o = with_input(&layout, &["password"], "not-the-password");
+    assert!(!o.status.success(), "{o:?}");
+    let o = with_input(&layout, &["password"], &password);
+    assert!(o.status.success(), "{o:?}");
+    let said = String::from_utf8_lossy(&o.stdout).to_lowercase();
+    assert!(
+        said.contains(&format!(
+            "the node has the password of {}",
+            account.to_lowercase()
+        )),
+        "{said}"
+    );
+    let o = Command::new(&layout.bin)
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
+    assert_eq!(v["owner_password"], "stored", "{v}");
+
     // Off: the sudo list names the command, yet it is refused.
     assert_eq!(state(&mut conn).await, "off");
     let e = refused(
@@ -200,24 +243,43 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     );
     assert!(e.contains("sudo is off"), "{e}");
 
-    // A wrong password is refused and the switch stays off.
+    // A center is refused before any password is checked, so a wrong one
+    // learns nothing and cannot count towards locking the owner's account.
     let e = refused(
         on(&mut conn, "not-the-password").await,
-        ErrorCode::InvalidArgs,
+        ErrorCode::Forbidden,
     );
-    assert!(e.contains("is wrong"), "{e}");
-    assert_eq!(state(&mut conn).await, "off");
-    assert!(!kept.exists());
+    assert!(e.contains("in the Nerve app on this machine"), "{e}");
+    assert!(!e.contains("is wrong"), "{e}");
 
-    // The right one turns it on and is kept with DPAPI.
-    on(&mut conn, &password).await.expect("on");
-    assert_eq!(state(&mut conn).await, "on");
-    let blob = std::fs::read(&kept).unwrap();
+    // A center may not turn it on, not even with the right password: it
+    // is the owner's Windows password, which only the app takes.
+    let e = refused(on(&mut conn, &password).await, ErrorCode::Forbidden);
+    assert!(e.contains("in the Nerve app on this machine"), "{e}");
+    assert_eq!(state(&mut conn).await, "off");
+
+    // The installed program, as the app runs it: a wrong password is
+    // refused and the switch stays off.
+    let o = cli_on(&layout, "not-the-password");
+    assert!(!o.status.success(), "{o:?}");
     assert!(
-        !blob
-            .windows(password.len())
-            .any(|w| w == password.as_bytes())
+        String::from_utf8_lossy(&o.stderr).contains("is wrong"),
+        "{o:?}"
     );
+    assert_eq!(state(&mut conn).await, "off");
+
+    // The right one turns it on, held in the node's memory only.
+    let o = cli_on(&layout, &password);
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(state(&mut conn).await, "on");
+    for f in std::fs::read_dir(&paths.config_dir).unwrap() {
+        let f = f.unwrap().path();
+        assert_ne!(
+            f.file_name().unwrap().to_string_lossy(),
+            "sudo.dpapi",
+            "the password is kept at rest"
+        );
+    }
 
     // A command without sudo runs with the filtered token, one with sudo
     // with the full one.
@@ -257,28 +319,28 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     let left = String::from_utf8_lossy(&o.stdout);
     assert!(!left.to_lowercase().contains("ping.exe"), "{left}");
 
-    // A restarted service holds the kept password again.
-    restart_service();
-    let mut conn = linked(&mut center).await;
-    assert_eq!(state(&mut conn).await, "on");
-    let r = run(&mut conn, "sudo whoami /groups")
-        .await
-        .expect("sudo whoami");
-    assert!(stdout(&r).contains(HIGH), "{r}");
-
-    // The installed program's `sudo off`, as the app runs it, removes it,
-    // and the running service drops the password.
+    // The installed program's `sudo off`, as the app runs it: the running
+    // service drops the password at once.
     let o = Command::new(&layout.bin)
         .args(["sudo", "off"])
         .output()
         .unwrap();
     assert!(o.status.success(), "{o:?}");
-    assert!(!kept.exists());
-    let until = std::time::Instant::now() + Duration::from_secs(5);
-    while state(&mut conn).await != "off" {
-        assert!(std::time::Instant::now() < until, "sudo stays on");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    assert_eq!(state(&mut conn).await, "off");
+    let e = refused(
+        run(&mut conn, "sudo whoami /groups").await,
+        ErrorCode::Forbidden,
+    );
+    assert!(e.contains("sudo is off"), "{e}");
+
+    // On again, then a restart of the service: the switch is off, as on
+    // Linux, since nothing kept the password.
+    let o = cli_on(&layout, &password);
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(state(&mut conn).await, "on");
+    restart_service();
+    let mut conn = linked(&mut center).await;
+    assert_eq!(state(&mut conn).await, "off");
     let e = refused(
         run(&mut conn, "sudo whoami /groups").await,
         ErrorCode::Forbidden,

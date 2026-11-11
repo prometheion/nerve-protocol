@@ -1655,6 +1655,25 @@ mod tests {
         assert!(APP_JS.contains("((state.checker && state.checker.meta.fields) || {})[scope]"));
     }
 
+    /// A Windows machine's sudo switch takes no password from the center:
+    /// it is the owner's Windows password, and the node refuses it from a
+    /// center. The card says where it is turned on, and keeps Off.
+    #[test]
+    fn a_windows_machines_sudo_is_turned_on_in_its_app() {
+        let f = &APP_JS[APP_JS.find("function sudoSwitch(").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        let windows = &f[f.find(r#"if (n.platform === "windows") {"#).unwrap()..];
+        let windows = &windows[..windows.find("\n  }\n").unwrap()];
+        assert!(
+            windows.contains("Turn it on in the Nerve app on that machine, Permissions, Sudo."),
+            "{windows}"
+        );
+        assert!(windows.contains("off)"), "{windows}");
+        assert!(!windows.contains("Turn sudo on"), "{windows}");
+        assert!(!windows.contains("password"), "{windows}");
+        assert!(!f.contains("account commands run as"), "{f}");
+    }
+
     /// A sudo command's audit row has no Allow buttons, as only the
     /// machine's owner puts a command on the sudo list: it says where,
     /// the nerve-node command with a Copy button, or the app's place on a
@@ -1746,7 +1765,7 @@ mod tests {
             "Its owner lets it in the Nerve app on that machine: Centers, Settings grant.",
             "in the Nerve app on that machine: Capabilities, ${e.name}.",
             "Change them in the Nerve app on the machine.",
-            "password of the account commands run as",
+            "Turn it on in the Nerve app on that machine, Permissions, Sudo.",
             "in an administrator's terminal for the installed center.",
             "`nerve-center install` in an administrator's terminal keeps it out.",
             "state.overview.center.os === \"windows\"",

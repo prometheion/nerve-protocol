@@ -627,7 +627,7 @@ export component CapDialog inherits Dialog {
 
 export component SudoDialog inherits Dialog {
     title: "Turn sudo on";
-    subtitle: "Your sudo password, kept in the node's memory only. On Windows, the password of the commands' account.";
+    subtitle: Perm.windows ? "Your Windows password. Sudo commands run as you, with your administrator rights. The node keeps it in memory only: sudo is off after a restart." : "Your sudo password. The node keeps it in memory only: sudo is off after a restart.";
     card-width: 480px;
     close => {
         Perm.sudo-open = false;
@@ -668,6 +668,56 @@ export component SudoDialog inherits Dialog {
             busy: Perm.sudo-busy;
             clicked => {
                 Perm.sudo-confirm();
+            }
+        }
+    }
+}
+
+// The owner's Windows password, where the node has none that works
+// (src/app/perm.rs).
+export component OwnerPasswordDialog inherits Dialog {
+    title: "Your Windows password";
+    subtitle: "Commands that run as you need it. The node checks it and keeps it with DPAPI.";
+    card-width: 480px;
+    close => {
+        Perm.owner-password-open = false;
+    }
+    enter => {
+        if (Perm.owner-password != "" && !Perm.owner-password-busy) {
+            Perm.owner-password-save();
+        }
+    }
+    Field {
+        label: "Password";
+        TextField {
+            text <=> Perm.owner-password;
+            password: true;
+            label: "Password";
+            enabled: !Perm.owner-password-busy;
+            accepted => {
+                Perm.owner-password-save();
+            }
+            init => {
+                self.focus();
+            }
+        }
+    }
+    DialogButtons {
+        error: Perm.owner-password-error;
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Perm.owner-password-open = false;
+            }
+        }
+        Button {
+            text: "Save";
+            kind: ButtonKind.primary;
+            enabled: Perm.owner-password != "";
+            busy: Perm.owner-password-busy;
+            clicked => {
+                Perm.owner-password-save();
             }
         }
     }
@@ -922,7 +972,7 @@ export component RestoreDialog inherits Dialog {
     }
     CheckBox {
         text: "Keep its keys in files";
-        detail: "When this machine cannot use the system keyring.";
+        detail: Install.windows ? "Else they go into the node's Credential Manager when it starts." : "When this machine cannot use the system keyring.";
         checked: Prefs.restore-in-files;
         toggled(on) => {
             Prefs.restore-in-files = on;
@@ -1085,6 +1135,8 @@ export component UninstallDialog inherits Dialog {
             Install.close();
         } else if (Install.step != "working") {
             Install.uninstall-open = false;
+            Install.can-forget = false;
+            Install.forget = false;
         }
     }
     enter => {
@@ -1101,6 +1153,17 @@ export component UninstallDialog inherits Dialog {
             VerticalLayout {
                 spacing: Space.xl;
                 UninstallChoice { }
+                Reveal {
+                    shown: Install.can-forget;
+                    CheckBox {
+                        text: "Go on without the keys and the proxy's login";
+                        detail: "The node's Credential Manager cannot put them aside. They are lost.";
+                        checked: Install.forget;
+                        toggled(on) => {
+                            Install.forget = on;
+                        }
+                    }
+                }
                 DialogButtons {
                     error: Install.error;
                     error-title: "Uninstalling did not finish";
@@ -1109,6 +1172,8 @@ export component UninstallDialog inherits Dialog {
                         kind: ButtonKind.ghost;
                         clicked => {
                             Install.uninstall-open = false;
+                            Install.can-forget = false;
+                            Install.forget = false;
                         }
                     }
                     Button {

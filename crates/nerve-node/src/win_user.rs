@@ -255,6 +255,31 @@ pub fn own_uid() -> u32 {
     }
 }
 
+/// The token this thread acts with now (one it impersonates), for a query.
+pub(crate) fn thread_token() -> io::Result<Token> {
+    let mut h: HANDLE = std::ptr::null_mut();
+    // SAFETY: this thread's pseudo handle and a place for the token, opened
+    // with the process's own rights (`OpenAsSelf`).
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut h) } == 0 {
+        return Err(last());
+    }
+    // SAFETY: OpenThreadToken returned a handle this code now owns.
+    Ok(Token(unsafe { OwnedHandle::from_raw_handle(h as _) }))
+}
+
+/// The SID of the account of `t`, as text.
+pub(crate) fn token_sid(t: &Token) -> io::Result<String> {
+    let buf = token_info(t.raw(), TokenUser)?;
+    // SAFETY: the buffer holds a TOKEN_USER, whose SID points into it; the
+    // SID is copied while the buffer lives.
+    let sid = unsafe {
+        let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        let len = GetLengthSid(sid) as usize;
+        std::slice::from_raw_parts(sid.cast::<u8>(), len).to_vec()
+    };
+    crate::win_host::sid_text(&sid).map_err(io::Error::other)
+}
+
 /// The SID of the account this process runs as.
 pub(crate) fn own_sid() -> io::Result<Vec<u8>> {
     let t = process_token(TOKEN_QUERY)?;
@@ -931,6 +956,16 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     let t = Arc::new(t);
     *cached = Some((account.name.clone(), Instant::now(), t.clone()));
     Ok(t)
+}
+
+/// What `status` says of the owner's stored password: missing, stale (a
+/// logon refused it and it is not tried again) or stored
+/// (crate::winsvc::owner_password_state).
+pub fn owner_password_state() -> &'static str {
+    let blob = SECRET
+        .get()
+        .and_then(|d| std::fs::read(d.join(crate::winsvc::SECRET_FILE)).ok());
+    crate::winsvc::owner_password_state(blob.as_deref(), &nerve_transport::sync::lock(&STALE))
 }
 
 /// A logon of the command account `nerve-run` as a batch job, the logon its

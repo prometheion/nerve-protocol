@@ -4,8 +4,10 @@
 //! user name and password in the proxy URL among them, are always in the
 //! system keyring: `node.toml` names the headers, and their values are never
 //! in a file, a log, an error text or the audit log. The installed node on
-//! Windows has no keyring for them ([`PROXY_WINDOWS_SERVICE`]) and takes a
-//! proxy without header or password only.
+//! Windows keeps them, and its keys where they are in the keyring, in the
+//! Credential Manager of its own account, which only the service reads and
+//! writes ([`vault`]); while that service is stopped, what goes there waits
+//! in a file sealed with the machine's DPAPI key ([`vault::PENDING`]).
 //!
 //! The node's own keys, the key of the config's MAC, the node key per
 //! center, the relay's TLS key and the password of an `https://` proxy (a
@@ -107,6 +109,28 @@ impl Entry {
     pub fn account(&self) -> &str {
         &self.account
     }
+
+    /// Whether `account` names one of the entries of the node at `paths`:
+    /// one of the kinds above, after its prefix the node's config folder
+    /// (its state folder for the config key's).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_of(paths: &NodePaths, account: &str) -> bool {
+        let (config, state) = (
+            absolute(&paths.config_dir).display().to_string(),
+            absolute(&paths.state_dir).display().to_string(),
+        );
+        let Some((kind, rest)) = account.split_once(':') else {
+            return false;
+        };
+        match kind {
+            "proxy" | "relay-tls" | "ui-tls" | "proxy-login" => rest == config,
+            "config-key" => rest == state,
+            "center-key" | "center-key-next" => rest.split_once(':').is_some_and(|(c, dir)| {
+                nerve_policy::config::valid_center_name(c) && dir == config
+            }),
+            _ => false,
+        }
+    }
 }
 
 /// How errors name the entry: the service, then the account.
@@ -120,34 +144,16 @@ fn absolute(p: &Path) -> std::path::PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Why the installed node on Windows takes no header value and no password
-/// for its proxy. They are kept in the keyring, and the keyring the service
-/// reads is its own account's, not that of the administrator who runs
-/// `proxy set`. The node keeps them nowhere else.
-pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: a proxy's header values and password in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The node keeps them nowhere else";
-
-/// What the installed node on Windows says to a proxy that needs a header
-/// value or a password ([`PROXY_WINDOWS_SERVICE`]).
-pub fn proxy_windows_refusal() -> String {
-    format!(
-        "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
-    )
-}
-
 /// Puts the proxy's header values into the node's keyring entry, replacing
-/// what it held. The installed node on Windows refuses, before it asks the
-/// keyring ([`PROXY_WINDOWS_SERVICE`]).
+/// what it held.
 pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> Result<(), String> {
-    if windows_service(paths) {
-        return Err(proxy_windows_refusal());
-    }
     let entry = Entry::proxy(paths);
     let map: BTreeMap<&str, &str> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let text = serde_json::to_string(&map).map_err(|e| e.to_string())?;
-    store::set(entry.account(), &text).map_err(|e| {
+    vault::set(paths, entry.account(), &text).map_err(|e| {
         format!(
             "cannot store the proxy's header values in the system keyring (entry {entry}): {e}. The node keeps them nowhere else, so nothing was changed; on a machine without a keyring (a Linux without a desktop has no Secret Service) use a proxy that needs no header"
         )
@@ -156,22 +162,14 @@ pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> R
 
 /// The proxy's header lines: the names `node.toml` gives, with their values
 /// from the keyring. No names, no keyring call. A missing or unreadable entry,
-/// or one without a value for a name, is an error that names the entry. On
-/// the installed node on Windows named headers are an error without a keyring
-/// call: whatever an administrator's keyring holds, the service does not find
-/// it, and the same answer must come from the service and from `proxy`.
+/// or one without a value for a name, is an error that names the entry.
 pub fn proxy_headers(paths: &NodePaths, names: &[String]) -> Result<Vec<(String, String)>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    if windows_service(paths) {
-        return Err(format!(
-            "node.toml names header values for the proxy, but {PROXY_WINDOWS_SERVICE}. Under Settings › Network › Proxy in the app, set a proxy that needs no header and no password, or remove it"
-        ));
-    }
     let entry = Entry::proxy(paths);
     let again = "run `nerve-node proxy set` again";
-    let text = match store::get(entry.account()) {
+    let text = match vault::get(paths, entry.account()) {
         Ok(Some(t)) => t,
         Ok(None) => {
             return Err(format!(
@@ -201,7 +199,7 @@ pub fn proxy_headers(paths: &NodePaths, names: &[String]) -> Result<Vec<(String,
 /// Deletes the node's proxy entry; `Ok(false)` when there was none.
 pub fn remove_proxy_headers(paths: &NodePaths) -> Result<bool, String> {
     let entry = Entry::proxy(paths);
-    store::delete(entry.account())
+    vault::delete(paths, entry.account())
         .map_err(|e| format!("cannot delete the keyring entry {entry}: {e}"))
 }
 
@@ -314,7 +312,7 @@ pub(crate) fn get(
         }
         SecretStorage::Keyring => {
             let entry = key.entry(paths);
-            store::get(entry.account())
+            vault::get(paths, entry.account())
                 .map(|t| t.map(|t| t.trim().to_string()))
                 .map_err(|e| {
                     format!(
@@ -346,7 +344,7 @@ pub(crate) fn put(
         }
         SecretStorage::Keyring => {
             let entry = key.entry(paths);
-            store::set(entry.account(), text).map_err(|e| {
+            vault::set(paths, entry.account(), text).map_err(|e| {
                 format!(
                     "cannot keep {} in the system keyring (entry {entry}): {e}",
                     key.what()
@@ -377,10 +375,19 @@ pub(crate) fn delete(paths: &NodePaths, storage: SecretStorage, key: Key) -> Res
         }
         SecretStorage::Keyring => {
             let entry = key.entry(paths);
-            store::delete(entry.account())
+            vault::delete(paths, entry.account())
                 .map_err(|e| format!("cannot delete the keyring entry {entry}: {e}"))
         }
     }
+}
+
+/// The node's `node.toml` as it stands, read without checking its MAC: for
+/// the service, which wrote it, to name its own entries.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn stated_config(paths: &NodePaths) -> Result<NodeConfig, String> {
+    let file = paths.config_file();
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    NodeConfig::parse(&text)
 }
 
 /// Where the node's `node.toml` says its keys are, read without checking
@@ -392,60 +399,9 @@ pub fn stated_storage(paths: &NodePaths) -> SecretStorage {
         .unwrap_or_default()
 }
 
-/// Why the installed node on Windows keeps its keys in files. The service
-/// runs as its own account, `nerve`, and the Credential Manager is one per
-/// account: `setup` and `config set` run as an administrator, so whatever
-/// they put in the keyring would be in that administrator's, where the
-/// service never finds it.
-pub const KEYRING_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: keys put in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The installed node on Windows keeps its keys in files (machine.secret_storage = \"file\"), which only nerve and the administrators can open";
-
-/// Why the node at `paths` keeps its keys in files, whatever asks for the
-/// keyring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoKeyring {
-    /// The installed node on Windows ([`KEYRING_WINDOWS_SERVICE`]).
-    WindowsService,
-}
-
-impl NoKeyring {
-    pub fn why(self) -> String {
-        match self {
-            NoKeyring::WindowsService => KEYRING_WINDOWS_SERVICE.into(),
-        }
-    }
-
-    /// What to do after deleting the folders, when the node's start refused:
-    /// the folders are gone with the install, so it is installed again first.
-    pub fn then_at_start(self) -> &'static str {
-        match self {
-            NoKeyring::WindowsService => {
-                "install Nerve again with the installer, and pair the centers again"
-            }
-        }
-    }
-
-    /// What becomes of the keys in the keyring.
-    fn unreachable(self) -> &'static str {
-        match self {
-            NoKeyring::WindowsService => {
-                "Those keys are in the Credential Manager of another account, out of the service's reach"
-            }
-        }
-    }
-}
-
-/// Why the keys of the node at `paths` may not go into the keyring, or
-/// `None` when they may: on Linux on every kernel, since the keyring of the
-/// node's user is out of reach of the commands of the installed node, which
-/// run as other accounts (a node run by hand runs no folder mode command
-/// while its keys are there, crate::daemon::KEYRING_NOT_CONFINED).
-pub fn no_keyring(paths: &NodePaths) -> Option<NoKeyring> {
-    windows_service(paths).then_some(NoKeyring::WindowsService)
-}
-
-/// Whether the node at `paths` is the installed node on Windows, whose keys
-/// may not go into the keyring ([`KEYRING_WINDOWS_SERVICE`]). Its folders
-/// are found in any spelling: Windows does not tell `C:\ProgramData` from
+/// Whether the node at `paths` is the installed node on Windows, whose
+/// keyring is its service account's ([`vault`]). Its folders are found in
+/// any spelling: Windows does not tell `C:\ProgramData` from
 /// `c:\programdata`.
 pub fn windows_service(paths: &NodePaths) -> bool {
     #[cfg(test)]
@@ -482,6 +438,8 @@ pub(crate) mod for_tests {
     #[derive(Default)]
     struct Pretended {
         windows_service: bool,
+        service_runs: bool,
+        service_account: bool,
     }
 
     static NODES: LazyLock<Mutex<HashMap<PathBuf, Pretended>>> = LazyLock::new(Mutex::default);
@@ -496,30 +454,41 @@ pub(crate) mod for_tests {
         with(paths, |p| p.windows_service = true);
     }
 
+    /// The service of the node at `paths` runs (`true`), and takes
+    /// `vault.*` calls as the account whose vault it is, or does not.
+    pub fn pretend_service_runs(paths: &NodePaths, runs: bool) {
+        with(paths, |p| p.service_runs = runs);
+    }
+
+    /// The calls a process that is not the service makes to it
+    /// (crate::secrets::vault): what the running service answers, else what
+    /// the pipe says when it finds none (crate::pipe::call).
+    pub fn service_call(
+        paths: &NodePaths,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if !with(paths, |p| p.service_runs) {
+            return Err(crate::pipe::missing_pipe(|| {
+                super::KeysLock::node_runs(paths)
+            }));
+        }
+        super::vault::serve(paths, method, &params)
+    }
+
+    /// This process counts as the service's account for the node at
+    /// `paths`, whose vault is its own: a daemon of a test.
+    pub fn pretend_service_account(paths: &NodePaths) {
+        with(paths, |p| p.service_account = true);
+    }
+
+    pub fn service_account(paths: &NodePaths) -> bool {
+        with(paths, |p| p.service_account)
+    }
+
     pub fn windows_service(paths: &NodePaths) -> bool {
         with(paths, |p| p.windows_service)
     }
-}
-
-/// The refusal of a node whose `node.toml` keeps the keys in the keyring
-/// where [`no_keyring`] says `n`: at its start, at install, at `config
-/// accept`. The service never reaches those keys, and on Windows only the
-/// app is there to move them, as the service: what it names deletes them
-/// with the node's data, whether or not the folders are the installed
-/// node's yet.
-///
-/// `what` says what does not happen, `then` what to do after.
-pub fn keyring_refused(paths: &NodePaths, n: NoKeyring, what: &str, then: &str) -> String {
-    format!(
-        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. If the keys are still in files in {} (a line in node.toml that someone changed), set that line back to \"file\" and nothing is lost. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it; that deletes the audit log {} too, so copy it aside first); then {then}",
-        paths.config_file().display(),
-        n.why(),
-        paths.config_dir.join("keys").display(),
-        n.unreachable(),
-        paths.config_dir.display(),
-        paths.state_dir.display(),
-        paths.audit_log().display(),
-    )
 }
 
 /// The node key for `center` from where `storage` keeps it.
@@ -916,8 +885,8 @@ impl Secrets for NodeSecrets {
             SecretStorage::File => MacKey::load(&file),
             SecretStorage::Keyring => {
                 let entry = Entry::config_key(&self.paths);
-                let text =
-                    store::get(entry.account()).map_err(|e| unreachable_keyring(&entry, &e))?;
+                let text = vault::get(&self.paths, entry.account())
+                    .map_err(|e| unreachable_keyring(&entry, &e))?;
                 match text {
                     Some(t) => MacKey::from_text(&t)
                         .map(Some)
@@ -953,17 +922,6 @@ impl Secrets for NodeSecrets {
 
     fn copy(&mut self, cfg: &NodeConfig) -> Result<(), String> {
         let to = cfg.machine.secret_storage;
-        // Before the count of running commands: this refusal holds whatever
-        // runs, so the count's advice (end them, change it again) would
-        // not help.
-        if to == SecretStorage::Keyring
-            && let Some(n) = no_keyring(&self.paths)
-        {
-            return Err(format!(
-                "machine.secret_storage cannot be \"keyring\" here: {}; nothing was changed",
-                n.why()
-            ));
-        }
         if let Some((open, ended)) = self.open_commands(to) {
             return Err(format!(
                 "{open}; the node's keys stay in their files, and nothing was changed. Wait until {ended} ended, or end every command with `nerve-node panic`, change it again, then `nerve-node unlock`"
@@ -1028,17 +986,9 @@ impl Secrets for NodeSecrets {
     }
 
     /// Another writer moved the keys into the keyring: the running node
-    /// does not follow where they may not be there ([`no_keyring`]), nor
-    /// while it counts a command that would reach them there.
+    /// does not follow while it counts a command that would reach them
+    /// there.
     fn may_reload(&self, cfg: &NodeConfig) -> Result<(), String> {
-        if cfg.machine.secret_storage == SecretStorage::Keyring
-            && let Some(n) = no_keyring(&self.paths)
-        {
-            return Err(format!(
-                "node.toml keeps the node's keys in the system keyring, but {}; the node goes on with the config in force, which keeps them in their files",
-                n.why()
-            ));
-        }
         match self.open_commands(cfg.machine.secret_storage) {
             Some((open, ended)) => Err(format!(
                 "node.toml keeps the node's keys in the system keyring, but {open}; the node goes on with the config in force, which keeps them in their files. Wait until {ended} ended, then reload again"
@@ -1115,9 +1065,29 @@ const FORKED_COPY_WAIT: std::time::Duration = std::time::Duration::from_millis(3
 /// them. It is released when its holder ends, however it ends.
 pub struct KeysLock {
     _file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+/// The locks this process holds: a node cannot run on their folders, so a
+/// call to it that finds no pipe finds none that runs (the restore asks the
+/// stopped service's vault while it holds the lock).
+static HELD_HERE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+impl Drop for KeysLock {
+    fn drop(&mut self) {
+        let mut held = nerve_transport::sync::lock(&HELD_HERE);
+        if let Some(i) = held.iter().position(|p| *p == self.path) {
+            held.remove(i);
+        }
+    }
 }
 
 impl KeysLock {
+    fn held(file: std::fs::File, path: std::path::PathBuf) -> KeysLock {
+        nerve_transport::sync::lock(&HELD_HERE).push(path.clone());
+        KeysLock { _file: file, path }
+    }
+
     /// The lock, when nobody holds it; `None` when someone does.
     pub fn try_take(paths: &NodePaths) -> Result<Option<KeysLock>, String> {
         let path = paths.keys_lock();
@@ -1135,7 +1105,7 @@ impl KeysLock {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Some(KeysLock { _file: file }));
+                return Ok(Some(KeysLock::held(file, path)));
             }
             let e = std::io::Error::last_os_error();
             if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -1149,17 +1119,22 @@ impl KeysLock {
             // Opened without sharing: nobody else opens it while it is held.
             const SHARING_VIOLATION: i32 = 32;
             match o.share_mode(0).open(&path) {
-                Ok(file) => Ok(Some(KeysLock { _file: file })),
+                Ok(file) => Ok(Some(KeysLock::held(file, path))),
                 Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
                 Err(e) => Err(format!("{}: {e}", path.display())),
             }
         }
     }
 
+    /// Whether this process holds the lock of the node at `paths`.
+    fn held_here(paths: &NodePaths) -> bool {
+        nerve_transport::sync::lock(&HELD_HERE).contains(&paths.keys_lock())
+    }
+
     /// Whether a node holds the lock, asked without making anything: no
-    /// state folder or no lock file is a node that never ran, and a lock
-    /// that cannot be tried counts as held (the safe answer for a caller that
-    /// writes behind a node).
+    /// state folder or no lock file is a node that never ran, a lock this
+    /// process holds is no node's, and a lock that cannot be tried counts as
+    /// held (the safe answer for a caller that writes behind a node).
     #[cfg(any(windows, test))]
     pub fn node_runs(paths: &NodePaths) -> bool {
         // Only a file known to be missing is "no node": an entry that cannot
@@ -1167,7 +1142,11 @@ impl KeysLock {
         if matches!(paths.keys_lock().try_exists(), Ok(false)) {
             return false;
         }
-        !matches!(KeysLock::try_take(paths), Ok(Some(_)))
+        if KeysLock::held_here(paths) {
+            return false;
+        }
+        // A holder that let go a moment ago may still have a forked copy.
+        !matches!(KeysLock::try_take_soon(paths), Ok(Some(_)))
     }
 
     /// The lock, trying again for a moment when someone holds it. A process
@@ -1221,14 +1200,21 @@ pub(crate) struct HeldByANode {
 
 #[cfg(test)]
 impl HeldByANode {
+    /// `lock` as a node's, as if another process held it.
+    #[cfg(not(target_os = "linux"))]
+    fn unlisted(lock: KeysLock) -> HeldByANode {
+        nerve_transport::sync::lock(&HELD_HERE).retain(|p| *p != lock.path);
+        HeldByANode { _lock: lock }
+    }
+
     pub(crate) fn take(paths: &NodePaths) -> HeldByANode {
         nerve_transport::files::create_private_dir(&paths.state_dir).unwrap();
         #[cfg(not(target_os = "linux"))]
-        return HeldByANode {
-            _lock: KeysLock::try_take(paths)
+        return HeldByANode::unlisted(
+            KeysLock::try_take(paths)
                 .unwrap()
                 .expect("the lock is free"),
-        };
+        );
         #[cfg(target_os = "linux")]
         {
             use std::io::Read;
@@ -1300,6 +1286,332 @@ pub(crate) unsafe fn keep_only(fd: i32) {
             libc::syscall(libc::SYS_close_range, 3, fd - 1, 0);
         }
         libc::syscall(libc::SYS_close_range, fd + 1, libc::c_uint::MAX, 0);
+    }
+}
+
+/// The keyring of a node as this process reaches it. The installed node on
+/// Windows keeps its keyring secrets in the Credential Manager of its own
+/// account, `nerve`, which is one per account (Q8): the service writes and
+/// reads them itself, and any other process (the CLI and the app of an
+/// administrator) asks the running service over its control pipe
+/// (`vault.get`, `vault.set`, `vault.delete`), never its own vault. While no
+/// service runs (a restore, an install), what goes into the vault waits in
+/// [`PENDING`], sealed with DPAPI, and the service takes it at its start
+/// ([`take_pending`]). Everywhere else this is the keyring itself
+/// ([`super::store`]).
+pub(crate) mod vault {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    use super::{Entry, NodePaths, store};
+
+    /// The file in the config folder's `keys` that holds, sealed, what goes
+    /// into the service's vault once it runs: each entry with its new text,
+    /// or none for one to delete.
+    pub const PENDING: &str = "vault.pending";
+
+    /// The entry in [`PENDING`] that says it holds every entry of the node's
+    /// vault, not only what a call put there while no service ran
+    /// (`vault.stage` writes it). The service's start takes it away with the
+    /// rest.
+    const COMPLETE: &str = "\u{1}complete";
+
+    /// What a read of the vault says while no service runs and nothing
+    /// waits for it.
+    pub const NOT_RUNNING: &str = "the node keeps this in the Credential Manager of its service account nerve, which only the running node reads: start the node on the app's Overview, then try again";
+
+    pub fn pending_file(paths: &NodePaths) -> PathBuf {
+        paths.config_dir.join("keys").join(PENDING)
+    }
+
+    /// Whether this process reaches the keyring of the node at `paths`
+    /// through its service: the installed node on Windows, from a process
+    /// that is not the service's account.
+    pub fn through_service(paths: &NodePaths) -> bool {
+        super::windows_service(paths) && !service_account(paths)
+    }
+
+    /// Whether this process runs as the service's own account, whose vault
+    /// is the node's.
+    fn service_account(paths: &NodePaths) -> bool {
+        #[cfg(test)]
+        return super::for_tests::service_account(paths);
+        #[cfg(not(test))]
+        let _ = paths;
+        #[cfg(all(windows, not(test)))]
+        return crate::win_user::current_user()
+            .is_ok_and(|n| n.eq_ignore_ascii_case(crate::service::USER));
+        #[cfg(all(not(windows), not(test)))]
+        false
+    }
+
+    /// Whether [`PENDING`] holds every entry of the service's vault, as an
+    /// earlier `vault.stage` left it: a stopped service needs no start to
+    /// put them aside again, and one that cannot start loses none.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn staged_all(paths: &NodePaths) -> bool {
+        read_pending(paths).is_ok_and(|p| p.contains_key(COMPLETE))
+    }
+
+    /// Drops what a `vault.stage` wrote, for an install or an uninstall that
+    /// could not stop the service after it: the service goes on running
+    /// with its live vault, which `vault.set` and `vault.delete` change from
+    /// then on, and a stage kept would be written back over those changes at
+    /// its next start (or taken for current by the next install).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn discard_pending(paths: &NodePaths) {
+        let _ = std::fs::remove_file(pending_file(paths));
+    }
+
+    /// Whether the service's vault may hold entries of the node at `paths`:
+    /// its keys, where `node.toml` says the keyring, and the proxy's header
+    /// values, which are there whatever it says. A config that cannot be
+    /// read may name either.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn may_hold(paths: &NodePaths) -> bool {
+        if !paths.config_file().exists() {
+            return false;
+        }
+        super::stated_storage(paths) == nerve_policy::config::SecretStorage::Keyring
+            || super::stated_config(paths).map_or(true, |c| !c.connection.headers.is_empty())
+    }
+
+    /// One call to the running service, from code that does not wait
+    /// (`get` is called inside and outside the runtime): on a thread of its
+    /// own with a runtime of its own.
+    fn call(paths: &NodePaths, method: &str, params: Value) -> Result<Value, String> {
+        #[cfg(test)]
+        return super::for_tests::service_call(paths, method, params);
+        #[cfg(all(windows, not(test)))]
+        {
+            let (paths, method) = (paths.clone(), method.to_string());
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?
+                    .block_on(crate::pipe::call(&paths, &method, params))
+            })
+            .join()
+            .map_err(|_| "the call to the node ended".to_string())?
+        }
+        #[cfg(all(not(windows), not(test)))]
+        {
+            let _ = (paths, method, params);
+            Err(nerve_transport::ctl::NOT_RUNNING.into())
+        }
+    }
+
+    fn seal(plain: &[u8]) -> Result<Vec<u8>, String> {
+        #[cfg(windows)]
+        return crate::win_user::protect(plain).map_err(|e| format!("DPAPI: {e}"));
+        #[cfg(not(windows))]
+        Ok(plain.to_vec())
+    }
+
+    fn unseal(sealed: &[u8]) -> Result<Vec<u8>, String> {
+        #[cfg(windows)]
+        return crate::win_user::unprotect(sealed).map_err(|e| format!("DPAPI: {e}"));
+        #[cfg(not(windows))]
+        Ok(sealed.to_vec())
+    }
+
+    type Pending = BTreeMap<String, Option<String>>;
+
+    /// What waits for the service; nothing when no file is there. The error
+    /// names the file, never a value.
+    fn read_pending(paths: &NodePaths) -> Result<Pending, String> {
+        let file = pending_file(paths);
+        let sealed = match std::fs::read(&file) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Pending::new()),
+            Err(e) => return Err(format!("{}: {e}", file.display())),
+        };
+        unseal(&sealed)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| format!("{} cannot be read", file.display()))
+    }
+
+    fn write_pending(paths: &NodePaths, p: &Pending) -> Result<(), String> {
+        let file = pending_file(paths);
+        if p.is_empty() {
+            return match std::fs::remove_file(&file) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("{}: {e}", file.display())),
+            };
+        }
+        if let Some(dir) = file.parent() {
+            nerve_transport::files::create_private_dir(dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let plain = serde_json::to_vec(p).map_err(|e| e.to_string())?;
+        nerve_transport::files::write_private(&file, &seal(&plain)?)
+            .map_err(|e| format!("{}: {e}", file.display()))
+    }
+
+    /// Whether the service did not take the call because it does not run.
+    fn not_running(e: &str) -> bool {
+        e == nerve_transport::ctl::NOT_RUNNING
+    }
+
+    /// What staging says when a node took the keys' lock meanwhile: it
+    /// started since the call found none.
+    pub const STARTED: &str =
+        "the node started meanwhile, so nothing was kept for its start: try again";
+
+    /// Keeps `value` (or, with `None`, deletes the entry) for the service
+    /// to take at its start. Under the keys' lock, which the service takes
+    /// before it takes the file: the two never write it at once. A process
+    /// that holds the lock already (a restore) writes on.
+    pub(super) fn stage(
+        paths: &NodePaths,
+        account: &str,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        let _lock = match super::KeysLock::held_here(paths) {
+            true => None,
+            false => Some(super::KeysLock::try_take_soon(paths)?.ok_or(STARTED)?),
+        };
+        let mut p = read_pending(paths)?;
+        p.insert(account.into(), value.map(String::from));
+        write_pending(paths, &p)
+    }
+
+    /// Takes back the change of `account` staged for the service, for a
+    /// restore that failed: what the service's vault holds stays.
+    pub fn unstage(paths: &NodePaths, account: &str) -> Result<(), String> {
+        let mut p = read_pending(paths)?;
+        if p.remove(account).is_some() {
+            write_pending(paths, &p)?;
+        }
+        Ok(())
+    }
+
+    pub fn get(paths: &NodePaths, account: &str) -> Result<Option<String>, String> {
+        if !through_service(paths) {
+            return store::get(account);
+        }
+        match call(paths, "vault.get", json!({"account": account})) {
+            Ok(v) => Ok(v["value"].as_str().map(String::from)),
+            Err(e) if not_running(&e) => match read_pending(paths)?.remove(account) {
+                Some(v) => Ok(v),
+                None => Err(NOT_RUNNING.into()),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set(paths: &NodePaths, account: &str, value: &str) -> Result<(), String> {
+        if !through_service(paths) {
+            return store::set(account, value);
+        }
+        match call(
+            paths,
+            "vault.set",
+            json!({"account": account, "value": value}),
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if not_running(&e) => stage(paths, account, Some(value)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `Ok(false)` when there was none; one staged while no service runs
+    /// counts as there.
+    pub fn delete(paths: &NodePaths, account: &str) -> Result<bool, String> {
+        if !through_service(paths) {
+            return store::delete(account);
+        }
+        match call(paths, "vault.delete", json!({"account": account})) {
+            Ok(v) => Ok(v["deleted"] == true),
+            Err(e) if not_running(&e) => stage(paths, account, None).map(|()| true),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// What the service does with a `vault.*` request for the node at
+    /// `paths`, as the account whose vault it is: an entry that is not one
+    /// of this node's is refused. `vault.stage` copies every entry of the
+    /// node's into [`PENDING`], for an install that gives the account a new
+    /// password (Windows then cannot open what it kept before) and an
+    /// uninstall that keeps the data.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn serve(paths: &NodePaths, method: &str, params: &Value) -> Result<Value, String> {
+        if method == "vault.stage" {
+            let cfg = super::stated_config(paths)?;
+            let mut p = read_pending(paths)?;
+            let mut n = 0;
+            let accounts = super::keys(&cfg)
+                .into_iter()
+                .map(|k| k.entry(paths))
+                .chain(std::iter::once(Entry::proxy(paths)));
+            for e in accounts {
+                if let Some(v) = store::get(e.account())? {
+                    p.insert(e.account().into(), Some(v));
+                    n += 1;
+                }
+            }
+            p.insert(COMPLETE.into(), None);
+            write_pending(paths, &p)?;
+            return Ok(json!({"staged": n}));
+        }
+        let account = params["account"].as_str().ok_or("account is missing")?;
+        if !Entry::is_of(paths, account) {
+            return Err(format!("{account:?} is no entry of this node"));
+        }
+        match method {
+            "vault.get" => Ok(json!({"value": store::get(account)?})),
+            "vault.set" => {
+                let value = params["value"].as_str().ok_or("value is missing")?;
+                store::set(account, value)?;
+                Ok(json!({}))
+            }
+            "vault.delete" => Ok(json!({"deleted": store::delete(account)?})),
+            m => Err(format!("unknown method {m}")),
+        }
+    }
+
+    /// Has the running service copy its entries aside ([`serve`]'s
+    /// `vault.stage`); how many.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn stage_in_service(paths: &NodePaths) -> Result<u64, String> {
+        call(paths, "vault.stage", json!({})).map(|v| v["staged"].as_u64().unwrap_or(0))
+    }
+
+    /// Puts what waits in [`PENDING`] into the vault of this process, the
+    /// service's, at its start, then deletes the file; what fails stays
+    /// there for the next start and is said.
+    pub fn take_pending(paths: &NodePaths) -> Result<usize, String> {
+        let mut p = read_pending(paths)?;
+        p.remove(COMPLETE);
+        let mut left = Pending::new();
+        let mut errors = Vec::new();
+        let mut n = 0;
+        for (account, value) in p {
+            let r = match &value {
+                Some(v) => store::set(&account, v),
+                None => store::delete(&account).map(|_| ()),
+            };
+            match r {
+                Ok(()) => n += 1,
+                Err(e) => {
+                    errors.push(format!("{account}: {e}"));
+                    left.insert(account, value);
+                }
+            }
+        }
+        write_pending(paths, &left)?;
+        match errors.is_empty() {
+            true => Ok(n),
+            false => Err(format!(
+                "cannot put into the Credential Manager: {}",
+                errors.join("; ")
+            )),
+        }
     }
 }
 
@@ -1457,6 +1769,40 @@ mod tests {
         assert!(!KeysLock::node_runs(&paths));
     }
 
+    /// What waits for the service's start is written under the keys' lock:
+    /// never while a node that just started holds it (it may be taking the
+    /// file), and on where this process holds it (a restore).
+    #[test]
+    fn what_waits_for_the_service_is_written_under_the_keys_lock() {
+        let (_d, paths) = node();
+        let file = vault::pending_file(&paths);
+        let held = HeldByANode::take(&paths);
+        let e = vault::stage(&paths, "proxy:x", Some("v")).unwrap_err();
+        assert_eq!(e, vault::STARTED);
+        assert!(!file.exists());
+        drop(held);
+        let mine = KeysLock::try_take(&paths).unwrap().unwrap();
+        vault::stage(&paths, "proxy:x", Some("v")).unwrap();
+        assert!(file.exists());
+        drop(mine);
+        vault::stage(&paths, "proxy:y", None).unwrap();
+        // The lock went with the write.
+        assert!(KeysLock::try_take_soon(&paths).unwrap().is_some());
+    }
+
+    /// A lock this process holds (a restore's) is no node's: the stopped
+    /// service's vault is asked while the restore holds it.
+    #[test]
+    fn a_lock_this_process_holds_is_no_nodes() {
+        let (_d, paths) = node();
+        let mine = KeysLock::try_take(&paths).unwrap().unwrap();
+        assert!(!KeysLock::node_runs(&paths));
+        drop(mine);
+        let held = HeldByANode::take(&paths);
+        assert!(KeysLock::node_runs(&paths));
+        drop(held);
+    }
+
     /// A state folder that cannot be looked into is not proof that no node
     /// runs: the answer is the safe one, held.
     #[cfg(unix)]
@@ -1475,38 +1821,6 @@ mod tests {
         if !looked {
             assert!(runs, "a lock that cannot be looked at counted as no node");
         }
-    }
-
-    /// The refusal at the node's start puts the install before the pairing:
-    /// after Uninstall there is nothing to Start, and no center to pair.
-    #[test]
-    fn the_keyring_refusal_at_start_installs_before_it_pairs() {
-        let (_d, paths) = node();
-        let n = NoKeyring::WindowsService;
-        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
-        let (delete, then) = said.split_once("; then ").unwrap();
-        assert!(!delete.contains("pair"), "{said}");
-        let (install, pair) = then.split_once("pair").unwrap();
-        assert!(install.contains("install"), "{said}");
-        assert!(pair.contains("centers"), "{said}");
-        assert!(!said.contains("Start on the app"), "{said}");
-    }
-
-    /// The refusal does not send the owner to delete keys that may still be
-    /// in their files, or the audit log, without saying so.
-    #[test]
-    fn the_keyring_refusal_keeps_good_keys_and_warns_about_the_audit_log() {
-        let (_d, paths) = node();
-        let n = NoKeyring::WindowsService;
-        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
-        let (before, delete) = said.split_once("delete ").unwrap();
-        assert!(before.contains("still in files"), "{said}");
-        assert!(before.contains("nothing is lost"), "{said}");
-        assert!(
-            delete.contains(&paths.audit_log().display().to_string()),
-            "{said}"
-        );
-        assert!(delete.contains("copy it aside"), "{said}");
     }
 
     fn in_keyring(paths: &NodePaths, key: Key) -> Option<String> {
@@ -1615,32 +1929,125 @@ mod tests {
         }
     }
 
-    /// The installed node on Windows keeps no proxy value in a keyring it
-    /// would not read: storing refuses, reading named headers fails, both
-    /// without asking the keyring, and a node on other folders is as it was.
+    /// The installed node on Windows keeps its keyring secrets in the vault
+    /// of its service account: another process asks the running service,
+    /// and while none runs what it writes waits in a sealed file that the
+    /// service takes at its start; a read then finds what waits, or says
+    /// to start the node. An entry of another node is refused.
     #[test]
-    fn the_installed_node_on_windows_stores_and_reads_no_proxy_value() {
+    fn the_installed_node_on_windows_keeps_its_secrets_in_its_services_vault() {
         let (_d, paths) = node();
         let headers = [("X-Key".to_string(), "s3cret-value".to_string())];
         let names = ["X-Key".to_string()];
+        for_tests::pretend_windows_service(&paths);
+        assert!(vault::through_service(&paths));
+        // The service runs: the values go to its vault, through it.
+        for_tests::pretend_service_runs(&paths, true);
         store_proxy_headers(&paths, &headers).unwrap();
         assert_eq!(proxy_headers(&paths, &names).unwrap(), headers);
-        for_tests::pretend_windows_service(&paths);
-        let asked = store::calls();
-        let e = store_proxy_headers(&paths, &headers).unwrap_err();
-        assert!(e.contains(PROXY_WINDOWS_SERVICE), "{e}");
-        assert!(e.contains("nothing was changed"), "{e}");
-        // The entry from before is the administrator's, not the service's.
-        let e = proxy_headers(&paths, &names).unwrap_err();
-        assert!(e.contains(PROXY_WINDOWS_SERVICE), "{e}");
-        assert!(!e.contains("s3cret"), "{e}");
-        assert_eq!(store::calls(), asked, "the keyring was asked");
-        // No header, no value to read.
-        assert_eq!(proxy_headers(&paths, &[]).unwrap(), Vec::new());
-        // Another node of this process is not the installed one.
+        let entry = Entry::proxy(&paths);
+        assert!(store::get(entry.account()).unwrap().is_some());
+        assert!(!vault::pending_file(&paths).exists());
+        // It does not run: a key written now waits for it, sealed, and is
+        // read from there; an entry nothing waits for says to start it.
+        for_tests::pretend_service_runs(&paths, false);
+        put(
+            &paths,
+            SecretStorage::Keyring,
+            Key::ProxyLogin,
+            "t0ken-value",
+        )
+        .unwrap();
+        let file = vault::pending_file(&paths);
+        assert!(file.exists());
+        assert_eq!(
+            get(&paths, SecretStorage::Keyring, Key::ProxyLogin)
+                .unwrap()
+                .as_deref(),
+            Some("t0ken-value")
+        );
+        let e = get(&paths, SecretStorage::Keyring, Key::RelayTls).unwrap_err();
+        assert!(e.contains("start the node"), "{e}");
+        assert!(remove_proxy_headers(&paths).unwrap());
+        assert!(
+            store::get(Key::ProxyLogin.entry(&paths).account())
+                .unwrap()
+                .is_none()
+        );
+        // Its start takes them, as the service.
+        let n = vault::take_pending(&paths).unwrap();
+        assert_eq!(n, 2);
+        assert!(!file.exists());
+        assert_eq!(
+            store::get(Key::ProxyLogin.entry(&paths).account())
+                .unwrap()
+                .as_deref(),
+            Some("t0ken-value")
+        );
+        assert_eq!(store::get(entry.account()).unwrap(), None);
+        // The service serves its own node's entries only.
         let (_d2, other) = node();
-        store_proxy_headers(&other, &headers).unwrap();
-        assert_eq!(proxy_headers(&other, &names).unwrap(), headers);
+        let e = vault::serve(
+            &paths,
+            "vault.get",
+            &serde_json::json!({"account": Entry::proxy(&other).account()}),
+        )
+        .unwrap_err();
+        assert!(e.contains("no entry of this node"), "{e}");
+        for (account, mine) in [
+            (Entry::center_key(&paths, "lab").account().to_string(), true),
+            (Entry::config_key(&paths).account().to_string(), true),
+            (format!("config-key:{}", paths.config_dir.display()), false),
+            (
+                Entry::center_key(&other, "lab").account().to_string(),
+                false,
+            ),
+            ("center-key:../x:".to_string(), false),
+            ("anything".to_string(), false),
+        ] {
+            assert_eq!(Entry::is_of(&paths, &account), mine, "{account}");
+        }
+        // A node on other folders keeps using the keyring itself.
+        assert!(!vault::through_service(&other));
+    }
+
+    /// Before an install gives the service account a new password (Windows
+    /// then no longer opens what it kept), and before an uninstall that
+    /// keeps the data, the service copies its node's entries into the file
+    /// its next start takes.
+    #[test]
+    fn the_service_stages_its_entries_for_a_new_install() {
+        let (_d, paths) = node();
+        drop(paired(&paths, SecretStorage::Keyring, &["home"]));
+        let headers = [("X-Key".to_string(), "s3cret-value".to_string())];
+        store_proxy_headers(&paths, &headers).unwrap();
+        // What one call put aside while no service ran is no stage of all.
+        for_tests::pretend_windows_service(&paths);
+        for_tests::pretend_service_runs(&paths, false);
+        vault::stage(&paths, "proxy:x", Some("v")).unwrap();
+        assert!(!vault::staged_all(&paths));
+        vault::unstage(&paths, "proxy:x").unwrap();
+        let v = vault::serve(&paths, "vault.stage", &serde_json::json!({})).unwrap();
+        assert_eq!(v["staged"], 3, "{v}");
+        assert!(vault::staged_all(&paths));
+        let key = Key::Center("home").entry(&paths);
+        let kept = store::get(key.account()).unwrap();
+        assert!(kept.is_some());
+        // The account's vault is gone with its old password.
+        store::delete(key.account()).unwrap();
+        store::delete(Entry::proxy(&paths).account()).unwrap();
+        // The mark is no entry: the service's start counts and puts the
+        // three only.
+        assert_eq!(vault::take_pending(&paths).unwrap(), 3);
+        // The service's start took it all, the mark too.
+        assert!(!vault::pending_file(&paths).exists());
+        assert!(!vault::staged_all(&paths));
+        assert_eq!(store::get(key.account()).unwrap(), kept);
+        assert!(
+            store::get(Entry::proxy(&paths).account())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -2161,7 +2568,6 @@ mod tests {
     #[test]
     fn the_keyring_holds_the_keys_on_every_linux_kernel() {
         let (_d, paths) = node();
-        assert_eq!(no_keyring(&paths), None);
         let mut s = paired(&paths, SecretStorage::File, &["home"]);
         set_storage(&mut s, SecretStorage::Keyring).unwrap();
         assert_eq!(s.config().machine.secret_storage, SecretStorage::Keyring);

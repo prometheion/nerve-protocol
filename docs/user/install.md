@@ -11,7 +11,7 @@ Get the programs from
 
 | Machine | Files |
 |---|---|
-| x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux` |
+| x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`; the desktop app as `nerve-node-desktop_<version>_amd64.deb`, `nerve-node-desktop-<version>.x86_64.rpm` or `nerve-node-desktop-x86_64-linux` |
 | ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
 
 `nerve-center` and `nerve-node` are static and need no libraries. The
@@ -97,16 +97,22 @@ manager. Such a node runs every command as you
 
 ## The desktop app
 
-1. Download `nerve-node-desktop-x86_64-linux`.
-2. Let it run: in the file's **Properties**, switch on **Executable as
-   Program** (GNOME Files) or tick **Is executable** under **Permissions**
-   (KDE Dolphin).
-3. Open it, and press **Install**. The system asks for an administrator's
-   password.
+1. Download the package: the `.deb` for Ubuntu and Debian, the `.rpm` for
+   Fedora.
+2. Double-click it, and press **Install** in the software installer (or
+   `sudo apt install ./nerve-node-desktop_<version>_amd64.deb`,
+   `sudo dnf install ./nerve-node-desktop-<version>.x86_64.rpm`).
+3. Open **Nerve** from the application menu, and press **Install**. The
+   system asks for an administrator's password.
 
-It installs the node as a service, the app with **Nerve** in the application
-menu, and `nerve://` links, so a pairing link opens in Nerve. You become the
-node's owner. Its first steps pair your first center and choose its mode.
+The plain program works too: download `nerve-node-desktop-x86_64-linux`,
+switch on **Executable as Program** in its **Properties** (GNOME Files) or
+tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
+press **Install**.
+
+It installs the node as a service, `nerve://` links, so a pairing link opens
+in Nerve, and, for the plain program, **Nerve** in the application menu. You
+become the node's owner. Its first steps pair your first center and choose its mode.
 After that the app needs the password only for what changes the system
 ([rights](../dev/desktop.md#administrator-rights)).
 
@@ -173,7 +179,9 @@ release's `SHA256SUMS`, and restarts the service. `--from <file>` takes a
 file you checked yourself. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own
 to a unit belong in `sudo systemctl edit nerve-node`, which `update` leaves
-alone. The desktop app updates under **Settings › App › Update…**.
+alone. The desktop app updates under **Settings › App › Update…**; from a
+package, it installs the release's newer package with `apt` or `dnf`, and a
+newer package you install yourself updates the node's service too.
 
 ## Uninstall
 
@@ -186,7 +194,9 @@ sudo nerve-center uninstall [--purge]
 `uninstall` takes `nerve-run`'s access off your folders and gives you what
 it made there. Kept folders belong to root, and a later `install` takes them
 up again. Where the desktop app took over the node, `nerve-node uninstall`
-removes the app too.
+removes the app too. The app from a package: **Settings › App › Uninstall…**
+removes the node, then `sudo apt remove nerve-node-desktop` or
+`sudo dnf remove nerve-node-desktop` removes the app.
 
 ## Where the files are
 

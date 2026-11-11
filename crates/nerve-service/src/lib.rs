@@ -26,8 +26,8 @@ pub use account::Account;
 pub use files::owner_to_become;
 pub use files::{as_owner_of, become_owner, chown_tree, set_mode, write_file};
 pub use update::{
-    Place, Program, SERVICE_FILES, ServiceFile, Steps, Version, fetch_release, files_from,
-    files_text, start_unit, system_account, update,
+    Place, Placed, Program, SERVICE_FILES, ServiceFile, Steps, Version, fetch_release,
+    fetch_release_where, files_from, files_text, start_unit, system_account, update,
 };
 
 /// The control socket of the node `nerve-node install` put on a Linux

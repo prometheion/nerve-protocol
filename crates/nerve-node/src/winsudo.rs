@@ -8,13 +8,13 @@
 //! account's password, and the installed service, which alone may start a
 //! process with another account's token (crate::win_user).
 //!
-//! The switch keeps that password with DPAPI in the config folder
-//! ([`SUDO_FILE`]), as `install` keeps the owner's password
-//! (crate::winsvc::SECRET_FILE), and a restart holds it again ([`settle`]).
-//! `sudo on` and `sudo off` go to the running service over its control
-//! pipe, which checks the password and keeps it ([`take`]) or drops it at
-//! once, as a center with the settings grant does. With no node running,
-//! `sudo off` removes the file itself.
+//! The running node holds that password in its memory only, as on Linux:
+//! the switch is off after a restart of the node or of Windows. `sudo on`
+//! and `sudo off` go to the running service over its control pipe, which
+//! checks the password ([`take`]) or drops it at once. No center turns the
+//! switch on for a Windows node (crate::sudo::center_may_turn_on): the
+//! password is the owner's Windows password, which does not go through a
+//! web page and the relay; only the app on the machine turns it on.
 //!
 //! The steps go through [`WinSystem`], so they run on every platform in the
 //! tests.
@@ -22,16 +22,11 @@
 use std::io::Write;
 
 use nerve_policy::config::Sudo;
-use nerve_policy::settings::SettingsStore;
 use serde_json::{Value, json};
 
 use crate::paths::NodePaths;
-use crate::service::{Account, write_file};
-use crate::winsvc::{WinSystem, parse_secret, secret};
-
-/// The file in the config folder that holds the sudo password, encrypted
-/// with DPAPI, while the switch is on.
-pub const SUDO_FILE: &str = "sudo.dpapi";
+use crate::service::Account;
+use crate::winsvc::WinSystem;
 
 /// Why a node that is not the installed service has no sudo switch.
 pub const INSTALLED_ONLY: &str = "on Windows the sudo switch works on the node installed as a service (Nerve's installer installs it): only the service may start a command with the administrator token of the node's owner";
@@ -78,91 +73,23 @@ pub fn check(sys: &dyn WinSystem, account: Option<&Account>, password: &str) -> 
 }
 
 /// What the running node does with the password of `sudo on`: checks it
-/// for `account` ([`check`]) and keeps it ([`keep`]). The account's name.
+/// for `account` ([`check`]); the account's name. The node then holds the
+/// password in its memory only.
 pub fn take(
-    paths: &NodePaths,
     sys: &dyn WinSystem,
     account: Option<&Account>,
     password: &str,
 ) -> Result<String, String> {
     check(sys, account, password)?;
-    let name = &account.expect("checked").name;
-    keep(paths, sys, name, password)?;
-    Ok(name.clone())
+    Ok(account.expect("checked").name.clone())
 }
 
 /// Why `sudo on` asks for no password while no node runs.
 pub const NEEDS_THE_NODE: &str = "sudo on needs the running node, which checks the password: start it on the app's Overview, then turn sudo on again";
 
-/// Keeps `password`, `name`'s, with DPAPI in [`SUDO_FILE`].
-pub fn keep(
-    paths: &NodePaths,
-    sys: &dyn WinSystem,
-    name: &str,
-    password: &str,
-) -> Result<(), String> {
-    let sealed = sys.protect(&secret(name, password))?;
-    write_file(&paths.config_dir.join(SUDO_FILE), &sealed, 0o600)
-}
-
-/// Removes [`SUDO_FILE`]; one that is not there is fine.
-pub fn forget(paths: &NodePaths) -> Result<(), String> {
-    let file = paths.config_dir.join(SUDO_FILE);
-    match std::fs::remove_file(&file) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", file.display())),
-    }
-}
-
-/// Whether [`SUDO_FILE`] is there.
-pub fn kept(paths: &NodePaths) -> bool {
-    paths.config_dir.join(SUDO_FILE).is_file()
-}
-
-/// The password [`keep`] kept, when it is `user`'s: the owner now
-/// (crate::owner).
-pub fn stored(paths: &NodePaths, sys: &dyn WinSystem, user: Option<&str>) -> Option<String> {
-    let user = user?;
-    let blob = std::fs::read(paths.config_dir.join(SUDO_FILE)).ok()?;
-    let (name, password) = parse_secret(&sys.unprotect(&blob).ok()?)?;
-    name.eq_ignore_ascii_case(user).then_some(password)
-}
-
-/// What the running node does with the password it holds (crate::sudo).
-#[derive(Debug, PartialEq, Eq)]
-pub enum Settle {
-    /// The switch is on, no password is held and one is kept: a start, or
-    /// `sudo on` before it. The node holds the kept one.
-    Load,
-    /// A password is held but none is kept any more: `sudo off` removed
-    /// it. The node drops it, and the switch goes off.
-    Drop,
-    Nothing,
-}
-
-/// [`Settle`] for the switch `on`, whether a password is `held`, and
-/// whether one is `kept`.
-pub fn settle(on: bool, held: bool, kept: bool) -> Settle {
-    match (on, held, kept) {
-        (true, false, true) => Settle::Load,
-        (true, true, false) => Settle::Drop,
-        _ => Settle::Nothing,
-    }
-}
-
-/// The signed config, read as the CLI reads it: its key may be in the
-/// system keyring (`machine.secret_storage`).
-fn read(paths: &NodePaths) -> Result<nerve_policy::NodeConfig, String> {
-    SettingsStore::peek_with(
-        &paths.config_file(),
-        &crate::secrets::NodeSecrets::for_cli(paths),
-    )
-}
-
 /// `nerve-node sudo on`: asks for the password of the account the commands
 /// run as and hands it to the running node over `call` (its control pipe),
-/// which checks it, keeps it ([`take`]) and turns the switch on at once.
+/// which checks it ([`take`]), holds it and turns the switch on at once.
 /// `installed` says whether `paths` are the installed service's.
 pub async fn on(
     sys: &dyn WinSystem,
@@ -201,7 +128,8 @@ pub async fn on(
 
 /// `nerve-node sudo off`: the running node drops the password at once and
 /// sets the switch off (`call`, its control pipe); with no node running the
-/// kept password and the switch go from the files here.
+/// switch goes off in the config here (a node that does not run holds no
+/// password).
 pub async fn off(
     paths: &NodePaths,
     sys: &dyn WinSystem,
@@ -216,7 +144,6 @@ pub async fn off(
     match call("sudo.off", json!({})).await {
         Ok(_) => {}
         Err(e) if crate::cli::no_node(paths, &e) => {
-            forget(paths)?;
             crate::cli::edit(paths, |c| {
                 c.machine.sudo = Sudo::Off;
                 Ok(())
@@ -241,23 +168,17 @@ pub async fn off(
     Ok(())
 }
 
-/// `nerve-node sudo`: what the running node says (`call`); with no node
-/// running, on when the signed config says so and the password is kept.
+/// `nerve-node sudo`: what the running node says (`call`); a node that
+/// does not run holds no password, so the switch is off.
 pub async fn status(
     paths: &NodePaths,
     call: impl AsyncFn(&str, Value) -> Result<Value, String>,
 ) -> Result<bool, String> {
     match call("sudo.status", json!({})).await {
         Ok(v) => Ok(v["sudo"] == "on"),
-        Err(e) if crate::cli::no_node(paths, &e) => kept_on(paths),
+        Err(e) if crate::cli::no_node(paths, &e) => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-/// On in the signed config, with the password kept.
-fn kept_on(paths: &NodePaths) -> Result<bool, String> {
-    let cfg = read(paths)?;
-    Ok(cfg.machine.sudo == Sudo::On && kept(paths))
 }
 
 #[cfg(test)]
@@ -266,7 +187,13 @@ mod tests {
     use crate::winsvc::tests::{Fake, account, installed};
 
     fn sudo_of(paths: &NodePaths) -> Sudo {
-        read(paths).unwrap().machine.sudo
+        nerve_policy::settings::SettingsStore::peek_with(
+            &paths.config_file(),
+            &crate::secrets::NodeSecrets::for_cli(paths),
+        )
+        .unwrap()
+        .machine
+        .sudo
     }
 
     #[test]
@@ -287,7 +214,7 @@ mod tests {
         );
         let e = check(&sys, Some(&bob), "wrong").unwrap_err();
         assert!(e.contains("password of bob is wrong"), "{e}");
-        check(&sys, Some(&bob), "bob's").unwrap();
+        assert_eq!(take(&sys, Some(&bob), "bob's").unwrap(), "bob");
         assert_eq!(
             sys.calls()
                 .iter()
@@ -299,12 +226,14 @@ mod tests {
 
     /// The node the CLI talks to over its control pipe, as far as the switch
     /// goes: it takes the password as the daemon does ([`take`], then the
-    /// switch in its config), records what it was sent, and answers
-    /// [`nerve_transport::ctl::NOT_RUNNING`] while it is `down`.
+    /// switch in its config), holds it in memory, records what it was sent,
+    /// and answers [`nerve_transport::ctl::NOT_RUNNING`] while it is `down`.
+    /// A restart drops what it holds.
     struct Node<'a> {
         paths: &'a NodePaths,
         sys: &'a dyn WinSystem,
         down: std::cell::Cell<bool>,
+        held: std::cell::RefCell<Option<String>>,
         sent: std::cell::RefCell<Vec<String>>,
     }
 
@@ -320,21 +249,21 @@ mod tests {
                     Ok(())
                 })
             };
+            let on = || self.held.borrow().is_some() && sudo_of(self.paths) == Sudo::On;
             match method {
                 "status" => Ok(json!({})),
-                "sudo.status" => {
-                    Ok(json!({"sudo": if kept_on(self.paths)? { "on" } else { "off" }}))
-                }
+                "sudo.status" => Ok(json!({"sudo": if on() { "on" } else { "off" }})),
                 "sudo.on" => {
                     let user = self.sys.owner()?.map(|(_, n)| n);
                     let account = user.and_then(|n| self.sys.account(&n).ok().flatten());
                     let password = params["password"].as_str().unwrap_or_default();
-                    take(self.paths, self.sys, account.as_ref(), password)?;
+                    take(self.sys, account.as_ref(), password)?;
+                    *self.held.borrow_mut() = Some(password.into());
                     set(true).await?;
                     Ok(json!({"sudo": "on"}))
                 }
                 "sudo.off" => {
-                    forget(self.paths)?;
+                    *self.held.borrow_mut() = None;
                     set(false).await?;
                     Ok(json!({"sudo": "off"}))
                 }
@@ -344,8 +273,8 @@ mod tests {
     }
 
     /// A pipe of the node's name that another account made, while no node
-    /// runs, is no node: `sudo off` and the status work on the files, as the
-    /// other commands do (cli::no_node).
+    /// runs, is no node: `sudo off` works on the files and the status is
+    /// off, as the other commands do (cli::no_node).
     #[tokio::test]
     async fn another_accounts_pipe_is_no_node_for_the_switch() {
         let d = tempfile::tempdir().unwrap();
@@ -358,14 +287,14 @@ mod tests {
                 crate::pipe::NOT_THE_NODES
             ))
         };
-        keep(p, &sys, "alice", "alice's").unwrap();
         crate::cli::edit(p, |c| {
             c.machine.sudo = Sudo::On;
             Ok(())
         })
         .await
         .unwrap();
-        assert!(status(p, call).await.unwrap());
+        // No node holds a password, whatever the config says.
+        assert!(!status(p, call).await.unwrap());
         off(p, &sys, call, &mut Vec::new()).await.unwrap();
         assert_eq!(sudo_of(p), Sudo::Off);
         assert!(!status(p, call).await.unwrap());
@@ -377,11 +306,11 @@ mod tests {
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
         let p = &l.paths;
-        let file = p.config_dir.join(SUDO_FILE);
         let node = Node {
             paths: p,
             sys: &sys,
             down: false.into(),
+            held: Default::default(),
             sent: Default::default(),
         };
         let call = async |m: &str, v: Value| node.call(m, v).await;
@@ -389,7 +318,6 @@ mod tests {
         sys.types("alice's");
         let e = on(&sys, true, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("alice is not an administrator"), "{e}");
-        assert!(!file.exists());
         sys.put_owner("S-1-5-21-1-2-3-1002").unwrap();
         sys.passwords
             .borrow_mut()
@@ -411,14 +339,13 @@ mod tests {
         assert_eq!(e, NEEDS_THE_NODE);
         assert!(String::from_utf8(out).unwrap().is_empty());
         node.down.set(false);
-        // A wrong password leaves the switch off and keeps nothing.
+        // A wrong password leaves the switch off.
         sys.types("wrong");
         let e = on(&sys, true, call, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("password of bob is wrong"), "{e}");
-        assert!(!file.exists());
         assert_eq!(sudo_of(p), Sudo::Off);
         assert!(!status(p, call).await.unwrap());
-        // The right one: the node has it, keeps it sealed and is on now.
+        // The right one: the node holds it and is on now.
         sys.types("bob's");
         let mut out = Vec::new();
         on(&sys, true, call, &mut out).await.unwrap();
@@ -447,12 +374,14 @@ mod tests {
             "{:?}",
             node.sent
         );
-        let blob = std::fs::read(&file).unwrap();
-        assert!(!blob.windows(5).any(|w| w == b"bob's"));
-        assert_eq!(stored(p, &sys, Some("BOB")).as_deref(), Some("bob's"));
-        // A password is one account's.
-        assert_eq!(stored(p, &sys, Some("alice")), None);
-        assert_eq!(stored(p, &sys, None), None);
+        // Nothing in the config folder holds it: a restart forgets it.
+        for f in std::fs::read_dir(&p.config_dir).unwrap() {
+            let f = f.unwrap().path();
+            if f.is_file() {
+                let b = std::fs::read(&f).unwrap();
+                assert!(!b.windows(5).any(|w| w == b"bob's"), "{}", f.display());
+            }
+        }
         assert_eq!(sudo_of(p), Sudo::On);
         assert!(status(p, call).await.unwrap());
         // Off goes to the node.
@@ -467,13 +396,10 @@ mod tests {
                 && out.contains("Take it out of Administrators"),
             "{out}"
         );
-        assert!(!file.exists());
         assert_eq!(sudo_of(p), Sudo::Off);
         assert!(!status(p, call).await.unwrap());
-        assert_eq!(stored(p, &sys, Some("bob")), None);
-        // With no node running, off removes the kept password and the
-        // switch from the files, and the status reads them.
-        keep(p, &sys, "bob", "bob's").unwrap();
+        // With no node running, the status is off whatever the config
+        // says, and off sets the config off.
         crate::cli::edit(p, |c| {
             c.machine.sudo = Sudo::On;
             Ok(())
@@ -481,11 +407,9 @@ mod tests {
         .await
         .unwrap();
         node.down.set(true);
-        assert!(status(p, call).await.unwrap());
-        off(p, &sys, call, &mut Vec::new()).await.unwrap();
-        assert!(!file.exists());
-        assert_eq!(sudo_of(p), Sudo::Off);
         assert!(!status(p, call).await.unwrap());
+        off(p, &sys, call, &mut Vec::new()).await.unwrap();
+        assert_eq!(sudo_of(p), Sudo::Off);
         node.down.set(false);
         // Another group that can read every file is named as it is; an
         // account in none gets no reminder.
@@ -505,49 +429,6 @@ mod tests {
                 ),
                 None => assert!(!out.contains("still in the group"), "{out}"),
             }
-        }
-    }
-
-    /// A node whose config key is in the system keyring (no `config.key`)
-    /// reads its config there for `sudo` while it does not run.
-    #[test]
-    fn status_reads_a_config_whose_key_is_in_the_keyring() {
-        let d = tempfile::tempdir().unwrap();
-        let p = NodePaths::new(d.path().join("config"), d.path().join("state"));
-        let mut s = SettingsStore::open_with(
-            p.config_file(),
-            Box::new(crate::secrets::NodeSecrets::new(&p)),
-            nerve_policy::audit::AuditLog::new(p.audit_log()),
-        )
-        .unwrap();
-        s.update(|c| {
-            c.machine.secret_storage = nerve_policy::config::SecretStorage::Keyring;
-            Ok(())
-        })
-        .unwrap();
-        assert!(!p.config_key().exists());
-        assert_eq!(kept_on(&p), Ok(false));
-    }
-
-    /// The running node holds a kept password when the switch is on, and
-    /// drops the one it holds when `sudo off` removed it.
-    #[test]
-    fn the_running_node_follows_the_kept_password() {
-        assert_eq!(settle(true, false, true), Settle::Load);
-        assert_eq!(settle(true, true, false), Settle::Drop);
-        for (on, held, kept) in [
-            (true, true, true),
-            (true, false, false),
-            (false, false, true),
-            (false, true, true),
-            (false, true, false),
-            (false, false, false),
-        ] {
-            assert_eq!(
-                settle(on, held, kept),
-                Settle::Nothing,
-                "{on} {held} {kept}"
-            );
         }
     }
 }

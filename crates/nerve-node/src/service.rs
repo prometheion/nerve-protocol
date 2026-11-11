@@ -37,6 +37,11 @@ pub const USER: &str = "nerve";
 /// The comment `install` gives that user. A `nerve` user without it was not
 /// made by `install`: install does not take it over, uninstall leaves it.
 pub const USER_MARK: &str = "Nerve node";
+/// What an install or an uninstall on Windows says when the service could
+/// not put the keys and the proxy's login of its Credential Manager aside
+/// and nothing was changed. The app offers to go on without them where it
+/// finds this text in the error (`--forget-secrets`).
+pub const SECRETS_KEPT: &str = "nothing was changed, and they would be lost";
 /// The systemd unit.
 pub const UNIT_NAME: &str = "nerve-node.service";
 
@@ -60,7 +65,96 @@ pub struct Layout {
     pub release: String,
     /// The program installed: the node, or the desktop app with its parts.
     pub edition: &'static crate::edition::Edition,
+    /// The package the desktop app came from on Linux (#212), whose package
+    /// manager owns the program: none for a plain program.
+    pub package: Option<Package>,
 }
+
+/// The kind of package the Linux desktop app came from (#212). The package
+/// puts the program in `/usr/bin` with its menu entry and icon, and
+/// [`Package::MARK`], which names its kind; `install` then leaves the
+/// program where it is, `update` installs the release's package with the
+/// package manager, and `uninstall` leaves the program to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Package {
+    Deb,
+    Rpm,
+}
+
+impl Package {
+    /// The file the package brings that says its kind: `deb` or `rpm`.
+    pub const MARK: &str = "/usr/share/nerve-node-desktop/package";
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Package::Deb => "deb",
+            Package::Rpm => "rpm",
+        }
+    }
+
+    /// The kind [`Package::MARK`] says.
+    pub fn of_word(said: &str) -> Option<Package> {
+        match said.trim() {
+            "deb" => Some(Package::Deb),
+            "rpm" => Some(Package::Rpm),
+            _ => None,
+        }
+    }
+
+    /// The release's file of `program`'s package of version `v`.
+    pub fn asset(self, program: &str, v: &str) -> String {
+        match self {
+            Package::Deb => format!("{program}_{v}_amd64.deb"),
+            Package::Rpm => format!("{program}-{v}.x86_64.rpm"),
+        }
+    }
+
+    /// The version in the name of a release file of `program`'s package of
+    /// this kind; none for any other file.
+    pub fn version_in(self, program: &str, name: &str) -> Option<Version> {
+        let v = match self {
+            Package::Deb => name
+                .strip_prefix(program)?
+                .strip_prefix('_')?
+                .strip_suffix("_amd64.deb")?,
+            Package::Rpm => name
+                .strip_prefix(program)?
+                .strip_prefix('-')?
+                .strip_suffix(".x86_64.rpm")?,
+        };
+        Version::parse_of(program, &format!("{program} {v}"))
+    }
+
+    /// The package manager's command that installs the file at `file`, and
+    /// its name.
+    pub fn manager(self) -> &'static str {
+        match self {
+            Package::Deb => "apt-get",
+            Package::Rpm => "dnf",
+        }
+    }
+
+    /// What removes the package.
+    pub fn remove(self, program: &str) -> String {
+        match self {
+            Package::Deb => format!("sudo apt remove {program}"),
+            Package::Rpm => format!("sudo dnf remove {program}"),
+        }
+    }
+}
+
+/// The package the desktop app came from, as the mark at `mark` says.
+pub fn package_at(mark: &Path) -> Option<Package> {
+    Package::of_word(&std::fs::read_to_string(mark).ok()?)
+}
+
+/// What `update` of a program from a package says to `--from` with another
+/// file: the package manager owns the program.
+pub const PACKAGE_FROM: &str = "only its package manager replaces it: install the newer package, or update without a file, which installs the latest release's package";
+
+/// The environment variable `update` sets for the package manager it runs:
+/// the package's own script then leaves the service to the update.
+pub const UPDATING_VAR: &str = "NERVE_PACKAGE_UPDATE";
 
 impl Layout {
     /// The places on this machine. On Windows the program goes to
@@ -74,7 +168,22 @@ impl Layout {
     /// [`Layout::system`] for `edition`: the program is named after it,
     /// `/usr/local/bin/nerve-node-desktop` for the desktop app.
     pub fn of(edition: &'static crate::edition::Edition) -> Layout {
+        let package = if cfg!(target_os = "linux") {
+            package_at(Path::new(Package::MARK))
+        } else {
+            None
+        };
+        Layout::of_package(edition, package)
+    }
+
+    /// [`Layout::of`] where the desktop app came from `package`: its
+    /// program is the package's, in `/usr/bin`. The node alone has none.
+    pub fn of_package(
+        edition: &'static crate::edition::Edition,
+        package: Option<Package>,
+    ) -> Layout {
         let program = edition.program;
+        let package = package.filter(|_| program == crate::edition::DESKTOP_PROGRAM);
         let release = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into();
         if cfg!(windows) {
             let var = |k: &str, or: &str| {
@@ -94,11 +203,17 @@ impl Layout {
                 run_temp: Vec::new(),
                 release,
                 edition,
+                package: None,
             };
         }
+        let bin_dir = if package.is_some() {
+            "/usr/bin"
+        } else {
+            "/usr/local/bin"
+        };
         Layout {
             unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
-            bin: PathBuf::from("/usr/local/bin").join(program),
+            bin: PathBuf::from(bin_dir).join(program),
             home: "/var/lib/nerve".into(),
             run_home: crate::account::RUN_HOME.into(),
             run_temp: ["/tmp", "/var/tmp", "/dev/shm"]
@@ -108,6 +223,22 @@ impl Layout {
             paths: NodePaths::new("/etc/nerve", "/var/lib/nerve/state"),
             release,
             edition,
+            package,
+        }
+    }
+
+    /// The `/usr/local` of the program: its folder's parent, or beside
+    /// the `/usr/bin` of a package's program, where the package manager
+    /// owns the folders.
+    fn local(&self) -> PathBuf {
+        let usr = self
+            .bin
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("/usr/local"));
+        match self.package {
+            Some(_) => usr.join("local"),
+            None => usr.to_path_buf(),
         }
     }
 
@@ -135,12 +266,7 @@ impl Layout {
     /// ([`service_helper_text`]): beside the program's `bin`, in
     /// `/usr/local/lib/nerve-node`.
     pub fn service_helper(&self) -> PathBuf {
-        let local = self
-            .bin
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or(Path::new("/usr/local"));
-        local.join("lib/nerve-node").join(SERVICE_HELPER)
+        self.local().join("lib/nerve-node").join(SERVICE_HELPER)
     }
 
     /// The polkit action of [`Layout::service_helper`]: in
@@ -512,6 +638,15 @@ pub trait System: nerve_service::System {
             program.display()
         ))
     }
+    /// Installs the package file at `file` with the package manager of its
+    /// kind, without a question.
+    fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+        Err(format!(
+            "cannot install {} with {} here",
+            file.display(),
+            package.manager()
+        ))
+    }
 }
 
 /// The `pkexec` of this machine: on `PATH`, else in `/usr/bin`.
@@ -689,6 +824,29 @@ impl System for Host {
     fn restricts_userns(&self) -> bool {
         std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
             .is_ok_and(|v| v.trim() == "1")
+    }
+
+    fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+        let manager = package.manager();
+        let mut c = std::process::Command::new(manager);
+        // A path, so that the package manager takes the file and does not
+        // look for a package of that name.
+        c.args(["install", "-y"])
+            .arg(file)
+            .env(UPDATING_VAR, "1")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdin(std::process::Stdio::null());
+        nerve_service::regain_root(&mut c);
+        let o = c.output().map_err(|e| format!("{manager}: {e}"))?;
+        if o.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{manager} install {}: {}",
+                file.display(),
+                failure(&o)
+            ))
+        }
     }
 
     fn apparmor(&self, profile: &Path, remove: bool) -> Result<(), String> {
@@ -984,16 +1142,15 @@ fn install_steps(
     invoker: &str,
     steps: &mut Steps,
 ) -> Result<(), String> {
-    // Keys in the keyring where they may not be there (an old Landlock):
-    // the installed node would not start, so install changes nothing.
-    if crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring
-        && let Some(n) = crate::secrets::no_keyring(&layout.paths)
-    {
-        return Err(crate::secrets::keyring_refused(
-            &layout.paths,
-            n,
-            "install changed nothing",
-            "run `sudo nerve-node install` again, and pair the centers again",
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    let in_place = real(exe).is_some() && real(exe) == real(&layout.bin);
+    // The package manager owns a package's program: another one does not
+    // take its place.
+    if let (Some(package), false) = (layout.package, in_place) {
+        return Err(format!(
+            "the app came from its {} package here, so its program is {}: open that one (Nerve in the application menu); {PACKAGE_FROM}",
+            package.word(),
+            layout.bin.display()
         ));
     }
     // Asked before anything changes.
@@ -1069,8 +1226,7 @@ fn install_steps(
     ));
     let owner = owner_of_install(layout, sys, invoker, root, steps)?;
     let in_keyring = crate::secrets::stated_storage(&layout.paths) == SecretStorage::Keyring;
-    let real = |p: &Path| std::fs::canonicalize(p).ok();
-    if real(exe).is_some() && real(exe) == real(&layout.bin) {
+    if in_place {
         steps.did(format!(
             "the program is at {} already",
             layout.bin.display()
@@ -1702,10 +1858,37 @@ fn uninstall_steps(
         None => {}
     }
     uninstall_parts(layout, steps)?;
-    if layout.bin.exists() {
+    if let Some(package) = layout.package {
+        steps.did(format!(
+            "left the program {}: it is the {} package's, which `{}` removes",
+            layout.bin.display(),
+            package.word(),
+            package.remove(layout.edition.program)
+        ));
+    } else if layout.bin.exists() {
         std::fs::remove_file(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
         steps.did(format!("removed the program {}", layout.bin.display()));
     }
+    Ok(())
+}
+
+/// Where the app came from a package, the plain program an earlier
+/// install put in `/usr/local/bin` goes: the package's takes its place,
+/// and the command must not run the older one.
+#[cfg(not(windows))]
+fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    if layout.package.is_none() {
+        return Ok(());
+    }
+    let plain = beside(layout, layout.edition.program);
+    if !std::fs::symlink_metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
+    steps.did(format!(
+        "removed the earlier program {}: the package's takes its place",
+        plain.display()
+    ));
     Ok(())
 }
 
@@ -1752,6 +1935,23 @@ async fn update_steps(
 ) -> Result<(), String> {
     let program = layout.edition.program;
     let install = format!("sudo {program} install");
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    // The app from a package: its package manager replaces the program.
+    let placed = match (layout.package, from) {
+        (None, _) => None,
+        // The package manager put it in place before (the package's own
+        // script runs this when it is installed).
+        (Some(_), Some(f)) if real(f).is_some() && real(f) == real(&layout.bin) => {
+            Some(nerve_service::Placed::default())
+        }
+        (Some(package), Some(_)) => {
+            return Err(format!(
+                "the app came from its {} package here, so {PACKAGE_FROM}",
+                package.word()
+            ));
+        }
+        (Some(package), None) => Some(install_package(layout, sys, package, steps).await?),
+    };
     // The files of the service the new program has, for the owner the unit
     // names now and the polkit of this machine.
     let files_args = files_args(unit_owner(layout), sys.polkit(&layout.polkit_rule()));
@@ -1771,12 +1971,102 @@ async fn update_steps(
                 load_apparmor(layout, sys, steps);
             }
         },
+        placed,
     };
     let started = || sys.wait_running(&layout.paths);
     if nerve_service::update(&p, sys, from, &started, steps).await? {
         install_parts(layout, steps)?;
     }
     Ok(())
+}
+
+/// The latest release's package of the app, checked against its
+/// `SHA256SUMS` and installed with the package manager: what the program
+/// was before it.
+async fn install_package(
+    layout: &Layout,
+    sys: &dyn System,
+    package: Package,
+    steps: &mut Steps<'_>,
+) -> Result<nerve_service::Placed, String> {
+    let program = layout.edition.program;
+    let account = sys
+        .account(USER)?
+        .filter(|a| a.comment == USER_MARK)
+        .ok_or_else(|| {
+            format!("the user {USER} is missing; `sudo {program} install` makes it again")
+        })?;
+    let old_v = sys
+        .version_of(&layout.bin, &account)
+        .ok()
+        .and_then(|s| program_version(layout, &s));
+    let what = format!("{} package of {program}", package.word());
+    let (asset, bytes) = nerve_service::fetch_release_where(&layout.release, &what, &|name| {
+        package.version_in(program, name).is_some()
+    })
+    .await?;
+    steps.did(format!(
+        "downloaded {asset} from {} and checked it against its SHA256SUMS",
+        layout.release
+    ));
+    let new_v = package.version_in(program, &asset);
+    match (old_v, new_v) {
+        (Some(o), Some(n)) if n < o => {
+            return Err(format!(
+                "the release's package is {program} {n}, older than the installed {o}; nothing changed"
+            ));
+        }
+        // The service may still run an older one, which the package
+        // manager replaced without a restart: it restarts with this one.
+        (Some(o), Some(n)) if n == o => {
+            steps.did(format!("the release's {program} {o} is installed already"));
+            return Ok(nerve_service::Placed::default());
+        }
+        _ => {}
+    }
+    let old = std::fs::read(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
+    // In a folder of root's own, which the package manager reads as root.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    let names = (0..16).map(|i| format!("nerve-update-{}-{stamp:x}-{i}", std::process::id()));
+    let dir = fresh_dir(&std::env::temp_dir(), names)?;
+    let file = dir.join(&asset);
+    let r = write_file(&file, &bytes, 0o644).and_then(|()| sys.install_package(package, &file));
+    let _ = std::fs::remove_dir_all(&dir);
+    r?;
+    steps.did(format!("installed {asset} with {}", package.manager()));
+    Ok(nerve_service::Placed {
+        old: Some(old),
+        version: old_v,
+    })
+}
+
+/// A folder this process makes under `parent`, 0700, at the first of
+/// `names` that is free. One that is there already, a folder or a link that
+/// another account put in `/tmp` under that name, is never taken: what root
+/// writes into it could be swapped before the package manager reads it.
+fn fresh_dir(parent: &Path, names: impl IntoIterator<Item = String>) -> Result<PathBuf, String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    for name in names {
+        let dir = parent.join(name);
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!(
+        "{}: every name for a folder of the update is taken",
+        parent.display()
+    ))
 }
 
 /// What `update` asks the new program besides `service-files`: the owner the
@@ -1875,12 +2165,17 @@ pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String
 }
 
 /// [`put_parts`], and on Linux the node alone that was installed before the
-/// program becomes a link to it ([`link_node`]). Windows has no node alone
-/// to take over: the desktop app is the only way to the node there.
+/// program becomes a link to it ([`link_node`]), and the app from a package
+/// drops its earlier plain program ([`drop_plain_program`]). Windows has no
+/// node alone to take over: the desktop app is the only way to the node
+/// there.
 pub(crate) fn install_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     put_parts(layout, steps)?;
     #[cfg(not(windows))]
-    link_node(layout, steps)?;
+    {
+        drop_plain_program(layout, steps)?;
+        link_node(layout, steps)?;
+    }
     Ok(())
 }
 
@@ -1909,10 +2204,15 @@ pub fn node_beside(layout: &Layout) -> Option<PathBuf> {
     Some(beside(layout, node))
 }
 
-/// The program `program` in `layout`'s folder, with its extension.
+/// The program `program` in `layout`'s folder, with its extension; for
+/// the app from a package, in the `/usr/local/bin` where the plain programs
+/// are.
 #[cfg(not(windows))]
 fn beside(layout: &Layout, program: &str) -> PathBuf {
-    let mut p = layout.bin.with_file_name(program);
+    let mut p = match layout.package {
+        Some(_) => layout.local().join("bin").join(program),
+        None => layout.bin.with_file_name(program),
+    };
     if let Some(ext) = layout.bin.extension() {
         p.set_extension(ext);
     }
@@ -1929,7 +2229,17 @@ pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
     if layout.edition.program != crate::edition::NODE.program {
         return None;
     }
-    Some(beside(layout, crate::edition::DESKTOP_PROGRAM)).filter(|p| p.is_file())
+    let app = crate::edition::DESKTOP_PROGRAM;
+    // Or the app from a package, in the /usr/bin beside /usr/local.
+    let packaged = layout
+        .bin
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|usr| usr.join("bin").join(app));
+    std::iter::once(beside(layout, app))
+        .chain(packaged)
+        .find(|p| p.is_file())
 }
 
 /// `uninstall` of the node alone where the desktop app took the node over:
@@ -1993,8 +2303,11 @@ fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let Some(node) = node_beside(layout) else {
         return Ok(());
     };
-    // A link is there already (this one, or another's to leave alone).
-    if !std::fs::symlink_metadata(&node).is_ok_and(|m| m.is_file()) {
+    // A link is there already (this one, or another's to leave alone),
+    // but for one to the plain program the package's replaced.
+    let to_plain = layout.package.is_some()
+        && std::fs::read_link(&node).is_ok_and(|t| t == beside(layout, layout.edition.program));
+    if !std::fs::symlink_metadata(&node).is_ok_and(|m| m.is_file()) && !to_plain {
         return Ok(());
     }
     let at = |e: std::io::Error| format!("{}: {e}", node.display());
@@ -2431,6 +2744,9 @@ pub(crate) mod tests {
         pub(crate) restricts_userns: std::cell::Cell<bool>,
         /// The AppArmor profiles loaded (true) and taken out (false).
         pub(crate) apparmor: std::cell::RefCell<Vec<(PathBuf, bool)>>,
+        /// Where the package manager puts the program a package holds: a
+        /// package here is the program's text.
+        pub(crate) package_bin: std::cell::RefCell<Option<PathBuf>>,
     }
 
     impl std::ops::Deref for Fake {
@@ -2455,6 +2771,7 @@ pub(crate) mod tests {
                 landlock_abi: std::cell::Cell::new(None),
                 restricts_userns: std::cell::Cell::new(false),
                 apparmor: std::cell::RefCell::default(),
+                package_bin: std::cell::RefCell::default(),
             }
         }
     }
@@ -2567,6 +2884,16 @@ pub(crate) mod tests {
             ));
             Ok(())
         }
+        fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!(
+                "{} install {}",
+                package.manager(),
+                file.file_name().unwrap().to_string_lossy()
+            ));
+            let bin = self.package_bin.borrow().clone().ok_or("no package here")?;
+            let program = std::fs::read(file).map_err(|e| e.to_string())?;
+            write_file(&bin, &program, 0o755)
+        }
     }
 
     fn layout(root: &Path) -> Layout {
@@ -2579,6 +2906,7 @@ pub(crate) mod tests {
             paths: NodePaths::new(root.join("etc/nerve"), root.join("var/lib/nerve/state")),
             release: "http://127.0.0.1:1/none".into(),
             edition: &crate::edition::NODE,
+            package: None,
         }
     }
 
@@ -4545,10 +4873,15 @@ pub(crate) mod tests {
     /// A release on a local server: `SHA256SUMS` and the program, the
     /// program behind a redirect as GitHub has it.
     async fn release(program: &'static [u8], sums: String) -> String {
+        release_of(&asset_name("nerve-node").unwrap(), program, sums).await
+    }
+
+    /// [`release`] with the file `asset`.
+    async fn release_of(asset: &str, program: &'static [u8], sums: String) -> String {
         use nerve_transport::http::{Response, read_request};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let asset = asset_name("nerve-node").unwrap();
+        let asset = asset.to_string();
         tokio::spawn(async move {
             while let Ok((mut io, _)) = listener.accept().await {
                 let req = read_request(&mut io, 0).await.unwrap();
@@ -4768,6 +5101,194 @@ pub(crate) mod tests {
         install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
         uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
         assert_eq!(std::fs::read_link(&node.bin).unwrap(), other);
+    }
+
+    /// The package's kinds, their release files and the app's places
+    /// from a package (#212); the node alone has no package.
+    #[test]
+    fn a_package_says_its_kind_its_release_file_and_the_apps_places() {
+        let d = tempfile::tempdir().unwrap();
+        let mark = d.path().join("package");
+        assert_eq!(package_at(&mark), None);
+        for (word, kind) in [("deb\n", Package::Deb), ("rpm", Package::Rpm)] {
+            std::fs::write(&mark, word).unwrap();
+            assert_eq!(package_at(&mark), Some(kind));
+        }
+        std::fs::write(&mark, "tar").unwrap();
+        assert_eq!(package_at(&mark), None);
+        let app = "nerve-node-desktop";
+        let deb = Package::Deb.asset(app, "0.1.0");
+        let rpm = Package::Rpm.asset(app, "0.1.0");
+        assert_eq!(deb, "nerve-node-desktop_0.1.0_amd64.deb");
+        assert_eq!(rpm, "nerve-node-desktop-0.1.0.x86_64.rpm");
+        let v = |p: Package, n: &str| p.version_in(app, n).map(|v| v.to_string());
+        assert_eq!(v(Package::Deb, &deb).as_deref(), Some("0.1.0"));
+        assert_eq!(v(Package::Rpm, &rpm).as_deref(), Some("0.1.0"));
+        for other in [
+            rpm.as_str(),
+            "nerve-node-desktop-x86_64-linux",
+            "nerve-node_0.1.0_amd64.deb",
+            "nerve-node-desktop_0.1_amd64.deb",
+            "nerve-node-desktop_0.1.0_arm64.deb",
+        ] {
+            assert_eq!(v(Package::Deb, other), None, "{other}");
+        }
+        let l = Layout::of_package(&DESKTOP, Some(Package::Deb));
+        assert_eq!(l.bin, Path::new("/usr/bin/nerve-node-desktop"));
+        assert_eq!(l.package, Some(Package::Deb));
+        // What the package manager does not own stays in /usr/local.
+        assert_eq!(
+            l.service_helper(),
+            Path::new("/usr/local/lib/nerve-node/service-control")
+        );
+        assert_eq!(
+            node_beside(&l).as_deref(),
+            Some(Path::new("/usr/local/bin/nerve-node"))
+        );
+        let node = Layout::of_package(&crate::edition::NODE, Some(Package::Rpm));
+        assert_eq!(node.package, None);
+        assert_eq!(node.bin, Path::new("/usr/local/bin/nerve-node"));
+        assert_eq!(
+            Layout::of_package(&DESKTOP, None).bin,
+            Layout::of(&DESKTOP).bin
+        );
+    }
+
+    /// The folder an update writes the release's package into is one it
+    /// made: a name that another account took first, with a folder or a
+    /// link of its own, is passed over and left as it is.
+    #[cfg(unix)]
+    #[test]
+    fn the_package_goes_into_a_folder_the_update_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let theirs = d.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::create_dir(d.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(&theirs, d.path().join("b")).unwrap();
+        let names = ["a", "b", "c"].map(String::from);
+        let dir = fresh_dir(d.path(), names.clone()).unwrap();
+        assert_eq!(dir, d.path().join("c"));
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 0);
+        let e = fresh_dir(d.path(), names).unwrap_err();
+        assert!(e.contains("every name"), "{e}");
+    }
+
+    /// The app from a package (#212): install leaves the package's program
+    /// where it is and drops the plain one an earlier install put in
+    /// /usr/local/bin; update installs the release's package, checked
+    /// against SHA256SUMS, with the package manager, and restarts the
+    /// service with it; a file of its own and an older package are refused;
+    /// uninstall leaves the program to the package manager.
+    #[tokio::test]
+    async fn the_app_from_a_package_installs_in_place_and_updates_through_its_package_manager() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        // An earlier plain install of the app, which a node alone links to.
+        let plain = d.path().join("usr/local/bin/nerve-node-desktop");
+        let node = d.path().join("usr/local/bin/nerve-node");
+        write_file(&plain, b"nerve-node-desktop 0.9.0\n", 0o755).unwrap();
+        std::os::unix::fs::symlink(&plain, &node).unwrap();
+        let mut l = Layout {
+            bin: d.path().join("usr/bin/nerve-node-desktop"),
+            edition: &DESKTOP,
+            package: Some(Package::Deb),
+            ..layout(d.path())
+        };
+        *sys.package_bin.borrow_mut() = Some(l.bin.clone());
+        // Another program does not take the package's place.
+        let download = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
+        write_file(&download, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        let e = install(&l, &sys, &download, "alice", &mut Vec::new()).unwrap_err();
+        assert!(e.contains("came from its deb package"), "{e}");
+        assert!(!l.unit.exists() && sys.calls().is_empty());
+        // The package's own.
+        write_file(&l.bin, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        let mut out = Vec::new();
+        install(&l, &sys, &l.bin.clone(), "alice", &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("is at") && out.contains("already"), "{out}");
+        assert!(out.contains("removed the earlier program"), "{out}");
+        assert!(!plain.exists());
+        assert_eq!(std::fs::read_link(&node).unwrap(), l.bin);
+        assert!(
+            std::fs::read_to_string(&l.unit)
+                .unwrap()
+                .contains(&format!("ExecStart={} --config-dir", l.bin.display()))
+        );
+
+        // A file of its own is refused.
+        let e = update(&l, &sys, Some(&download), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("only its package manager replaces it"), "{e}");
+        // The release's package.
+        let program: &[u8] = b"nerve-node-desktop 1.3.0\n";
+        let deb = Package::Deb.asset("nerve-node-desktop", "1.3.0");
+        let sums = format!(
+            "{}  nerve-node-desktop-x86_64-linux\n{}  {deb}\n",
+            sha(b"x"),
+            sha(program)
+        );
+        l.release = release_of(&deb, program, sums.clone()).await;
+        let mut out = Vec::new();
+        update(&l, &sys, None, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("checked it against its SHA256SUMS"), "{out}");
+        assert!(
+            out.contains(&format!("installed {deb} with apt-get")),
+            "{out}"
+        );
+        assert!(
+            out.contains("replaced nerve-node-desktop 1.0.0 with 1.3.0"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read(&l.bin).unwrap(), program);
+        let calls = sys.calls();
+        let at = calls
+            .iter()
+            .position(|c| *c == format!("apt-get install {deb}"))
+            .unwrap();
+        assert_eq!(calls[at + 1..], [format!("systemctl restart {UNIT_NAME}")]);
+        // The same again restarts the service with it, and an older one is
+        // refused.
+        update(&l, &sys, None, &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            sys.calls().last().unwrap(),
+            &format!("systemctl restart {UNIT_NAME}")
+        );
+        let older = Package::Deb.asset("nerve-node-desktop", "1.2.0");
+        let old_program: &[u8] = b"nerve-node-desktop 1.2.0\n";
+        l.release = release_of(
+            &older,
+            old_program,
+            format!("{}  {older}\n", sha(old_program)),
+        )
+        .await;
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, None, &mut Vec::new()).await.unwrap_err();
+        assert!(e.contains("older than the installed 1.3.0"), "{e}");
+        assert_eq!(sys.calls().len(), calls);
+        // The package's script after the package manager put it in place.
+        write_file(&l.bin, b"nerve-node-desktop 1.4.0\n", 0o755).unwrap();
+        let mut out = Vec::new();
+        update(&l, &sys, Some(&l.bin.clone()), &mut out)
+            .await
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("1.4.0 from its package is in place"), "{out}");
+
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("`sudo apt remove nerve-node-desktop`"),
+            "{out}"
+        );
+        assert!(l.bin.is_file());
+        assert!(std::fs::symlink_metadata(&node).is_err());
     }
 
     /// A program still open for writing a moment after it was written

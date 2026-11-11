@@ -8,7 +8,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
 import { Install } from "store.slint";
 import {
-    Button, ButtonKind, Card, Banner, Field, TextField, InfoRow, Icon, IconTile, OptionTile,
+    Button, ButtonKind, CheckBox, Card, Banner, Field, TextField, InfoRow, Icon, IconTile, OptionTile,
     Reveal, Fit, Dots, PathText, Divider,
 } from "widgets.slint";
 
@@ -279,6 +279,20 @@ component StepFoot {
                     : Install.action == "uninstall" ? "Uninstalling did not finish"
                     : "Installing did not finish";
                 text: Install.error;
+            }
+            Rectangle {
+                height: Space.xl;
+            }
+        }
+        Reveal {
+            shown: Install.can-forget;
+            CheckBox {
+                text: "Go on without the keys and the proxy's login";
+                detail: "The node's Credential Manager cannot put them aside. They are lost, and entered again afterwards.";
+                checked: Install.forget;
+                toggled(on) => {
+                    Install.forget = on;
+                }
             }
             Rectangle {
                 height: Space.xl;

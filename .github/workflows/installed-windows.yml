@@ -11,7 +11,11 @@
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
 # - with the node installed again by that account, its owner: the sudo
-#   switch end to end (crates/nerve-node/tests/win_sudo.rs), the limits per
+#   switch end to end, refused from a center and off after a restart of the
+#   service (crates/nerve-node/tests/win_sudo.rs), a provider on the provider
+#   pipe (crates/nerve-node/tests/win_provider.rs), the keys and a proxy's
+#   password in the service's Credential Manager through backup and restore
+#   (crates/nerve-node/tests/win_vault.rs), the limits per
 #   command on the service (crates/nerve-node/tests/win_limits.rs), and
 #   folder and allowlist mode as the command account nerve-run, each pairing
 #   in its AppContainer: folders, a closed folder, another pairing's folders,
@@ -49,7 +53,7 @@ on:
         type: string
         required: true
       tests:
-        description: "The artifact with the test programs real.exe, win_sudo.exe, win_limits.exe, win_account.exe, win_service.exe, nerve_node_lib.exe, nerve_sandbox_lib.exe and nerve_service_lib.exe"
+        description: "The artifact with the test programs real.exe, win_sudo.exe, win_provider.exe, win_vault.exe, win_limits.exe, win_account.exe, win_service.exe, nerve_node_lib.exe, nerve_sandbox_lib.exe and nerve_service_lib.exe"
         type: string
         required: true
       ref:
@@ -160,10 +164,12 @@ jobs:
           $run = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\nerve-run' }
           if (-not $run) { throw 'nerve-run has no profile' }
           if ((Get-Service nerve-run-profile).Status -ne 'Running') { throw 'nerve-run-profile does not run' }
-      - name: Sudo, limits, the command account, the batch logon, a virtual disk
+      - name: Sudo, providers, limits, the command account, the batch logon, a virtual disk
         run: |
           $runs = @(
             @('win_sudo.exe', 'sudo_runs_a_listed_command_elevated_on_the_installed_service'),
+            @('win_provider.exe', 'the_owners_program_attaches_on_the_provider_pipe'),
+            @('win_vault.exe', 'the_service_keeps_its_secrets_in_its_own_credential_manager'),
             @('win_limits.exe', 'the_installed_service_holds_a_command_to_its_memory_limit'),
             @('win_account.exe', 'folder_and_allowlist_mode_run_as_nerve_run_in_their_containers'),
             @('win_account.exe', 'a_command_the_folder_sync_refuses_is_in_the_audit_log'),

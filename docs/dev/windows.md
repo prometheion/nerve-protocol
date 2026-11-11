@@ -22,10 +22,10 @@ Debian 12, Fedora 36 and later) and fontconfig.
 | `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, as `nerve-run` in the pairing's AppContainer ([the account](#the-account-commands-run-as-on-windows)) |
 | `allowlist` and `user` mode run commands | Yes | Yes: `allowlist` as `nerve-run` in the pairing's AppContainer, or as you with `--as-owner`; `user` as you. Each in a Job Object |
 | Sudo switch | Yes | On the [installed service](#the-node-as-a-service-on-windows), with your administrator token ([sudo on Windows](#sudo-on-windows)) |
-| [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter | The AppContainer without its network capabilities, while the Windows Firewall service runs |
-| Control socket | Yes | A [control pipe](#the-control-pipe): every change at once, no providers |
+| [Network switch](sandbox-linux.md#no-network-for-a-centers-commands) | The node's seccomp filter; name lookups still work | The AppContainer without its network capabilities, while the Windows Firewall service runs; name lookups fail too |
+| Control socket | Yes | A [control pipe](#the-control-pipe): every change at once |
 | [Limits per command](#limits-per-command) | A cgroup | The command's job object |
-| [Providers](capabilities.md#capability-providers-in-use) | Yes | Not yet |
+| [Providers](capabilities.md#capability-providers-in-use) | Yes | On the installed service's provider pipe ([providers on Windows](#providers-on-windows)) |
 | [Capabilities of `node.toml`](capabilities.md#capabilities-of-your-own-in-nodetoml) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Yes: as `nerve-run`, in the pairing's AppContainer |
 | Install as a service | Yes, with systemd, the node and the [center](service.md#the-center-as-a-service) | The node and the [center](#the-center-as-a-windows-service) |
 | A second center on one state folder | Attaches over a socket | Attaches over a [pipe](#a-second-center-attaches) |
@@ -213,7 +213,7 @@ The install does this, and the installer shows each step:
 
 | What | Where |
 |---|---|
-| `node.toml`, one key per center, `nerve-run`'s password and yours, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
+| `node.toml`, one key per center, `nerve-run`'s password and yours | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logging.md#the-log-as-the-owner-reads-it), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
 | The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](#the-windows-event-log)) |
@@ -239,24 +239,39 @@ service, and the owners and their rights with it.
 The service takes every change at once over its
 [control pipe](#the-control-pipe).
 
-The installed node on Windows keeps its keys in files. The service runs as
-`nerve`, and the Credential Manager is one per account: keys put in the
-keyring would be in the Credential Manager of the account that put them
-there, where the service does not find them. The app's first-run steps
-leave the keys alone, and the keyring under **Settings**, **Keys** is
-refused and changes nothing. A `node.toml` that keeps the keys in the keyring is refused by the
-install, before it changes anything, and the service does not start with
-one: those keys are out of the service's reach. If the keys are still in
-files in `config\keys` (the line in `node.toml` was changed), set the line
-back to `"file"` and nothing is lost. Otherwise delete the node's folders
-(with **Settings**, **App**, **Uninstall** and **Delete the data**, where
-Nerve is installed; that deletes the audit log too, so copy
-`state\audit.jsonl` aside first) and pair the centers again.
-
-The same account problem keeps the proxy's values out of reach: the installed
-node on Windows takes a proxy only if it needs no header and no password.
-A proxy with either is refused and changes nothing
-([proxy](#a-proxy-for-the-service-on-windows)).
+The installed node keeps its keys in files by default. Under **Settings**,
+**Keys** they can go into the Credential Manager instead: the one of the
+service's own account `nerve` (Q8), as the Credential Manager is one per
+account. The service writes and reads it itself; the CLI and the app of an
+administrator ask the running service over its
+[control pipe](#the-control-pipe) (`vault.get`, `vault.set`, `vault.delete`,
+for this node's entries only), never their own. The proxy's header values and
+password live there too. While no service runs (a restore, an install), what
+goes there waits in `config\keys\vault.pending`, sealed with DPAPI, and the
+service takes it at its start, under the keys' lock that whoever writes the
+file holds too. An install gives `nerve` a new password, after which Windows
+no longer opens what its Credential Manager kept: so the service first puts
+its entries aside the same way (`vault.stage`); the stage ends with a mark
+that says the file holds every entry, which the service's start takes away
+with the rest. An install starts a stopped service for it. Where entries may
+be there (the keys with the keyring, the proxy's header values) and the
+service cannot put them aside, the install changes nothing, unless the mark
+is there already: an install that failed half way, with `nerve`'s old
+password still the service's, goes on without a start, so that running it
+again repairs the node. A service that cannot start otherwise (the program is
+gone or damaged, `node.toml` does not parse) says so in the installer, which
+then offers **Go on without the keys and the proxy's login** (`install
+--forget-secrets`, for scripts): they are lost and entered again afterwards. Uninstall removes
+`nerve` and its Credential Manager with it; **Keep the data** puts the
+entries aside first, for a later install, and never starts a service the
+owner stopped: with the node stopped, it goes on only where the mark is
+there, or with the same choice in the uninstall dialog
+(`uninstall --forget-secrets`), or after the owner started the node. While they wait in that file, the
+keys and the proxy's values are in a file after all: sealed with the
+machine's DPAPI key, so its folder's ACL (`nerve`, SYSTEM, the
+administrators) is what keeps them, as it keeps the keys in files.
+`nerve-run`'s commands do not reach that Credential Manager: it is another
+account's.
 
 ### The account commands run as on Windows
 
@@ -315,16 +330,26 @@ the twin of root as the owner on Linux.
 [Sudo on Windows](#sudo-on-windows) needs you to be an administrator.
 
 If your password changes, commands that run as you fail until you save the
-new one under **Settings**, **General**, **Account for commands**. So do
+new one under **Settings**, **General**, **Account for commands**, or where the
+app asks for it: while the node has no password of yours that works
+(`status`'s `owner_password` is `missing` or `stale`), the app asks for it when
+you switch a pairing to `user` mode or to allowlist mode as you, when the
+first-run steps would set `user` mode or add a folder in `folder` mode (it
+asks first and goes on with the step once the password is saved), when you turn
+sudo on (sudo's password is yours, so the node keeps that one too), and on the
+folder grants' warning. The app hands it to the running node over the
+[control pipe](#the-control-pipe) (`owner.password`, the hidden `password`
+command): the node checks it with a logon, as the install does, stores it with
+DPAPI in place of the old one and brings the folder grants in line at once. So do
 the changes of your folders' entries for `folder` and `allowlist` mode: a
 folder you add gives the commands no access, and one you remove or close
 stops the pairing's commands, until the node can log on as you again (the
 log says so). The node tries a stored password that failed once only, until
 you save a new one (or the service restarts), so its calls cannot run up the
-wrong-password count that locks your account. [Sudo](#sudo-on-windows) keeps
-a copy of your password of its own, which saving the new one does not renew:
-the node tries it once too, and sudo commands fail until you turn sudo off
-and on again. A Microsoft account works with its Microsoft password, which
+wrong-password count that locks your account. [Sudo](#sudo-on-windows) holds
+a copy of your password of its own while it is on, which saving the new one
+does not renew: the node tries it once too, and sudo commands fail until you
+turn sudo off and on again. A Microsoft account works with its Microsoft password, which
 can change outside the machine.
 
 To start a process as another account, the service keeps two privileges,
@@ -353,8 +378,7 @@ its entry in Apps & features. It also takes off the folder grants left on
 your folders, the containers' and `nerve-run`'s
 ([modes](#what-a-command-can-reach-in-folder-mode-windows)). With
 **Keep the data** the folders and the stored password stay, open to the
-administrators only; the [sudo](#sudo-on-windows) password goes, so
-sudo is off after a later install. A later install takes them up again.
+administrators only. A later install takes them up again.
 **Delete the data** deletes them. The installed program cannot delete its
 own file at once: it moves it aside, and Windows deletes it at its next
 start. Where Windows still holds the profile of `nerve` or `nerve-run`
@@ -931,8 +955,8 @@ container and `nerve-run` may open.
   session could not use it. The container has none of the capabilities for
   your sign-in credentials or certificates (code), so it should not reach
   network shares as you; not checked. With the node's keys in the
-  Credential Manager (`machine.secret_storage = keyring`) `folder` mode runs
-  no command on Windows (code, [keys](settings-and-config.md#where-the-node-keeps-its-keys)).
+  Credential Manager (`machine.secret_storage = keyring`), they are in that of
+  `nerve`, which commands of `nerve-run`, another account, do not reach.
   Checked: a blob protected with DPAPI for the machine can be opened by the
   command. A blob for your user could not be made in the test session, so
   that is not checked. The node's own keys are files in folders that get no
@@ -965,6 +989,37 @@ container and `nerve-run` may open.
   [protected paths](policy-engine.md#protected-paths-as-the-owner-sees-them)
   decide, and none runs while the pairing's network is off.
 
+## Providers on Windows
+
+A program you allow under **Capabilities**, **Programs** (`provider add`)
+attaches to the installed service over the provider pipe
+`\\.\pipe\nerve-node-provider`, as it attaches to the provider socket on
+Linux ([the spec](spec/node-local.md#providers-on-windows)):
+
+- Only your programs and an elevated administrator's get in, told by the
+  client's token; the pipe refuses other accounts, `nerve-run`'s commands and
+  clients from the network. You may read and write on the pipe, not make
+  instances of it: open it with `FILE_GENERIC_READ | FILE_WRITE_DATA` (a
+  client that asks `GENERIC_WRITE` or `FILE_APPEND_DATA`, which on a pipe
+  is the right to make instances, is refused). Otherwise an account that
+  could make an instance would be taken for the node by a provider that
+  checks the pipe's owner, as all instances share the first one's.
+- The node checks the program by its image: the path Windows names for the
+  client's process must be the one you allowed. Where its own account may
+  not open the process (yours, an elevated one), Windows names the image by
+  the process id. A program in your folders is looked at as you, with the
+  password the app keeps for folder mode.
+- A process of a command the node runs is refused.
+- The program runs as whoever started it, outside the node's containers, as
+  on Linux; its actions show in the descriptor and in `cap` as there.
+- The pipe's name is fixed and Windows lets any account make a pipe of a
+  name nobody holds, so while the node is stopped another account could
+  make it and take a provider's hello. A provider checks the pipe before it
+  says `hello`, as Nerve's CLI checks the control pipe: it opens it with
+  `SECURITY_IDENTIFICATION` and talks only to a pipe whose owner is SYSTEM,
+  the Administrators or `nerve`. A node that could not make the pipe says
+  so in `status` and on the app's Overview.
+
 ## Sudo on Windows
 
 Windows has no `sudo` program. A sudo command runs as you, the node's
@@ -978,15 +1033,20 @@ of `nerve-run`, which is no administrator, never get them. So:
   Your other commands (`user` mode, `--as-owner`) run with the token UAC
   filtered, but UAC is no security boundary: any of them can get the
   administrator rights back and read the node's keys.
-- Turning it on asks for your password. A wrong password is refused and
-  the switch stays as it was.
-- The node keeps the password with DPAPI in the config folder (`sudo.dpapi`).
-  Unlike on Linux, sudo stays on when the service restarts. Turning it off
-  removes the file, and uninstalling removes it too. Neither takes you out
-  of Administrators. Turning it off reminds you.
-- If your password changes, turn sudo off and on again: the node tries the
-  password it kept once, not at every command, and a sudo command fails
-  until then.
+- Turning it on asks for your Windows password. A wrong password is
+  refused and the switch stays as it was.
+- The node holds the password in its memory only, as on Linux: sudo is off
+  after a restart of the service or of Windows. Turning it off does not take
+  you out of Administrators; it reminds you.
+- Only the app on the machine turns it on. A center cannot (Q13): the
+  password is your Windows password, maybe your Microsoft account's, which
+  should not pass through a web page and the relay. The node refuses
+  `settings.sudo` on from a center on Windows, as it does for root as the
+  owner on Linux; the center's page says to use the app. A center with the
+  settings grant can still turn it off.
+- If your password changes while sudo is on, turn sudo off and on again: the
+  node tries the password it holds once, not at every command, and a sudo
+  command fails until then.
 - No sudo command runs while the pairing's network is off.
 
 In the [desktop app](desktop.md), the **Sudo** section of **Permissions**
@@ -994,10 +1054,7 @@ turns it on and off, and the center's sudo list there takes the commands
 (`net session`). Turning it on needs an administrator: the app asks Windows
 for the rights, with the UAC prompt. Both take effect at once, over the
 [control pipe](#the-control-pipe): the running service checks the password
-and keeps it, or drops it. Turning it on needs the node running.
-
-A center with the settings grant switches the running service at once, as on
-Linux.
+and holds it, or drops it. Turning it on needs the node running.
 
 The node starts the command line after `sudo` with the shell
 (`machine.shell`, Windows PowerShell 5.1 by default), logged on as a batch
@@ -1012,25 +1069,12 @@ not the only way to those rights: see the administrator above.
 
 ## A proxy for the service on Windows
 
-The installed node on Windows runs as the account `nerve`, and the Credential
-Manager is one per account. A header value or a password would go to the
-Credential Manager of the account that sets the proxy, where the service does
-not find it. The node keeps them nowhere else (not in a file), so the
-installed node on Windows takes a proxy that needs neither: set it in the
-[desktop app](desktop.md) under **Settings**, **Network**, **Proxy**, as
-`http://proxy.example:3128`.
-
-A proxy with a header, or with a user name and password in the URL, is
-refused there and changes nothing. If the proxy needs a login, the installed
-node on Windows cannot use it.
-
-A header in `node.toml` is not read by the service: the link stays down. The
-app's **Overview** shows it as `bad proxy:` with the reason, which it asks the
-running node over its [control pipe](#the-control-pipe). The
-service's [log](logging.md#the-log-as-the-owner-reads-it) has the reason as an `error` line with `bad proxy:`, in
-`C:\ProgramData\Nerve\state\log.jsonl`. Set the proxy again without the header,
-or remove it; either deletes the old entry from the Credential Manager of the
-account that does it.
+A proxy with a header, or with a user name and password in the URL, works on
+the installed node as on Linux: set it in the [desktop app](desktop.md)
+under **Settings**, **Network**, **Proxy**. Its values go into the
+Credential Manager of the service's account `nerve`, through the running
+service ([keys above](#the-node-as-a-service-on-windows)); a backup takes
+them into its own encryption, and a restore puts them back there.
 
 ## A relay on Windows
 

@@ -6,7 +6,9 @@
 //! - Linux: a desktop entry in `/usr/local/share/applications`, which GNOME
 //!   and KDE read, its icon in the hicolor theme of `/usr/local/share/icons`,
 //!   and `x-scheme-handler/nerve` in the entry and as the default in
-//!   `/etc/xdg/mimeapps.list`.
+//!   `/etc/xdg/mimeapps.list`. The app from a .deb or .rpm (#212) has the
+//!   package's entry and icon in `/usr/share` ([`package_root`]), so it
+//!   writes only the default handler.
 //! - Windows: a shortcut in the Start menu of all users, the URL protocol
 //!   `nerve` in `HKLM\Software\Classes`, and the entry in Apps & features
 //!   (`HKLM\…\Uninstall\Nerve`), whose Uninstall opens the app's
@@ -15,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use nerve_node::edition::{Edition, Parts};
+pub use nerve_node::service::Package;
 
 /// The program's name, and the id of its menu entry and icon.
 pub const PROGRAM: &str = nerve_node::edition::DESKTOP_PROGRAM;
@@ -52,6 +55,37 @@ impl Parts for Desktop {
 /// it for one.
 pub const UNINSTALL_ARG: &str = "__desktop-uninstall";
 
+/// The switch of a silent install (winget, #67): `install` without a
+/// window and without a question; the app asks for the owner's password
+/// later, where it is needed.
+pub const SILENT_ARG: &str = "--silent";
+
+/// What a silent install runs: the program's own `install`, the owner's
+/// password not asked (no input), its output the caller's.
+pub fn silent_install() -> i32 {
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(e) => {
+            eprintln!("nerve-node-desktop: {e}");
+            return 1;
+        }
+    };
+    match std::process::Command::new(me)
+        .args(SILENT_COMMAND)
+        .stdin(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("nerve-node-desktop: {e}");
+            1
+        }
+    }
+}
+
+/// The command a silent install runs.
+pub const SILENT_COMMAND: [&str; 1] = ["install"];
+
 /// The scheme of the links the app opens.
 pub const SCHEME: &str = "nerve";
 const MIME: &str = "x-scheme-handler/nerve";
@@ -68,6 +102,9 @@ pub struct Places {
     pub refresh: bool,
     /// The program that does: update-desktop-database.
     pub cache_tool: &'static str,
+    /// Whether the app came from a package, which has the menu entry and
+    /// the icon.
+    pub packaged: bool,
 }
 
 impl Places {
@@ -78,6 +115,7 @@ impl Places {
             mimeapps: "/etc/xdg/mimeapps.list".into(),
             refresh: true,
             cache_tool: "update-desktop-database",
+            packaged: nerve_node::service::package_at(Path::new(Package::MARK)).is_some(),
         }
     }
 
@@ -89,6 +127,7 @@ impl Places {
             mimeapps: root.join("etc/xdg/mimeapps.list"),
             refresh: false,
             cache_tool: "update-desktop-database",
+            packaged: false,
         }
     }
 
@@ -104,12 +143,23 @@ impl Places {
 
     pub fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
         let mut did = Vec::new();
-        write(&self.icon(), ICON, 0o644)?;
-        write(&self.entry(), desktop_entry(bin).as_bytes(), 0o644)?;
-        did.push(format!(
-            "put Nerve in the application menu ({}), with its icon",
-            self.entry().display()
-        ));
+        if self.packaged {
+            // The package's entry is the menu's Nerve: an earlier plain
+            // program's would show it twice.
+            if self.remove_entry()? {
+                did.push(
+                    "removed the menu entry of the earlier program: the package has its own"
+                        .to_string(),
+                );
+            }
+        } else {
+            write(&self.icon(), ICON, 0o644)?;
+            write(&self.entry(), desktop_entry(bin).as_bytes(), 0o644)?;
+            did.push(format!(
+                "put Nerve in the application menu ({}), with its icon",
+                self.entry().display()
+            ));
+        }
         let before = std::fs::read_to_string(&self.mimeapps).unwrap_or_default();
         write(
             &self.mimeapps,
@@ -130,8 +180,9 @@ impl Places {
         Ok(did)
     }
 
-    pub fn uninstall(&self) -> Result<Vec<String>, String> {
-        let mut did = Vec::new();
+    /// Removes the menu entry and the icon [`Places::install`] wrote, and
+    /// the icon's folders that hold nothing else; whether one was there.
+    fn remove_entry(&self) -> Result<bool, String> {
         let mut gone = false;
         for p in [self.entry(), self.icon()] {
             match std::fs::remove_file(&p) {
@@ -139,9 +190,6 @@ impl Places {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("{}: {e}", p.display())),
             }
-        }
-        if gone {
-            did.push("removed Nerve from the application menu".to_string());
         }
         // The icon's folders, when nothing else is in them, up to the
         // `icons` folder that install may have made.
@@ -157,6 +205,14 @@ impl Places {
                 break;
             }
             dir = d.parent().map(Path::to_path_buf);
+        }
+        Ok(gone)
+    }
+
+    pub fn uninstall(&self) -> Result<Vec<String>, String> {
+        let mut did = Vec::new();
+        if self.remove_entry()? {
+            did.push("removed Nerve from the application menu".to_string());
         }
         if let Ok(before) = std::fs::read_to_string(&self.mimeapps) {
             let after = without_default(&before, MIME, &format!("{PROGRAM}.desktop"));
@@ -215,8 +271,71 @@ impl Places {
 /// The app's icon, which the menu shows.
 pub const ICON: &[u8] = include_bytes!("../ui/icons/app.svg");
 
-/// The desktop entry (freedesktop Desktop Entry 1.5): the menu's "Nerve",
-/// which opens `bin`, also with a `nerve://` link.
+/// The hidden argument that writes the files of the app's package (#212):
+/// `__package-root <folder> deb|rpm`, which the release packs with
+/// dpkg-deb and rpmbuild (.github/scripts/desktop-packages.sh).
+pub const PACKAGE_ROOT_ARG: &str = "__package-root";
+
+/// The files of the app's package below `root`, with this program `exe`:
+/// the program in `/usr/bin`, its menu entry and icon in `/usr/share`, and
+/// the mark of the package's kind ([`Package::MARK`]); what it wrote.
+pub fn package_root(root: &Path, exe: &Path, package: Package) -> Result<Vec<PathBuf>, String> {
+    let under = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
+    let bin = Path::new("/usr/bin").join(PROGRAM);
+    let program = std::fs::read(exe).map_err(|e| format!("{}: {e}", exe.display()))?;
+    let share = Places {
+        applications: under(Path::new("/usr/share/applications")),
+        icons: under(Path::new("/usr/share/icons/hicolor")),
+        ..Places::under(root)
+    };
+    let files = [
+        (under(&bin), program, 0o755),
+        (share.entry(), desktop_entry(&bin).into_bytes(), 0o644),
+        (share.icon(), ICON.to_vec(), 0o644),
+        (
+            under(Path::new(Package::MARK)),
+            format!("{}\n", package.word()).into_bytes(),
+            0o644,
+        ),
+    ];
+    let mut wrote = Vec::new();
+    for (path, data, mode) in files {
+        write(&path, &data, mode)?;
+        wrote.push(path);
+    }
+    Ok(wrote)
+}
+
+/// [`package_root`] for the command line: `<folder> deb|rpm`.
+pub fn package_root_main(args: &[String]) -> i32 {
+    let (Some(root), Some(package), None) = (
+        args.first(),
+        args.get(1).and_then(|w| Package::of_word(w)),
+        args.get(2),
+    ) else {
+        eprintln!("usage: nerve-node-desktop {PACKAGE_ROOT_ARG} <folder> deb|rpm");
+        return 2;
+    };
+    let r = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|exe| package_root(Path::new(root), &exe, package));
+    match r {
+        Ok(wrote) => {
+            for p in wrote {
+                println!("{}", p.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("nerve-node-desktop: {e}");
+            1
+        }
+    }
+}
+
+/// The desktop entry: the menu's "Nerve", which opens `bin`, also with a
+/// `nerve://` link. Desktop Entry 1.4, the newest that the
+/// desktop-file-validate of Ubuntu 22.04 takes; it uses nothing newer.
 pub fn desktop_entry(bin: &Path) -> String {
     let exec = bin.display().to_string();
     // Exec quotes a path with a space or a quote in it, escaping as the
@@ -236,7 +355,7 @@ pub fn desktop_entry(bin: &Path) -> String {
     format!(
         "[Desktop Entry]
 Type=Application
-Version=1.5
+Version=1.4
 Name=Nerve
 GenericName=Nerve node
 Comment=Decide what your Nerve centers may do on this machine
@@ -328,7 +447,8 @@ fn write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
 
 /// The texts of Nerve's entry in Apps & features on Windows, for the
 /// program `bin` of `version`: Uninstall there runs `bin` with
-/// [`UNINSTALL_ARG`].
+/// [`UNINSTALL_ARG`]; a quiet one (winget) runs its `uninstall`, which keeps
+/// the data.
 pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
     let exe = bin.display().to_string();
     let folder = bin
@@ -341,6 +461,7 @@ pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
         ("DisplayVersion", version.to_string()),
         ("DisplayIcon", format!("\"{exe}\",0")),
         ("UninstallString", format!("\"{exe}\" {UNINSTALL_ARG}")),
+        ("QuietUninstallString", format!("\"{exe}\" uninstall")),
         ("InstallLocation", folder),
         ("URLInfoAbout", env!("CARGO_PKG_REPOSITORY").to_string()),
         (
@@ -710,6 +831,16 @@ mod tests {
             entry["UninstallString"],
             format!(r#""C:\Program Files\Nerve\nerve-node-desktop.exe" {UNINSTALL_ARG}"#)
         );
+        // A quiet uninstall without a window keeps the data: no --purge.
+        assert_eq!(
+            entry["QuietUninstallString"],
+            r#""C:\Program Files\Nerve\nerve-node-desktop.exe" uninstall"#
+        );
+        // The silent install is the program's `install`, which a command
+        // line takes as such (and which needs an administrator).
+        let args: Vec<String> = SILENT_COMMAND.iter().map(|a| a.to_string()).collect();
+        assert_eq!(args, ["install"]);
+        assert!(nerve_node::owner::args_need_admin(&args));
         assert_eq!(
             entry["DisplayIcon"],
             r#""C:\Program Files\Nerve\nerve-node-desktop.exe",0"#
@@ -737,6 +868,79 @@ mod tests {
             "{did:?}"
         );
         assert!(p.uninstall().is_ok());
+    }
+
+    /// The package's files (#212): the program in /usr/bin, its menu entry
+    /// opening it there, the icon, and the mark of the package's kind.
+    /// Linux only, as the packages are.
+    #[cfg(unix)]
+    #[test]
+    fn the_package_holds_the_program_its_menu_entry_icon_and_kind() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("nerve-node-desktop-x86_64-linux");
+        std::fs::write(&exe, "the program").unwrap();
+        let root = d.path().join("root");
+        let wrote = package_root(&root, &exe, Package::Rpm).unwrap();
+        let rel: Vec<String> = wrote
+            .iter()
+            .map(|p| p.strip_prefix(&root).unwrap().display().to_string())
+            .collect();
+        assert_eq!(
+            rel,
+            [
+                "usr/bin/nerve-node-desktop",
+                "usr/share/applications/nerve-node-desktop.desktop",
+                "usr/share/icons/hicolor/scalable/apps/nerve-node-desktop.svg",
+                "usr/share/nerve-node-desktop/package",
+            ]
+        );
+        assert_eq!(std::fs::read(&wrote[0]).unwrap(), b"the program");
+        let entry = std::fs::read_to_string(&wrote[1]).unwrap();
+        assert!(
+            entry.contains("\nExec=/usr/bin/nerve-node-desktop %u\n"),
+            "{entry}"
+        );
+        assert_eq!(std::fs::read(&wrote[2]).unwrap(), ICON);
+        assert_eq!(
+            nerve_node::service::package_at(&wrote[3]),
+            Some(Package::Rpm)
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&wrote[0]), 0o755);
+        assert_eq!(mode(&wrote[1]), 0o644);
+        assert_eq!(package_root_main(&["x".into()]), 2);
+        assert_eq!(package_root_main(&["x".into(), "tar".into()]), 2);
+    }
+
+    /// The app from a package writes only the default handler: the menu
+    /// entry and icon are the package's, and an earlier plain program's go.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_app_from_a_package_leaves_the_menu_entry_to_it() {
+        let d = tempfile::tempdir().unwrap();
+        let plain = Places::under(d.path());
+        plain
+            .install(&d.path().join("usr/local/bin/nerve-node-desktop"))
+            .unwrap();
+        let p = Places {
+            packaged: true,
+            ..Places::under(d.path())
+        };
+        let did = p.install(Path::new("/usr/bin/nerve-node-desktop")).unwrap();
+        assert!(did[0].contains("the package has its own"), "{did:?}");
+        assert!(!p.entry().exists() && !p.icon().exists());
+        assert!(
+            std::fs::read_to_string(&p.mimeapps)
+                .unwrap()
+                .contains("x-scheme-handler/nerve=nerve-node-desktop.desktop")
+        );
+        // Again writes nothing of the menu's.
+        let did = p.install(Path::new("/usr/bin/nerve-node-desktop")).unwrap();
+        assert_eq!(did.len(), 1, "{did:?}");
+        assert!(!p.applications.exists() || !p.entry().exists());
+        p.uninstall().unwrap();
+        assert!(!p.mimeapps.exists());
     }
 
     #[cfg(not(windows))]

@@ -254,7 +254,7 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_setup_start();
     store.set_toast("".into());
     store.invoke_setup_skip();
-    assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
     assert_eq!(store.get_toast(), "");
@@ -641,7 +641,9 @@ fn the_app_drives_the_cli_end_to_end() {
             ctl.show_status(Ok(st.clone()));
             assert!(perm.get_home_warning().contains("mode 755"));
         } else {
-            assert!(!perm.get_separate());
+            // The installed Windows node runs them as nerve-run too, each
+            // pairing's in its AppContainer, with no folders of its own.
+            assert_eq!(perm.get_separate(), cfg!(windows));
             assert_eq!(perm.get_built_in(), "");
         }
     }
@@ -776,21 +778,13 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_show(Page::Capabilities);
     assert_eq!(caps.get_center(), "home");
     assert_eq!(caps.get_load(), Load::Ready, "{}", caps.get_error());
-    // Why this machine offers no programs, or no capabilities of node.toml:
-    // Windows offers no programs yet, and a node run by hand none of
-    // node.toml, on Linux and on Windows.
+    // Why this machine offers no capabilities of node.toml: a node run by
+    // hand offers none, on Linux and on Windows.
     assert!(
         caps.get_config_note().contains("runs by hand"),
         "{}",
         caps.get_config_note()
     );
-    if cfg!(windows) {
-        assert!(caps.get_windows());
-        assert!(caps.get_programs_note().contains("Windows"));
-    } else {
-        assert!(!caps.get_windows());
-        assert_eq!(caps.get_programs_note(), "");
-    }
     let row = |name: &str| caps.get_rows().iter().find(|c| c.name == name);
     let run = row("exec.run").expect("exec.run is listed");
     assert!(run.switchable && run.action);
@@ -1146,7 +1140,11 @@ fn the_app_drives_the_cli_end_to_end() {
     // The update's file the same: its dialog says it under a heading of
     // its own, since no update ran.
     let update = window.global::<Install>();
+    // A tick left from an uninstall that was cancelled does not reach it.
+    update.set_can_forget(true);
+    update.set_forget(true);
     update.invoke_ask_update();
+    assert!(!update.get_can_forget() && !update.get_forget());
     update.invoke_choose_file();
     assert!(update.get_error().contains("xdg-desktop-portal"));
     assert_eq!(update.get_error_title(), "No file dialog");
@@ -1239,17 +1237,76 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 2));
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 1, "{}", store.get_pair_error());
+    // A node that has no Windows password of the owner (the installer
+    // asked none, or it failed) asks for it before user mode: Continue
+    // would otherwise switch to a mode whose commands all fail.
+    let perm = window.global::<Perm>();
+    perm.set_owner_password_missing(true);
+    store.set_setup_mode("user".into());
+    store.invoke_setup_next();
+    assert!(perm.get_owner_password_open());
+    assert_eq!(perm.get_owner_password_then(), "setup");
+    assert_eq!(store.get_setup_step(), 1);
+    assert_ne!(
+        config(&paths).center("studio-center").unwrap().policy.mode,
+        nerve_policy::Mode::User,
+        "the mode changed before the password"
+    );
+    perm.set_owner_password_open(false);
+    perm.set_owner_password_missing(false);
+    // Folder mode with the network off: the folder step comes next.
     store.set_setup_mode("folder".into());
+    store.set_setup_no_network(true);
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
-    assert_eq!(
-        config(&paths).center("studio-center").unwrap().policy.mode,
-        nerve_policy::Mode::Folder
-    );
+    let policy = config(&paths)
+        .center("studio-center")
+        .unwrap()
+        .policy
+        .clone();
+    assert_eq!(policy.mode, nerve_policy::Mode::Folder);
+    assert!(policy.no_network);
     store.invoke_setup_back();
     assert_eq!(store.get_setup_step(), 1);
     store.invoke_setup_next();
     assert_eq!(store.get_setup_step(), 2, "{}", store.get_setup_error());
+    // A folder, with write: it is the center's now.
+    let work = dir.path().join("setup-work");
+    std::fs::create_dir_all(&work).unwrap();
+    store.set_setup_folder(work.display().to_string().into());
+    // Its grants are made as the owner: the password comes first here too.
+    perm.set_owner_password_missing(true);
+    store.invoke_setup_next();
+    assert!(perm.get_owner_password_open());
+    assert_eq!(store.get_setup_step(), 2);
+    assert!(
+        config(&paths)
+            .center("studio-center")
+            .unwrap()
+            .policy
+            .folders
+            .is_empty(),
+        "the folder was added before the password"
+    );
+    perm.set_owner_password_open(false);
+    perm.set_owner_password_missing(false);
+    store.invoke_setup_next();
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
+    let folders = config(&paths)
+        .center("studio-center")
+        .unwrap()
+        .policy
+        .folders
+        .clone();
+    assert!(
+        folders.iter().any(|f| f.path == work.display().to_string()),
+        "{folders:?}"
+    );
+    // Back from the end goes to the folder in folder mode.
+    store.invoke_setup_back();
+    assert_eq!(store.get_setup_step(), 2);
+    store.invoke_setup_next();
+    assert_eq!(store.get_setup_step(), 3, "{}", store.get_setup_error());
     store.invoke_setup_next();
     assert!(!store.get_setup_open());
     let after = config(&paths);

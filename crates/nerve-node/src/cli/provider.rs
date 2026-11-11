@@ -72,11 +72,11 @@ pub(super) async fn show_providers(paths: NodePaths, out: &mut dyn Write) -> Res
 }
 
 /// What `provider add` and `provider` add where no program attaches: the
-/// node tells a provider's program by what Linux shows of it.
-const NO_PROVIDERS_HERE: Option<&str> = if cfg!(target_os = "linux") {
+/// node tells a provider's program by what Linux and Windows show of it.
+const NO_PROVIDERS_HERE: Option<&str> = if cfg!(any(target_os = "linux", windows)) {
     None
 } else {
-    Some("programs attach as providers on Linux only for now: this node takes none")
+    Some("programs attach as providers on Linux and Windows only: this node takes none")
 };
 
 /// The lines of `provider`: each program allowed, and whether it is
@@ -128,10 +128,10 @@ mod tests {
             "{said}"
         );
         // Where no program attaches, the owner is told so.
-        let elsewhere = "programs attach as providers on Linux only for now";
+        let elsewhere = "programs attach as providers on Linux and Windows only";
         assert_eq!(
             said.contains(elsewhere),
-            cfg!(not(target_os = "linux")),
+            cfg!(not(any(target_os = "linux", windows))),
             "{said}"
         );
         run(&paths, &["provider", "add", "desk", &b]).unwrap();
@@ -145,7 +145,7 @@ mod tests {
             .map(|p| (p.name.as_str(), p.exe.as_str()))
             .collect();
         assert_eq!(allowed, [("desk", b.as_str()), ("lamp-2", lamp.as_str())]);
-        let note = match cfg!(target_os = "linux") {
+        let note = match cfg!(any(target_os = "linux", windows)) {
             true => String::new(),
             false => format!("{elsewhere}: this node takes none\n"),
         };

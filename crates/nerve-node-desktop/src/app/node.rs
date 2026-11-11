@@ -101,13 +101,18 @@ impl Ctl {
         self.with_store(|s| s.set_elevate_needed(true));
     }
 
-    /// The first-run steps: the first center and its mode, as `setup` asks
-    /// in a terminal. The machine's name and where the keys live keep their
-    /// defaults; Settings changes them.
+    /// The first-run steps: the first center, its mode and its network, and
+    /// in folder mode a folder, as `setup` asks in a terminal. The machine's
+    /// name and where the keys live keep their defaults; Settings changes
+    /// them.
     pub(super) fn setup_start(self: &Rc<Self>) {
         self.with_store(|s| {
             s.set_setup_step(0);
             s.set_setup_mode("allowlist".into());
+            s.set_setup_no_network(false);
+            s.set_setup_folder(SharedString::new());
+            s.set_setup_folder_write(true);
+            s.set_setup_folder_execute(false);
             s.set_setup_error(SharedString::new());
             s.set_setup_busy(false);
             s.set_pair_step(0);
@@ -126,11 +131,16 @@ impl Ctl {
         });
     }
 
-    /// Runs a step's command, then goes to `next`.
-    fn setup_run(self: &Rc<Self>, args: Vec<String>, next: i32) {
+    /// Runs a step's commands one after another, then goes to `next`; the
+    /// first that fails stops there and says why.
+    fn setup_run(self: &Rc<Self>, mut commands: Vec<Vec<String>>, next: i32) {
+        if commands.is_empty() {
+            return self.setup_go(next);
+        }
+        let args = commands.remove(0);
         self.with_store(|s| s.set_setup_busy(true));
         self.command(args, None, move |c, answer| match answer {
-            Ok(_) => c.setup_go(next),
+            Ok(_) => c.setup_run(commands, next),
             Err(e) => {
                 c.with_store(|s| {
                     s.set_setup_busy(false);
@@ -140,7 +150,29 @@ impl Ctl {
         });
     }
 
-    fn setup_next(self: &Rc<Self>) {
+    /// The folder step's folder, from the system's picker.
+    fn setup_folder_choose(self: &Rc<Self>) {
+        let chooser = self.chooser.borrow().clone();
+        self.job(
+            move |_| chooser(super::Choose::Folder),
+            |c, picked| match picked {
+                Err(e) => c.no_chooser(e),
+                Ok(None) => {}
+                Ok(Some(path)) => {
+                    let path = path.display().to_string();
+                    // A network folder or drive is said at once: the node
+                    // refuses it.
+                    if let Some(why) = nerve_node::drives::refusal(&path) {
+                        c.toast(why, Tone::Danger);
+                        return;
+                    }
+                    c.with_store(|s| s.set_setup_folder(path.into()));
+                }
+            },
+        );
+    }
+
+    pub(super) fn setup_next(self: &Rc<Self>) {
         let Some((step, mode, center, pair_step, link, pair_name)) = self.with_store(|s| {
             (
                 s.get_setup_step(),
@@ -153,13 +185,44 @@ impl Ctl {
         }) else {
             return;
         };
+        let at = format!("--center={center}");
         match step {
             // Back from the mode: the center is paired, on to its mode.
             0 if pair_step == 2 => self.setup_go(1),
             0 => self.pair(&link, &pair_name, pair_step == 1),
+            // Commands that run as the owner need the owner's Windows
+            // password (user mode, folder mode's grants): where the node
+            // has none that works, it is asked for first, and Continue goes
+            // on with the step once it is saved.
+            1 if mode == "user" && self.owner_password_first("setup") => {}
             1 => {
-                let args = vec!["mode".into(), mode, format!("--center={center}")];
-                self.setup_run(args, 2);
+                let off = self.with_store(|s| s.get_setup_no_network()) == Some(true);
+                let network = if off { "off" } else { "on" };
+                let commands = vec![
+                    vec!["mode".into(), mode.clone(), at.clone()],
+                    vec!["network".into(), network.into(), at],
+                ];
+                self.setup_run(commands, if mode == "folder" { 2 } else { 3 });
+            }
+            2 => {
+                let Some((folder, w, x)) = self.with_store(|s| {
+                    (
+                        s.get_setup_folder().to_string(),
+                        s.get_setup_folder_write(),
+                        s.get_setup_folder_execute(),
+                    )
+                }) else {
+                    return;
+                };
+                if folder.is_empty() {
+                    return self.setup_go(3);
+                }
+                if self.owner_password_first("setup") {
+                    return;
+                }
+                let rights = format!("r{}{}", if w { "w" } else { "" }, if x { "x" } else { "" });
+                let add = vec!["folder".into(), "add".into(), folder, rights, at];
+                self.setup_run(vec![add], 3);
             }
             _ => {
                 let state = self
@@ -187,14 +250,16 @@ impl Ctl {
     }
 
     /// One step back. The pairing's confirmation goes back to its link; the
-    /// mode, to the center it paired, which stays paired; the end, to the
-    /// mode, or to the pairing when it was skipped.
+    /// mode, to the center it paired, which stays paired; the folder, to the
+    /// mode; the end, to the folder in folder mode, else to the mode, or to
+    /// the pairing when it was skipped.
     fn setup_back(&self) {
-        let Some((step, pair_step, center)) = self.with_store(|s| {
+        let Some((step, pair_step, center, mode)) = self.with_store(|s| {
             (
                 s.get_setup_step(),
                 s.get_pair_step(),
                 s.get_setup_center().to_string(),
+                s.get_setup_mode().to_string(),
             )
         }) else {
             return;
@@ -211,15 +276,16 @@ impl Ctl {
                 self.with_store(|s| s.set_pair_step(2));
                 self.setup_go(0);
             }
-            2 if center.is_empty() => self.setup_go(0),
+            3 if center.is_empty() => self.setup_go(0),
+            3 if mode != "folder" => self.setup_go(1),
             _ => self.setup_go(step - 1),
         }
     }
 
     fn setup_skip(&self) {
-        // Without a center there is no mode to choose: past the pairing, or
-        // past the mode, the steps are done.
-        self.setup_go(2);
+        // Without a center there is no mode to choose: past the pairing, the
+        // mode or the folder, the steps are done.
+        self.setup_go(3);
     }
 }
 
@@ -239,4 +305,6 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     store.on_setup_back(move || c.setup_back());
     let c = ctl.clone();
     store.on_setup_close(move || c.setup_close());
+    let c = ctl.clone();
+    store.on_setup_folder_choose(move || c.setup_folder_choose());
 }

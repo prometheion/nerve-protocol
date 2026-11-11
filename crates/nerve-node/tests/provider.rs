@@ -1743,8 +1743,20 @@ async fn a_full_owner_socket_does_not_block_the_provider_socket_and_the_reverse(
     for _ in 0..nerve_transport::ctl::MAX_PROVIDERS {
         held.push(UnixStream::connect(&at).await.unwrap());
     }
-    settle().await;
-    let (_p, first) = hello_on(&at).await;
+    // The node takes the held connections up in its own time, which under
+    // load can be longer than a settle: one more is let in until it has.
+    // Each that is let in is let go again, so with one place too many
+    // every try would be let in and the test fails.
+    let mut first = json!(null);
+    for _ in 0..50 {
+        settle().await;
+        let (p, said) = hello_on(&at).await;
+        first = said;
+        if first["error"] == nerve_transport::ctl::BUSY {
+            break;
+        }
+        drop(p);
+    }
     assert_eq!(first["error"], nerve_transport::ctl::BUSY, "{first}");
     let mut answered = status(&owner_at).await;
     for _ in 0..50 {

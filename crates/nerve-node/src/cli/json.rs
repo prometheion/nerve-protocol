@@ -258,15 +258,13 @@ pub(super) async fn command(
     print(out, v)
 }
 
-/// Whether the node's keys could go into the system keyring here: where
-/// `setup` would not offer it (`reason` `windows-service`), and whether a keyring answers for the account the node
-/// runs as (`no-answer`); `why` says it in words.
+/// Whether the node's keys could go into the system keyring here: whether
+/// a keyring answers for the account the node runs as (`reason`
+/// `no-answer`); `why` says it in words. The installed node on Windows
+/// keeps them in its service account's Credential Manager, which answers.
 fn keyring_here(paths: &NodePaths) -> Value {
-    if let Some(n) = crate::secrets::no_keyring(paths) {
-        let reason = match n {
-            crate::secrets::NoKeyring::WindowsService => "windows-service",
-        };
-        return json!({ "usable": false, "reason": reason, "why": n.why() });
+    if crate::secrets::windows_service(paths) {
+        return json!({ "usable": true });
     }
     // The installed program, which the node's user can run, asks its
     // keyring, as setup's does.

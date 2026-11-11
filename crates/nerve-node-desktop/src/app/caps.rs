@@ -47,10 +47,8 @@ impl Ctl {
             return;
         }
         let installed = self.with_store(|s| s.get_installed()).unwrap_or(false);
-        let (programs_note, config_note) = view::caps_notes(cfg!(windows), installed);
+        let config_note = view::config_note(installed);
         let Some(center) = self.with_caps(|c| {
-            c.set_windows(cfg!(windows));
-            c.set_programs_note(programs_note.into());
             c.set_config_note(config_note.into());
             c.set_load(Load::Loading);
             c.get_center().to_string()

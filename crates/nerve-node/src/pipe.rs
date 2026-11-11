@@ -406,7 +406,8 @@ mod tests {
         let paths = crate::paths::NodePaths::new(d.path().join("config"), d.path().join("state"));
         let e = call(&paths, "status", serde_json::json!({})).await;
         assert_eq!(e, Err(NOT_RUNNING.to_string()));
-        let held = crate::secrets::KeysLock::try_take(&paths).unwrap().unwrap();
+        // Another process's lock: one this process holds is no node's.
+        let held = crate::secrets::HeldByANode::take(&paths);
         let e = call(&paths, "status", serde_json::json!({})).await;
         assert_eq!(e, Err(NO_PIPE.to_string()));
         drop(held);
