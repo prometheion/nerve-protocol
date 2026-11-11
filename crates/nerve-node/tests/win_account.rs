@@ -1539,6 +1539,15 @@ async fn an_owner_with_a_blank_and_an_umlaut_in_the_name_runs_commands_as_itself
     let mine = owner_profile(&owner_sid).join("nerve-umlaut");
     let _ = std::fs::remove_dir_all(&mine);
     std::fs::create_dir_all(&mine).unwrap();
+    // The test runs as an administrator, so the folder is the administrators'
+    // and the owner (a standard account) could not change its list: the
+    // owner's own folder is the owner's, as one it made would be.
+    let granted = Command::new("icacls")
+        .arg(&mine)
+        .args(["/grant", &format!("*{owner_sid}:(OI)(CI)F")])
+        .output()
+        .unwrap();
+    assert!(granted.status.success(), "{granted:?}");
     let (_center, mut conn) = pair_d(&paths, vec![folder(&mine, "rwx")]).await;
     let r = run_in(
         &mut conn,
@@ -1603,6 +1612,9 @@ async fn a_capability_s_value_is_one_argument_on_windows() {
         powershell.display().to_string(),
         "-NoProfile".into(),
         "-NonInteractive".into(),
+        // A machine may allow no scripts by default (a Windows client does).
+        "-ExecutionPolicy".into(),
+        "Bypass".into(),
         "-File".into(),
         script.display().to_string(),
         "{text}".into(),
@@ -1626,12 +1638,12 @@ async fn a_capability_s_value_is_one_argument_on_windows() {
     nerve_node::cli::edit(&paths, |cfg| {
         let e = cfg.center_mut(D).expect("paired");
         e.settings = nerve_policy::config::SettingsGrant::Write;
-        // An action that names no path needs its `on` in folder mode.
-        for cap in ["p1o", "p1c"] {
-            e.policy
-                .caps
-                .insert(cap.into(), nerve_policy::config::CapSetting::On);
-        }
+        // An action that names no path needs its `on` in folder mode. The
+        // center's own capability gets its `on` after it added it: the node
+        // refuses an addition under a rule set before.
+        e.policy
+            .caps
+            .insert("p1o".into(), nerve_policy::config::CapSetting::On);
         Ok(())
     })
     .await
@@ -1642,6 +1654,16 @@ async fn a_capability_s_value_is_one_argument_on_windows() {
                          "command": command, "params": params});
     let added = call(&mut conn, "settings", "cap-add", json!({"capability": own})).await;
     added.unwrap_or_else(|e| panic!("the center's capability: {e:?}"));
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(D)
+            .expect("paired")
+            .policy
+            .caps
+            .insert("p1c".into(), nerve_policy::config::CapSetting::On);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
     own["name"] = json!("p1c.cmd");
     own["command"] = json!(["cmd.exe", "/c", "echo", "{text}"]);
     let e = call(&mut conn, "settings", "cap-add", json!({"capability": own}))

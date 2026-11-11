@@ -264,6 +264,19 @@ fn powershell(shell: &str) -> bool {
     lower.contains("powershell") || lower.contains("pwsh")
 }
 
+/// PowerShell in a container would stand somewhere else than its folder:
+/// its command line gets the start that puts it there. A config capability's
+/// arguments (`argv`) are values of a call, whole and as they came, so the
+/// start never goes into the last of them.
+fn start_powershell_in_its_folder(argv: bool, program: &str, args: &mut [String]) {
+    if !argv
+        && powershell(program)
+        && let Some(line) = args.last_mut()
+    {
+        line.insert_str(0, nerve_sandbox::POWERSHELL_START);
+    }
+}
+
 /// A Windows command line for `program` and `args`, quoted as the Rust
 /// standard library quotes one for `CreateProcessW` (the rules of the
 /// Microsoft C runtime): a command started with another account's token
@@ -2152,12 +2165,8 @@ pub async fn run(
         }
         None => shell_command(shell, &call.command),
     };
-    // PowerShell in a container would stand somewhere else than its folder.
-    if opts.container.is_some()
-        && powershell(&program)
-        && let Some(line) = args.last_mut()
-    {
-        line.insert_str(0, nerve_sandbox::POWERSHELL_START);
+    if opts.container.is_some() {
+        start_powershell_in_its_folder(call.argv.is_some(), &program, &mut args);
     }
     // A sudo command and root's never: sudo would not rise in the user
     // namespace the shim makes for it.
@@ -2699,6 +2708,22 @@ async fn run_as(
 #[cfg(test)]
 mod command_line_tests {
     use super::windows_command_line;
+
+    /// A config capability's value is one argument as it came, also its last
+    /// one: PowerShell's start goes into a command line only (node-2).
+    #[test]
+    fn a_capability_s_last_argument_gets_no_powershell_start() {
+        let args = || vec!["-File".to_string(), "echo.ps1".into(), "hi; whoami".into()];
+        let mut a = args();
+        super::start_powershell_in_its_folder(true, "powershell.exe", &mut a);
+        assert_eq!(a, args());
+        let mut c = vec!["-Command".to_string(), "whoami".into()];
+        super::start_powershell_in_its_folder(false, "powershell.exe", &mut c);
+        assert_eq!(c[1], format!("{}whoami", nerve_sandbox::POWERSHELL_START));
+        let mut other = args();
+        super::start_powershell_in_its_folder(false, "tool.exe", &mut other);
+        assert_eq!(other, args());
+    }
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
