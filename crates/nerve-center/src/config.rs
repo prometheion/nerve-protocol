@@ -129,9 +129,7 @@ pub struct Args {
         global = true
     )]
     pub listen: String,
-    /// The URL put into pairing links; https://<host name>:<port> by default.
-    /// `{port}` in it stands for the port the center listens on for nodes
-    /// (for a `--listen` with port 0).
+    /// The URL in pairing links; `{port}` in it is the listening port
     #[arg(long, env = "NERVE_CENTER_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP, on a loopback --listen only
