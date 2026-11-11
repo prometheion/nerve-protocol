@@ -337,9 +337,11 @@ timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
 with `-m <model>`, `-ngl 0` (CPU) or `-ngl 999` (GPU), `-c`, `-b` and `-ub`
 of the model's context and `-np 1`, restarted with backoff, ended with the
-center (`kill_on_drop`, a process group on Unix; on Windows a job object of
-the center's, which ends it also when the center is killed, where on Linux
-only the installed service's cgroup does); its state and the install
+center (`kill_on_drop`, a process group on Unix; on Linux
+`PR_SET_PDEATHSIG`, set from a thread of its own that lives as long as the
+center, since the signal follows the thread that started it; on Windows a
+job object of the center's: both end it also when the center is killed); a
+stdio center stops cleanly on SIGTERM and SIGINT; its state and the install
 progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
 <path>.sock`) on Unix, so no other account can reach it or bind its address
 after a crash; on Windows, or where that path is over 100 bytes, on a free

@@ -117,6 +117,28 @@ fn stdio_and_a_second_instance_that_attaches() {
     assert!(owner.wait().unwrap().success());
 }
 
+/// A harness that ends its center with SIGTERM, or a Ctrl+C (SIGINT) in its
+/// terminal, while the pipe is still open gets a clean stop: the center says
+/// bye to its nodes and exits with 0, not killed by the signal.
+#[cfg(unix)]
+#[test]
+fn a_signal_stops_a_stdio_center_cleanly() {
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = spawn(dir.path());
+        let mut out = BufReader::new(c.stdout.take().unwrap());
+        init(&mut c, &mut out);
+        // SAFETY: a signal to the child this test started.
+        assert_eq!(unsafe { libc::kill(c.id() as i32, sig) }, 0);
+        assert!(
+            wait(&mut c, Duration::from_secs(10)),
+            "signal {sig}: it still runs"
+        );
+        let status = c.wait().unwrap();
+        assert!(status.success(), "signal {sig}: {status:?}");
+    }
+}
+
 /// The first start says the owner token on stderr at once, whatever the
 /// level, and where it is kept; a later start says nothing of it.
 #[cfg(unix)]

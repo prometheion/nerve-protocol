@@ -57,6 +57,9 @@ pub struct Engine {
     transport: String,
     session: Mutex<Arc<Session>>,
     initialized: AtomicBool,
+    /// Set first in [`Engine::close`]: a call still running when its client
+    /// went away must not open a new session that nobody ever ends.
+    closed: AtomicBool,
     /// Tool calls in flight by their request id (as JSON text), each with a
     /// number of its own so a reused id cannot stop the wrong call, and the
     /// sender that cancels it.
@@ -71,6 +74,7 @@ impl Engine {
             transport: transport.to_string(),
             session: Mutex::new(center.new_session(transport)),
             initialized: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             calls: Mutex::new(HashMap::new()),
             next_call: AtomicU64::new(0),
         }
@@ -81,10 +85,11 @@ impl Engine {
     }
 
     /// The live session; a session ended from the web UI is replaced by a
-    /// fresh one, so a long-running stdio harness keeps working.
+    /// fresh one, so a long-running stdio harness keeps working. One ended
+    /// by [`Engine::close`] stays ended.
     fn live_session(&self) -> Arc<Session> {
         let mut s = lock(&self.session);
-        if s.ended() {
+        if s.ended() && !self.closed.load(Ordering::SeqCst) {
             let client = lock(&s.client).clone();
             *s = self.center.new_session(&self.transport);
             *lock(&s.client) = client;
@@ -98,6 +103,7 @@ impl Engine {
 
     /// Ends the session at the center (the client went away).
     pub async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let id = self.session().id.clone();
         self.center.end_session(&id).await;
     }
@@ -2217,6 +2223,55 @@ mod tests {
         )
         .await;
         assert_eq!(read_box(&e, "box-1").await, CALLED);
+    }
+
+    /// A call that runs on after its client went away (stdin closed right
+    /// after the request) opens no new session: the center counts none, so
+    /// a stdio center exits.
+    #[tokio::test]
+    async fn a_call_after_close_opens_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path());
+        with_box(&c);
+        let e = Engine::new(&c, "test");
+        e.close().await;
+        assert_eq!(c.session_count(), 0);
+        call(
+            &e,
+            "list",
+            json!({"node": "box-1", "capability": "fs.read"}),
+        )
+        .await;
+        read_box(&e, "box-1").await;
+        assert_eq!(c.session_count(), 0);
+    }
+
+    /// The pipe a harness writes one request to and closes leaves no
+    /// session behind within a second.
+    #[tokio::test]
+    async fn a_pipe_closed_right_after_a_request_leaves_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path());
+        with_box(&c);
+        let input = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": PROTOCOL}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "list", "arguments": {"node": "box-1", "capability": ["fs.read"]}}}),
+        ]
+        .map(|v| format!("{v}\n"))
+        .concat();
+        serve_lines(
+            c.clone(),
+            tokio::io::BufReader::new(std::io::Cursor::new(input.into_bytes())),
+            tokio::io::sink(),
+            "stdio",
+        )
+        .await;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while c.session_count() > 0 && std::time::Instant::now() < end {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(c.session_count(), 0);
     }
 
     /// A misspelt node or capability gets the one it was likely meant to

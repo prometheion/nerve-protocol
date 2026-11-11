@@ -296,7 +296,16 @@ pub async fn run(args: Args) -> Result<(), String> {
     nerve_service::win::dispatch::running();
     match args.mcp {
         McpMode::Stdio => {
-            crate::mcp::serve_stdio(running.center.clone()).await;
+            // A harness may end its server with SIGTERM, and a Ctrl+C in its
+            // terminal sends SIGINT: both stop the center cleanly, with a
+            // bye to the nodes and the statistics written.
+            tokio::select! {
+                _ = crate::mcp::serve_stdio(running.center.clone()) => {}
+                _ = signal() => {
+                    running.stop().await;
+                    return Ok(());
+                }
+            }
             // The harness that started us is gone; harnesses that attached
             // keep the center until they end too.
             while running.center.session_count() > 0 {

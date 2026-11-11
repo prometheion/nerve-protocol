@@ -31,6 +31,10 @@ pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
 pub const DUPLICATE_PING: Duration = Duration::from_secs(3);
 /// No frame for this long is a dead link (§4.4).
 pub const DEAD_AFTER: Duration = Duration::from_secs(45);
+/// How long a `bye` or a ping waits for room in the send queue, and the
+/// writer for the socket once the reader ended: a node that stops reading
+/// fills both and must not hold up a stop, a remove or its own reconnect.
+pub const SEND_OUT_WAIT: Duration = Duration::from_secs(5);
 /// How long the center waits for a `describe`, `get` or `settings.set`.
 pub const SHORT_CALL: Duration = Duration::from_secs(30);
 /// The most of the node's call places (its `limits.calls`, 64 for
@@ -322,11 +326,15 @@ impl Link {
         }
     }
 
-    /// Sends a frame of the connection now only (a ping, a `bye`).
+    /// Sends a frame of the connection now only (a ping, a `bye`), waiting
+    /// at most [`SEND_OUT_WAIT`] for room.
     async fn send_out(&self, o: Out) -> bool {
         let out = lock(&self.wire).out.clone();
         match out {
-            Some(out) => out.send(o).await.is_ok(),
+            Some(out) => matches!(
+                tokio::time::timeout(SEND_OUT_WAIT, out.send(o)).await,
+                Ok(Ok(()))
+            ),
             None => false,
         }
     }
@@ -1347,7 +1355,18 @@ pub async fn run(
             _ => {}
         }
     }
-    drop(writer);
+    // The writer may still send what is queued, a bye above all; one stuck
+    // on a node that reads nothing would keep the socket for as long as the
+    // kernel keeps trying.
+    tokio::spawn(async move {
+        let mut writer = writer;
+        if tokio::time::timeout(SEND_OUT_WAIT, &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+        }
+    });
     // A connection that dropped without a bye parks a link the node can
     // resume; its calls wait for the grace.
     if !said_bye && link.park(conn) {
@@ -1562,6 +1581,21 @@ mod tests {
         assert!(held.is_err(), "the queue had room");
         assert_eq!(link.waiting(), 1);
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// A `bye` to a node that reads nothing, whose send queue is full, gives
+    /// up after [`SEND_OUT_WAIT`]: a stop, a remove or the node's reconnect
+    /// would wait for it otherwise.
+    #[tokio::test(start_paused = true)]
+    async fn a_bye_to_a_node_that_reads_nothing_does_not_wait_for_ever() {
+        let (out, _rx) = mpsc::channel(1);
+        out.try_send(Out::Frame(WsMessage::text("{}"))).unwrap();
+        let link = Link::new("n1", String::new(), Limits::default(), out, None);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(60), link.bye(ByeReason::Shutdown))
+            .await
+            .expect("the bye waited for ever");
+        assert_eq!(started.elapsed(), SEND_OUT_WAIT);
     }
 
     /// A `stream.open` in flight when the link resumes fails, and is not

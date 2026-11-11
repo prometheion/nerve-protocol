@@ -196,24 +196,19 @@ impl Center {
         lock(&self.local_model).as_ref().map(|s| s.status())
     }
 
-    /// Replaces the checker config (after the UI validated the change),
-    /// saves it, rebuilds the checker and tells the UI. `clear_taint` clears
-    /// every session's taint mark, for when taint is switched off.
-    pub fn set_checker_config(&self, cfg: CheckerConfig, clear_taint: bool) {
-        self.store_checker_config(cfg, clear_taint, None)
-            .expect("a save without a version is never stale");
-    }
-
-    /// [`set_checker_config`](Self::set_checker_config), refused with
+    /// Replaces the checker config (after it was validated), saves it,
+    /// rebuilds the checker and tells the UI. `clear_taint` clears every
+    /// session's taint mark, for when taint is switched off. Refused with
     /// [`CHECKER_STALE`] when `if_version` is given and the stored config is
-    /// at another version: checked and written under one lock of the store.
+    /// at another version: checked and written under one lock of the store,
+    /// and refused with [`UNWRITABLE`] when the state file does not take it.
     fn store_checker_config(
         &self,
         mut cfg: CheckerConfig,
         clear_taint: bool,
         if_version: Option<u64>,
     ) -> Result<(), String> {
-        self.update(|s| {
+        self.update_saved(|s| {
             if if_version.is_some_and(|v| v != s.checker.version) {
                 return Err(CHECKER_STALE.to_string());
             }
@@ -383,14 +378,14 @@ impl Center {
         };
         // Added to the stored config under its lock: a read, a push and a
         // write of the whole config would lose a change saved in between.
-        let added = self.update(|s| {
+        let added = self.update_saved(|s| {
             let new = !s.checker.allow_rules.contains(&entry);
             if new {
                 s.checker.allow_rules.push(entry);
                 s.checker.version += 1;
             }
-            new
-        });
+            Ok(new)
+        })?;
         if added {
             self.rebuild_checker();
             self.changed(Change::Nodes);
@@ -560,7 +555,9 @@ impl Center {
         // The model is off everywhere then: also for a node that had it on
         // by its own setting, which would otherwise refuse its every call
         // with no model to ask (fail closed).
-        self.update(|s| {
+        // Off at once, as the files are gone; the answer says when the
+        // state file did not keep it.
+        let (_, kept) = self.update_kept(|s| {
             s.checker.version += 1;
             if s.checker.model.source == ModelSource::Local {
                 s.checker.model_on = false;
@@ -581,7 +578,7 @@ impl Center {
                     None,
                     "the action checker's local model was removed",
                 );
-                Ok(())
+                kept
             }
             Err(e) => {
                 let e = format!("the local model is off, but not every file could be deleted: {e}");

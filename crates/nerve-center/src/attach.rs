@@ -181,8 +181,9 @@ mod unix {
     /// Serves attached harnesses until the task is dropped.
     pub async fn serve(center: Center, listener: UnixListener) {
         let me = nerve_transport::net::euid();
+        let mut failing = false;
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Some((stream, _)) = accepted(listener.accept().await, &mut failing).await else {
                 continue;
             };
             let uid = stream.peer_cred().map(|c| c.uid()).ok();
@@ -191,6 +192,26 @@ mod unix {
                 continue;
             }
             tokio::spawn(super::attached(center.clone(), stream));
+        }
+    }
+
+    /// The connection an accept gave, or `None` after a failed one, which
+    /// is logged once while it lasts and followed by a pause: a lasting
+    /// failure (no file descriptor left) would turn the loop into a spin
+    /// that burns a core and holds up the tasks that would free one.
+    pub(super) async fn accepted<T>(r: std::io::Result<T>, failing: &mut bool) -> Option<T> {
+        match r {
+            Ok(c) => {
+                *failing = false;
+                Some(c)
+            }
+            Err(e) => {
+                if !std::mem::replace(failing, true) {
+                    tracing::warn!("the harness socket cannot accept a connection: {e}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                None
+            }
         }
     }
 
@@ -483,6 +504,23 @@ mod link_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A failed accept pauses the harness socket's loop, so a lasting
+    /// failure (EMFILE) does not spin a core.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_accept_pauses_the_loop() {
+        let mut failing = false;
+        let started = tokio::time::Instant::now();
+        for _ in 0..10 {
+            let r: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+            assert!(unix::accepted(r, &mut failing).await.is_none());
+        }
+        assert!(failing);
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        assert_eq!(unix::accepted(Ok(()), &mut failing).await, Some(()));
+        assert!(!failing);
+    }
 
     /// Whether a center runs is not told through a link, nor by waiting on
     /// a FIFO in place of the lock (round 1, correctness 6): root's

@@ -586,10 +586,14 @@ impl Center {
 
     /// Sets the level from now on and keeps it for the next start. With
     /// `--log` the flag holds for this run: only the stored level changes.
-    pub fn set_log_level(&self, level: Level) {
+    /// A level the state file does not take is not set.
+    pub fn set_log_level(&self, level: Level) -> Result<(), String> {
         let stored = self.stored_log_level();
         if stored != level {
-            self.update(|s| s.log_level = level);
+            self.update_saved(|s| {
+                s.log_level = level;
+                Ok(())
+            })?;
         }
         let old = self.log.level();
         if self.log_level_pinned {
@@ -600,10 +604,10 @@ impl Center {
                     &format!("the log level is kept as {level} for the next start; --log holds this run at {old}"),
                 );
             }
-            return;
+            return Ok(());
         }
         if old == level {
-            return;
+            return Ok(());
         }
         // Said at a level that both the old and the new setting keep.
         let wide = old.max(level);
@@ -614,6 +618,7 @@ impl Center {
             &format!("the log level changes from {old} to {level}"),
         );
         self.log.set_level(level);
+        Ok(())
     }
 
     /// What the log view shows: the entries `q` asks for, newest first, the
@@ -899,8 +904,9 @@ impl Center {
                 plural(links.len() as u32, "node link")
             ),
         );
+        // All at once: each bye may wait for a node that reads nothing.
+        futures_util::future::join_all(links.iter().map(|l| l.bye(ByeReason::Shutdown))).await;
         for l in links {
-            l.bye(ByeReason::Shutdown).await;
             // A parked link has no connection for the bye; its calls end.
             if !l.is_live() {
                 l.fail_all();
@@ -1279,7 +1285,7 @@ pub(crate) mod tests {
     #[test]
     fn a_level_saved_under_the_flag_is_kept_for_the_next_start_only() {
         let dir = tempfile::tempdir().unwrap();
-        open(dir.path(), None).set_log_level(Level::Debug);
+        open(dir.path(), None).set_log_level(Level::Debug).unwrap();
         let c = Center::open(Options {
             state_dir: dir.path().to_path_buf(),
             name: None,
@@ -1293,13 +1299,13 @@ pub(crate) mod tests {
             (Level::Warn, Level::Debug)
         );
         // Saving the stored level again changes nothing.
-        c.set_log_level(Level::Debug);
+        c.set_log_level(Level::Debug).unwrap();
         assert_eq!(
             (c.log().level(), c.stored_log_level()),
             (Level::Warn, Level::Debug)
         );
         // Another one is stored; this run stays where the flag put it.
-        c.set_log_level(Level::Error);
+        c.set_log_level(Level::Error).unwrap();
         assert_eq!(
             (c.log().level(), c.stored_log_level()),
             (Level::Warn, Level::Error)
@@ -1316,7 +1322,7 @@ pub(crate) mod tests {
         assert_eq!(c.log().level(), Level::Info);
         c.log().record(Level::Debug, None, "detail one");
         assert!(said(&c, Level::Debug, "detail").is_empty());
-        c.set_log_level(Level::Debug);
+        c.set_log_level(Level::Debug).unwrap();
         c.log().record(Level::Debug, None, "detail two");
         assert_eq!(said(&c, Level::Debug, "detail two").len(), 1);
         assert_eq!(
@@ -1329,7 +1335,7 @@ pub(crate) mod tests {
         assert_eq!(c.log().level(), Level::Debug);
         assert!(!c.log_level_pinned());
         // Lowering is told too, while the old level still keeps it.
-        c.set_log_level(Level::Error);
+        c.set_log_level(Level::Error).unwrap();
         assert_eq!(
             said(&c, Level::Info, "the log level changes from debug to error").len(),
             1

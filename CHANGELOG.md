@@ -6,6 +6,14 @@
 
 - The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
 
+### Fixed
+
+- A center started by a harness exits when the harness closes the pipe right after a request; it ran on with a session nobody ended, and kept its ports and its state folder.
+- SIGTERM or Ctrl+C stops a center started by a harness cleanly: a bye to the nodes, the statistics written. On Linux the action checker's local model (`llama-server`) ends with the center, also when the center is killed.
+- Stopping the center, removing a node and a node's reconnect no longer wait without end for a node that stops reading.
+- A change in the center's web UI that the state file cannot take (a node's name or switch, the action checker's settings and allow rules, the center's settings and log level) is an error, not "saved".
+- The center stays responsive while it installs the local model (the hash and the unpack run off its workers), and its harness socket no longer spins a CPU when the center runs out of file descriptors.
+
 ### Windows (with 0.1.0)
 
 Built and tested, not released: the releases before 0.1.0 publish the Linux programs only.

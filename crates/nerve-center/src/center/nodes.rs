@@ -12,7 +12,7 @@ impl Center {
         if !nerve_proto::valid_node_name(name) {
             return Err("a node name is 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit".into());
         }
-        let old = self.update(|s| {
+        let old = self.update_saved(|s| {
             if s.nodes.values().any(|n| n.name == name && n.id != node_id) {
                 return Err("another node already has this name".to_string());
             }
@@ -38,9 +38,11 @@ impl Center {
     /// stopped: the owner who disables a machine wants the agent's work
     /// there to end, not to run on unseen.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
-        self.update(|s| {
+        // Kept before it is answered: a node the owner disabled must not
+        // come back enabled at the next start.
+        self.update_saved(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
-            Ok::<(), String>(())
+            Ok(())
         })?;
         if disabled {
             let sessions: Vec<Arc<Session>> = lock(&self.sessions).values().cloned().collect();
