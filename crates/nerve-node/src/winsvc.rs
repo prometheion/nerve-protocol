@@ -354,6 +354,12 @@ fn put_owner(sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
         steps.did("no owner besides the administrators");
         return Ok(());
     };
+    // The node's own accounts own nothing of it: not the owner's place.
+    if name.eq_ignore_ascii_case(USER) || name.eq_ignore_ascii_case(RUN_USER) {
+        return Err(format!(
+            "{name} is an account of the node itself and cannot own it; install as yourself"
+        ));
+    }
     let before = sys.owner()?;
     sys.put_owner(&sid)?;
     match before {
@@ -2614,6 +2620,23 @@ pub(crate) mod tests {
             "{e}"
         );
         assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+    }
+
+    /// The node's own accounts are not taken as its owner, whoever names them.
+    #[test]
+    fn the_node_s_own_accounts_do_not_own_it() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for name in [USER, RUN_USER] {
+            *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), name.into()));
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert!(e.contains("cannot own it"), "{name}: {e}");
+            assert_eq!(sys.owner().unwrap(), None, "{name}");
+        }
     }
 
     /// A silent install has no input: that is no blank password, and the
