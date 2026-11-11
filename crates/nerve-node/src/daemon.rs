@@ -3566,6 +3566,9 @@ mod every_platform {
             let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
             let mut opts = NodeOptions::new(paths.clone());
             opts.home = d.path().to_path_buf();
+            // CI runs the tests as an administrator, which a node refuses
+            // to run as without machine.allow_root; not what this tests.
+            opts.full_rights = Some(false);
             let daemon = Daemon::start(opts).await.unwrap();
             assert!(crate::pipe::call(&paths, "status", json!({})).await.is_ok());
             daemon.stop().await;

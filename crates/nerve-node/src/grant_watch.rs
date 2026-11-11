@@ -1470,8 +1470,14 @@ mod tests {
         std::fs::create_dir(&app).unwrap();
         // The sync moved the grant: the record names the new folder.
         w.follow(|| granted(&app), || Ok(()));
-        std::fs::hard_link(&store, app.join("linked.js")).unwrap();
-        assert!(told(&w), "a name in the new folder is told");
+        // The watch is armed on its own thread, a moment after `follow`: a
+        // name made before that is not told, so a new one is made until one
+        // is.
+        let new_told = (0..10).any(|i| {
+            std::fs::hard_link(&store, app.join(format!("linked{i}.js"))).unwrap();
+            told(&w)
+        });
+        assert!(new_told, "a name in the new folder is told");
         std::fs::hard_link(&store, old.join("linked.js")).unwrap();
         assert!(!told(&w), "the old folder is not watched any more");
     }
