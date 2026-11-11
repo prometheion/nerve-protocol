@@ -1063,7 +1063,7 @@ mod tests {
         let sid = sid_text(&win_user::own_sid().unwrap()).unwrap();
         let given = std::process::Command::new("icacls")
             .arg(&top)
-            .args(["/setowner", "*S-1-5-32-544", "/T"])
+            .args(["/setowner", "*S-1-5-32-544"])
             .output()
             .unwrap();
         assert!(given.status.success(), "{given:?}");
@@ -1072,7 +1072,14 @@ mod tests {
             .unwrap();
         let acl = icacls(&top.join("sub/f"));
         assert!(acl.contains(&format!("\\{me}:(I)(F)")), "{acl}");
-        assert_eq!(acl.lines().filter(|l| l.contains(":(")).count(), 3, "{acl}");
+        // The DACL's three entries are what the file inherits. An entry of
+        // its own that the file got where it was made stays (CI's built-in
+        // Administrator gets one from the runner's temp folder).
+        assert_eq!(
+            acl.lines().filter(|l| l.contains(":(I)")).count(),
+            3,
+            "{acl}"
+        );
         assert_eq!(icacls(&outside.join("f")), before);
         WinHost.admins_own(&top).unwrap();
         junction(&d.path().join("link"), &outside);
