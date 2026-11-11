@@ -904,8 +904,10 @@ impl Center {
                 plural(links.len() as u32, "node link")
             ),
         );
-        // All at once: each bye may wait for a node that reads nothing.
-        futures_util::future::join_all(links.iter().map(|l| l.bye(ByeReason::Shutdown))).await;
+        // All at once: each bye may wait for a node that reads nothing. The
+        // caller ends the runtime next, so a bye is waited for until it is
+        // sent, not only queued.
+        futures_util::future::join_all(links.iter().map(|l| l.bye_sent(ByeReason::Shutdown))).await;
         for l in links {
             // A parked link has no connection for the bye; its calls end.
             if !l.is_live() {
@@ -980,6 +982,18 @@ pub(crate) mod tests {
     /// offline check; one that reaches the send ends as `connection_lost`.
     pub(super) fn online(c: &Center, node: &str) {
         lock(&c.links).insert(node.into(), Arc::new(Link::for_test(node)));
+    }
+
+    /// A stop returns once the byes are sent, not only queued: the process
+    /// ends right after, and a writer that has not run yet never sends one.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_waits_for_the_byes_to_be_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        lock(&c.links).insert("n1".into(), Arc::new(Link::for_test_slow_bye("n1")));
+        let started = tokio::time::Instant::now();
+        c.shutdown().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
     }
 
     pub(super) fn exec_route(node: &str) -> Route {

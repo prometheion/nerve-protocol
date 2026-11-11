@@ -254,10 +254,10 @@ jobs:
   # The node keeps its keys in the system keyring on every Linux kernel, and
   # folder mode runs as the account `nerve-run` (issue #135). The programs the
   # `musl` job built are installed on Ubuntu 22.04 and 24.04 (x86_64 and
-  # arm64) and Debian 12, and take the whole path an owner takes: the
-  # real-machine tests (folder grants, an owner's program as a provider held
-  # to the folders, capabilities of node.toml, rules on their arguments, the
-  # limits per command in the service's cgroup, root as the owner), then
+  # arm64), Ubuntu 26.04, and Debian 12 and 13, and take the whole path an
+  # owner takes: the real-machine tests (folder grants, an owner's program as
+  # a provider held to the folders, capabilities of node.toml, rules on their
+  # arguments, the limits per command in the service's cgroup, root as the owner), then
   # `setup` in a terminal answering yes to the keyring, the keys moving out of
   # their files, the keyring test as `nerve`, a restart of the keyring's
   # session and of the node, `status`, a folder mode command as `nerve-run`,

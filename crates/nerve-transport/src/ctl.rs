@@ -968,9 +968,10 @@ mod unix {
                 format!("{} is in use: is the node running already?", path.display()),
             ));
         }
-        let mut name = path.as_os_str().to_owned();
-        name.push(".new");
-        let new = std::path::PathBuf::from(name);
+        // A name no longer than `path`'s own: a socket path is at most 107
+        // bytes, and a longer staging name would take 4 off the longest state
+        // folder that works.
+        let new = path.with_extension("new");
         let _ = std::fs::remove_file(&new);
         let listener = UnixListener::bind(&new)?;
         let made = (|| {
@@ -1150,9 +1151,27 @@ mod unix {
             drop(listener);
             let (_listener, token) = bind_with_token(&p).await.unwrap();
             assert_eq!(std::fs::read_to_string(token_file(&p)).unwrap(), token);
-            let mut name = p.as_os_str().to_owned();
-            name.push(".new");
-            assert!(!std::path::Path::new(&name).exists());
+            assert!(!p.with_extension("new").exists());
+        }
+
+        /// The longest socket path that works still binds: the socket is
+        /// bound under a name beside it, which may not be longer than the
+        /// path (a socket path is at most 107 bytes on Linux).
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn the_longest_socket_path_still_binds() {
+            let d = tempfile::tempdir().unwrap();
+            let name = "ctl.sock";
+            let pad = 107usize
+                .checked_sub(d.path().as_os_str().len() + 2 + name.len())
+                .filter(|p| *p > 0)
+                .expect("a temp folder short enough");
+            let dir = d.path().join("x".repeat(pad));
+            std::fs::create_dir(&dir).unwrap();
+            let p = dir.join(name);
+            assert_eq!(p.as_os_str().len(), 107);
+            let (_listener, token) = bind_with_token(&p).await.unwrap();
+            assert_eq!(std::fs::read_to_string(token_file(&p)).unwrap(), token);
         }
 
         /// A file sent with the request on the open socket reaches the

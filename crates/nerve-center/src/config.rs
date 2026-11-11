@@ -439,6 +439,14 @@ pub fn address_url(a: &str) -> String {
     }
 }
 
+/// [`address_url`] of `a` with the port the listener got, for a port 0.
+pub fn address_url_on(a: &str, port: u16) -> String {
+    match a.rsplit_once(':') {
+        Some((host, _)) => address_url(&format!("{host}:{port}")),
+        None => address_url(a),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// By hand at a terminal the center says what it waits for (round 2,
@@ -466,6 +474,16 @@ mod tests {
         assert_eq!(address_url("[::]:7481"), format!("https://{host}:7481"));
         assert_eq!(address_url("127.0.0.1:7481"), "http://127.0.0.1:7481");
         assert_eq!(address_url("10.0.0.5:7481"), "https://10.0.0.5:7481");
+        // A port 0 is named by the port the listener got.
+        assert_eq!(
+            address_url_on("0.0.0.0:0", 4321),
+            format!("https://{host}:4321")
+        );
+        assert_eq!(
+            address_url_on("[::]:0", 4321),
+            format!("https://{host}:4321")
+        );
+        assert_eq!(address_url_on("10.0.0.5:0", 4321), "https://10.0.0.5:4321");
     }
 
     /// Every command answers `--help` and `-h`, not only the top level

@@ -493,3 +493,282 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     let bad = owner(&["pair"], None);
     assert!(!bad.status.success());
 }
+
+/// A center that runs a node's link and a harness over stdio, stopped by a
+/// signal, and one that serves MCP over HTTP beyond loopback with port 0.
+#[cfg(unix)]
+mod running {
+    use super::*;
+
+    use std::path::Path;
+    use std::sync::mpsc::{Receiver, channel};
+
+    use clap::Parser;
+    use futures_util::{SinkExt, StreamExt};
+    use nerve_center::config::Args;
+    use nerve_proto::link::{CenterUrl, PairLink};
+    use nerve_proto::msg::{self, method};
+    use nerve_proto::rpc::Message;
+    use nerve_transport::keys::NodeKey;
+    use nerve_transport::ws::{self, WsMessage};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Pairs a node with a center on `dir`, as a node does over the node
+    /// port, and stops that center again: the state folder keeps the node.
+    /// Gives the node's key and id.
+    fn paired_node(dir: &Path) -> (NodeKey, String) {
+        runtime().block_on(async {
+            nerve_transport::init_crypto();
+            let args = Args::try_parse_from([
+                "nerve-center",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:0",
+                "--plain-loopback",
+                "--ui",
+                "off",
+                "--mcp",
+                "off",
+            ])
+            .unwrap();
+            let lock = nerve_center::attach::try_lock(dir).unwrap().unwrap();
+            let running = nerve_center::server::start(&args, lock).await.unwrap();
+            let key = NodeKey::generate().unwrap();
+            let link = running.center.new_pairing()["link"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let code = PairLink::parse(&link).unwrap().code;
+            let mut io = tokio::net::TcpStream::connect(running.nodes).await.unwrap();
+            let resp = nerve_transport::http::post_json(
+                &mut io,
+                "127.0.0.1",
+                nerve_proto::PAIR_PATH,
+                &json!({"code": code, "name": "box", "platform": "linux", "arch": "x86_64",
+                        "public_key": key.public_hex()}),
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            running.stop().await;
+            (key, body["node_id"].as_str().unwrap().to_string())
+        })
+    }
+
+    /// Starts `nerve-center` with `env` added and reads the port its start
+    /// line names, `(listening on <addr>)`, and the line itself.
+    fn start(c: &mut Command) -> (Child, u16, String) {
+        let mut child = c.stderr(Stdio::piped()).spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let mut sent = false;
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("[nerve-center] {line}");
+                if !sent && line.contains("(listening on ") {
+                    let _ = tx.send(line);
+                    sent = true;
+                }
+            }
+        });
+        let line = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the start line");
+        let at = line.split("(listening on ").nth(1).unwrap();
+        let port = at.split(')').next().unwrap().rsplit(':').next().unwrap();
+        (child, port.parse().unwrap(), line)
+    }
+
+    /// A node on port `port` that answers the center like a node (a
+    /// description with a `fs.read`, a result for every call), and says on
+    /// the first channel that the center welcomed it, on the second how its
+    /// link ended: the reason of a `bye`, or that the connection closed.
+    fn node(port: u16, key: NodeKey, node_id: String) -> (Receiver<()>, Receiver<String>) {
+        let (welcomed, welcome) = channel();
+        let (ended, end) = channel();
+        std::thread::spawn(move || {
+            runtime().block_on(async {
+                let url = CenterUrl::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+                let mut ws = ws::connect(&url, None, None, &node_id, 4 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                let text = async |ws: &mut tokio_tungstenite::WebSocketStream<_>| loop {
+                    match tokio::time::timeout(Duration::from_secs(60), ws.next()).await {
+                        Ok(Some(Ok(WsMessage::Text(t)))) => return Message::decode(&t).ok(),
+                        Ok(Some(Ok(_))) => continue,
+                        _ => return None,
+                    }
+                };
+                let Some(Message::Notification { params, .. }) = text(&mut ws).await else {
+                    panic!("no challenge")
+                };
+                let nonce = msg::unhex(params["nonce"].as_str().unwrap()).unwrap();
+                let center_id = params["center_id"].as_str().unwrap().to_string();
+                let hello = json!({
+                    "node_id": node_id,
+                    "auth": {"sig": key.sign_connect(&center_id, &nonce)},
+                    "versions": ["0"],
+                    "software": {"name": "t", "version": "1"},
+                    "rev": 1,
+                    "features": [],
+                    "resume": {"link": msg::hex(&nerve_transport::keys::random_bytes(16)), "got": 0},
+                });
+                let hello = Message::notification(method::HELLO, hello);
+                ws.send(WsMessage::text(hello.encode())).await.unwrap();
+                let Some(Message::Notification { method: m, .. }) = text(&mut ws).await else {
+                    panic!("no welcome")
+                };
+                assert_eq!(m, method::WELCOME);
+                let _ = welcomed.send(());
+                let described = json!({
+                    "nerve": "0",
+                    "node": {"id": node_id, "name": "box", "platform": "linux", "arch": "x86_64",
+                             "software": {"name": "t", "version": "1"}},
+                    "rev": 1,
+                    "summary": "A test node.",
+                    "capabilities": [
+                        {"id": "fs", "profile": "fs", "exposure": "on", "summary": "Files.",
+                         "actions": {"read": {"effect": "read", "summary": "Read a file.",
+                                              "params": {"type": "object", "properties": {
+                                                  "path": {"type": "string", "x-nerve-path": "read"}},
+                                                         "required": ["path"]}}}}
+                    ]
+                });
+                loop {
+                    match text(&mut ws).await {
+                        Some(Message::Request { id, method: m, .. }) => {
+                            let result = match m.as_str() {
+                                method::DESCRIBE => described.clone(),
+                                method::INVOKE => json!({"content": "hi", "encoding": "utf-8"}),
+                                _ => json!({}),
+                            };
+                            ws.send(WsMessage::text(Message::result(id, result).encode()))
+                                .await
+                                .unwrap();
+                        }
+                        Some(Message::Notification { method: m, params }) if m == method::BYE => {
+                            let _ = ended.send(params["reason"].as_str().unwrap().to_string());
+                            return;
+                        }
+                        Some(_) => {}
+                        None => {
+                            let _ = ended.send("closed without a bye".into());
+                            return;
+                        }
+                    }
+                }
+            })
+        });
+        (welcome, end)
+    }
+
+    /// A SIGTERM to a center with a node linked says bye to the node and
+    /// writes the statistics that were waiting for their timer: the call
+    /// made just before it is in the state file (#40, center-2).
+    #[test]
+    fn a_signal_says_bye_to_the_nodes_and_writes_their_statistics() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, node_id) = paired_node(dir.path());
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+        bare(&mut cmd)
+            .env("NERVE_CENTER_STATE_DIR", dir.path())
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", "off")
+            .env("NERVE_CENTER_LOG", "info")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let (mut c, port, _) = start(&mut cmd);
+        let mut out = BufReader::new(c.stdout.take().unwrap());
+        init(&mut c, &mut out);
+        let (welcomed, ended) = node(port, key, node_id.clone());
+        welcomed
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the node is welcomed");
+        // The node's description comes after the welcome.
+        let mut id = 10;
+        let listed = loop {
+            id += 1;
+            let r = ask(
+                &mut c,
+                &mut out,
+                json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+                    "name": "list", "arguments": {"node": "box", "capability": "fs.read"}}}),
+            );
+            if r["result"]["isError"] != json!(true) {
+                break r;
+            }
+            assert!(id < 200, "the node never described itself: {r}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(listed.get("result").is_some(), "{listed}");
+        let call = ask(
+            &mut c,
+            &mut out,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "execute",
+                "arguments": {"node": "box", "capability": "fs.read", "args": {"path": "/x"}}}}),
+        );
+        assert_ne!(call["result"]["isError"], json!(true), "{call}");
+        // SAFETY: a signal to the child this test started.
+        assert_eq!(unsafe { libc::kill(c.id() as i32, libc::SIGTERM) }, 0);
+        assert!(wait(&mut c, Duration::from_secs(10)), "it still runs");
+        assert!(c.wait().unwrap().success());
+        assert_eq!(
+            ended.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "shutdown"
+        );
+        let state = nerve_center::store::Store::load(dir.path())
+            .unwrap()
+            .unwrap();
+        let calls: usize = state.stats[&node_id]
+            .days
+            .values()
+            .map(|d| d.calls.len())
+            .sum();
+        assert_eq!(
+            calls, 1,
+            "the call made before the signal is not in the state file"
+        );
+    }
+
+    /// An HTTP MCP endpoint beyond loopback on port 0 names the port it got
+    /// in the start line, where a script reads it (#40, shared-2).
+    #[test]
+    fn an_mcp_endpoint_beyond_loopback_with_port_0_names_its_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+        bare(&mut cmd)
+            .env("NERVE_CENTER_STATE_DIR", dir.path())
+            .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+            .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_UI", "off")
+            .env("NERVE_CENTER_MCP", "0.0.0.0:0")
+            .env("NERVE_CENTER_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
+        let (mut c, _, line) = start(&mut cmd);
+        let url = line.split("MCP at ").nth(1).expect("an MCP url").trim();
+        let port: u16 = url
+            .trim_end_matches("/mcp")
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(url.starts_with("https://"), "{url}");
+        assert_ne!(port, 0, "{url}");
+        // SAFETY: a signal to the child this test started.
+        assert_eq!(unsafe { libc::kill(c.id() as i32, libc::SIGTERM) }, 0);
+        assert!(wait(&mut c, Duration::from_secs(10)), "it still runs");
+    }
+}

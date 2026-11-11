@@ -3984,7 +3984,7 @@ mod tests {
         // flagged 00010000. The path is the one it was bound at, beside the
         // socket's (`ctl::bind_with_token` renames it into place).
         let unix = std::fs::read_to_string("/proc/net/unix").unwrap();
-        let bound = format!("{}.new", socket.display());
+        let bound = socket.with_extension("new").display().to_string();
         let inode = unix
             .lines()
             .map(|l| l.split_whitespace().collect::<Vec<_>>())
