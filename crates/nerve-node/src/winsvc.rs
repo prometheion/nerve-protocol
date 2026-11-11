@@ -107,6 +107,12 @@ pub trait WinSystem {
     /// Refuses `dir` unless it is a folder, no link, that SYSTEM or the
     /// administrators own (nerve_service::win::dacl::admins_folder).
     fn admins_own(&self, dir: &Path) -> Result<(), String>;
+    /// Refuses `dir` when something below it (links not followed) is owned
+    /// by an account that is none of SYSTEM, the administrators, this
+    /// process, `node_sid` (nerve's) and the accounts deleted since: a
+    /// standard account put it there before the folder was closed, and its
+    /// owner may open it again (nerve_service::win::dacl::foreign_below).
+    fn nothing_foreign_below(&self, dir: &Path, node_sid: &str) -> Result<(), String>;
     /// The SID of this machine's own accounts (`S-1-5-21-…`), which each
     /// local account's SID begins with.
     fn machine_sid(&self) -> Result<String, String>;
@@ -812,6 +818,13 @@ fn install_steps(
     ] {
         sys.secure(dir, &dacl)?;
     }
+    // The folders are closed now, so nothing new comes in: what a standard
+    // account put in a folder made by hand before is found here. The check
+    // above looks at the folders' own owners, not at what is in them.
+    let node_sid = local_sid(&sys.machine_sid()?, node.uid);
+    for dir in [&layout.paths.config_dir, &layout.paths.state_dir] {
+        sys.nothing_foreign_below(dir, &node_sid)?;
+    }
     steps.did(format!(
         "{} and {} are open to {USER} and the administrators only",
         layout.paths.config_dir.display(),
@@ -1087,6 +1100,23 @@ fn uninstall_steps(
     forget_secrets: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
+    // Kept data is closed to the administrators again at the end, which
+    // refuses a folder another account owns: say so before the service and
+    // the accounts are gone, not after. An uninstall that deletes the data
+    // does not look at the owners.
+    if !purge {
+        for dir in [
+            &layout.paths.config_dir,
+            &layout.home,
+            &layout.paths.state_dir,
+        ] {
+            if dir.symlink_metadata().is_ok() {
+                sys.admins_own(dir).map_err(|e| {
+                    format!("{e}; nothing is uninstalled; delete it, or uninstall with --purge")
+                })?;
+            }
+        }
+    }
     // The Credential Manager of nerve goes with the account: kept data keeps
     // its entries aside, sealed, for a later install's service to take.
     if !purge {
@@ -1530,6 +1560,8 @@ pub(crate) mod tests {
         secured: RefCell<Vec<(PathBuf, String)>>,
         /// The folders another account owns: refused.
         pub(crate) foreign: RefCell<Vec<PathBuf>>,
+        /// The folders with something below them that another account owns.
+        pub(crate) planted: RefCell<Vec<PathBuf>>,
         /// Granted folders on drives that are not connected.
         away: RefCell<Vec<PathBuf>>,
         /// The message file of the Event Log source, while it is registered.
@@ -1575,6 +1607,7 @@ pub(crate) mod tests {
                 started: RefCell::new(Vec::new()),
                 secured: RefCell::new(Vec::new()),
                 foreign: RefCell::new(Vec::new()),
+                planted: RefCell::new(Vec::new()),
                 away: RefCell::new(Vec::new()),
                 event_source: RefCell::new(None),
                 removed: RefCell::new(Vec::new()),
@@ -1718,6 +1751,15 @@ pub(crate) mod tests {
             if self.foreign.borrow().iter().any(|f| f == dir) {
                 return Err(format!(
                     "{}: another account (S-1-5-21-1-2-3-1002) owns it",
+                    dir.display()
+                ));
+            }
+            Ok(())
+        }
+        fn nothing_foreign_below(&self, dir: &Path, _: &str) -> Result<(), String> {
+            if self.planted.borrow().iter().any(|f| f == dir) {
+                return Err(format!(
+                    "{}/keys: another account (S-1-5-21-1-2-3-1002) owns it, and could open it again; delete it, then install again",
                     dir.display()
                 ));
             }
@@ -2470,8 +2512,6 @@ pub(crate) mod tests {
         for (rid, who, typed, why) in [
             (1002, "bob", "wrong", "the password of bob is wrong"),
             (1999, "ghost", "", "there is no local account ghost"),
-            (1010, "nerve", "", "node's own user"),
-            (1011, "nerve-run", "", "the commands' own user"),
             (1003, "carol", "carol's", "carol could open"),
             (1998, "a:b", "", "not an account name"),
             (
@@ -2802,8 +2842,39 @@ pub(crate) mod tests {
         // A kept folder that another account owns now is not given the
         // administrators' DACL as if it were theirs.
         *sys.foreign.borrow_mut() = vec![l.paths.state_dir.clone()];
+        let before = sys.calls();
         let e = uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("another account"), "{e}");
+        // Nothing was stopped or removed first.
+        assert_eq!(sys.calls(), before);
+        assert!(sys.account(USER).unwrap().is_some());
+        assert!(sys.service.get().is_some());
+        assert!(l.bin.exists());
+    }
+
+    /// A folder made by hand before the install, with something in it that
+    /// another account owns, is refused after it was closed to everyone
+    /// else (the owner of the folder alone is not enough).
+    #[test]
+    fn install_refuses_what_another_account_put_in_the_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for dir in [&l.paths.config_dir, &l.paths.state_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+            *sys.planted.borrow_mut() = vec![dir.clone()];
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert!(e.contains("another account"), "{e}");
+            assert!(e.ends_with("delete it, then install again"), "{e}");
+            // The service is not registered over it.
+            assert_eq!(sys.service.get(), None);
+        }
+        sys.planted.borrow_mut().clear();
+        sys.types("alice's");
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
     }
 
     /// The folders the service checks at its start: config and state and

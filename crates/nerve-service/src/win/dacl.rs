@@ -545,6 +545,49 @@ pub fn admins_folder(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The first thing below `dir` (links are not followed) whose owner is none
+/// of SYSTEM, the administrators and this process's own account, and that
+/// `allowed` does not take either; with its owner. What a folder made by
+/// hand in `ProgramData` carries, when a standard account put something in
+/// it first: that account owns it, and may open it again whatever the
+/// folder's list says now.
+#[cfg(windows)]
+pub fn foreign_below(
+    dir: &Path,
+    allowed: impl Fn(&[u8]) -> bool,
+) -> Result<Option<(std::path::PathBuf, Vec<u8>)>, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+    };
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let at = |e: String| format!("{}: {e}", d.display());
+        for entry in std::fs::read_dir(&d).map_err(|e| at(e.to_string()))? {
+            let entry = entry.map_err(|e| at(e.to_string()))?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|e| at(e.to_string()))?;
+            // The item itself, not what a link there points to.
+            let f = std::fs::OpenOptions::new()
+                .access_mode(READ_CONTROL)
+                .share_mode(SHARE_ALL)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(owner) =
+                foreign_owner(&f, true).map_err(|e| format!("{}: {e}", path.display()))?
+                && !allowed(&owner)
+            {
+                return Ok(Some((path, owner)));
+            }
+            if kind.is_dir() {
+                todo.push(path);
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Opens the folder `dir` itself, not what a link there points to, for
 /// `access`; `None` when nothing is there. A link or a file is refused.
 #[cfg(windows)]

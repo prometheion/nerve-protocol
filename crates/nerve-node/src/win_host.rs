@@ -481,6 +481,27 @@ impl WinSystem for WinHost {
         nerve_service::win::dacl::admins_folder(dir)
     }
 
+    fn nothing_foreign_below(&self, dir: &Path, node_sid: &str) -> Result<(), String> {
+        // The node's own account, and the accounts deleted since (the node
+        // made them, and a kept folder still names them), may own what is
+        // below; a live account of someone else may not.
+        let allowed = |owner: &[u8]| {
+            nerve_service::win::sid::sid_text(owner).is_ok_and(|text| {
+                text == node_sid || matches!(win_user::lookup_sid(&text), Ok(None))
+            })
+        };
+        match nerve_service::win::dacl::foreign_below(dir, allowed)? {
+            None => Ok(()),
+            Some((path, owner)) => {
+                let who = nerve_service::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
+                Err(format!(
+                    "{}: another account ({who}) owns it, and could open it again; delete it, then install again",
+                    path.display()
+                ))
+            }
+        }
+    }
+
     fn machine_sid(&self) -> Result<String, String> {
         win_user::machine_sid()
     }

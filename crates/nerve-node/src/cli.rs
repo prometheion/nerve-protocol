@@ -1674,7 +1674,8 @@ mod tests {
                 .desktop_user_sid,
             None
         );
-        // Named twice (the broker's and the request's), clap refuses.
+        // Named twice before the subcommand clap refuses; after it the later
+        // one wins, so the broker refuses a request that names it at all.
         assert!(
             Cli::try_parse_from([
                 "nerve-node",

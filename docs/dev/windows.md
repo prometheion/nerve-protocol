@@ -194,8 +194,13 @@ The install does this, and the installer shows each step:
    of yours made without **Run as administrator**, and a link in its place
    are refused before the install changes anything; delete it and install
    again. The folder they are in must be SYSTEM's or the administrators'
-   too. The service checks the config and state folders, and the folder
-   they are in, again at each start.
+   too. The install also looks below the config and state folders, once
+   they are closed, and refuses anything an account owns that is none of
+   SYSTEM, the administrators, you or `nerve` (a standard account may have
+   put it in a folder made by hand before; accounts deleted since do not
+   count). The service checks the config and state folders, and the folder
+   they are in, again at each start. An uninstall that keeps the data checks
+   the folders' owners first, before it stops or removes anything.
 3. Makes the local user `nerve-run`, which commands from centers run as
    ([the account](#the-account-commands-run-as-on-windows)), with a long
    random password stored with DPAPI in the config folder

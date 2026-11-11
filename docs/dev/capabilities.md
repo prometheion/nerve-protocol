@@ -621,7 +621,10 @@ nerve-node cap add logs.tail --effect read \
   center adds it, with the safe form: a script run with `powershell
   -NoProfile -File script.ps1 {field}` (only PowerShell's own options, then
   `-File` and a fixed script, before the first `{field}`: any other word
-  before `-File` starts the command, and `-File` is then part of its text),
+  before `-File` starts the command, and `-File` is then part of its text;
+  an option counts from the shortest form Windows PowerShell 5.1 knows
+  (`-nop`, not `-n`), because a form it does not know starts the command
+  too, and `-NoExit` and pwsh's `-SettingsFile` are not taken),
   which gets each value as one of its `$args`. In the pairing's container
   the script runs without the node's start, so it imports the modules it
   uses (`Import-Module Microsoft.PowerShell.Utility` for `Write-Output`):

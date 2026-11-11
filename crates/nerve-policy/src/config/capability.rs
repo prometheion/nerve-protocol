@@ -315,26 +315,26 @@ fn windows_reread(command: &[String]) -> Option<String> {
             }
             break;
         }
-        let is = |names: &[&str]| names.iter().any(|w| w.starts_with(&n));
-        let takes = is(&[
-            "executionpolicy",
-            "windowstyle",
-            "version",
-            "inputformat",
-            "outputformat",
-            "psconsolefile",
-            "configurationname",
-            "workingdirectory",
-            "settingsfile",
-        ]) || ["ep", "w", "wd", "if", "of"].contains(&n.as_str());
-        let alone = is(&[
-            "noprofile",
-            "nologo",
-            "noninteractive",
-            "noexit",
-            "sta",
-            "mta",
-        ]);
+        // Windows PowerShell 5.1 takes an option from its shortest form on
+        // (`-nop`, not `-n`), and it does not know pwsh's `-SettingsFile`
+        // at all: a form it does not know starts the command, with `-File`
+        // and its value as the command's text. So each option is taken from
+        // its minimum form only, and only those that both programs have.
+        // `-NoExit` is left out: it would keep PowerShell waiting.
+        let from = |min: &str, full: &str| n.len() >= min.len() && full.starts_with(&n);
+        let takes = from("ex", "executionpolicy")
+            || from("w", "windowstyle")
+            || from("v", "version")
+            || from("inp", "inputformat")
+            || from("o", "outputformat")
+            || from("config", "configurationname")
+            || from("wo", "workingdirectory")
+            || ["ep", "if", "of", "wd"].contains(&n.as_str());
+        let alone = from("nop", "noprofile")
+            || from("nol", "nologo")
+            || from("noni", "noninteractive")
+            || from("st", "sta")
+            || from("mta", "mta");
         match (takes, alone) {
             (true, false) => at += 2,
             (false, true) => at += 1,
@@ -1182,6 +1182,27 @@ mod tests {
             &["powershell", "-NoProfile", "x", "-File", "s.ps1", "{text}"],
             // Not an option of PowerShell's.
             &["powershell", "-Foo", "-File", "s.ps1", "{text}"],
+            // Forms Windows PowerShell 5.1 does not know as options, which
+            // start the command, `-File` and its value included: a prefix
+            // shorter than the minimum form, an option of pwsh only, and
+            // one that keeps PowerShell waiting.
+            &["powershell", "-n", "-File", "s.ps1", "{text}"],
+            &["powershell", "-no", "-File", "s.ps1", "{text}"],
+            &["powershell", "-non", "-File", "s.ps1", "{text}"],
+            &["powershell", "-m", "-File", "s.ps1", "{text}"],
+            &["powershell", "-mt", "-File", "s.ps1", "{text}"],
+            &["powershell", "-con", "x", "-File", "s.ps1", "{text}"],
+            &["powershell", "-conf", "x", "-File", "s.ps1", "{text}"],
+            &[
+                "powershell",
+                "-SettingsFile",
+                "x",
+                "-File",
+                "s.ps1",
+                "{text}",
+            ],
+            &["pwsh", "-sett", "x", "-File", "s.ps1", "{text}"],
+            &["powershell", "-NoExit", "-File", "s.ps1", "{text}"],
         ] {
             for platform in [Platform::Windows, Platform::Any] {
                 let e = check(command, platform).unwrap_err();
@@ -1218,6 +1239,23 @@ mod tests {
                 "Hidden",
                 "-ep",
                 "Bypass",
+                "-File",
+                "echo.ps1",
+                "{text}",
+            ],
+            // The minimum forms 5.1 knows.
+            &[
+                "powershell",
+                "-nop",
+                "-nol",
+                "-noni",
+                "-st",
+                "-ex",
+                "Bypass",
+                "-w",
+                "Hidden",
+                "-config",
+                "x",
                 "-File",
                 "echo.ps1",
                 "{text}",

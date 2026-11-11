@@ -124,7 +124,21 @@ pub fn serve(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
-        // Before the request's own arguments: given twice, clap refuses.
+        // The app's user is the broker's to name. clap refuses the option
+        // given twice before the subcommand only; after it, the later one
+        // wins, so a request must not carry it at all.
+        let option = nerve_node::cli::DESKTOP_USER_SID_ARG;
+        if args
+            .iter()
+            .any(|a| a == option || a.strip_prefix(option).is_some_and(|r| r.starts_with('=')))
+        {
+            let refused = Output {
+                stderr: b"the broker names the app's user itself".to_vec(),
+                ..Output::default()
+            };
+            send(&out, &json!({ "id": id, "done": done(&refused) }));
+            continue;
+        }
         args.splice(0..0, named.iter().cloned());
         let input = req["input"].as_str().map(str::to_string);
         let (out, exe) = (out.clone(), exe.clone());
@@ -872,6 +886,64 @@ mod tests {
                 .unwrap()
                 .contains("commands only")
         );
+    }
+
+    /// A request cannot name the app's user, before or after the
+    /// subcommand: the broker does, and the later of two options wins.
+    #[test]
+    fn a_request_cannot_name_the_apps_user() {
+        let (req_r, mut req_w) = pipe();
+        let (ans_r, ans_w) = pipe();
+        // Nothing must run at all.
+        let t = std::thread::spawn(move || {
+            serve(
+                req_r,
+                Box::new(ans_w),
+                PathBuf::from("/nonexistent/program"),
+                Some("S-1-5-21-1-2-3-1001"),
+            )
+        });
+        for (id, args) in [
+            (
+                1,
+                json!([
+                    "--json",
+                    "install",
+                    "--desktop-user-sid",
+                    "S-1-5-21-1-2-3-1003"
+                ]),
+            ),
+            (
+                2,
+                json!([
+                    "--json",
+                    "install",
+                    "--desktop-user-sid=S-1-5-21-1-2-3-1003"
+                ]),
+            ),
+            (
+                3,
+                json!(["--desktop-user-sid", "S-1-5-21-1-2-3-1003", "status"]),
+            ),
+        ] {
+            writeln!(req_w, "{}", json!({"id": id, "args": args})).unwrap();
+        }
+        drop(req_w);
+        let lines: Vec<Value> = BufReader::new(ans_r)
+            .lines()
+            .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+            .collect();
+        t.join().unwrap();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        for l in &lines[1..] {
+            assert!(
+                l["done"]["stderr"]
+                    .as_str()
+                    .unwrap()
+                    .contains("names the app's user itself"),
+                "{l}"
+            );
+        }
     }
 
     /// The broker's commands, run once or followed, take the app's user as
