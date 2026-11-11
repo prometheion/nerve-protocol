@@ -176,6 +176,9 @@ jobs:
           if (Get-LocalUser nerve -ErrorAction SilentlyContinue) { throw 'the refused install made the user nerve' }
           if (Get-Service nerve-node -ErrorAction SilentlyContinue) { throw 'the refused install registered the service' }
           Remove-Item -LiteralPath $data -Recurse -Force
+          # The refused install's exit code is what was wanted: the runner
+          # would end the step with it.
+          exit 0
       # As the app's install runs for that account's owner: the broker names
       # the owner by SID (an argument, as the broker gives it), and the
       # password goes on stdin.
