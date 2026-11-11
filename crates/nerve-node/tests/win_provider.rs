@@ -305,7 +305,11 @@ async fn provider_program() {
     let mut parts = spec.splitn(3, '|');
     let (name, pipe, log) = (
         parts.next().unwrap().to_string(),
-        parts.next().unwrap().to_string(),
+        // None given: the provider pipe, which a command may not name.
+        Some(parts.next().unwrap())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(PIPE)
+            .to_string(),
         PathBuf::from(parts.next().unwrap()),
     );
     let write = |s: &str| std::fs::write(&log, format!("{s}\n")).unwrap();
@@ -439,9 +443,11 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
     let log = dir.join("command.log");
     let _ = std::fs::remove_file(&log);
     // A program that ends before it wrote says so in the log, with its
-    // exit code.
+    // exit code. The command does not name the pipe: the node refuses a
+    // command that names its own places (guard:node-paths), and the
+    // program finds the pipe by itself.
     let command = format!(
-        "$env:{PROVIDER} = '{NAME}|{PIPE}|{log}'; & '{exe}' --ignored --exact --nocapture provider_program; if (-not (Test-Path '{log}')) {{ \"the program ended with $LASTEXITCODE before it wrote\" | Set-Content '{log}' }}; exit 0",
+        "$env:{PROVIDER} = '{NAME}||{log}'; & '{exe}' --ignored --exact --nocapture provider_program; if (-not (Test-Path '{log}')) {{ \"the program ended with $LASTEXITCODE before it wrote\" | Set-Content '{log}' }}; exit 0",
         log = log.display(),
         exe = exe.display()
     );
