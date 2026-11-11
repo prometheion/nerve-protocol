@@ -100,6 +100,11 @@ pub struct Cli {
     /// Print JSON for programs instead of text: the read commands their data, the others the lines they print, an error {"error": ...}
     #[arg(long, global = true, hide = true)]
     pub json: bool,
+    /// Windows: the SID of the desktop app's user, named by its broker
+    ///
+    /// Windows: the SID of the desktop app's user. The app's elevated broker names it here, not in a variable: any program of the account may set a variable of its own.
+    #[arg(long, global = true, hide = true, value_name = "SID")]
+    pub desktop_user_sid: Option<String>,
     #[command(subcommand)]
     pub cmd: Cmd,
 }
@@ -1221,22 +1226,41 @@ pub fn settle_user(cli: &Cli) -> Result<(), String> {
     crate::service::become_owner(&paths, matches!(cli.cmd, Cmd::Setup))
 }
 
-/// Set by the desktop app's broker on Windows for the commands it runs: the
-/// SID of the app's user. The broker runs as the administrator who answered
-/// the UAC prompt, who is another account when the app's user is a standard
-/// user.
-pub const DESKTOP_USER_SID: &str = "NERVE_DESKTOP_USER_SID";
+/// The SID of the app's user, as the desktop app's broker names it on
+/// Windows for the commands it runs (`--desktop-user-sid`). The broker runs
+/// as the administrator who answered the UAC prompt, who is another account
+/// when the app's user is a standard user. It is an argument, not a
+/// variable: an elevated command takes the account's variables, which its
+/// unelevated programs may set, and this decides who owns the node.
+pub const DESKTOP_USER_SID_ARG: &str = "--desktop-user-sid";
+
+#[cfg(windows)]
+static DESKTOP_USER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Keeps the app user's SID of this command line ([`desktop_user`]).
+#[cfg(windows)]
+pub(crate) fn set_desktop_user(sid: Option<String>) {
+    if let Some(sid) = sid {
+        let _ = DESKTOP_USER.set(sid);
+    }
+}
+
+/// The app's user the broker named for this command, if it did.
+#[cfg(windows)]
+pub(crate) fn desktop_user() -> Option<String> {
+    DESKTOP_USER.get().cloned()
+}
 
 /// The account that ran this command through sudo, else root. On Windows
 /// the account this command runs as, or the desktop app's user for the
-/// app's broker ([`DESKTOP_USER_SID`]). A command the node runs for one of
+/// app's broker ([`DESKTOP_USER_SID_ARG`]). A command the node runs for one of
 /// its owners is that owner's (crate::owner).
 pub(crate) fn invoker() -> String {
     if let Some(owner) = crate::owner::owner_running() {
         return owner;
     }
     #[cfg(windows)]
-    if let Some(name) = windows_invoker(std::env::var(DESKTOP_USER_SID).ok()) {
+    if let Some(name) = windows_invoker(desktop_user()) {
         return name;
     }
     invoker_of(
@@ -1629,6 +1653,39 @@ mod tests {
         assert_eq!(invoker_of(None, Some("1001".into()), alice), "root");
         assert_eq!(invoker_of(None, Some("0".into()), alice), "root");
         assert_eq!(invoker_of(None, None, alice), "root");
+    }
+
+    /// The app's user comes to a command as the broker's argument; the
+    /// variable of that name that an account may set is nobody's input.
+    #[test]
+    fn the_apps_user_is_an_argument() {
+        let argv = [
+            "nerve-node",
+            DESKTOP_USER_SID_ARG,
+            "S-1-5-21-1-2-3-1001",
+            "--json",
+            "status",
+        ];
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert_eq!(cli.desktop_user_sid.as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(
+            Cli::try_parse_from(["nerve-node", "status"])
+                .unwrap()
+                .desktop_user_sid,
+            None
+        );
+        // Named twice (the broker's and the request's), clap refuses.
+        assert!(
+            Cli::try_parse_from([
+                "nerve-node",
+                DESKTOP_USER_SID_ARG,
+                "a",
+                DESKTOP_USER_SID_ARG,
+                "b",
+                "status"
+            ])
+            .is_err()
+        );
     }
 
     /// On Windows the desktop app's broker names the app's user by SID, and

@@ -1274,6 +1274,15 @@ command = ["sensors", "-l"]
         ] {
             assert!(from_sent(&bad, 60).is_err(), "{bad}");
         }
+        // A template Windows would read again as commands (node-2, Q9).
+        let reread = from_sent(
+            &json!({"name": "a.b", "effect": "read", "platform": "windows",
+                    "command": ["cmd", "/c", "echo", "{text}"],
+                    "params": {"type": "object", "properties": {"text": {"type": "string"}},
+                               "required": ["text"], "additionalProperties": false}}),
+            60,
+        );
+        assert!(reread.unwrap_err().contains("on Windows"));
         let full = from_sent(
             &json!({"name": "a.b", "effect": "read", "command": ["id"], "result": "text",
                     "platform": "linux", "timeout_secs": 60, "summary": "Who."}),

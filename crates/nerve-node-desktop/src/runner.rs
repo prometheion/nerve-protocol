@@ -125,7 +125,7 @@ impl Runner {
         let args = self.args(args);
         let out = match &self.broker {
             Some(b) => b.run(args, input)?,
-            None => run_process(&self.exe, &args, &[], input)?,
+            None => run_process(&self.exe, &args, input)?,
         };
         // On Windows the app is the only way to the node: what the node
         // says, it says in the app's words (crate::in_app).
@@ -162,7 +162,7 @@ impl Runner {
         };
         match &self.broker {
             Some(b) => b.follow(args, Box::new(on_line), Box::new(on_end)),
-            None => follow_process(&self.exe, &args, &[], Box::new(on_line), Box::new(on_end)),
+            None => follow_process(&self.exe, &args, Box::new(on_line), Box::new(on_end)),
         }
     }
 }
@@ -177,21 +177,11 @@ fn entry(line: &str) -> Option<Result<Value, String>> {
     }
 }
 
-/// What the broker's commands get in their environment besides this
-/// process's: the app's user on Windows (crate::broker).
-pub type Env = [(String, String)];
-
-/// Runs `exe` with `args` and `env`, `input` as the first line of stdin,
+/// Runs `exe` with `args`, `input` as the first line of stdin,
 /// and waits.
-pub fn run_process(
-    exe: &PathBuf,
-    args: &[String],
-    env: &Env,
-    input: Option<&str>,
-) -> Result<Output, String> {
+pub fn run_process(exe: &PathBuf, args: &[String], input: Option<&str>) -> Result<Output, String> {
     let mut c = Command::new(exe);
     c.args(args)
-        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -216,19 +206,17 @@ pub fn run_process(
     })
 }
 
-/// Starts `exe` with `args` and `env`, and gives each line it prints to
+/// Starts `exe` with `args`, and gives each line it prints to
 /// `on_line`, then how it ended to `on_end`, unless it was ended on purpose.
 /// The returned [`Follow`] ends it.
 pub fn follow_process(
     exe: &PathBuf,
     args: &[String],
-    env: &Env,
     mut on_line: Box<dyn FnMut(String) + Send>,
     on_end: Box<dyn FnOnce(Output) + Send>,
 ) -> Result<Follow, String> {
     let mut c = Command::new(exe);
     c.args(args)
-        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -356,7 +344,6 @@ mod tests {
         let f = follow_process(
             &PathBuf::from("/bin/sh"),
             &["-c".into(), "echo up; exec >&- 2>&-; sleep 30".into()],
-            &[],
             Box::new(move |l| {
                 let _ = tx.send(l);
             }),

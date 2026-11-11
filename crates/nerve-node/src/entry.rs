@@ -72,6 +72,8 @@ pub fn main() -> i32 {
     let matches = crate::cli::help_pages(crate::cli::Cli::command(), program).get_matches();
     let cli = crate::cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     #[cfg(windows)]
+    crate::cli::set_desktop_user(cli.desktop_user_sid.clone());
+    #[cfg(windows)]
     // SAFETY: nothing here has started another thread.
     if let Err(e) = unsafe { settle_environment(&cli) } {
         return failed(cli.json, &e);
@@ -164,7 +166,8 @@ mod tests {
         let cli = crate::cli::Cli::try_parse_from(["nerve-node", "update"]).unwrap();
         // SAFETY: a process of its own, run with `--test-threads=1`, that
         // reads these variables nowhere else.
-        let _ = unsafe { super::settle_environment(&cli) };
+        let settled = unsafe { super::settle_environment(&cli) };
+        println!("settled: {settled:?}");
         let left: Vec<_> = std::env::vars_os()
             .filter(|(k, _)| is_steering(k))
             .collect();
@@ -174,7 +177,8 @@ mod tests {
     /// The elevated `update` downloads the program the service runs: it
     /// takes the machine's proxy and trusted certificates, never the
     /// account's variables, which its unelevated programs may set
-    /// (windows-2). Set for a process of its own.
+    /// (windows-2); an elevated one also refuses the folder variables.
+    /// Set for a process of its own.
     #[test]
     fn an_update_takes_the_machine_s_proxy() {
         let mut c = std::process::Command::new(std::env::current_exe().unwrap());
@@ -188,10 +192,22 @@ mod tests {
         for k in STEERING {
             c.env(k, "decoy-from-the-account");
         }
+        c.env(crate::paths::STATE_DIR_VAR, "decoy-from-the-account");
         let o = c.output().unwrap();
         let said = String::from_utf8_lossy(&o.stdout);
         assert!(o.status.success(), "{said}");
         assert!(said.contains("steering: ["), "{said}");
+        // The steering variables are the machine's, whoever runs it; the
+        // folder variable is refused in an elevated process (a runner
+        // is one, a developer's terminal need not be).
         assert!(!said.contains("decoy-from-the-account"), "{said}");
+        if crate::win_host::is_admin() {
+            assert!(
+                said.contains("settled: Err(") && said.contains("NERVE_NODE_STATE_DIR is set"),
+                "{said}"
+            );
+        } else {
+            assert!(said.contains("settled: Ok("), "{said}");
+        }
     }
 }

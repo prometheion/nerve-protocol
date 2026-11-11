@@ -578,7 +578,7 @@ impl WinSystem for WinHost {
 
     fn owner_sid(&self) -> Option<(String, String)> {
         // The app's broker names its user; the name says the SID is one.
-        if let Ok(sid) = std::env::var(crate::cli::DESKTOP_USER_SID)
+        if let Some(sid) = crate::cli::desktop_user()
             && let Ok(name) = win_user::name_of_sid(&sid)
         {
             return Some((sid, name));
@@ -721,13 +721,10 @@ impl WinSystem for WinHost {
             // A console without echo does not end the line.
             let _ = writeln!(out);
         }
-        r.map_err(|e| e.to_string())?;
-        let password = line.trim_end_matches(['\n', '\r']).to_string();
+        let read = r.map_err(|e| e.to_string())?;
+        let password = crate::winsvc::password_of_line(read, &line);
         line.clear();
-        if password.is_empty() {
-            return Err(crate::winsvc::BLANK_PASSWORD.into());
-        }
-        Ok(password)
+        password
     }
 
     fn check_logon(

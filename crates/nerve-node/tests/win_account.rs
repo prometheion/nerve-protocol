@@ -1600,10 +1600,12 @@ async fn a_capability_s_value_is_one_argument_on_windows() {
     let _ = std::fs::remove_dir_all(&base);
     owners_folder(&base, &owner_sid);
     // How many arguments came, and the first: one line the test compares.
+    // The script uses no cmdlet: in the container PowerShell may not load
+    // its modules by itself, and a -File script has no start that does.
     let script = base.join("echo.ps1");
     std::fs::write(
         &script,
-        "Write-Output ('{0}|{1}' -f $args.Count, $args[0])\r\n",
+        "[Console]::Out.WriteLine(('{0}|{1}' -f $args.Count, $args[0]))\r\n",
     )
     .unwrap();
     let powershell = std::path::Path::new(&std::env::var("SystemRoot").unwrap())

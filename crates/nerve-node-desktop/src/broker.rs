@@ -70,23 +70,23 @@ fn output_of(v: &Value) -> Output {
 /// The broker's side: answers the requests on `input` with `exe`, the
 /// program itself, until `input` ends; then ends what still runs. With the
 /// SID of the app's user (Windows), its commands take that user as the one
-/// who asked ([`nerve_node::cli::DESKTOP_USER_SID`]).
+/// who asked ([`nerve_node::cli::DESKTOP_USER_SID_ARG`]), as an argument:
+/// a variable would be one the account's unelevated programs may set.
 pub fn serve(
     input: impl Read,
     output: Box<dyn Write + Send>,
     exe: PathBuf,
     app_user_sid: Option<&str>,
 ) {
-    let env: Arc<Vec<(String, String)>> = Arc::new(
+    let named: Arc<Vec<String>> = Arc::new(
         app_user_sid
             .map(|sid| {
-                (
-                    nerve_node::cli::DESKTOP_USER_SID.to_string(),
-                    sid.to_string(),
-                )
+                vec![
+                    nerve_node::cli::DESKTOP_USER_SID_ARG.to_string(),
+                    sid.into(),
+                ]
             })
-            .into_iter()
-            .collect(),
+            .unwrap_or_default(),
     );
     let out: Out = Arc::new(Mutex::new(output));
     if !send(&out, &json!({ "hello": HELLO })) {
@@ -108,7 +108,7 @@ pub fn serve(
                 .remove(&id);
             continue;
         }
-        let args: Vec<String> = req["args"]
+        let mut args: Vec<String> = req["args"]
             .as_array()
             .into_iter()
             .flatten()
@@ -124,14 +124,15 @@ pub fn serve(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
+        // Before the request's own arguments: given twice, clap refuses.
+        args.splice(0..0, named.iter().cloned());
         let input = req["input"].as_str().map(str::to_string);
-        let (out, exe, env) = (out.clone(), exe.clone(), env.clone());
+        let (out, exe) = (out.clone(), exe.clone());
         if req["follow"] == true {
             let (o1, o2) = (out.clone(), out.clone());
             let follow = follow_process(
                 &exe,
                 &args,
-                &env,
                 Box::new(move |line| {
                     send(&o1, &json!({ "id": id, "line": line }));
                 }),
@@ -157,7 +158,7 @@ pub fn serve(
             continue;
         }
         std::thread::spawn(move || {
-            let o = run_process(&exe, &args, &env, input.as_deref()).unwrap_or_else(|e| Output {
+            let o = run_process(&exe, &args, input.as_deref()).unwrap_or_else(|e| Output {
                 stderr: e.into_bytes(),
                 ..Output::default()
             });
@@ -889,9 +890,10 @@ mod tests {
             .spawn()
             .unwrap();
         let mut input = sh.stdin.take().unwrap();
-        let var = nerve_node::cli::DESKTOP_USER_SID;
+        // The command says its arguments and whether the variable the app's
+        // user used to come in is set: it must not be.
         input
-            .write_all(format!("#!/bin/sh\necho \"${{{var}-none}}\"\n").as_bytes())
+            .write_all(b"#!/bin/sh\necho \"$* ${NERVE_DESKTOP_USER_SID-unset}\"\n")
             .unwrap();
         drop(input);
         assert!(sh.wait().unwrap().success());
@@ -918,8 +920,11 @@ mod tests {
             t.join().unwrap();
             said
         };
-        assert_eq!(got(Some("S-1-5-21-1-2-3-1001")), ["S-1-5-21-1-2-3-1001"; 2]);
-        assert_eq!(got(None), ["none"; 2]);
+        assert_eq!(
+            got(Some("S-1-5-21-1-2-3-1001")),
+            ["--desktop-user-sid S-1-5-21-1-2-3-1001 --json x unset"; 2]
+        );
+        assert_eq!(got(None), ["--json x unset"; 2]);
     }
 
     /// pkexec runs, and what it says when it does not start the broker

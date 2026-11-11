@@ -1739,7 +1739,6 @@ fn spawn<F: HandedFd>(
             // Who asked is the owner, not whoever these name.
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
-            .env_remove(crate::cli::DESKTOP_USER_SID)
             .env_remove(crate::paths::CONFIG_DIR_VAR)
             .env_remove(crate::paths::STATE_DIR_VAR)
             .env_remove(crate::caller_file::OWNER_FILE_ENV)

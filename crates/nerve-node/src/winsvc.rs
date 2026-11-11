@@ -35,6 +35,9 @@ pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save yo
 /// The file in the config folder that holds the owner's password, for the
 /// commands that run as the owner, encrypted with DPAPI ([`Secret`]).
 pub const OWNER_SECRET_FILE: &str = "owner-password.dpapi";
+/// The name the owner's password file had before 0.1.0: an install deletes
+/// it, which would otherwise keep the password sealed there for good.
+const OLD_OWNER_SECRET_FILE: &str = "command-account.dpapi";
 /// The file in the config folder that holds the password of the command
 /// account [`crate::account::RUN_USER`], encrypted with DPAPI.
 pub const RUN_SECRET_FILE: &str = "run-account.dpapi";
@@ -497,7 +500,7 @@ pub fn local_rid(sid: &str, machine: &str) -> Option<u32> {
 /// this machine (Q1: refused in 0.1.0, by its SID).
 pub fn not_local(name: &str) -> String {
     format!(
-        "{name} is an account of a domain or of Microsoft Entra ID, and for now the node's owner must be a local account of this machine: install Nerve as one"
+        "{name} is not a local account of this machine (an account of a domain or of Microsoft Entra ID, or the system's own), and for now the node's owner must be one: install Nerve as a local account"
     )
 }
 
@@ -522,6 +525,20 @@ pub fn owner_by_sid(
 }
 
 pub use crate::account::BLANK_PASSWORD;
+
+/// The password of a line `line` that `read` bytes of stdin gave. No bytes
+/// is the end of the input (a silent install has none), not a blank
+/// password.
+pub fn password_of_line(read: usize, line: &str) -> Result<String, String> {
+    let password = line.trim_end_matches(['\n', '\r']);
+    if read == 0 {
+        Err("no password given: the input ended".into())
+    } else if password.is_empty() {
+        Err(BLANK_PASSWORD.into())
+    } else {
+        Ok(password.into())
+    }
+}
 
 /// A stored password that did not work, remembered with the file it came
 /// from. Windows counts every wrong password toward a lockout of the
@@ -618,6 +635,7 @@ pub fn save_owner_password(
         password: password.into(),
     };
     write_file(&file, &sys.protect(&secret.text())?, 0o600)?;
+    let _ = std::fs::remove_file(paths.config_dir.join(OLD_OWNER_SECRET_FILE));
     Ok(a.name)
 }
 
@@ -795,6 +813,7 @@ fn install_steps(
     ));
     let run_password = run_account(layout, sys, steps)?;
     owner_account(layout, sys, steps);
+    forget_old_owner_password(&layout.paths, steps);
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -973,6 +992,18 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
             crate::account::NO_COMMANDS_AS_YOU,
             crate::account::NO_ACCOUNT_INSTALL
         )),
+    }
+}
+
+/// Deletes the owner's password under its old name ([`OLD_OWNER_SECRET_FILE`])
+/// where an install over an earlier node finds it.
+fn forget_old_owner_password(paths: &NodePaths, steps: &mut Steps) {
+    let file = paths.config_dir.join(OLD_OWNER_SECRET_FILE);
+    if std::fs::remove_file(&file).is_ok() {
+        steps.did(format!(
+            "deleted {}, the old file of your password",
+            file.display()
+        ));
     }
 }
 
@@ -2563,6 +2594,70 @@ pub(crate) mod tests {
             usable_owner(&sys, "S-1-12-1-1-2-3-4", "max.mustermann@corp.example").unwrap_err(),
             not_local("max.mustermann@corp.example")
         );
+    }
+
+    /// The system's own account owns no node, and the refusal does not call
+    /// it an account of a domain: an install run as SYSTEM (a deployment
+    /// tool's) learns what is wrong.
+    #[test]
+    fn the_system_is_refused_as_an_owner_without_naming_a_domain() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        *sys.installer.borrow_mut() = Some(("S-1-5-18".into(), "SYSTEM".into()));
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert!(
+            e.starts_with("SYSTEM is not a local account of this machine"),
+            "{e}"
+        );
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+    }
+
+    /// A silent install has no input: that is no blank password, and the
+    /// owner is not told to give the account one.
+    #[test]
+    fn the_end_of_the_input_is_no_blank_password() {
+        assert_eq!(
+            password_of_line(0, ""),
+            Err("no password given: the input ended".into())
+        );
+        assert_eq!(password_of_line(1, "\n"), Err(BLANK_PASSWORD.into()));
+        assert_eq!(password_of_line(2, "\r\n"), Err(BLANK_PASSWORD.into()));
+        assert_eq!(password_of_line(5, "pw 1\r\n"), Ok("pw 1".into()));
+    }
+
+    /// The owner's password under its old name is deleted by the install and
+    /// by saving a new one, not kept sealed for good.
+    #[test]
+    fn the_old_file_of_the_owner_s_password_is_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let old = l.paths.config_dir.join(OLD_OWNER_SECRET_FILE);
+        std::fs::write(&old, "sealed").unwrap();
+        let mut steps = Steps {
+            done: Vec::new(),
+            out: &mut Vec::new(),
+        };
+        forget_old_owner_password(&l.paths, &mut steps);
+        assert!(!old.exists());
+        assert!(
+            steps.done.iter().any(|d| d.contains(OLD_OWNER_SECRET_FILE)),
+            "{:?}",
+            steps.done
+        );
+        // The install goes through it too.
+        std::fs::write(&old, "sealed").unwrap();
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        sys.types("alice's");
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+        assert!(!old.exists());
+        std::fs::write(&old, "sealed").unwrap();
+        save_owner_password(&l.paths, &sys, "alice's").unwrap();
+        assert!(!old.exists());
     }
 
     /// The SID decides who is local: this machine's and one number more.

@@ -1640,7 +1640,7 @@ mod tests {
     use super::*;
 
     /// The account of a SID as text, which the desktop app's broker hands
-    /// to the commands (crate::cli::DESKTOP_USER_SID): this process's own.
+    /// to the commands (`--desktop-user-sid`): this process's own.
     #[test]
     fn a_sid_names_its_account() {
         let sid = own_sid().unwrap();

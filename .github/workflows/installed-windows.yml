@@ -166,8 +166,7 @@ jobs:
             -Credential $cred -WorkingDirectory "$env:SystemRoot" -Wait
           $owner = (Get-Acl "$data\config").Owner
           if ($owner -notlike "*\$env:NERVE_WIN_STD_ACCOUNT") { throw "the folder is $owner's" }
-          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
-          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 | Out-String
+          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $said
           if ($code -eq 0) { throw 'the install took the folder' }
@@ -178,11 +177,11 @@ jobs:
           if (Get-Service nerve-node -ErrorAction SilentlyContinue) { throw 'the refused install registered the service' }
           Remove-Item -LiteralPath $data -Recurse -Force
       # As the app's install runs for that account's owner: the broker names
-      # the owner by SID, and the password goes on stdin.
+      # the owner by SID (an argument, as the broker gives it), and the
+      # password goes on stdin.
       - name: The node installed by the account, nerve-run for commands
         run: |
-          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
-          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 |
+          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/install.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($said in "run commands as $env:NERVE_WIN_SUDO_ACCOUNT", 'made the user nerve-run',
@@ -225,6 +224,26 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # A node from before the install's check, or a folder changed after it,
+      # may be another account's: the service does not start on it (security-1)
+      # and starts again once the administrators own the folder.
+      - name: The service does not start on a folder another account owns
+        run: |
+          $state = 'C:\ProgramData\Nerve\state'
+          $std = "$env:COMPUTERNAME\$env:NERVE_WIN_STD_ACCOUNT"
+          Stop-Service nerve-node
+          icacls $state /setowner $std | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'cannot give the state folder to the standard account' }
+          try {
+            Start-Service nerve-node -ErrorAction Stop
+            $started = $true
+          } catch { $started = $false }
+          Start-Sleep -Seconds 5
+          $status = (Get-Service nerve-node).Status
+          icacls $state /setowner 'BUILTIN\Administrators' | Out-Null
+          if ($started -or $status -eq 'Running') { throw "the service started on a folder of $std" }
+          Start-Service nerve-node -ErrorAction Stop
+          if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the service does not start on the administrators'' folder' }
       # A local account named as a Windows set up offline names it, with a
       # blank and an umlaut, installs the node again and owns it: its folder
       # is granted and user mode runs as it (windows-1). A standard account:
@@ -241,8 +260,7 @@ jobs:
           Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
             -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
           $sid = (Get-LocalUser $name).SID.Value
-          $env:NERVE_DESKTOP_USER_SID = $sid
-          $pw | & dist/nerve-node-desktop.exe install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
+          $pw | & dist/nerve-node-desktop.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # The name comes back in the console's code page: its ASCII start.
           if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install-umlaut.log" -Pattern 'run commands as Nerve M')) {

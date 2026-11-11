@@ -619,8 +619,15 @@ nerve-node cap add logs.tail --effect read \
   where `;` and `$(...)` run. So a command whose program is one of these is
   refused when a `{field}` goes into it, whether the owner declares it or a
   center adds it, with the safe form: a script run with `powershell
-  -NoProfile -File script.ps1 {field}` (`-File` and a fixed script before
-  the first `{field}`), which gets each value as one of its `$args`. A
+  -NoProfile -File script.ps1 {field}` (only PowerShell's own options, then
+  `-File` and a fixed script, before the first `{field}`: any other word
+  before `-File` starts the command, and `-File` is then part of its text),
+  which gets each value as one of its `$args`. In the pairing's container
+  the script runs without the node's start, so it imports the modules it
+  uses (`Import-Module Microsoft.PowerShell.Utility` for `Write-Output`):
+  on some machines PowerShell does not load them there by itself. The rule
+  holds also where `platform` is left at `any`, since that takes Windows:
+  set `platform = "linux"` for a template that only a Linux node runs. A
   command without a `{field}` (`cmd /c ver`) is taken as it is. Another
   program that reads its arguments as code (`wscript`, `mshta`, a
   program's own `-e` option) is yours to keep away from a `{field}`, as on

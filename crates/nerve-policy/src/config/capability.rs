@@ -293,21 +293,53 @@ fn windows_reread(command: &[String]) -> Option<String> {
             .to_ascii_lowercase();
         (!name.is_empty()).then_some(name)
     };
+    // Only PowerShell's own options may come before `-File`. The first word
+    // that is neither an option nor the value of one that takes a value
+    // starts the command, whose text is everything after it, `-File`
+    // included (`Get-ChildItem -File -Path {path}`).
     let mut at = 1;
     while at < first {
-        match option(&command[at]) {
-            Some(n) if "commandwithargs".starts_with(&n) || n == "cwa" => break,
-            Some(n) if n == "e" || n == "ec" || n.len() > 1 && "encodedcommand".starts_with(&n) => {
-                break;
+        let Some(n) = option(&command[at]) else { break };
+        if "commandwithargs".starts_with(&n)
+            || n == "cwa"
+            || n == "e"
+            || n == "ec"
+            || n.len() > 1 && "encodedcommand".starts_with(&n)
+        {
+            break;
+        }
+        if n == "f" || n == "file" {
+            // The script is fixed: the value is one of its arguments.
+            if at + 1 < first {
+                return None;
             }
-            Some(n) if n == "f" || n == "file" => {
-                // The script is fixed: the value is one of its arguments.
-                if at + 1 < first {
-                    return None;
-                }
-                break;
-            }
-            _ => at += 1,
+            break;
+        }
+        let is = |names: &[&str]| names.iter().any(|w| w.starts_with(&n));
+        let takes = is(&[
+            "executionpolicy",
+            "windowstyle",
+            "version",
+            "inputformat",
+            "outputformat",
+            "psconsolefile",
+            "configurationname",
+            "workingdirectory",
+            "settingsfile",
+        ]) || ["ep", "w", "wd", "if", "of"].contains(&n.as_str());
+        let alone = is(&[
+            "noprofile",
+            "nologo",
+            "noninteractive",
+            "noexit",
+            "sta",
+            "mta",
+        ]);
+        match (takes, alone) {
+            (true, false) => at += 2,
+            (false, true) => at += 1,
+            // Not an option of PowerShell's, or a short form of two.
+            _ => break,
         }
     }
     Some(format!(
@@ -1118,6 +1150,38 @@ mod tests {
             &["powershell", "-Command", "x", "-File", "s.ps1", "{text}"],
             // The script itself would be the value.
             &["powershell", "-File", "{text}"],
+            // A word before -File starts the command, and -File is then the
+            // text of that command, or a cmdlet's own switch.
+            &["powershell", "x", "-File", "s.ps1", "{text}"],
+            &[
+                "powershell",
+                "-NoProfile",
+                "Get-ChildItem",
+                "-File",
+                "-Path",
+                "{text}",
+            ],
+            &[
+                "powershell",
+                "-NoProfile",
+                "Get-ChildItem",
+                "-File",
+                "-Recurse",
+                "{text}",
+            ],
+            &[
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "x",
+                "-f",
+                "s.ps1",
+                "{text}",
+            ],
+            // A value-less option does not take the next word as its value.
+            &["powershell", "-NoProfile", "x", "-File", "s.ps1", "{text}"],
+            // Not an option of PowerShell's.
+            &["powershell", "-Foo", "-File", "s.ps1", "{text}"],
         ] {
             for platform in [Platform::Windows, Platform::Any] {
                 let e = check(command, platform).unwrap_err();
@@ -1146,11 +1210,29 @@ mod tests {
                 "--",
                 "{text}",
             ],
+            &[
+                "powershell",
+                "-NoLogo",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ep",
+                "Bypass",
+                "-File",
+                "echo.ps1",
+                "{text}",
+            ],
             &["C:\\tools\\echo.exe", "{text}"],
             &["cmdkey", "/list", "{text}"],
         ] {
             assert!(check(command, Platform::Windows).is_ok(), "{command:?}");
         }
+        // A center's capability is checked the same way, as it is added and
+        // as the config is loaded.
+        let mut centers = cap(&["cmd", "/c", "echo", "{text}"], text.clone());
+        centers.platform = Platform::Windows;
+        let e = validate_center(&[centers]).unwrap_err();
+        assert!(e.contains("on Windows"), "{e}");
         // Without a value nothing is read again.
         let mut fixed = cap(&["cmd", "/c", "ver"], Value::Null);
         fixed.platform = Platform::Windows;
