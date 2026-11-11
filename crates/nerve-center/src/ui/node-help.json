@@ -20,6 +20,12 @@
       "optional": true
     },
     {
+      "line": "Windows: the SID of the desktop app's user, named by its broker",
+      "more": "Windows: the SID of the desktop app's user. The app's elevated broker names it here, not in a variable: any program of the account may set a variable of its own.",
+      "name": "--desktop-user-sid <SID>",
+      "optional": true
+    },
+    {
       "line": "Which center, when more than one is paired",
       "more": "",
       "name": "--center <CENTER>",
