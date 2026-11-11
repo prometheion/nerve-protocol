@@ -592,7 +592,12 @@ string as it is, a number or boolean as JSON text); an argument left out or
 null drops its element. A value that starts with `-` in an element before the
 first literal `--` is refused `invalid_args`, as the program would read it as
 an option. No shell reads the argv: the node starts the program itself
-(through the shim where it confines it), never through sudo or as root.
+(through the shim where it confines it), never through sudo or as root. On
+Windows the argv becomes one command line quoted by the C runtime's rules;
+an entry whose program reads that line again as commands (`cmd`, a `.bat` or
+`.cmd` file, PowerShell without `-File` and a fixed script before the first
+`{field}`) is refused when a `{field}` goes into it, by its owner's config as
+by `settings.cap-add`.
 
 Which ones a node offers, with `provider: "config"`, one capability per
 `cap` (crate::config_cap): on Linux only, those whose `platform` takes it,

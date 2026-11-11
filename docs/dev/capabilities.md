@@ -608,6 +608,23 @@ nerve-node cap add logs.tail --effect read \
   hands its arguments to a shell of its own reads a value as code again, as
   `ssh host cmd {arg}` does on the other machine and `sh -c`, `su -c` or
   `flock -c` do here. Fill no placeholder into such a command.
+- On Windows a program gets one command line, not a list of words, and
+  splits it itself. The node quotes each word by the rules of the C runtime
+  (`CommandLineToArgvW`), which most programs follow, so a `{field}` reaches
+  them as one argument, quotes and blanks included. `cmd` does not follow
+  them: it reads the line again as commands, where `&`, `|` and `"` end a
+  command; Windows runs a `.bat` or `.cmd` file through `cmd`; and
+  PowerShell joins what follows `-Command` (its default in Windows
+  PowerShell), `-EncodedCommand` or `-CommandWithArgs` into one script,
+  where `;` and `$(...)` run. So a command whose program is one of these is
+  refused when a `{field}` goes into it, whether the owner declares it or a
+  center adds it, with the safe form: a script run with `powershell
+  -NoProfile -File script.ps1 {field}` (`-File` and a fixed script before
+  the first `{field}`), which gets each value as one of its `$args`. A
+  command without a `{field}` (`cmd /c ver`) is taken as it is. Another
+  program that reads its arguments as code (`wscript`, `mshta`, a
+  program's own `-e` option) is yours to keep away from a `{field}`, as on
+  Linux.
 - An argument may be a string, a number, an integer or a boolean. One the
   call leaves out (or gives as null) is left out of the command, so the words
   after it would move up: an option before it would take the next word as its

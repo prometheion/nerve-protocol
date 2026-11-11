@@ -6,8 +6,11 @@
 //! The installed Linux node runs each one as `nerve-run`, held to the
 //! folders like that account's commands. A node run by hand has no
 //! `nerve-run`, so it offers none; an action with the owner's rights comes
-//! from a program the owner allows (crate::provider). Windows reads them and
-//! offers none yet.
+//! from a program the owner allows (crate::provider). The installed Windows
+//! node runs each one as `nerve-run` in the pairing's container; a program
+//! that would read a value again as commands there (`cmd`, PowerShell
+//! without `-File`) is refused when the capability is added
+//! (nerve_policy's `windows_reread`).
 //!
 //! A center with the settings grant `write` adds capabilities of the same
 //! shape to its own entry (`settings.cap-add`, `cap-edit`, `cap-rm`): they

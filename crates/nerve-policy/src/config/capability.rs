@@ -253,6 +253,68 @@ fn program_named(program: &str, platform: Platform) -> bool {
     }
 }
 
+/// Why `command` would run a value of its placeholders as a command on
+/// Windows, where each program reads its own command line: `cmd` and a
+/// batch file (which Windows runs through `cmd`) read it again as commands,
+/// and so does PowerShell what follows `-Command` (its default in Windows
+/// PowerShell) or `-EncodedCommand`. PowerShell with `-File` and a fixed
+/// script before the first placeholder gets each value as one argument of
+/// the script. `None` where no value goes to such a program (node-2, Q9).
+fn windows_reread(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let first = command
+        .iter()
+        .skip(1)
+        .position(|e| placeholder(e).is_some())?
+        + 1;
+    let file = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+    let field = placeholder(&command[first]).unwrap_or_default();
+    let safe = format!(
+        "put the command in a script and run it with `powershell -NoProfile -File script.ps1 {{{field}}}`, which gets each value as one argument"
+    );
+    if stem == "cmd" || file.ends_with(".bat") || file.ends_with(".cmd") {
+        return Some(format!(
+            "on Windows {program} reads its command line again as commands, so a value with `&` would run more than this capability; {safe}"
+        ));
+    }
+    if stem != "powershell" && stem != "pwsh" {
+        return None;
+    }
+    // PowerShell's options take `-`, `--` or `/` and may be shortened.
+    let option = |e: &str| {
+        let name = e
+            .strip_prefix("--")
+            .or_else(|| e.strip_prefix(['-', '/']))?
+            .to_ascii_lowercase();
+        (!name.is_empty()).then_some(name)
+    };
+    let mut at = 1;
+    while at < first {
+        match option(&command[at]) {
+            Some(n) if "commandwithargs".starts_with(&n) || n == "cwa" => break,
+            Some(n) if n == "e" || n == "ec" || n.len() > 1 && "encodedcommand".starts_with(&n) => {
+                break;
+            }
+            Some(n) if n == "f" || n == "file" => {
+                // The script is fixed: the value is one of its arguments.
+                if at + 1 < first {
+                    return None;
+                }
+                break;
+            }
+            _ => at += 1,
+        }
+    }
+    Some(format!(
+        "on Windows {program} without -File and a script before {{{field}}} reads its arguments as a script, so a value with `;` would run more than this capability; {safe}"
+    ))
+}
+
 impl ConfigCapability {
     /// The capability and the action of `name`.
     pub fn split(&self) -> (&str, &str) {
@@ -409,13 +471,20 @@ impl ConfigCapability {
                 "the argument {unused} of params is in no element; name it as {{{unused}}}"
             ));
         }
+        if self.platform.takes("windows")
+            && let Some(why) = windows_reread(&self.command)
+        {
+            return Err(why);
+        }
         Ok(())
     }
 
     /// The program and its arguments for a call with `args`, which fit
     /// `params` already: each placeholder becomes the argument's value as
     /// one element (a string as it is, a number or boolean as JSON writes
-    /// it), never read by a shell; one left out (or null) is left out. A
+    /// it), never read by a shell (on Windows quoted for the C runtime's
+    /// rules; a program that reads its line again is refused, see
+    /// `windows_reread`); one left out (or null) is left out. A
     /// value that starts with `-` before the first `--` element is refused:
     /// the program would read it as an option.
     pub fn argv(&self, args: &Map<String, Value>) -> Result<Vec<String>, String> {
@@ -1003,6 +1072,89 @@ mod tests {
         );
         assert!(line.is_ascii(), "{line}");
         assert_eq!(crate::config::form::command_words(&line).unwrap(), words);
+    }
+
+    /// On Windows a template whose program reads a value again as commands
+    /// is refused, naming the safe form: cmd, a batch file, and PowerShell
+    /// without `-File` and a fixed script before the value (`-Command`, its
+    /// default, `-EncodedCommand`, `-CommandWithArgs`). A Linux one, or one
+    /// with no value in it, is not (node-2, Q9).
+    #[test]
+    fn a_windows_template_that_reads_a_value_again_is_refused() {
+        let text = json!({"type": "object", "properties": {"text": {"type": "string"}},
+                          "required": ["text"], "additionalProperties": false});
+        let check = |command: &[&str], platform: Platform| {
+            let mut c = cap(command, text.clone());
+            c.platform = platform;
+            c.validate(60)
+        };
+        for command in [
+            &["cmd", "/c", "echo", "{text}"][..],
+            &["C:\\Windows\\System32\\CMD.EXE", "/c", "echo", "{text}"],
+            &["C:\\tools\\run.bat", "{text}"],
+            &["run.CMD", "--", "{text}"],
+            &[
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Write-Output",
+                "{text}",
+            ],
+            &["powershell", "-NoProfile", "Write-Output", "{text}"],
+            &["pwsh", "-c", "Write-Output", "{text}"],
+            &["pwsh.exe", "/Command", "Write-Output", "{text}"],
+            &[
+                "powershell",
+                "-EncodedCommand",
+                "VwByAGkAdABlAA==",
+                "{text}",
+            ],
+            &[
+                "pwsh",
+                "-CommandWithArgs",
+                "Write-Output $args[0]",
+                "{text}",
+            ],
+            &["powershell", "-Command", "x", "-File", "s.ps1", "{text}"],
+            // The script itself would be the value.
+            &["powershell", "-File", "{text}"],
+        ] {
+            for platform in [Platform::Windows, Platform::Any] {
+                let e = check(command, platform).unwrap_err();
+                assert!(e.contains("on Windows"), "{command:?}: {e}");
+                assert!(
+                    e.ends_with("run it with `powershell -NoProfile -File script.ps1 {text}`, which gets each value as one argument"),
+                    "{command:?}: {e}"
+                );
+            }
+            assert!(check(command, Platform::Linux).is_ok(), "{command:?}");
+        }
+        for command in [
+            &[
+                "powershell.exe",
+                "-NoProfile",
+                "-File",
+                "C:\\tools\\echo.ps1",
+                "{text}",
+            ][..],
+            &[
+                "pwsh",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-f",
+                "echo.ps1",
+                "--",
+                "{text}",
+            ],
+            &["C:\\tools\\echo.exe", "{text}"],
+            &["cmdkey", "/list", "{text}"],
+        ] {
+            assert!(check(command, Platform::Windows).is_ok(), "{command:?}");
+        }
+        // Without a value nothing is read again.
+        let mut fixed = cap(&["cmd", "/c", "ver"], Value::Null);
+        fixed.platform = Platform::Windows;
+        assert!(fixed.validate(60).is_ok());
     }
 
     #[test]
