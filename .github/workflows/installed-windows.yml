@@ -294,7 +294,7 @@ jobs:
           $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
           & dist/nerve-node-desktop.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "the silent install failed ($LASTEXITCODE)" }
-          if ((Get-Service nerve).Status -ne 'Running') { throw 'the node does not run after the silent install' }
+          if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the node does not run after the silent install' }
           if (-not (Test-Path $key)) { throw 'no Apps & features entry after the silent install' }
           if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk")) { throw 'no Start menu link after the silent install' }
       - name: Uninstall
