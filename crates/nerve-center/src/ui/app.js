@@ -31,12 +31,15 @@ function pageHelp() {
   // Connect a harness card follows its token and the center's MCP: a
   // token made or hidden here shows at once.
   const mcp = state.overview && state.overview.mcp;
-  const key = JSON.stringify([state.harnessToken, mcp || null]);
+  const windows = windowsHelpNote(state.overview);
+  const key = JSON.stringify([state.harnessToken, mcp || null, windows]);
   if (key !== helpKey) { helpParts = null; helpKey = key; }
   if (!helpParts) helpParts = buildHelp(h, [
     expander("Connect a harness", "plug", true, harnessCard(mcp)),
     expander("nerve-center commands", "terminal", true, centerCommands(state.help.center)),
     el("p", { class: "meta" }, "New here? ", el("a", { href: "#overview" }, "Get started"), " on the Overview."),
+    windows ? el("p", { class: "meta" }, windows, " ",
+      el("a", { href: `${GUIDE}/windows.md`, target: "_blank", rel: "noopener noreferrer" }, "Nerve on Windows")) : null,
   ]);
   return helpParts;
 }
@@ -55,6 +58,14 @@ function centerCommands(c) {
     el("div", { class: "arg-rows" }, c.commands.flatMap(line)),
     more("center:options", `Options (${main.length})`, el("div", { class: "arg-rows" }, main.flatMap(line))),
     more("center:advanced", `Advanced (${adv.length})`, el("div", { class: "arg-rows" }, adv.flatMap(line))));
+}
+
+// The line Help adds where a paired machine runs Windows: the nerve-node
+// commands below are not for it, as it has no nerve-node.
+function windowsHelpNote(o) {
+  return o && o.nodes.some((n) => n.platform === "windows")
+    ? "A Windows machine has no nerve-node: the Nerve app on it does what these commands do, and its Help says where."
+    : null;
 }
 
 // Whether this center runs on Windows, where its service commands run in an

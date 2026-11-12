@@ -376,8 +376,8 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
 }
 
 /// Every page of the docs that the code and the dev docs name (a comment, a
-/// message, a help link, a spec's reference) is there: a page that moves
-/// takes its names along.
+/// message, a help link, a spec's reference) is there, and so is a heading
+/// named with it: a page or section that moves takes its names along.
 #[test]
 fn every_doc_page_the_code_names_exists() {
     fn walk(dir: &Path, found: &mut Vec<String>) {
@@ -407,6 +407,29 @@ fn every_doc_page_the_code_names_exists() {
                         }
                         if !root().join(name).exists() {
                             found.push(format!("{}:{}: {name}", path.display(), i + 1));
+                            continue;
+                        }
+                        // A section named after the page, `page.md, "Heading"`
+                        // (in a Rust string `\"`), whole on this line, is there,
+                        // as a heading or a paragraph's bold lead: a message
+                        // sends the owner to it.
+                        let rest = &line[at + name.len()..];
+                        let named = rest
+                            .strip_prefix(", \\\"")
+                            .and_then(|r| r.split_once("\\\""))
+                            .or_else(|| rest.strip_prefix(", \"").and_then(|r| r.split_once('"')));
+                        if let Some((heading, _)) = named {
+                            let page = std::fs::read_to_string(root().join(name)).unwrap();
+                            let there = page.lines().any(|l| {
+                                l.starts_with('#') && l.trim_start_matches('#').trim() == heading
+                            }) || page.contains(&format!("**{heading}.**"));
+                            if !there {
+                                found.push(format!(
+                                    "{}:{}: {name} has no heading {heading:?}",
+                                    path.display(),
+                                    i + 1
+                                ));
+                            }
                         }
                     }
                 }

@@ -1828,6 +1828,37 @@ mod tests {
         }
     }
 
+    /// Help says that a Windows machine has no `nerve-node` where one is
+    /// paired, and links the Windows page; with Linux machines only, or none
+    /// yet, it says nothing (docs-13). Runs the page's function with `node`
+    /// where it is there.
+    #[test]
+    fn help_tells_a_windows_machine_it_has_no_nerve_node() {
+        let from = APP_JS.find("function windowsHelpNote(").unwrap();
+        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
+        let script = format!(
+            "{func}\nconst n = (p) => ({{nodes: p.map((platform) => ({{platform}}))}});\nconsole.log(JSON.stringify([windowsHelpNote(n([\"linux\", \"windows\"])), windowsHelpNote(n([\"linux\"])), windowsHelpNote(n([])), windowsHelpNote(null)]));"
+        );
+        let out = match std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => {
+                eprintln!("skipped: no node here");
+                return;
+            }
+        };
+        let notes: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
+        assert!(
+            notes[0].as_deref().unwrap().contains("has no nerve-node"),
+            "{notes:?}"
+        );
+        assert_eq!(notes[1..], [None, None, None]);
+        assert!(APP_JS.contains("href: `${GUIDE}/windows.md`"));
+    }
+
     /// The line the Audit page offers for a sudo command is the exact rule
     /// (a trailing ` *` stays the command's own, not a wildcard for root),
     /// and only for a word that reads the same in POSIX shells and in fish:

@@ -52,7 +52,7 @@ pub const NOT_THE_NODES: &str = "the control pipe is not the node's";
 /// [`nerve_transport::ctl::NOT_RUNNING`]: nothing may be written behind a
 /// node that runs, and the app, which stops the service for a panic the node
 /// did not take, sees an error.
-pub const NO_PIPE: &str = "the node runs without its control pipe: it is still starting, or another process held the pipe's name when it started (docs/dev/windows.md, \"The control pipe is not the node's\"); try again in a moment, or restart the node";
+pub const NO_PIPE: &str = "the node runs without its control pipe: it is still starting, or another process held the pipe's name when it started (docs/user/windows.md, \"When something fails\"); try again in a moment, or restart the node";
 
 /// The error of a call that found no pipe of the node's name:
 /// [`nerve_transport::ctl::NOT_RUNNING`], unless the node runs all the same
@@ -295,7 +295,7 @@ mod sys {
         if let Some(owner) = foreign {
             let who = crate::win_host::sid_text(&owner).unwrap_or_else(|e| e);
             return Err(format!(
-                "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/dev/windows.md, \"The control pipe is not the node's\"). With the node stopped, folder changes go to node.toml"
+                "{NOT_THE_NODES}: {name} belongs to {who}, so nothing was sent to it. Another process made it before the node started, and the node runs without its pipe: end that process and restart the node (docs/user/windows.md, \"When something fails\"). With the node stopped, folder changes go to node.toml"
             ));
         }
         Ok(())

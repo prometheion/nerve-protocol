@@ -400,6 +400,22 @@ export component HelpPage inherits PageFrame {
             Manual.tasks-open = !Manual.tasks-open;
         }
         icon: @image-url("icons/check.svg");
+        // On Windows the user guide's page for this machine, which holds the
+        // same map with more on each row.
+        if Install.windows: HorizontalLayout {
+            Button {
+                text: "Nerve on Windows";
+                icon: @image-url("icons/external.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                clicked => {
+                    Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/windows.md#where-each-task-is");
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
         TaskRow {
             task: "Pair a center";
             where: "Centers › Pair";
@@ -414,6 +430,11 @@ export component HelpPage inherits PageFrame {
             task: "Give it a folder";
             where: "Permissions › Folders";
             differs: Install.windows ? "Its commands run in an AppContainer of their own." : "";
+        }
+        TaskRow {
+            task: "Give moved files their access";
+            where: "Permissions › Folders › Sync folders";
+            differs: "Only for a folder the node does not watch.";
         }
         TaskRow {
             task: "Allow one command";
@@ -431,6 +452,16 @@ export component HelpPage inherits PageFrame {
             differs: Install.windows ? "Name lookups fail too." : "";
         }
         TaskRow {
+            task: "Limit what a command uses";
+            where: "Settings › Limits";
+            differs: Install.windows ? "Held by the command's job object." : "";
+        }
+        TaskRow {
+            task: "Who runs the commands";
+            where: "Settings › General › Account for commands";
+            differs: Install.windows ? "Save your new Windows password here when it changed." : "";
+        }
+        TaskRow {
             task: "Add a program's capabilities";
             where: "Capabilities › Programs";
             differs: "";
@@ -444,6 +475,11 @@ export component HelpPage inherits PageFrame {
             task: "Where the keys live";
             where: "Settings › Keys";
             differs: Install.windows ? "The keyring is the service's Credential Manager." : "";
+        }
+        TaskRow {
+            task: "Rotate a center's key";
+            where: "Centers › New key…";
+            differs: "";
         }
         TaskRow {
             task: "Back up, restore";
