@@ -17,11 +17,12 @@ A center and a node can share a machine.
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has seven programs and a `SHA256SUMS` file.
+release has these files and a `SHA256SUMS` file (seven for Linux, two more
+with Windows).
 
 | System | Files |
 |---|---|
-| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux` |
+| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux`, which also comes as `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm` |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
 | Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
 
@@ -473,10 +474,10 @@ with the node.
 
 - `install`, `setup`, `update` and `uninstall` are refused from a command the
   node runs for a center, as every other change of the node's settings is.
-  An agent cannot install, update or remove the node. On Windows the control
-  pipe does not take this check yet; there install, update and uninstall need
-  an administrator, which a command gets only through an account in
-  Administrators (the UAC warning above).
+  An agent cannot install, update or remove the node. On Windows these
+  three do not go over the control pipe, which refuses every request from a
+  command's process; they need an administrator, which a command gets only
+  through an account in Administrators (the UAC warning above).
 - Each is written to the [audit log](logging.md#the-audit-log-as-the-owner-reads-it) with the steps it did, and the
   error that stopped it, if any. `uninstall --purge` deletes the log with the
   rest.
