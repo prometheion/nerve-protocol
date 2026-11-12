@@ -370,7 +370,7 @@ processes of `nerve-run` outside one; no command runs so.
 UAC is no security boundary: a command that runs as you, where you are an
 administrator, can get the group's rights back and read the keys. The
 install warns about an owner in Administrators or Backup Operators, and so
-do the Overview (`status`'s `owner_is_admin`) and giving a center the
+do the Overview (`status`'s `owner_full_rights`) and giving a center the
 settings grant, as a center with the grant can set its own mode to `user`:
 the twin of root as the owner on Linux.
 [Sudo on Windows](#sudo-on-windows) needs you to be an administrator.

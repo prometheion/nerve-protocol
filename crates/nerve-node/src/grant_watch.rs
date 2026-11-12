@@ -127,6 +127,8 @@ pub struct Pending {
     not_before: Option<Instant>,
     /// The config version the last finished sync saw, and what it left.
     last: Option<(u64, Synced)>,
+    /// The errors of that sync, which [`Synced::kept`] leaves out.
+    errors: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -283,7 +285,20 @@ impl Watch {
 
     /// A grant sync finished that saw the config of `version`.
     pub fn finished(&self, version: u64, synced: &Synced) {
-        lock(&self.pending).last = Some((version, synced.kept()));
+        let mut p = lock(&self.pending);
+        p.last = Some((version, synced.kept()));
+        p.errors.clone_from(&synced.errors);
+    }
+
+    /// What the last sync left, its errors too: `status`'s `folder_access`
+    /// on Windows, so the app shows a grant that failed or stayed (arch-3).
+    /// None before the first sync.
+    pub fn last(&self) -> Option<Synced> {
+        let p = lock(&self.pending);
+        p.last.as_ref().map(|(_, s)| Synced {
+            errors: p.errors.clone(),
+            ..s.kept()
+        })
     }
 
     /// What the last sync left, for a command that would wait for the turn
@@ -1480,5 +1495,42 @@ mod tests {
         assert!(new_told, "a name in the new folder is told");
         std::fs::hard_link(&store, old.join("linked.js")).unwrap();
         assert!(!told(&w), "the old folder is not watched any more");
+    }
+
+    /// What the last sync left is kept with its errors, so `status` says a
+    /// grant that failed or stayed on Windows too (arch-3); none before the
+    /// first sync.
+    #[test]
+    fn the_last_sync_is_kept_with_its_errors() {
+        let w = Watch::default();
+        assert!(w.last().is_none());
+        let grant = |path: &str| crate::grants::Grant {
+            container: "c1".into(),
+            path: path.into(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+            id: None,
+            unfinished: false,
+            toward: Vec::new(),
+            closed_at: None,
+        };
+        let synced = Synced {
+            errors: vec!["C:\\w\\gone: access denied".into()],
+            stale: vec![grant("C:\\w\\gone")],
+            unclosed: vec![grant("C:\\w\\shut")],
+            ..Default::default()
+        };
+        w.finished(3, &synced);
+        let st = w.last().unwrap().status_json();
+        assert_eq!(
+            st["errors"],
+            serde_json::json!(["C:\\w\\gone: access denied"])
+        );
+        assert_eq!(st["stale"], serde_json::json!(["C:\\w\\gone"]));
+        assert_eq!(st["unclosed"], serde_json::json!(["C:\\w\\shut"]));
+        w.finished(4, &Synced::default());
+        assert_eq!(
+            w.last().unwrap().status_json()["errors"],
+            serde_json::json!([])
+        );
     }
 }

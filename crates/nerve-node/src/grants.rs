@@ -335,6 +335,19 @@ impl Synced {
         })
     }
 
+    /// What `status` says of the last sync (`folder_access`): its errors,
+    /// and the folders of the grants left stale or not closed.
+    pub fn status_json(&self) -> serde_json::Value {
+        let paths = |l: &[Grant]| -> Vec<String> {
+            l.iter().map(|g| g.path.display().to_string()).collect()
+        };
+        serde_json::json!({
+            "errors": self.errors,
+            "stale": paths(&self.stale),
+            "unclosed": paths(&self.unclosed),
+        })
+    }
+
     /// What `folder sync` hears of the sync: its errors, the folders of the
     /// grants left stale, and how many grants it walked (`walked`).
     pub fn json(&self, walked: usize) -> serde_json::Value {

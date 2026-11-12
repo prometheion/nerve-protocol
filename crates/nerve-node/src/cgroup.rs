@@ -40,8 +40,9 @@ use serde_json::{Value, json};
 /// Where this node holds commands to their limits, or why it cannot.
 pub type Found = Result<Arc<Cgroups>, String>;
 
-/// What `status` says of the limits: the node's settings, the cgroup they
-/// are held by and which of them it holds, or why none is.
+/// What `status` says of the limits: the node's settings, what holds them
+/// (`held_by`: the cgroup on Linux, the command's job object on Windows)
+/// and which of them it holds, or why none is.
 pub fn status(limits: &CommandLimits, found: &Found) -> Value {
     json!({
         "memory_mb": limits.memory_mb,
@@ -50,7 +51,7 @@ pub fn status(limits: &CommandLimits, found: &Found) -> Value {
         "cpu_max_percent": limits.cpu_max_percent,
         "processes": limits.processes,
         "processes_max": limits.processes_max,
-        "cgroup": found.as_ref().ok().map(|c| c.name().to_string()),
+        "held_by": found.as_ref().ok().map(|c| c.name().to_string()),
         "enforced": found.as_ref().map_or_else(|_| Vec::new(), |c| c.enforced()),
         "lost": found.as_ref().map_or_else(|_| Vec::new(), |c| c.lost()),
         "off": found.as_ref().err(),

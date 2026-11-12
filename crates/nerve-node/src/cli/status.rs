@@ -29,7 +29,7 @@ fn limits_lines_on(v: &Value, windows: bool) -> Vec<String> {
             .collect()
     };
     let (enforced, lost) = (list("enforced"), list("lost"));
-    if let Some(cgroup) = v["cgroup"].as_str() {
+    if let Some(cgroup) = v["held_by"].as_str() {
         let (holder, lacks, gone) = if windows {
             (
                 cgroup.to_string(),
@@ -92,14 +92,17 @@ pub(super) async fn status(paths: NodePaths, out: &mut dyn Write) -> Result<(), 
     Ok(())
 }
 
-/// The line of `status` on the node's owner, which says plainly what root
-/// as the owner means, and on Windows an administrator.
-fn owner_line(owner: Option<&str>, root: bool, admin: bool) -> Option<String> {
-    match (owner, root, admin) {
-        (Some(_), true, _) => Some(format!("owner: {}", crate::owner::ROOT_OWNER_NOTE)),
-        (Some(o), false, true) => Some(format!("owner: {}", crate::owner::admin_owner_note(o))),
-        (Some(o), false, false) => Some(format!("owner: {o}")),
-        (None, ..) => None,
+/// The line of `status` on the node's owner, which says plainly what an
+/// owner with the machine's full rights means: root on Linux, an
+/// administrator on Windows.
+fn owner_line(owner: Option<&str>, full: bool) -> Option<String> {
+    match (owner, full) {
+        (Some(o), true) if cfg!(windows) => {
+            Some(format!("owner: {}", crate::owner::admin_owner_note(o)))
+        }
+        (Some(_), true) => Some(format!("owner: {}", crate::owner::ROOT_OWNER_NOTE)),
+        (Some(o), false) => Some(format!("owner: {o}")),
+        (None, _) => None,
     }
 }
 
@@ -141,8 +144,7 @@ fn status_lines(v: &Value) -> Vec<String> {
     }
     lines.extend(owner_line(
         v["owner"].as_str(),
-        v["owner_is_root"] == true,
-        v["owner_is_admin"] == true,
+        v["owner_full_rights"] == true,
     ));
     if let Some(h) = v["home_warning"]["warning"].as_str() {
         lines.push(format!("warning: {h}"));
@@ -168,7 +170,7 @@ fn status_lines(v: &Value) -> Vec<String> {
         // The installed node says as whom its commands run. Where Landlock
         // is missing nerve-run runs without it.
         let whom = match c["account"].as_str() {
-            Some(a) if a == crate::account::RUN_USER && c["landlock"] == false => {
+            Some(a) if a == crate::account::RUN_USER && c["confined"] == false => {
                 format!(", as {a}, without Landlock")
             }
             Some(a) => format!(", as {a}"),
@@ -332,9 +334,9 @@ mod tests {
                 ],
             },
             "centers": [
-                {"name": "a", "status": "connected", "mode": "folder", "account": "nerve-run", "landlock": false},
-                {"name": "b", "status": "connected", "mode": "folder", "account": "nerve-run", "landlock": true},
-                {"name": "c", "status": "connected", "mode": "user", "account": "alice", "landlock": false},
+                {"name": "a", "status": "connected", "mode": "folder", "account": "nerve-run", "confined": false},
+                {"name": "b", "status": "connected", "mode": "folder", "account": "nerve-run", "confined": true, "confinement": "landlock"},
+                {"name": "c", "status": "connected", "mode": "user", "account": "alice", "confined": false},
                 {"name": "d", "status": "connected", "mode": "folder"},
             ],
         });
@@ -387,15 +389,16 @@ mod tests {
             1,
             "{lines:#?}"
         );
-        // Root as the owner is said plainly.
-        let root = status_lines(&json!({"owner": "root", "owner_is_root": true}));
-        assert!(
-            root.iter()
-                .any(|l| *l == format!("owner: {}", crate::owner::ROOT_OWNER_NOTE)),
-            "{root:#?}"
-        );
+        // An owner with the machine's full rights is said plainly: root on
+        // Linux, an administrator on Windows (#197).
+        let full = |o: &str| match cfg!(windows) {
+            true => format!("owner: {}", crate::owner::admin_owner_note(o)),
+            false => format!("owner: {}", crate::owner::ROOT_OWNER_NOTE),
+        };
+        let root = status_lines(&json!({"owner": "root", "owner_full_rights": true}));
+        assert!(root.contains(&full("root")), "{root:#?}");
         assert!(crate::owner::ROOT_OWNER_NOTE.contains("run as root"));
-        assert_eq!(owner_line(None, false, false), None);
+        assert_eq!(owner_line(None, false), None);
         // So is a kernel that gives no command a /proc of its own (#199).
         let shared = status_lines(&json!({"processes_warning": "they see each other"}));
         assert!(
@@ -408,15 +411,8 @@ mod tests {
         let pipe = status_lines(&json!({"provider_pipe_warning": why}));
         assert!(pipe.contains(&format!("warning: {why}")), "{pipe:#?}");
         assert!(why.contains("restart the node"), "{why}");
-        // An administrator as the owner on Windows is its twin (#197).
-        let admin = status_lines(&json!({"owner": "alice", "owner_is_admin": true}));
-        assert!(
-            admin.contains(&format!(
-                "owner: {}",
-                crate::owner::admin_owner_note("alice")
-            )),
-            "{admin:#?}"
-        );
+        let admin = status_lines(&json!({"owner": "alice", "owner_full_rights": true}));
+        assert!(admin.contains(&full("alice")), "{admin:#?}");
         assert!(crate::owner::admin_owner_note("alice").contains("alice is an administrator"));
         // So does a stopped node's.
         let root_line = format!("owner: {}", crate::owner::ROOT_OWNER_NOTE);
@@ -424,7 +420,7 @@ mod tests {
             status_lines(&json!({
                 "daemon": "not running",
                 "owner": owner,
-                "owner_is_root": crate::owner::is_root(owner),
+                "owner_full_rights": crate::owner::full_rights(owner),
             }))
         };
         assert_eq!(stopped(Some("root"))[0], "node: not running");
@@ -611,7 +607,7 @@ mod tests {
     fn the_status_names_the_cgroup_and_what_it_holds() {
         let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
                        "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
-                       "cgroup": "/system.slice/nerve-node.service",
+                       "held_by": "/system.slice/nerve-node.service",
                        "enforced": ["memory", "processes"], "off": null});
         assert_eq!(
             limits_lines_on(&v, false),
@@ -624,7 +620,7 @@ mod tests {
         // had, with what follows from it.
         let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
                        "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
-                       "cgroup": "/", "enforced": [], "lost": ["memory", "processes"],
+                       "held_by": "/", "enforced": [], "lost": ["memory", "processes"],
                        "off": null});
         assert_eq!(
             limits_lines_on(&v, false)[1..],
@@ -641,7 +637,7 @@ mod tests {
     fn the_status_names_the_job_object_on_windows() {
         let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
                        "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
-                       "cgroup": "the command's job object",
+                       "held_by": "the command's job object",
                        "enforced": ["memory", "cpu", "processes"], "off": null});
         assert_eq!(
             limits_lines_on(&v, true)[1],
@@ -649,7 +645,7 @@ mod tests {
         );
         let v = json!({"memory_mb": 1, "memory_max_mb": 2, "cpu_percent": 3,
                        "cpu_max_percent": 4, "processes": 5, "processes_max": 6,
-                       "cgroup": "the command's job object",
+                       "held_by": "the command's job object",
                        "enforced": ["memory"], "lost": ["processes"], "off": null});
         assert_eq!(
             limits_lines_on(&v, true)[1..],

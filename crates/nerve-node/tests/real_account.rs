@@ -2049,7 +2049,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     let limits = &st["command_limits"];
     assert!(limits["off"].is_null(), "{limits}");
     assert!(
-        limits["cgroup"]
+        limits["held_by"]
             .as_str()
             .is_some_and(|c| c.contains("nerve-node.service")),
         "{limits}"

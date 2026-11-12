@@ -842,8 +842,9 @@ so a command killed for its memory does not stop the service. A node without suc
 cgroup (no systemd, cgroup v1, a terminal's session scope) runs commands
 without these limits; the log says so at start (a warning on the installed
 node), and `status` has `command_limits: {memory_mb, memory_max_mb,
-cpu_percent, cpu_max_percent, processes, processes_max, cgroup, enforced,
-lost, off}`, where `enforced` lists `memory`, `cpu` and `processes` as far as the
+cpu_percent, cpu_max_percent, processes, processes_max, held_by, enforced,
+lost, off}`, where `held_by` names the cgroup (on Windows: the command's job
+object), `enforced` lists `memory`, `cpu` and `processes` as far as the
 root passes their controllers on, and `off` says why there is no cgroup. A
 cgroup that cannot be made for a command keeps it from running
 (`unavailable`). A command of the node's own user can write its cgroup's
@@ -1793,21 +1794,20 @@ answered, which takes long on a large folder. Methods:
 |---|---|---|
 | `status` | | as on the socket |
 | `folder.add` | `center`?, `path`, `access` (`r`, `w`, `x`, at least one), `recorded` | adds the folder, or replaces its rights (the same place in another spelling is the same folder); with `recorded` the folder is also entered in `policy.places`, as the real place the CLI settled it at |
-| `folder.set` | `center`?, `path`, `given`, `changes` (1 to 64 of `=rwx`, `+x`, `-w`) | changes the rights of a folder the center has |
 | `folder.rm` | `center`?, `path`, `given` | takes a folder away |
 | `center.rotate-key` | `center`, `end_grace` | as on the socket |
 | `caps.list` | | as on the socket |
 | `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
 | `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
 | `owner.check` | | as on the socket; the CLI asks it over the pipe as it asks the socket on Linux |
-| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, walked}` |
+| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, unclosed, walked}`: `unclosed` are folders closed to a container whose closing entry is not on, which stop its commands as `stale` does |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
 settled the path at (`exec::settle`, as this process sees it: the pipe takes
-the change, not the judging, which on Windows is the CLI's alone), for `set`
-and `rm` the stored folder it found (`stored_folder`). `given` is the folder
-as typed or, after that lookup, the stored path again; `set` and `rm` find the
-folder by either. A `rm` takes the folder's `places` entry with it (the
+the change, not the judging, which on Windows is the CLI's alone), for `rm`
+the stored folder it found (`stored_folder`). `given` is the folder as typed
+or, after that lookup, the stored path again; `rm` finds the folder by
+either. A `rm` takes the folder's `places` entry with it (the
 config's validation drops an entry that names no folder). Without `center`
 the only paired center is meant.
 While `node.toml` is newer than the config in force (a CLI wrote a change

@@ -266,7 +266,7 @@ Nothing in Nerve holds them back: the [guard](policy-engine.md#the-guard-against
 and the center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) only catch mistakes.
 `folder` mode and `allowlist` mode run as `nerve-run`, as on any node, and
 get the folders root gives them. `~` in folders and rules is `/root`.
-`status` says `owner: root is the owner: …` (`"owner_is_root": true` with
+`status` says `owner: root is the owner: …` (`"owner_full_rights": true` with
 `--json`), and so does the [desktop app](desktop.md). Root needs no polkit
 files to start and stop the service, so `install` writes none. No center can
 turn [sudo](policy-engine.md#sudo-as-the-owner-uses-it) on, since sudo checks no password of root's: root does,

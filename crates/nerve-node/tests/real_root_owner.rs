@@ -202,7 +202,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     );
     assert!(said.contains("Warning: no owner"), "{said}");
     assert_eq!(owner_in_unit(), None);
-    assert_eq!(status()["owner_is_root"], false);
+    assert_eq!(status()["owner_full_rights"], false);
 
     // A center paired by root, in user mode, and a folder of root's.
     let work = Path::new("/srv/nrv151");
@@ -246,7 +246,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(!Path::new("/usr/local/lib/nerve-node/service-control").exists());
     let st = status();
     assert_eq!(st["owner"], "root", "{st}");
-    assert_eq!(st["owner_is_root"], true, "{st}");
+    assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
         text.contains("owner: root is the owner: commands of user mode"),
@@ -323,7 +323,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(sh(Command::new(BIN).args(["service", "stop"])).0);
     let st = status();
     assert_eq!(st["daemon"], "not running", "{st}");
-    assert_eq!(st["owner_is_root"], true, "{st}");
+    assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
         text.contains("node: not running")

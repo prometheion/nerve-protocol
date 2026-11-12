@@ -713,7 +713,7 @@ and so does the desktop app when you give the grant. Its Windows twin is an
 owner (the account that installed it) in Administrators or Backup Operators
 (`owner::admin_owner`): user mode's commands run as that account and can take
 its rights, as UAC is no security boundary. `center settings on` and the app
-warn of that too, and `status` (`owner_is_admin`) and the app's Overview say
+warn of that too, and `status` (`owner_full_rights`) and the app's Overview say
 it.
 
 ### What stays with you
@@ -829,18 +829,24 @@ removed only with a change of the format, which the changelog names under
   (`{"entries": [...]}`, the lines as the file holds them; with `--follow`
   one a line). `status` has `"daemon"`:
   `"running"`, with what the running node says, or `"not running"`.
-  It names the installed node's `"owner"` and `"owner_is_root"` (root is the
-  owner, so `user` mode runs as root), each center's `"account"` (the
+  It names the installed node's `"owner"` and `"owner_full_rights"` (what
+  runs as the owner has every right of the machine: root is the owner on
+  Linux, so `user` mode runs as root; the owner is an administrator on
+  Windows), each center's `"account"` (the
   account its commands run as now, `null` on a node run by hand),
   `"as_owner"`, `"no_network"` (its commands have no network),
   `"network_off"` (`"held"`, `"as_owner"` or `"not_held"` while it is on:
   whether the node holds them to it, or runs none, and why) and
-  `"landlock"` (whether Landlock holds its commands now), `"network_rules"`
+  `"confined"` (whether its commands are confined now) with `"confinement"`
+  (`"landlock"` on Linux, `"appcontainer"` on Windows, `null` when
+  unconfined), `"network_rules"`
   (whether this machine can keep commands off the network),
-  the running Linux node's `"folder_access"` (`"errors"`, `"stale"`,
-  `"failed"`, `"skipped"`: what giving `nerve-run` its folders left; a failed
-  grant is tried again; while `"stale"` names a folder, no command of
-  `nerve-run` runs) and `"home_warning"` (on a kernel without Landlock,
+  the running node's `"folder_access"` (`"errors"`, `"stale"`,
+  `"failed"`, `"skipped"` on Linux, `"errors"`, `"stale"`, `"unclosed"` on
+  Windows: what the last sync of the folder grants left; a failed
+  grant is tried again; while `"stale"` (or `"unclosed"`) names a folder, no
+  command of `nerve-run` (of that pairing's container) runs; `null` before
+  the first sync on Windows) and `"home_warning"` (on a kernel without Landlock,
   `{"home", "mode", "below", "warning"}` when `nerve-run` gets into the
   owner's home: `"mode"` when the home is open to other accounts, else
   `null`, `"below"` the folders given in it as you named them, the home

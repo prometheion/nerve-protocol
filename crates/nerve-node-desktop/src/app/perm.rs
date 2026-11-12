@@ -104,7 +104,10 @@ impl Ctl {
                 .collect()
         };
         let errors = texts(&st["folder_access"]["errors"]);
-        let stale = texts(&st["folder_access"]["stale"]);
+        // A folder closed to the pairing that is not closed stops its
+        // commands too (Windows).
+        let mut stale = texts(&st["folder_access"]["stale"]);
+        stale.extend(texts(&st["folder_access"]["unclosed"]));
         let (stale, errors) = view::stale_grants(&stale, &errors);
         let folders: Vec<String> = self
             .with_perm(|p| p.get_folders().iter().map(|f| f.path.to_string()).collect())
@@ -128,15 +131,18 @@ impl Ctl {
             p.set_network_rules(st["network_rules"] != false);
             p.set_windows(cfg!(windows));
             p.set_runs_as_owner(c["network_off"] == "as_owner");
-            p.set_owner_is_root(st["owner_is_root"] == true);
-            p.set_owner_is_admin(st["owner_is_admin"] == true);
+            // An owner with the machine's full rights: root on Linux, an
+            // administrator on Windows.
+            let full = st["owner_full_rights"] == true;
+            p.set_owner_is_root(full && !cfg!(windows));
+            p.set_owner_is_admin(full && cfg!(windows));
             p.set_owner_password_missing(view::owner_password_missing(&st));
             p.set_built_in(built_in.as_str().into());
             p.set_grant_errors(errors.join("\n").into());
             p.set_stale(stale.join("\n").into());
             // A pairing of the installed Linux node that runs as nerve-run
             // says whether Landlock holds it; any other shows nothing.
-            p.set_landlock(c["landlock"] != false);
+            p.set_landlock(c["confined"] != false);
             p.set_home_warning(
                 st["home_warning"]["warning"]
                     .as_str()

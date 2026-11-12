@@ -1638,6 +1638,22 @@ impl Shared {
                 || self.separate(policy))
     }
 
+    /// What confines the commands of a pairing with `policy` now:
+    /// `landlock` ([`Self::landlock_for`]), or on Windows `appcontainer`
+    /// for those that run as `nerve-run`; none where nothing does.
+    pub fn confinement_for(
+        &self,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<&'static str> {
+        if self.landlock_for(policy) {
+            Some("landlock")
+        } else if cfg!(windows) && self.confinement.appcontainer && self.separate(policy) {
+            Some("appcontainer")
+        } else {
+            None
+        }
+    }
+
     /// What this kernel's Landlock does not guard of what the node asks for,
     /// on the installed node, whose pairings' commands all run as
     /// `nerve-run` (crate::account::landlock_warning).
@@ -1900,8 +1916,10 @@ impl Shared {
         lock(&self.commands).keys().any(|c| chain.contains(c))
     }
 
-    /// What the last sync of the folders' ACLs left, on the installed Linux
-    /// node (crate::acl): `status`'s `folder_access`.
+    /// What the last sync of the folder grants left: of the folders' ACLs
+    /// on the installed Linux node (crate::acl), of the grants on Windows
+    /// (crate::grants, as the watch kept it): `status`'s `folder_access`.
+    /// None before the first sync on Windows.
     pub fn folder_grants(&self) -> Value {
         #[cfg(target_os = "linux")]
         {
@@ -1913,7 +1931,12 @@ impl Shared {
                 "skipped": r.skipped,
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        return self
+            .grant_watch
+            .last()
+            .map_or(Value::Null, |s| s.status_json());
+        #[cfg(not(any(target_os = "linux", windows)))]
         Value::Null
     }
 
@@ -1929,8 +1952,7 @@ impl Shared {
 
     pub fn status(&self) -> Value {
         let cfg = self.config();
-        // What the last sync of the folders' ACLs left, on the installed
-        // Linux node (crate::acl).
+        // What the last sync of the folder grants left.
         let grants = self.folder_grants();
         let now = crate::now_ms();
         let centers: Vec<Value> = cfg
@@ -1965,14 +1987,12 @@ impl Shared {
                     // The account its commands run as now; none on a node
                     // run by hand, which runs them as itself.
                     "account": self.command_account(&cfg, &c.policy).ok().flatten().map(|a| a.name),
-                    // Whether Landlock holds its commands now; `nerve-run`
-                    // runs without it where the kernel has none. On
-                    // Windows: its AppContainer, which `nerve-run` always
-                    // runs in.
-                    "landlock": self.landlock_for(&c.policy)
-                        || cfg!(windows)
-                            && self.confinement.appcontainer
-                            && self.separate(&c.policy),
+                    // Whether its commands are confined now, and by what:
+                    // Landlock on Linux, where `nerve-run` runs without it
+                    // when the kernel has none; on Windows its
+                    // AppContainer, which `nerve-run` always runs in.
+                    "confined": self.confinement_for(&c.policy).is_some(),
+                    "confinement": self.confinement_for(&c.policy),
                     "settings": c.settings,
                     "paused": c.paused,
                     "revoked": c.revoked,
@@ -1983,12 +2003,11 @@ impl Shared {
         json!({
             "version": cfg.version,
             "locked": cfg.locked,
-            // The installed node's owner (crate::owner), and whether it is
-            // root, as whom what runs as the owner then runs.
+            // The installed node's owner (crate::owner), and whether what
+            // runs as the owner has the machine's full rights: root on
+            // Linux, an administrator on Windows.
             "owner": self.owner_name(&cfg),
-            "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
-            // Its Windows twin: the owner is an administrator.
-            "owner_is_admin": crate::owner::admin_owner(self.owner_name(&cfg).as_deref()).is_some(),
+            "owner_full_rights": crate::owner::full_rights(self.owner_name(&cfg).as_deref()),
             // Whether this is the installed node, which an owner may not
             // have been found for (the web UI words its advice by it).
             "installed": self.service,
@@ -4734,7 +4753,7 @@ mod tests {
             o.owner = owner.map(String::from);
             let daemon = Daemon::start(o).await.unwrap();
             let st = daemon.status();
-            assert_eq!(st["owner_is_root"], root, "{owner:?}: {st}");
+            assert_eq!(st["owner_full_rights"], root, "{owner:?}: {st}");
             daemon.stop().await;
         }
     }
@@ -5460,8 +5479,15 @@ mod tests {
             pairings(Vec::new());
             let st = daemon.status();
             let what = format!("service {service}, landlock {landlock}");
-            assert_eq!(st["centers"][0]["landlock"], landlock, "{what}");
-            assert_eq!(st["centers"][1]["landlock"], false, "{what}: user mode");
+            assert_eq!(st["centers"][0]["confined"], landlock, "{what}");
+            let by = if landlock {
+                json!("landlock")
+            } else {
+                Value::Null
+            };
+            assert_eq!(st["centers"][0]["confinement"], by, "{what}");
+            assert_eq!(st["centers"][1]["confined"], false, "{what}: user mode");
+            assert_eq!(st["centers"][1]["confinement"], Value::Null, "{what}");
             // Closed, and no folder in it: nothing to say.
             assert_eq!(st["home_warning"], Value::Null, "{what}");
             chmod(0o755);
