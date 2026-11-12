@@ -237,7 +237,8 @@ Machines, or ask the machine's owner.
 
 A capability the center adds runs as `nerve-run`, counts as `execute`, and
 one that senses or acts stays off until the machine's owner turns it on. A
-machine on Windows takes none yet, and one its owner runs by hand has no
+machine on Linux or Windows takes them (on Windows it runs them as `nerve-run`
+in the pairing's AppContainer), and one its owner runs by hand has no
 `nerve-run`: the page says so and offers no form.
 
 A machine without the settings grant is shown read only: its units and the

@@ -290,7 +290,7 @@ reaches it; the center tells the model so. A folder whose name cannot be
 shown on one line (a line break or another control character in it, a blank
 at either end) is left out and counted, and marks the folder around it the
 same way where it allows less. Where the machine runs no command in
-`folder` mode (the installed Windows node, which starts no AppContainer),
+`folder` mode (a node you run yourself on a kernel without Landlock),
 no folder is shown with `x`. Where Landlock or an AppContainer
 holds the commands, the center says the sandbox keeps them to the folders;
 on the installed Linux node without Landlock it says they reach what

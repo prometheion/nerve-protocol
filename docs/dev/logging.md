@@ -130,7 +130,9 @@ windows-msvc, and the desktop app's `build.rs` links the same table into
 `nerve-node-desktop`, the node's program on Windows; `install` registers the
 installed program (`nerve-node-desktop.exe`) as the message file under
 `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node`,
-and `uninstall` removes the key. A windows-gnu build has no table, and the
+and `uninstall` removes the key. `nerve-center install` and `uninstall` do the
+same for the source `nerve-center`, with the center's program as the message
+file (`nerve_service::win::event::put_source`). A windows-gnu build has no table, and the
 Event Viewer then shows the text with a note that the description is missing.
 
 Once someone read the entries, the Event Log service holds the program open
@@ -467,7 +469,7 @@ That command stays in this log. The center hears of each of its own calls
 command, since your command may hold words no center should see (while it
 runs, though, its line is open to every account on the machine, as every
 program's is: keep a secret out of it, see
-[config-capabilities.md](capabilities.md#keep-secrets-out-of-the-command)). The
+[capabilities](capabilities.md#keep-secrets-out-of-the-command)). The
 refusal the center gets names each path as it gave it; only the audit names
 where it led, which can be another place when the path goes through a link.
 A call to a capability you switched `off` is a refusal too, with the path or
