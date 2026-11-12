@@ -449,7 +449,13 @@ Keep nothing there that the machine's other accounts must not read.
   seconds; once it is there it is watched and walked. A granted folder that
   is a mount point loses its watches when the drive is unmounted: it is
   walked, not watched while it is a bare folder, and watched and walked
-  again once something is mounted there. The node also walks
+  again once something is mounted there. A drive mounted over a granted
+  folder that is watched already gives no event, so the node compares each
+  watched granted folder with what its path is (device and inode) every 10
+  seconds, and walks and watches it anew when it changed. A folder whose
+  path is 4,096 bytes or longer, and everything below it, is not watched
+  (a command can make a chain deeper than any path, and each watch keeps its
+  path); the walks reach it all the same. The node also walks
   every grant when it starts and on `folder add` of a folder it has. Each such walk is a pass
   over everything in the granted folder, which takes a while for large
   trees. `status` and the

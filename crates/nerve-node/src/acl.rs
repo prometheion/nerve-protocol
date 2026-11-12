@@ -1371,7 +1371,7 @@ pub fn remove_all(file: &Path, heir: &dyn Fn(u32) -> (u32, u32)) -> Report {
 /// The re-run of a test in a namespace, with its skips said again.
 #[cfg(test)]
 #[path = "../tests/common/ns.rs"]
-mod ns;
+pub(crate) mod ns;
 
 #[cfg(test)]
 mod tests {
