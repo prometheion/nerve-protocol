@@ -159,9 +159,11 @@ fn main() -> std::process::ExitCode {
     // harness on stdin.
     {
         use std::io::IsTerminal;
-        if let Some(say) =
-            nerve_center::config::terminal_notice(&args.mcp, std::io::stdin().is_terminal())
-        {
+        if let Some(say) = nerve_center::config::terminal_notice(
+            &args.mcp,
+            std::io::stdin().is_terminal(),
+            &nerve_center::config::started_as(std::env::args_os().next()),
+        ) {
             eprintln!("{say}");
         }
     }

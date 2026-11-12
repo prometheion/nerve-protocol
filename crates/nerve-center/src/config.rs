@@ -414,14 +414,42 @@ pub fn is_loopback(addr: &str) -> bool {
 }
 
 /// What `nerve-center` says when it is started by hand at a terminal with
-/// MCP on stdin: it would seem to hang, waiting for a harness.
-pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<String> {
+/// MCP on stdin: it would seem to hang, waiting for a harness. `program` is
+/// the program as it was started (`nerve-center`, or the downloaded file
+/// on Windows, which is on no `PATH` before `install`), so the command it
+/// names runs as it is typed.
+pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool, program: &str) -> Option<String> {
     (*mcp == McpMode::Stdio && stdin_is_terminal).then(|| {
         format!(
-            "nerve-center: waiting for MCP on stdin, as a harness starts it: what you type here goes to the center as MCP, so type no commands here. To sign in to its web UI, run `nerve-center owner-token` in another terminal and use the token it prints. {} runs it as a service; `nerve-center --help` lists the commands.",
+            "nerve-center: waiting for MCP on stdin, as a harness starts it: what you type here goes to the center as MCP, so type no commands here. To sign in to its web UI, run `{program} owner-token` in another terminal and use the token it prints. {} runs it as a service; `{program} --help` lists the commands.",
             crate::service::admin_command("install")
         )
     })
+}
+
+/// The program as the person started it, for [`terminal_notice`]:
+/// `nerve-center` when it was found by name, else the path given.
+pub fn started_as(arg0: Option<std::ffi::OsString>) -> String {
+    let given = arg0
+        .map(|a| a.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = std::path::Path::new(&given)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if given.is_empty() || (name == "nerve-center" && !given.contains(['/', '\\'])) {
+        "nerve-center".into()
+    } else if given.contains(' ') {
+        // PowerShell runs a quoted path with `&`; a Unix shell takes it
+        // quoted as it is.
+        if cfg!(windows) {
+            format!("& '{given}'")
+        } else {
+            format!("'{given}'")
+        }
+    } else {
+        given
+    }
 }
 
 /// The URL a person or a harness reaches the address `a` at: http on
@@ -453,7 +481,7 @@ mod tests {
     /// spec 3); under a harness, with a pipe on stdin, it says nothing.
     #[test]
     fn a_center_at_a_terminal_says_it_waits_for_mcp() {
-        let say = terminal_notice(&McpMode::Stdio, true).unwrap();
+        let say = terminal_notice(&McpMode::Stdio, true, "nerve-center").unwrap();
         assert!(say.contains("waiting for MCP on stdin"), "{say}");
         // A person at that terminal types a command into the center's MCP
         // input, and finds no token (#213): it says both.
@@ -466,8 +494,29 @@ mod tests {
             say.contains(&crate::service::admin_command("install")),
             "{say}"
         );
-        assert_eq!(terminal_notice(&McpMode::Stdio, false), None);
-        assert_eq!(terminal_notice(&McpMode::Off, true), None);
+        assert_eq!(
+            terminal_notice(&McpMode::Stdio, false, "nerve-center"),
+            None
+        );
+        // On Windows the downloaded file is on no PATH before `install`:
+        // the command is named as it was started.
+        let started = started_as(Some(r".\nerve-center-x86_64-windows.exe".into()));
+        assert_eq!(started, r".\nerve-center-x86_64-windows.exe");
+        let say = terminal_notice(&McpMode::Stdio, true, &started).unwrap();
+        assert!(
+            say.contains(r"run `.\nerve-center-x86_64-windows.exe owner-token`"),
+            "{say}"
+        );
+        assert_eq!(started_as(Some("nerve-center".into())), "nerve-center");
+        assert_eq!(started_as(None), "nerve-center");
+        let spaced = started_as(Some(r"C:\My Tools\nerve-center.exe".into()));
+        let want = if cfg!(windows) {
+            r"& 'C:\My Tools\nerve-center.exe'"
+        } else {
+            r"'C:\My Tools\nerve-center.exe'"
+        };
+        assert_eq!(spaced, want);
+        assert_eq!(terminal_notice(&McpMode::Off, true, "nerve-center"), None);
     }
 
     use super::*;
