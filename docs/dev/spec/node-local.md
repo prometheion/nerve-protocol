@@ -1756,7 +1756,7 @@ Methods:
 | `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
-| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: `{errors, stale, failed, skipped, service}`; `null` on Windows. `folder add` and `rm` ask it, `folder add` of a folder the center has and `folder sync` with `every` |
+| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: the folder-grant report `{errors, stale, unclosed, failed, skipped, walked, service}` (below). `folder add` and `rm` ask it, `folder add` of a folder the center has and `folder sync` with `every` |
 | `reload` | | rereads `node.toml`; only a file the node signed is applied (§1) |
 | `sudo.status` | | `{sudo: "on"|"off"}` |
 | `sudo.on` | `password` | checks it with `sudo -v` and turns the switch on (§4) |
@@ -1765,6 +1765,20 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
 | `caps.list` | | what `cap` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}, params?}`, `params` an action's arguments schema (also on a left-out config or center row; what a rule's conditions are checked against, §2 Rules), `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
+
+The folder-grant report, which `folder.grants` answers on the socket and on
+the pipe, `folder sync --json` gives as its data and `status` as
+`folder_access`, is the same on both platforms; a field one platform does
+not have stays empty there: `errors` (each change that failed, `<path>:
+<why>`), `stale` (folders that keep a grant they should have lost: no
+command of `nerve-run`, on Windows of that pairing, runs while one is left),
+`unclosed` (Windows: folders closed to a pairing that are not closed, which
+stop its commands as `stale` does), `failed` (Linux: granted folders that did
+not get every entry, tried again), `skipped` (Linux: how many files and
+folders were left as they are: another account's, with a second name, on
+another file system) and `walked` (how many grants were walked again into
+every folder below them besides those that changed). `folder.grants` adds
+`service`, whether this is the installed node.
 
 Every method is refused from a process that runs below a command the node
 started for a center, the reading ones (`status`, `config.read`,
@@ -1800,7 +1814,7 @@ answered, which takes long on a large folder. Methods:
 | `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
 | `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
 | `owner.check` | | as on the socket; the CLI asks it over the pipe as it asks the socket on Linux |
-| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; `{errors, stale, unclosed, walked}`: `unclosed` are folders closed to a container whose closing entry is not on, which stop its commands as `stale` does |
+| `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; the folder-grant report, as on the socket |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
 settled the path at (`exec::settle`, as this process sees it: the pipe takes

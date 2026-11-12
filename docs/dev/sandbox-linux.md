@@ -427,10 +427,23 @@ Keep nothing there that the machine's other accounts must not read.
   that what it makes there stays yours to use as well. What you make in such
   a folder later gets the entry by the default; what you move into it (`mv`
   of a download or a clone) keeps the ACL it had, so `nerve-run` reaches it
-  only as any other account would. The node gives it the folder's entries
-  when it walks every grant again: when it starts, on `folder add` of a folder it has, and on
-  `nerve-node folder sync`. Each walk is a pass over everything in every
-  granted folder, which takes a while for large trees. `status` and the
+  only as any other account would, until the node walks that folder. The
+  node watches the granted folders (inotify, a watch on each folder in
+  them; `crate::grant_watch`): a file or folder moved in, or a folder made,
+  marks its granted folder, which the node walks once the names are quiet
+  for 3 seconds, and no later than 30 seconds after the first change while
+  they go on, with a pause twice as long as the walk after it, as on
+  Windows. A lost event (the queue ran over) walks every granted folder. A
+  file made needs no walk: it gets the folder's default entries. The walk's
+  own changes are attribute changes, which the watch does not ask for, so
+  they do not wake it. A granted folder with more than 65,536 folders, or
+  one the system's limit of watches (`fs.inotify.max_user_watches`) leaves
+  out, is not watched; the log says so once, and what is moved into it gets
+  its entries at the next start or change, or by `nerve-node folder sync`,
+  which is a step by hand only then. The node also walks every grant when it
+  starts and on `folder add` of a folder it has. Each such walk is a pass
+  over everything in the granted folder, which takes a while for large
+  trees. `status` and the
   commands of `nerve-run` do not wait for it while the folders' entries are
   up to date; a change of the folders made meanwhile waits for it. A folder of yours
   above a grant that others may not enter gets an entry that lets it pass

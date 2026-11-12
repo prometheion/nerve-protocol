@@ -650,7 +650,7 @@ type AclSync<'a> =
 
 /// How far [`Shared::sync_acls`] goes.
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AclWalk {
     /// Only where the record is behind the config: the grants that changed.
     IfBehind,
@@ -659,17 +659,30 @@ pub(crate) enum AclWalk {
     /// Now, every grant: what was moved into a granted folder gets its
     /// entries.
     Every,
+    /// Now, the grants that changed and those on these folders, where a
+    /// file or folder was moved in (crate::grant_watch).
+    At(Vec<PathBuf>),
 }
 
-/// The walk of the first sync after the start (`acl_synced`: the config
-/// version it last synced, none before the first): every grant, so that what
-/// was moved into a granted folder meanwhile gets its entries; later ones
-/// only where the record is behind.
 #[cfg(target_os = "linux")]
-fn start_walk(acl_synced: Option<u64>) -> AclWalk {
-    match acl_synced {
-        None => AclWalk::Every,
-        Some(_) => AclWalk::IfBehind,
+impl AclWalk {
+    /// The grants it walks besides those that changed (crate::acl::sync_with).
+    fn rewalk(&self) -> crate::grants::Rewalk {
+        match self {
+            AclWalk::Every => crate::grants::Rewalk::Every,
+            AclWalk::At(folders) => crate::grants::Rewalk::At(folders.clone()),
+            AclWalk::IfBehind | AclWalk::Now => crate::grants::Rewalk::None,
+        }
+    }
+
+    /// The walk the grant watch asks for (crate::grant_watch::Watch::next_sync):
+    /// a sync of a new config walks what is behind.
+    fn of(walk: crate::grants::Rewalk) -> AclWalk {
+        match walk {
+            crate::grants::Rewalk::None => AclWalk::IfBehind,
+            crate::grants::Rewalk::Every => AclWalk::Every,
+            crate::grants::Rewalk::At(folders) => AclWalk::At(folders),
+        }
     }
 }
 
@@ -1237,6 +1250,7 @@ impl Shared {
                 .map(Some)
                 .map_err(|e| format!("cannot act as {}: {e}", owner.name))
         };
+        let rewalk = walk.rewalk();
         self.walk_acls(
             &file,
             &want,
@@ -1244,10 +1258,20 @@ impl Shared {
             walk,
             // A walk that waited applies the config as it is when it runs.
             &|| wanted(&self.config()),
-            &|want, stored| {
-                crate::acl::sync_with(&file, want, who, &act_as, walk == AclWalk::Every, stored)
-            },
+            &|want, stored| crate::acl::sync_with(&file, want, who, &act_as, &rewalk, stored),
         );
+    }
+
+    /// Watches the folders the ACLs grant for what is moved in, as the owner
+    /// (crate::grant_watch), after a sync wrote its record: the installed
+    /// Linux node walks such a folder by itself, as the Windows node does.
+    #[cfg(target_os = "linux")]
+    fn follow_acls(&self, cfg: &NodeConfig) {
+        let Some((_, owner)) = self.acl_accounts(cfg) else {
+            return;
+        };
+        let folders = crate::acl::granted_folders(&crate::acl::record_file(&self.paths));
+        self.grant_watch.follow_linux(&folders, Some(owner));
     }
 
     /// The locking of [`Shared::sync_acls`]: `sync` makes the report, and
@@ -1922,22 +1946,15 @@ impl Shared {
     /// None before the first sync on Windows.
     pub fn folder_grants(&self) -> Value {
         #[cfg(target_os = "linux")]
-        {
-            let r = lock(&self.acl);
-            json!({
-                "errors": r.errors,
-                "stale": r.stale,
-                "failed": r.failed,
-                "skipped": r.skipped,
-            })
-        }
+        let v = crate::grants::Report::of_acl(&lock(&self.acl)).json();
         #[cfg(windows)]
-        return self
+        let v = self
             .grant_watch
             .last()
-            .map_or(Value::Null, |s| s.status_json());
+            .map_or(Value::Null, |s| s.report(0).json());
         #[cfg(not(any(target_os = "linux", windows)))]
-        Value::Null
+        let v = Value::Null;
+        v
     }
 
     /// What `status` says of the owner's stored Windows password on the
@@ -2768,18 +2785,29 @@ async fn supervise(shared: Arc<Shared>) {
         }
         // On the installed Linux node the folders' ACLs follow it so
         // (crate::acl); a command of `nerve-run` syncs them as well before
-        // it runs.
-        // At the start every grant is walked: what was moved into a granted
-        // folder meanwhile gets its entries.
+        // it runs. The first sync is followed by a walk of every grant, so
+        // what was moved into a granted folder meanwhile gets its entries;
+        // after it the node walks a granted folder soon after something was
+        // moved in (crate::grant_watch), as on Windows.
         #[cfg(target_os = "linux")]
-        if shared.service && acl_synced != Some(cfg.version) {
-            let walk = start_walk(acl_synced);
+        if shared.service
+            && let Some((walk, began)) =
+                shared
+                    .grant_watch
+                    .next_sync(acl_synced, cfg.version, std::time::Instant::now())
+        {
+            let new_config = acl_synced != Some(cfg.version);
             acl_synced = Some(cfg.version);
             let (s, c) = (shared.clone(), cfg.clone());
             tokio::task::spawn_blocking(move || {
                 // A pairing's own folders come and go with it (#167).
-                s.sync_own_dirs(&c);
-                s.sync_acls(&c, walk)
+                if new_config {
+                    s.sync_own_dirs(&c);
+                }
+                s.sync_acls(&c, AclWalk::of(walk));
+                s.follow_acls(&c);
+                // Another sync may start from here.
+                drop(began);
             });
         }
         // The level follows the config, whoever changed it and however.
@@ -2976,7 +3004,7 @@ async fn owner_password(shared: &Arc<Shared>, params: Value) -> nerve_transport:
             &crate::win_host::WinHost,
             password.expose(),
         )?;
-        let synced = s.sync_grants().json(0);
+        let synced = s.sync_grants().report(0).json();
         Ok::<Value, String>(json!({"owner": name, "grants": synced}))
     })
     .await;
@@ -3067,7 +3095,9 @@ async fn pipe_folder_grants(shared: &Arc<Shared>, params: &Value) -> nerve_trans
         } else {
             0
         };
-        Ok::<Value, String>(s.sync_grants().json(walked))
+        let mut v = s.sync_grants().report(walked).json();
+        v["service"] = json!(s.service);
+        Ok::<Value, String>(v)
     })
     .await;
     match r {
@@ -3157,9 +3187,7 @@ async fn answer_folder_grants(
         #[cfg(target_os = "linux")]
         s.sync_acls(&s.config(), walk);
         let mut v = s.folder_grants();
-        if let Some(m) = v.as_object_mut() {
-            m.insert("service".into(), json!(s.service));
-        }
+        v["service"] = json!(s.service);
         v
     })
     .await;
@@ -4442,13 +4470,26 @@ mod tests {
         walker.join().unwrap();
     }
 
-    /// The walk at the start is every grant; the one a later config version
-    /// brings, and a `folder.grants` without `every`, only what changed.
+    /// The walk after the start is every grant, the one a later config
+    /// version brings only what is behind, one of the watch the folders
+    /// where something was moved in (crate::grant_watch::Watch::next_sync);
+    /// a `folder.grants` without `every` only what changed.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_start_and_folder_grants_choose_their_walk() {
-        assert_eq!(start_walk(None), AclWalk::Every);
-        assert_eq!(start_walk(Some(3)), AclWalk::IfBehind);
+        use crate::grants::Rewalk;
+        let w = crate::grant_watch::Watch::default();
+        let t0 = std::time::Instant::now();
+        let (first, began) = w.next_sync(None, 3, t0).unwrap();
+        drop(began);
+        assert_eq!(AclWalk::of(first), AclWalk::IfBehind);
+        let (start, began) = w.next_sync(Some(3), 3, t0).unwrap();
+        drop(began);
+        assert_eq!(AclWalk::of(start), AclWalk::Every);
+        let at = vec![PathBuf::from("/home/alice/work")];
+        assert_eq!(AclWalk::of(Rewalk::At(at.clone())), AclWalk::At(at.clone()));
+        assert_eq!(AclWalk::At(at.clone()).rewalk(), Rewalk::At(at));
+        assert_eq!(AclWalk::IfBehind.rewalk(), Rewalk::None);
         assert_eq!(grants_walk(&json!({"every": true})), AclWalk::Every);
         assert_eq!(grants_walk(&json!({"every": false})), AclWalk::Now);
         assert_eq!(grants_walk(&json!({})), AclWalk::Now);

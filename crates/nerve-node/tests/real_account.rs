@@ -667,21 +667,55 @@ except OSError as e:
     assert!(ok, "{said}");
     let r = run(&mut conn, &proj, "cat given.txt").await.unwrap();
     assert_eq!(out(&r), "given\n", "{r}");
-    // A file moved in from outside keeps its own ACL; `folder sync` walks
-    // the grants again and gives it the folder's entry.
+    // A file and a folder moved in from outside keep their own ACL; the
+    // node watches the granted folder and walks it a few seconds after,
+    // without Sync folders, so nerve-run reads them within the watch's
+    // bound (crate::grant_watch: 3 s of quiet, 30 s at most).
     let moved = base.join("moved.txt");
     std::fs::write(&moved, "moved\n").unwrap();
+    let moved_dir = base.join("moved-dir");
+    std::fs::create_dir_all(moved_dir.join("deep")).unwrap();
+    std::fs::write(moved_dir.join("deep/inner.txt"), "inner\n").unwrap();
     chown(&moved);
+    chown(&moved_dir);
     chmod(&moved, "600");
+    chmod(&moved_dir, "700");
+    let t0 = std::time::Instant::now();
     assert!(sh(Command::new("mv").arg(&moved).arg(proj.join("moved.txt"))).0);
-    assert!(!getfacl(&proj.join("moved.txt")).contains(&format!("user:{run_uid}:")));
+    assert!(
+        sh(Command::new("mv")
+            .arg(&moved_dir)
+            .arg(proj.join("moved-dir")))
+        .0
+    );
+    let entry = format!("user:{run_uid}:");
+    for _ in 0..400 {
+        if getfacl(&proj.join("moved.txt")).contains(&entry)
+            && getfacl(&proj.join("moved-dir/deep/inner.txt")).contains(&entry)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let took = t0.elapsed();
+    assert!(
+        took < Duration::from_secs(35),
+        "the moved file got no entry within the watch's bound ({took:?}): {}",
+        getfacl(&proj.join("moved.txt"))
+    );
+    eprintln!("the moved file and folder got their entries after {took:?}");
+    let r = run(&mut conn, &proj, "cat moved.txt").await.unwrap();
+    assert_eq!(out(&r), "moved\n", "{r}");
+    let r = run(&mut conn, &proj, "cat moved-dir/deep/inner.txt")
+        .await
+        .unwrap();
+    assert_eq!(out(&r), "inner\n", "{r}");
+    // `folder sync` stays for a walk by hand.
     let (ok, said) = as_owner(&owner, &["folder", "sync"]);
     assert!(
         ok && said.contains("nerve-run has its access to everything"),
         "{said}"
     );
-    let r = run(&mut conn, &proj, "cat moved.txt").await.unwrap();
-    assert_eq!(out(&r), "moved\n", "{r}");
     // Allowlist mode as nerve-run: its folders count, and say nothing; as
     // the owner they do not, and nerve-run loses their entries.
     let other = base.join("other");

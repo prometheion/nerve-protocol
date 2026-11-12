@@ -67,6 +67,7 @@ use nerve_policy::protected::Platform;
 use nerve_transport::files::Format;
 use serde::{Deserialize, Serialize};
 
+use crate::grants::Rewalk;
 use crate::paths::NodePaths;
 
 const VERSION: u32 = 2;
@@ -365,6 +366,10 @@ pub struct Report {
     /// Files and folders left as they are: another account's, with a
     /// second name, or on another file system.
     pub skipped: usize,
+    /// How many grants it walked again into every folder below them
+    /// besides those that changed: every one (`folder sync`, the start), or
+    /// those where a file or folder was moved in (crate::grant_watch).
+    pub walked: usize,
     /// Of those at `uninstall`: what `nerve-run` owns there that is no
     /// folder and has a second name, which may lie outside every grant. It
     /// is not given to the owner, as ownership goes with the file and not
@@ -967,7 +972,7 @@ pub fn sync(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
-    sync_with(file, want, who, act_as, false, &|_| {})
+    sync_with(file, want, who, act_as, &Rewalk::None, &|_| {})
 }
 
 /// [`sync`] that walks every grant, also one that did not change: a file or
@@ -979,20 +984,27 @@ pub fn sync_all(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
-    sync_with(file, want, who, act_as, true, &|_| {})
+    sync_with(file, want, who, act_as, &Rewalk::Every, &|_| {})
 }
 
-/// [`sync`], walking every grant of `want` when `every`. `stored` gets the
-/// report just before the record is written: once the record shows the walk
-/// as done, a reader that finds nothing behind must find its report as well.
+/// [`sync`], walking also the grants of `want` that `rewalk` names: every
+/// one, or those on the folders where names changed (crate::grant_watch).
+/// `stored` gets the report just before the record is written: once the
+/// record shows the walk as done, a reader that finds nothing behind must
+/// find its report as well.
 pub fn sync_with(
     file: &Path,
     want: &[Granted],
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
-    every: bool,
+    rewalk: &Rewalk,
     stored: &dyn Fn(&Report),
 ) -> Report {
+    let named = |g: &Granted| match rewalk {
+        Rewalk::None => false,
+        Rewalk::Every => true,
+        Rewalk::At(folders) => folders.contains(&g.path),
+    };
     let mut report = Report::default();
     let before = match read_record(file) {
         Ok(r) => r.unwrap_or_default(),
@@ -1062,13 +1074,14 @@ pub fn sync_with(
         let had = if old_uid { &[][..] } else { &before.grants[..] };
         let retry = if old_uid { &[][..] } else { &before.failed[..] };
         // A grant is walked when it is new, changed, failed last time or
-        // gone, or when every one is.
+        // gone, or when `rewalk` names it.
         let mut roots: Vec<&Path> = Vec::new();
-        for g in want
-            .iter()
-            .filter(|g| every || !had.contains(g) || retry.contains(&g.path))
-        {
-            roots.push(&g.path);
+        for g in want {
+            let asked = named(g);
+            if asked || !had.contains(g) || retry.contains(&g.path) {
+                report.walked += usize::from(asked);
+                roots.push(&g.path);
+            }
         }
         for g in had.iter().filter(|g| !want.contains(g)) {
             roots.push(&g.path);
@@ -1223,6 +1236,23 @@ pub fn recorded(file: &Path) -> Option<(Who, bool)> {
         }
         _ => None,
     }
+}
+
+/// The folders the record in `file` grants something to: those the node
+/// watches for what is moved in (crate::grant_watch). None where the record
+/// cannot be read.
+pub fn granted_folders(file: &Path) -> Vec<PathBuf> {
+    read_record(file)
+        .ok()
+        .flatten()
+        .map(|r| {
+            r.grants
+                .into_iter()
+                .filter(|g| g.access != Access::NONE)
+                .map(|g| g.path)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Marks every grant of the record in `file` as failed, so that the node
@@ -1479,7 +1509,7 @@ mod tests {
         let file = d.path().join("acl.json");
         let want = [grant(&work, "rw")];
         let behind_then = std::cell::Cell::new(None);
-        sync_with(&file, &want, who(), &none, false, &|_| {
+        sync_with(&file, &want, who(), &none, &Rewalk::None, &|_| {
             behind_then.set(Some(behind(&file, &want, who(), false)));
         });
         assert_eq!(behind_then.get(), Some(true));
@@ -1514,6 +1544,33 @@ mod tests {
         // The walk changed nothing of the record: the next sync has nothing
         // to do.
         assert!(!behind(&file, &want, who(), true));
+    }
+
+    /// A walk of the folders where something was moved in walks those
+    /// grants and no other (crate::grant_watch): the moved file gets its
+    /// entries, a file moved into another grant waits for its walk.
+    #[test]
+    fn a_walk_at_a_folder_walks_its_grant_alone() {
+        let Some(d) = tree() else { return };
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (work, other) = (root.join("work"), root.join("other"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let file = root.join("acl.json");
+        let want = [grant(&work, "rw"), grant(&other, "r")];
+        assert!(sync(&file, &want, who(), &none).errors.is_empty());
+        for (dir, name) in [(&work, "a.txt"), (&other, "b.txt")] {
+            std::fs::write(root.join(name), "x").unwrap();
+            std::fs::rename(root.join(name), dir.join(name)).unwrap();
+        }
+        let at = Rewalk::At(vec![work.clone()]);
+        let r = sync_with(&file, &want, who(), &none, &at, &|_| {});
+        assert_eq!(r.errors, Vec::<String>::new());
+        assert_eq!(r.walked, 1);
+        assert_eq!(rights(&work.join("a.txt"), RUN), Some(R | W));
+        assert_eq!(rights(&other.join("b.txt"), RUN), None);
+        assert_eq!(sync_all(&file, &want, who(), &none).walked, 2);
+        assert_eq!(rights(&other.join("b.txt"), RUN), Some(R));
     }
 
     /// A grant puts the entries on the folder and everything below, and the

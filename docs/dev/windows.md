@@ -642,7 +642,9 @@ runs in the container as well, unless the pairing runs as you.
   next start or by **Sync folders**.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
-  none runs). What the watch costs, as NTFS sets it:
+  none runs): a step by hand only, for a folder the watch leaves alone.
+  The Linux node watches its granted folders the same way
+  ([Linux](sandbox-linux.md#the-account-nerve-run)). What the watch costs, as NTFS sets it:
   - While a folder is granted, the folders above it cannot be renamed or
     moved, or deleted to the Recycle Bin: Explorer says the folder is open
     in another program. Rename it before you grant the folder below, or

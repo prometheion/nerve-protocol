@@ -51,7 +51,12 @@
 //!
 //! On Linux a new file in a granted folder gets its ACL entries from the
 //! folder's default entries, and a file with a second name gets none and
-//! keeps its own rights (crate::acl), so nothing waits for a walk there.
+//! keeps its own rights (crate::acl); a file or folder moved in keeps the ACL
+//! it had. So the installed Linux node watches its granted folders for what
+//! is moved in ([`linux`]: inotify, a watch on each folder in them) and walks
+//! them on the same timing ([`Pending`]); a folder too big to watch, or one
+//! the system's limit of watches leaves out, is left to the other syncs, and
+//! the log says so once.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -225,6 +230,8 @@ pub struct Watch {
     pending: Arc<Mutex<Pending>>,
     #[cfg(windows)]
     win: Mutex<win::Watches>,
+    #[cfg(target_os = "linux")]
+    linux: Mutex<linux::Watches>,
 }
 
 impl Watch {
@@ -333,6 +340,19 @@ impl Watch {
         let mut win = lock(&self.win);
         let folders = folders();
         win.follow(&folders, &self.pending, act);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Watch {
+    /// Watches the granted folders `folders` from now on, and no other: a
+    /// folder inside another is watched with it. The folders below each are
+    /// looked at and watched as `owner` (the owner of the installed node,
+    /// whose folders they are; none watches as the node). A folder too big
+    /// to watch, or one the system's limit of watches leaves out, is left
+    /// to the other syncs, and the log says so once (crate::grant_watch).
+    pub fn follow_linux(&self, folders: &[PathBuf], owner: Option<crate::service::Account>) {
+        lock(&self.linux).follow(folders, owner, &self.pending);
     }
 }
 
@@ -468,6 +488,427 @@ impl Starts {
     /// Forgets the folders that are not granted any more.
     fn keep(&mut self, folders: &[PathBuf]) {
         self.0.retain(|f, _| folders.contains(f));
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    //! One inotify instance watches every folder in the granted folders: a
+    //! watch per folder, as inotify watches one folder and not what is
+    //! below it. A thread reads its events. A file or folder moved in (and
+    //! a folder made, whose own folders are watched at once and may get
+    //! something moved in before) marks its granted folder changed; a file
+    //! made needs nothing, as it gets its entries from the folder's default
+    //! ones (crate::acl). The node's own changes of the entries are
+    //! attribute changes, which the watch does not ask for, so they do not
+    //! wake it. An overflow of the event queue walks every granted folder,
+    //! and a watched folder moved away or gone has its granted folder
+    //! walked and watched anew at the next follow.
+
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use nerve_policy::paths::within;
+
+    use super::{Pending, lock};
+    use crate::service::Account;
+
+    /// What each watch asks for: a name made or moved in, and the folder
+    /// itself moved away or gone. No attribute change: the walk's own.
+    const ASKED: u32 =
+        libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_MOVE_SELF | libc::IN_DELETE_SELF;
+
+    /// The most folders watched in one granted folder: one with more is
+    /// left to the other syncs, as watches cost the kernel's memory (about
+    /// 1 KiB each) and count against a limit of the system's.
+    pub const MOST: usize = 65_536;
+
+    /// One inotify event: the watch, what happened, and the name in the
+    /// folder it happened to, if any.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Event {
+        pub wd: i32,
+        pub mask: u32,
+        pub name: Option<std::ffi::OsString>,
+    }
+
+    /// The events in `buf`, as one read of an inotify descriptor filled
+    /// it: each a fixed head (watch, mask, cookie, length) and a name of
+    /// that length, padded with NULs. A record cut short ends the list.
+    pub fn events(buf: &[u8]) -> Vec<Event> {
+        let word = |at: usize| -> Option<[u8; 4]> { buf.get(at..at + 4)?.try_into().ok() };
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while let (Some(wd), Some(mask), Some(len)) = (word(at), word(at + 4), word(at + 12)) {
+            let len = u32::from_ne_bytes(len) as usize;
+            let Some(raw) = buf.get(at + 16..at + 16 + len) else {
+                break;
+            };
+            let name: Vec<u8> = raw.iter().copied().take_while(|b| *b != 0).collect();
+            out.push(Event {
+                wd: i32::from_ne_bytes(wd),
+                mask: u32::from_ne_bytes(mask),
+                name: (!name.is_empty()).then(|| std::ffi::OsString::from_vec(name)),
+            });
+            at += 16 + len;
+        }
+        out
+    }
+
+    /// Which watch is on which folder, by granted folder.
+    #[derive(Debug, Default)]
+    pub struct State {
+        /// Each watch: its granted folder, and the folder it is on.
+        by_wd: HashMap<i32, (PathBuf, PathBuf)>,
+        /// The granted folders watched, each with its watches.
+        roots: HashMap<PathBuf, HashSet<i32>>,
+        /// Granted folders to watch anew at the next follow: a folder in
+        /// them moved away, or events were lost.
+        stale: HashSet<PathBuf>,
+    }
+
+    /// What an event asks for: the granted folders to walk, and the new
+    /// folders to watch, each with its granted folder.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub struct Asked {
+        pub walk: Vec<PathBuf>,
+        pub watch: Vec<(PathBuf, PathBuf)>,
+    }
+
+    impl State {
+        fn held(&mut self, root: &Path, wd: i32, dir: &Path) {
+            self.by_wd
+                .insert(wd, (root.to_path_buf(), dir.to_path_buf()));
+            self.roots.entry(root.to_path_buf()).or_default().insert(wd);
+        }
+
+        /// The watches of `root`, which no longer count.
+        fn drop_root(&mut self, root: &Path) -> HashSet<i32> {
+            let wds = self.roots.remove(root).unwrap_or_default();
+            self.by_wd.retain(|wd, _| !wds.contains(wd));
+            self.stale.remove(root);
+            wds
+        }
+
+        #[cfg(test)]
+        pub fn hold_for_test(&mut self, root: &str, wd: i32, dir: &str) {
+            self.held(Path::new(root), wd, Path::new(dir));
+        }
+
+        #[cfg(test)]
+        pub fn is_stale_for_test(&self, root: &str) -> bool {
+            self.stale.contains(Path::new(root))
+        }
+
+        /// What `e` asks for.
+        pub fn react(&mut self, e: &Event) -> Asked {
+            let mut asked = Asked::default();
+            if e.mask & libc::IN_Q_OVERFLOW != 0 {
+                // What was lost may be anything: every granted folder is
+                // walked and watched anew.
+                asked.walk = self.roots.keys().cloned().collect();
+                self.stale.extend(asked.walk.iter().cloned());
+                return asked;
+            }
+            if e.mask & libc::IN_IGNORED != 0 {
+                if let Some((root, _)) = self.by_wd.remove(&e.wd)
+                    && let Some(set) = self.roots.get_mut(&root)
+                {
+                    set.remove(&e.wd);
+                }
+                return asked;
+            }
+            let Some((root, dir)) = self.by_wd.get(&e.wd).cloned() else {
+                return asked;
+            };
+            if e.mask & (libc::IN_MOVE_SELF | libc::IN_DELETE_SELF) != 0 {
+                // The watch goes along with a folder moved away, which may
+                // now lie outside the granted folder.
+                self.stale.insert(root.clone());
+                asked.walk.push(root);
+                return asked;
+            }
+            let dir_made = e.mask & libc::IN_ISDIR != 0;
+            let moved_in = e.mask & libc::IN_MOVED_TO != 0;
+            if moved_in || dir_made {
+                if dir_made && let Some(name) = &e.name {
+                    asked.watch.push((root.clone(), dir.join(name)));
+                }
+                asked.walk.push(root);
+            }
+            asked
+        }
+    }
+
+    /// The inotify instance, its thread, and what the two share.
+    struct Inner {
+        fd: OwnedFd,
+        state: Mutex<State>,
+        /// As whom the folders are looked at and watched.
+        owner: Mutex<Option<Account>>,
+        pending: Arc<Mutex<Pending>>,
+        /// The granted folders left to the other syncs, and said so once.
+        left: Mutex<HashSet<PathBuf>>,
+        most: usize,
+        stop: AtomicBool,
+    }
+
+    /// The watches of the granted folders on Linux.
+    #[derive(Default)]
+    pub struct Watches {
+        running: Option<(Arc<Inner>, std::thread::JoinHandle<()>)>,
+        /// Why the watch could not start, said once.
+        failed: bool,
+        /// [`MOST`], or less for a test.
+        most: Option<usize>,
+    }
+
+    impl Drop for Watches {
+        fn drop(&mut self) {
+            if let Some((inner, t)) = self.running.take() {
+                inner.stop.store(true, Ordering::SeqCst);
+                let _ = t.join();
+            }
+        }
+    }
+
+    impl Watches {
+        /// Watches with at most `most` folders in a granted folder.
+        #[cfg(test)]
+        pub fn with_most(most: usize) -> Watches {
+            Watches {
+                running: None,
+                failed: false,
+                most: Some(most),
+            }
+        }
+
+        pub fn follow(
+            &mut self,
+            folders: &[PathBuf],
+            owner: Option<Account>,
+            pending: &Arc<Mutex<Pending>>,
+        ) {
+            if self.running.is_none() && !folders.is_empty() && !self.failed {
+                match start(pending.clone(), self.most.unwrap_or(MOST)) {
+                    Ok(r) => self.running = Some(r),
+                    Err(e) => {
+                        self.failed = true;
+                        tracing::warn!(
+                            "folder grants: the granted folders are not watched ({e}); what is moved into one gets its entries at the next start, change or Sync folders"
+                        );
+                    }
+                }
+            }
+            let Some((inner, _)) = &self.running else {
+                return;
+            };
+            *lock(&inner.owner) = owner;
+            // A folder inside another is watched with it.
+            let roots: Vec<&PathBuf> = folders
+                .iter()
+                .filter(|f| !folders.iter().any(|o| o != *f && within(f, o)))
+                .collect();
+            lock(&inner.left).retain(|f| roots.contains(&f));
+            let (gone, new): (Vec<PathBuf>, Vec<PathBuf>) = {
+                let st = lock(&inner.state);
+                let gone = st
+                    .roots
+                    .keys()
+                    .filter(|r| !roots.contains(r))
+                    .cloned()
+                    .collect();
+                let new = roots
+                    .iter()
+                    .filter(|r| !st.roots.contains_key(**r) || st.stale.contains(**r))
+                    .filter(|r| !lock(&inner.left).contains(**r))
+                    .map(|r| (*r).clone())
+                    .collect();
+                (gone, new)
+            };
+            for root in gone {
+                unwatch(inner, &root);
+            }
+            for root in new {
+                inner.watch(&root, &root);
+            }
+        }
+    }
+
+    /// Starts the inotify instance and its thread.
+    fn start(
+        pending: Arc<Mutex<Pending>>,
+        most: usize,
+    ) -> std::io::Result<(Arc<Inner>, std::thread::JoinHandle<()>)> {
+        // SAFETY: a plain call; the descriptor is owned at once.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let inner = Arc::new(Inner {
+            // SAFETY: the descriptor just made, owned from here.
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            state: Mutex::new(State::default()),
+            owner: Mutex::new(None),
+            pending,
+            left: Mutex::new(HashSet::new()),
+            most,
+            stop: AtomicBool::new(false),
+        });
+        let reader = inner.clone();
+        let t = std::thread::Builder::new()
+            .name("grant-watch".into())
+            .spawn(move || read(&reader))?;
+        Ok((inner, t))
+    }
+
+    /// Takes every watch of `root` off.
+    fn unwatch(inner: &Inner, root: &Path) {
+        for wd in lock(&inner.state).drop_root(root) {
+            // SAFETY: a watch of this instance; one gone already is refused.
+            unsafe { libc::inotify_rm_watch(inner.fd.as_raw_fd(), wd) };
+        }
+    }
+
+    impl Inner {
+        /// Watches `dir` and every folder below it as part of the granted
+        /// folder `root`, as the owner; a watch already there stays. Where
+        /// `dir` is the granted folder, its watches that are no longer on a
+        /// folder in it go. One too big, or past the system's limit, is not
+        /// watched at all, and the log says so once.
+        fn watch(&self, root: &Path, dir: &Path) {
+            let owner = lock(&self.owner).clone();
+            let _as = owner.as_ref().and_then(|o| {
+                crate::account::FsAs::new(o)
+                    .inspect_err(|e| tracing::warn!("folder grants: cannot act as {}: {e}", o.name))
+                    .ok()
+            });
+            let mut made = HashSet::new();
+            let r = self.add_tree(root, dir, &mut made);
+            let mut st = lock(&self.state);
+            if let Err(why) = r {
+                drop(st);
+                unwatch(self, root);
+                if lock(&self.left).insert(root.to_path_buf()) {
+                    tracing::warn!(
+                        "folder grants: {} is not watched ({why}); what is moved into it gets its entries at the next start, change or Sync folders",
+                        root.display()
+                    );
+                }
+                return;
+            }
+            if dir == root {
+                // Made anew: what the folders below hold now is all.
+                let old = st.roots.get(root).cloned().unwrap_or_default();
+                st.stale.remove(root);
+                for wd in old.difference(&made) {
+                    st.by_wd.remove(wd);
+                    // SAFETY: a watch of this instance.
+                    unsafe { libc::inotify_rm_watch(self.fd.as_raw_fd(), *wd) };
+                }
+                st.roots.insert(root.to_path_buf(), made);
+            }
+        }
+
+        /// Adds a watch on `dir` and on every folder below it, links not
+        /// followed and other file systems left out, as the ACL walk does.
+        /// What vanished meanwhile, and a folder this account may not read,
+        /// are passed over.
+        fn add_tree(&self, root: &Path, dir: &Path, made: &mut HashSet<i32>) -> Result<(), String> {
+            let Ok(top) = std::fs::symlink_metadata(dir) else {
+                return Ok(());
+            };
+            if !top.is_dir() {
+                return Ok(());
+            }
+            let mut todo = vec![dir.to_path_buf()];
+            while let Some(d) = todo.pop() {
+                let Ok(c) = CString::new(d.as_os_str().as_bytes()) else {
+                    continue;
+                };
+                let mask = ASKED | libc::IN_ONLYDIR | libc::IN_DONT_FOLLOW | libc::IN_EXCL_UNLINK;
+                // SAFETY: an open instance and a NUL-terminated path.
+                let wd = unsafe { libc::inotify_add_watch(self.fd.as_raw_fd(), c.as_ptr(), mask) };
+                if wd < 0 {
+                    let e = std::io::Error::last_os_error();
+                    match e.raw_os_error() {
+                        Some(libc::ENOSPC) => {
+                            return Err(
+                                "the system's limit of watches is reached (fs.inotify.max_user_watches)"
+                                    .into(),
+                            );
+                        }
+                        _ => continue,
+                    }
+                }
+                made.insert(wd);
+                lock(&self.state).held(root, wd, &d);
+                let in_root = lock(&self.state).roots.get(root).map_or(0, HashSet::len);
+                if made.len().max(in_root) > self.most {
+                    return Err(format!("it holds more than {} folders", self.most));
+                }
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    if e.file_type().is_ok_and(|t| t.is_dir())
+                        && e.metadata().is_ok_and(|m| m.dev() == top.dev())
+                    {
+                        todo.push(e.path());
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// The thread: reads the events until the watches are dropped, marks
+    /// the granted folders they name changed, and watches the folders made
+    /// or moved in.
+    fn read(inner: &Inner) {
+        let mut buf = vec![0u8; 64 * 1024];
+        while !inner.stop.load(Ordering::SeqCst) {
+            let mut p = libc::pollfd {
+                fd: inner.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd; half a second, so a stop is seen.
+            if unsafe { libc::poll(&mut p, 1, 500) } <= 0 {
+                continue;
+            }
+            // SAFETY: a buffer of the length given.
+            let n = unsafe { libc::read(inner.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                continue;
+            }
+            let mut asked = Asked::default();
+            {
+                let mut st = lock(&inner.state);
+                for e in events(&buf[..n as usize]) {
+                    let a = st.react(&e);
+                    asked.walk.extend(a.walk);
+                    asked.watch.extend(a.watch);
+                }
+            }
+            for (root, dir) in asked.watch {
+                if !lock(&inner.left).contains(&root) {
+                    inner.watch(&root, &dir);
+                }
+            }
+            let now = Instant::now();
+            let mut p = lock(&inner.pending);
+            for root in asked.walk {
+                p.changed(&root, now);
+            }
+        }
     }
 }
 
@@ -1520,7 +1961,7 @@ mod tests {
             ..Default::default()
         };
         w.finished(3, &synced);
-        let st = w.last().unwrap().status_json();
+        let st = w.last().unwrap().report(0).json();
         assert_eq!(
             st["errors"],
             serde_json::json!(["C:\\w\\gone: access denied"])
@@ -1529,8 +1970,214 @@ mod tests {
         assert_eq!(st["unclosed"], serde_json::json!(["C:\\w\\shut"]));
         w.finished(4, &Synced::default());
         assert_eq!(
-            w.last().unwrap().status_json()["errors"],
+            w.last().unwrap().report(0).json()["errors"],
             serde_json::json!([])
         );
+    }
+
+    /// One inotify record as the kernel writes it: the watch, the mask, the
+    /// cookie, the name's padded length and the name.
+    #[cfg(target_os = "linux")]
+    fn inotify_record(wd: i32, mask: u32, name: &str) -> Vec<u8> {
+        let mut n = name.as_bytes().to_vec();
+        if !n.is_empty() {
+            n.push(0);
+            n.resize(n.len().next_multiple_of(16), 0);
+        }
+        let mut r = Vec::new();
+        r.extend(wd.to_ne_bytes());
+        r.extend(mask.to_ne_bytes());
+        r.extend(0u32.to_ne_bytes());
+        r.extend((n.len() as u32).to_ne_bytes());
+        r.extend(n);
+        r
+    }
+
+    /// The events of a read are parsed whole; one cut short ends them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inotify_events_are_read_from_their_records() {
+        use linux::{Event, events};
+        let mut buf = inotify_record(1, libc::IN_MOVED_TO, "moved.txt");
+        buf.extend(inotify_record(-1, libc::IN_Q_OVERFLOW, ""));
+        let got = events(&buf);
+        assert_eq!(
+            got,
+            [
+                Event {
+                    wd: 1,
+                    mask: libc::IN_MOVED_TO,
+                    name: Some("moved.txt".into())
+                },
+                Event {
+                    wd: -1,
+                    mask: libc::IN_Q_OVERFLOW,
+                    name: None
+                }
+            ]
+        );
+        buf.extend(&inotify_record(2, libc::IN_CREATE, "cut")[..20]);
+        assert_eq!(events(&buf).len(), 2);
+    }
+
+    /// What wakes the Linux watch: a file or folder moved in, a folder made
+    /// (and watched), a watched folder moved away; not a file made, which
+    /// takes the folder's default entries, nor the node's own changes of
+    /// the entries (attributes). An overflow walks every granted folder.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_watch_wakes_for_what_is_moved_in_only() {
+        use linux::{Asked, Event};
+        let ev = |wd: i32, mask: u32, name: &str| Event {
+            wd,
+            mask,
+            name: (!name.is_empty()).then(|| name.into()),
+        };
+        let mut st = linux::State::default();
+        st.hold_for_test("/w/proj", 1, "/w/proj");
+        st.hold_for_test("/w/proj", 2, "/w/proj/src");
+        st.hold_for_test("/w/other", 3, "/w/other");
+        let walk = |r: &str| Asked {
+            walk: vec![PathBuf::from(r)],
+            watch: Vec::new(),
+        };
+        assert_eq!(
+            st.react(&ev(2, libc::IN_MOVED_TO, "a.txt")),
+            walk("/w/proj")
+        );
+        assert_eq!(st.react(&ev(2, libc::IN_CREATE, "b.txt")), Asked::default());
+        for own in [libc::IN_ATTRIB, libc::IN_MODIFY, libc::IN_CLOSE_WRITE] {
+            assert_eq!(st.react(&ev(2, own, "a.txt")), Asked::default(), "{own:#x}");
+        }
+        assert_eq!(
+            st.react(&ev(1, libc::IN_CREATE | libc::IN_ISDIR, "new")),
+            Asked {
+                walk: vec![PathBuf::from("/w/proj")],
+                watch: vec![(PathBuf::from("/w/proj"), PathBuf::from("/w/proj/new"))]
+            }
+        );
+        assert_eq!(st.react(&ev(9, libc::IN_MOVED_TO, "x")), Asked::default());
+        assert_eq!(st.react(&ev(2, libc::IN_MOVE_SELF, "")), walk("/w/proj"));
+        assert!(st.is_stale_for_test("/w/proj"));
+        let mut all = st.react(&ev(-1, libc::IN_Q_OVERFLOW, "")).walk;
+        all.sort();
+        assert_eq!(all, [PathBuf::from("/w/other"), PathBuf::from("/w/proj")]);
+        assert!(st.is_stale_for_test("/w/other"));
+        // A watch the kernel took off is forgotten.
+        assert_eq!(st.react(&ev(3, libc::IN_IGNORED, "")), Asked::default());
+        assert_eq!(st.react(&ev(3, libc::IN_MOVED_TO, "y")), Asked::default());
+    }
+
+    /// Waits up to two seconds for `done`.
+    #[cfg(target_os = "linux")]
+    fn soon(done: impl Fn() -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    /// The real watch, of a folder of this test's: a burst of files moved
+    /// in, also into a folder made just before, is one walk of the granted
+    /// folder once the names are quiet; the walk's own changes (the mode,
+    /// an entry) wake nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_burst_moved_into_a_granted_folder_is_one_walk() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (granted, outside) = (root.join("granted"), root.join("outside"));
+        std::fs::create_dir_all(granted.join("deep/er")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let w = Watch::default();
+        w.follow_linux(std::slice::from_ref(&granted), None);
+        let quiet = || lock(&w.pending).folders.is_empty();
+        // The walk's own changes: the mode and an extended attribute.
+        let f = granted.join("deep/er/kept.txt");
+        std::fs::write(&f, "k").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(quiet(), "a file made wakes nothing");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let c = std::ffi::CString::new(f.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path, name and a value of the length given.
+        unsafe {
+            libc::setxattr(
+                c.as_ptr(),
+                c"user.nerve-test".as_ptr(),
+                b"1".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(quiet(), "the node's own changes woke the watch");
+        // A folder made deep inside, then files moved into it at once.
+        std::fs::create_dir(granted.join("deep/er/new")).unwrap();
+        for n in 0..50 {
+            let from = outside.join(format!("f{n}"));
+            std::fs::write(&from, "x").unwrap();
+            std::fs::rename(&from, granted.join(format!("deep/er/new/f{n}"))).unwrap();
+        }
+        assert!(soon(|| !quiet()), "the moves did not wake the watch");
+        // The thread reads what is left of the burst.
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        assert!(w.due(t0).is_empty(), "walked before the names were quiet");
+        assert_eq!(
+            w.due(t0 + QUIET + Duration::from_secs(1)),
+            std::slice::from_ref(&granted)
+        );
+        assert!(w.due(t0 + QUIET * 3).is_empty(), "one walk per burst");
+        // A file moved into the folder made after the watch started is
+        // seen: the folder was watched when it was made.
+        std::thread::sleep(Duration::from_millis(200));
+        lock(&w.pending).folders.clear();
+        std::fs::write(outside.join("late"), "x").unwrap();
+        std::fs::rename(outside.join("late"), granted.join("deep/er/new/late")).unwrap();
+        assert!(soon(|| !quiet()), "the new folder is not watched");
+    }
+
+    /// A granted folder with more folders than a watch may hold is left to
+    /// the other syncs, and the log says so once; a smaller one is watched.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_too_big_to_watch_is_left_and_said_once() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let log = nerve_transport::log::Log::new(nerve_transport::log::Level::Info);
+        let sub = tracing_subscriber::Registry::default().with(log.layer());
+        let _guard = tracing::subscriber::set_default(sub);
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (big, small) = (root.join("big"), root.join("small"));
+        std::fs::create_dir_all(big.join("a/b/c")).unwrap();
+        std::fs::create_dir_all(small.join("a")).unwrap();
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let mut w = linux::Watches::with_most(2);
+        let folders = [big.clone(), small.clone()];
+        w.follow(&folders, None, &pending);
+        w.follow(&folders, None, &pending);
+        let q = nerve_transport::log::Query {
+            limit: usize::MAX,
+            ..Default::default()
+        };
+        let said: Vec<String> = log
+            .entries(&q)
+            .into_iter()
+            .map(|(_, e)| e.msg)
+            .filter(|m| m.contains("is not watched"))
+            .collect();
+        assert_eq!(said.len(), 1, "{said:#?}");
+        assert!(said[0].contains(&big.display().to_string()), "{said:#?}");
+        assert!(said[0].contains("more than 2 folders"), "{said:#?}");
+        assert!(said[0].contains("Sync folders"), "{said:#?}");
+        std::fs::write(root.join("m"), "x").unwrap();
+        std::fs::rename(root.join("m"), small.join("a/m")).unwrap();
+        assert!(soon(|| !lock(&pending).folders.is_empty()));
+        assert_eq!(lock(&pending).folders[0].path, small);
     }
 }

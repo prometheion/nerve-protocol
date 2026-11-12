@@ -201,7 +201,7 @@ after `hello` and carries its calls.
 | `reload` | Reread `node.toml` (only a file the node signed) |
 | `sudo.status`, `sudo.on`, `sudo.off` | The sudo switch |
 | `folder.add` | `folder add`, judged by the node as the owner; it stores and records the real place |
-| `folder.grants` | Brings the folders' ACL entries for `nerve-run` in line with the config, and says what that left; with `every` (`folder add` of a listed folder, `folder sync`) every grant is walked |
+| `folder.grants` | Brings the folders' ACL entries for `nerve-run` in line with the config, and says what that left (the report of both platforms: `errors`, `stale`, `unclosed`, `failed`, `skipped`, `walked`, and `service`); with `every` (`folder add` of a listed folder, `folder sync`) every grant is walked |
 | `caps.list` | What `cap` shows: every action, its source, and each center's access |
 | `center.rotate-key` | `center rotate-key`: a new key for one center, sent over the link; it waits for the center's answer |
 | `owner.check` | Nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
@@ -885,7 +885,10 @@ removed only with a change of the format, which the changelog names under
   `backup` adds `"backup"` (`file`, `centers`, `saved`, and `left_out`, each
   with `what` and `why`: `keyring`, `does-not-fit` or `missing`),
   `center rotate-key` adds `"public_key"`, the new key,
-  `folder add`, `folder rm` and `folder sync` on the installed Linux node add
+  `folder sync` adds the report of the grants, on Linux and Windows alike
+  (`"errors"`, `"stale"`, `"unclosed"`, `"failed"`, `"skipped"`, `"walked"`,
+  as `folder.grants` answers),
+  `folder add` and `folder rm` on the installed Linux node add
   `"grant_errors"` (what giving `nerve-run` its folders left, each
   `<path>: <why>`) and `"grant_stale"` (folders whose access `nerve-run`
   keeps although it should have lost it) when there are any, and

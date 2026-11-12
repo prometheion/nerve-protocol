@@ -7,6 +7,8 @@
 - The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
 - `--public-url` of the center takes `{port}` for the port it listens on for nodes, for a `--listen` with port 0. Its start line in the log also names that address and the HTTP MCP URL.
 - The node and the center are installed and tested on Ubuntu 26.04 and Debian 13 too, before each release.
+- The installed Linux node watches the folders it gives `nerve-run`: a file or folder you move into one (`mv` of a download or a clone) gets the folder's access entries a few seconds later by itself, as on Windows. **Sync folders** (`nerve-node folder sync`) is a step by hand only now, for a folder too large to watch (the log says so).
+- `nerve-node folder sync --json` gives what the sync left as data, and `folder.grants` answers it, the same on Linux and Windows: `errors`, `stale`, `unclosed`, `failed`, `skipped`, `walked`; so does `status`'s `folder_access`.
 
 ### Fixed
 
