@@ -187,9 +187,11 @@ start it first.
   the node's [guard](policy-engine.md#the-guard-against-changing-the-node) catch a
   command that tries it by mistake; they are no boundary.
 
-On Windows every command runs as you, `folder` mode in an AppContainer
-([modes](windows.md#what-a-command-can-reach-in-folder-mode-windows)); an
-account of their own there is planned.
+On Windows `folder` mode, and `allowlist` mode unless you set `--as-owner`
+for the pairing, run commands as `nerve-run`, each pairing's in an
+AppContainer of its own; `user` mode runs them as you
+([the account](windows.md#the-account-commands-run-as-on-windows),
+[modes](windows.md#what-a-command-can-reach-in-folder-mode-windows)).
 
 The node also refuses the owner socket to a process it sees below a command
 it runs, and on Linux to one with `no_new_privs`, which every confined
@@ -248,10 +250,11 @@ so the node checks a value as it checks the command line's.
   commands that run as you);
   the **Shell** that runs each command (`machine.shell`); and how much the
   **Log** says (`log.level`).
-- **Keys**: in files, or in the system keyring where one can hold them. Where
-  it cannot (the installed node on Windows, no keyring
-  answering for the account the node runs as), the app says why and keeps
-  them in files.
+- **Keys**: in files, or in the system keyring where one can hold them: the
+  Credential Manager of the service's account on Windows
+  ([Windows](windows.md#the-node-as-a-service-on-windows)). Where it cannot
+  (no keyring answering for the account the node runs as), the app says why
+  and keeps them in files.
 - **Network**: the **Proxy**. The relay has a page of its own
   ([Relay](#relay)).
 - **Limits**: what one command may use and the most a call may ask for
@@ -338,8 +341,9 @@ the CLI ([rules](policy-engine.md#the-guard-against-changing-the-node)).
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
 the keyring), and the keyring `setup` installs for the node's account on a
-Linux without a desktop session for it. On Windows neither is there: the
-installed node keeps its keys in files ([Windows](windows.md#the-node-as-a-service-on-windows)).
+Linux without a desktop session for it. On Windows the Credential Manager is
+always there, and the app does both
+([Windows](windows.md#the-node-as-a-service-on-windows)).
 
 ## Capabilities
 
@@ -385,9 +389,9 @@ allow`), which **Choose…** picks.
 
 A node run by hand offers no capabilities of `node.toml` (they run as
 `nerve-run`, which only the installed node has), and the page says so. On
-Windows the node offers neither programs nor capabilities of `node.toml`
-yet, so the page shows what is declared and says so, without the forms to
-add more.
+Windows the installed node offers both: programs on the service's provider
+pipe, and capabilities of `node.toml` that run as `nerve-run` in the
+pairing's AppContainer ([Windows](windows.md#providers-on-windows)).
 
 ## Relay
 

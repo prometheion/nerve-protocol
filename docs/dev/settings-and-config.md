@@ -215,11 +215,11 @@ as the node's files are none. For a `folder` mode command the token also
 holds, as far as the sandbox does.
 
 Windows has no control socket. It has a control pipe with the same lines,
-which serves `status`, `caps.list`, `center.rotate-key`, `folder.add` and
-`folder.rm` only
-([node-local.md §5](spec/node-local.md#5-control-socket)). For every other
-change the CLI signs `node.toml` itself, and the change applies at the next
-start.
+which serves every method above but `hello` (a provider attaches to its own
+pipe), and `folder.rm`, `owner.password` and the `vault.*` methods besides
+([node-local.md §5](spec/node-local.md#the-control-pipe-windows)). A running
+node takes every change over it at once. Only while no node runs does the CLI
+sign `node.toml` itself, and the change applies at the next start.
 
 ## The owner's way in
 
@@ -338,7 +338,6 @@ name = "laptop"             # shown to centers; the host name by default
 shell = "/bin/bash"         # runs commands; the platform shell by default
 allow_root = false          # let a node run by hand run as root (Linux)
 sudo_path = "/usr/bin/sudo" # optional
-user = "alice"              # installed node on Windows: the account commands and sudo run as
 secret_storage = "file"     # file | keyring: where the node keeps its keys
 command_env = ["HTTPS_PROXY"] # installed Linux node: variables of the service nerve-run's commands get too
 
@@ -348,7 +347,7 @@ output_cap_bytes = 16777216 # for stdout and for stderr each; a result carries 1
 default_timeout_secs = 600  # how long a command runs when its call gives no timeout_ms
 max_timeout_secs = 3600     # the longest any command runs; a larger timeout_ms is cut to it
 
-[limits.command]            # what one command may use, Linux (limits.md)
+[limits.command]            # what one command may use (sandbox-linux.md)
 memory_mb = 4096            # MiB; past it the command is killed
 memory_max_mb = 16384       # the most a call may ask for
 cpu_percent = 200           # of one CPU: 200 is two CPUs
@@ -385,10 +384,10 @@ made = "2026-11-02T10:00:00Z"
 [log]
 level = "info"              # error | warn | info | debug: how much the node logs
 
-[providers]                 # programs that may add capabilities (providers.md)
+[providers]                 # programs that may add capabilities (capabilities.md)
 allowed = [{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }]
 
-[[capability]]              # one of yours, added by `nerve-node cap add` (config-capabilities.md)
+[[capability]]              # one of yours, added by `nerve-node cap add` (capabilities.md)
 name = "sensors.read"       # cap.action
 summary = "Temperatures of this machine."
 effect = "sense"            # read | write | execute | sense | actuate
@@ -415,7 +414,7 @@ deny = ["fs:~/private/*", "exec.run:rm *"]
 sudo_allow = ["sudo apt update"]
 protected = { extra = [], allow = [] }
 
-[[center.capability]]       # one this center added itself (config-capabilities.md)
+[[center.capability]]       # one this center added itself (capabilities.md)
 name = "say.back"           # the same keys as [[capability]]
 effect = "read"
 command = ["echo", "{word}"]
@@ -660,9 +659,9 @@ node, the command says:
 the change is in node.toml; it takes effect at the next start of the node
 ```
 
-On Windows a running node takes `folder add` and `folder rm`
-at once ([the control pipe](windows.md#the-control-pipe)); every other
-change it takes at its next start.
+On Windows a running node takes every change at once over its control pipe
+([the control pipe](windows.md#the-control-pipe)); without a running node the
+change waits for the next start, as above.
 
 ## The settings grant
 
@@ -832,7 +831,9 @@ removed only with a change of the format, which the changelog names under
   It names the installed node's `"owner"` and `"owner_full_rights"` (what
   runs as the owner has every right of the machine: root is the owner on
   Linux, so `user` mode runs as root; the owner is an administrator on
-  Windows), each center's `"account"` (the
+  Windows), on the installed node on Windows `"owner_password"` (`"stored"`,
+  `"missing"` or `"stale"`: whether the owner's Windows password, which the
+  commands that run as the owner need, is stored and works), each center's `"account"` (the
   account its commands run as now, `null` on a node run by hand),
   `"as_owner"`, `"no_network"` (its commands have no network),
   `"network_off"` (`"held"`, `"as_owner"` or `"not_held"` while it is on:
@@ -873,8 +874,7 @@ removed only with a change of the format, which the changelog names under
   words when it cannot, and `"said"`, the line for people.
 - Every other command prints the lines it shows as `{"messages": [...]}`,
   with `"next_start": true` when the node takes the change only at its next
-  start (it does not run, or it is the installed node on Windows, which
-  takes only folder changes while it runs); `center add --yes` says it the
+  start (it does not run); `center add --yes` says it the
   same way. `ui on` (with no token yet) and `ui token add` add `"token"`
   (`label`, `token`), `ui on` beyond loopback `"certificate"`
   (`fingerprint`, `made`); `ui` adds `"ui"` and `ui token`

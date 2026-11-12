@@ -157,8 +157,8 @@ a proxy before anything else looks at it: `connection` is the default, and the
 password and header values are dropped. So no credential is kept, written or
 needed, no keyring is asked for them, and the old node's header entry is
 deleted like any entry the restored config does not name. It is also the way
-to restore a config with header values on the installed node on Windows, which
-takes none.
+to restore a config with header values onto a machine whose keyring does not
+answer.
 
 When the replaced config does vouch for the header values (the same proxy, pin
 and names), they are that proxy's whatever the keyring says, and the restore
@@ -240,8 +240,8 @@ the node's key.
 
 ## What is not in a backup
 
-The MAC key (made again), the sudo password (never at rest on Linux; DPAPI on
-Windows is tied to the machine), the audit log, the log, the control socket
+The MAC key (made again), the sudo password (in memory only, on Linux and on
+Windows), the audit log, the log, the control socket
 and token, the Windows record of folder grants (`grants.json`, rebuilt by the
 running node before a command), and the center's log.
 
