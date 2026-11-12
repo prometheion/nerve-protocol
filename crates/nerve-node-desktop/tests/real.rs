@@ -40,19 +40,17 @@ fn restarts_without_end(name: &str) {
         String::from_utf8_lossy(&o.stdout).into_owned()
     };
     let failure = sc(&["qfailure", name]);
-    let restarts: Vec<&str> = failure
+    // The words around the delay are the Windows language's; the number after
+    // the `=` is not.
+    let restarts: Vec<u32> = failure
         .lines()
-        .filter_map(|l| l.find("RESTART -- Delay").map(|at| l[at..].trim()))
+        .filter(|l| l.contains("RESTART --"))
+        .filter_map(|l| {
+            let after = &l[l.find('=')? + 1..];
+            after.split_whitespace().next()?.parse().ok()
+        })
         .collect();
-    assert_eq!(
-        restarts,
-        [
-            "RESTART -- Delay = 5000 milliseconds.",
-            "RESTART -- Delay = 5000 milliseconds.",
-            "RESTART -- Delay = 60000 milliseconds.",
-        ],
-        "{name}: {failure}"
-    );
+    assert_eq!(restarts, [5000, 5000, 60000], "{name}: {failure}");
     assert!(!failure.contains("NONE"), "{name}: {failure}");
     let flag = sc(&["qfailureflag", name]);
     assert!(flag.contains("TRUE"), "{name}: {flag}");

@@ -391,19 +391,17 @@ fn the_center_runs_as_a_windows_service() {
         let failure = system("sc.exe", &["qfailure", "nerve-center"]);
         // The last action is repeated for every later failure, so the
         // service is never left down for the day (round 2, correctness 3).
-        let restarts: Vec<&str> = failure
+        // The words around a delay are the Windows language's; the number
+        // after the `=` is not.
+        let restarts: Vec<u32> = failure
             .lines()
-            .filter_map(|l| l.find("RESTART -- Delay").map(|at| l[at..].trim()))
+            .filter(|l| l.contains("RESTART --"))
+            .filter_map(|l| {
+                let after = &l[l.find('=')? + 1..];
+                after.split_whitespace().next()?.parse().ok()
+            })
             .collect();
-        assert_eq!(
-            restarts,
-            [
-                "RESTART -- Delay = 5000 milliseconds.",
-                "RESTART -- Delay = 5000 milliseconds.",
-                "RESTART -- Delay = 60000 milliseconds.",
-            ],
-            "{failure}"
-        );
+        assert_eq!(restarts, [5000, 5000, 60000], "{failure}");
         assert!(!failure.contains("NONE"), "{failure}");
         let flag = system("sc.exe", &["qfailureflag", "nerve-center"]);
         assert!(flag.contains("TRUE"), "{flag}");
