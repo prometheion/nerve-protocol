@@ -459,6 +459,20 @@ struct Opened {
     m: std::fs::Metadata,
 }
 
+/// A folder the walk has opened, and its path.
+struct Dir {
+    open: Opened,
+    path: PathBuf,
+}
+
+/// An entry of a folder the walk has yet to open: its folder, its name, and
+/// what of the folder's default ACL was the owner's.
+struct Todo {
+    dir: Rc<Dir>,
+    name: OsString,
+    above: Own,
+}
+
 impl Opened {
     /// A path that leads to this very file, whatever is done to its own
     /// path meanwhile.
@@ -795,19 +809,22 @@ fn walk(
     // The entries of a folder are opened when their turn comes, from the
     // folder's descriptor, so only the folders on the way are held open.
     // With each goes what of its folder's default ACL was the owner's.
-    let mut stack: Vec<(Rc<Opened>, OsString, PathBuf, Own)> = Vec::new();
+    // A folder's path is kept once, with its descriptor, and a name joins it
+    // when its turn comes: a folder with very many names holds a name each.
+    let mut stack: Vec<Todo> = Vec::new();
     let mut next = Some((root.to_path_buf(), top, Own::default()));
     loop {
         let (path, o, above) = match next.take() {
             Some(n) => n,
             None => {
-                let Some((dir, name, path, above)) = stack.pop() else {
+                let Some(Todo { dir, name, above }) = stack.pop() else {
                     break;
                 };
                 let Ok(c) = CString::new(name.as_bytes()) else {
                     continue;
                 };
-                match open_in(dir.file.as_raw_fd(), &c) {
+                let path = dir.path.join(&name);
+                match open_in(dir.open.file.as_raw_fd(), &c) {
                     Ok(o) => (path, o, above),
                     // Gone meanwhile.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -891,10 +908,13 @@ fn walk(
         if ft.is_dir() {
             match o.names() {
                 Ok(names) => {
-                    let dir = Rc::new(o);
-                    for n in names {
-                        let p = path.join(&n);
-                        stack.push((dir.clone(), n, p, own_here));
+                    let dir = Rc::new(Dir { open: o, path });
+                    for name in names {
+                        stack.push(Todo {
+                            dir: dir.clone(),
+                            name,
+                            above: own_here,
+                        });
                     }
                 }
                 // Another account's folder the owner may not read.
@@ -1544,6 +1564,21 @@ mod tests {
         // The walk changed nothing of the record: the next sync has nothing
         // to do.
         assert!(!behind(&file, &want, who(), true));
+    }
+
+    /// The walk queues a name for each entry of a folder, not a path: a
+    /// folder with very many names must not hold its path once per name.
+    #[test]
+    fn a_walk_queues_names_not_paths() {
+        assert!(
+            std::mem::size_of::<Todo>()
+                <= std::mem::size_of::<Rc<Dir>>()
+                    + std::mem::size_of::<OsString>()
+                    + std::mem::size_of::<Own>()
+                    + 8,
+            "{} bytes for an entry waiting",
+            std::mem::size_of::<Todo>()
+        );
     }
 
     /// A walk of the folders where something was moved in walks those

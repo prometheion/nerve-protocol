@@ -440,8 +440,11 @@ Keep nothing there that the machine's other accounts must not read.
   one the system's limit of watches (`fs.inotify.max_user_watches`) leaves
   out, is not watched; the log says so once, and what is moved into it gets
   its entries at the next start or change, or by `nerve-node folder sync`,
-  which is a step by hand only then. The node also walks every grant when it
-  starts and on `folder add` of a folder it has. Each such walk is a pass
+  which is a step by hand only then. A granted folder inside one left out
+  is watched for itself. One that is missing (made or mounted later, or
+  moved away and made again) has no watch and is looked for every 10
+  seconds; once it is there it is watched and walked. The node also walks
+  every grant when it starts and on `folder add` of a folder it has. Each such walk is a pass
   over everything in the granted folder, which takes a while for large
   trees. `status` and the
   commands of `nerve-run` do not wait for it while the folders' entries are

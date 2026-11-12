@@ -689,9 +689,9 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Give nerve-run its access to every granted folder again (installed Linux node)
+    /// Give nerve-run its access to every granted folder again
     ///
-    /// Give nerve-run its access to everything in the folders of every center again, also what was moved into them (the installed node on Linux): a pass over every granted folder.
+    /// Walk every granted folder of every center and give nerve-run its access to everything in it again. The node does this by itself for what is moved in; use this for a folder it does not watch (too large; the log says so).
     Sync,
 }
 

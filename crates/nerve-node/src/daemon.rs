@@ -2810,6 +2810,13 @@ async fn supervise(shared: Arc<Shared>) {
                 drop(began);
             });
         }
+        // A granted folder that was missing when the watches were set (one
+        // made or mounted later) is looked for again from time to time.
+        #[cfg(target_os = "linux")]
+        if shared.service && shared.grant_watch.follow_due(std::time::Instant::now()) {
+            let (s, c) = (shared.clone(), cfg.clone());
+            tokio::task::spawn_blocking(move || s.follow_acls(&c));
+        }
         // The level follows the config, whoever changed it and however.
         if let Some(log) = &shared.log {
             log.set_level(cfg.log.level);

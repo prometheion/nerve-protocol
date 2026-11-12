@@ -28,6 +28,19 @@ fn events(log: std::path::PathBuf) -> Events {
     }
 }
 
+/// Says in the node's log file why the service stopped. Nobody reads stderr
+/// here. The line is appended without reading the file or following a link:
+/// a start that stops on a state folder another account owns (crate::entry)
+/// must not read or write through what that account put there, and the
+/// manager starts it again every minute. The Event Log has the error too.
+fn stopped(file: &std::path::Path, e: &str) {
+    let _ = nerve_transport::log::Log::append_entry(
+        file,
+        nerve_transport::log::Level::Error,
+        &format!("the service stopped: {e}"),
+    );
+}
+
 /// Runs `body` as the service when the service control manager started
 /// this program; its exit code. Started any other way, as from a terminal,
 /// the node does not run (crate::cli::BY_HAND). `log` is the node's log
@@ -38,11 +51,7 @@ pub fn serve(body: Body, log: std::path::PathBuf, json: bool) -> i32 {
     let body: Body = Box::new(move || {
         let r = body();
         if let Err(e) = &r {
-            // Nobody reads stderr here: the node's log file has it.
-            if let Some(l) = nerve_transport::log::global() {
-                let _ = l.attach_file(&file);
-            }
-            tracing::error!("the service stopped: {e}");
+            stopped(&file, e);
         }
         r
     });
@@ -193,6 +202,29 @@ mod tests {
     extern "system" fn serve_panicking() {
         let marker = std::env::var("NERVE_TEST_CRASH").unwrap();
         run_body(Some(Box::new(move || panic!("test body crash {marker}"))));
+    }
+
+    /// A start that stops says why in the node's log file, and writes
+    /// nothing through a link that stands in its place: the file may be the
+    /// account's that owns the folder (security-2).
+    #[test]
+    fn a_stop_is_said_in_the_log_file_but_not_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("log.jsonl");
+        stopped(&log, "state folder refused");
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            said.contains("the service stopped: state folder refused"),
+            "{said}"
+        );
+        let (elsewhere, link) = (d.path().join("elsewhere.txt"), d.path().join("link.jsonl"));
+        std::fs::write(&elsewhere, "keep\n").unwrap();
+        if std::os::windows::fs::symlink_file(&elsewhere, &link).is_err() {
+            // A link needs the privilege for it.
+            return;
+        }
+        stopped(&link, "state folder refused");
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "keep\n");
     }
 
     /// Run by the test below in a program of its own, which it ends.

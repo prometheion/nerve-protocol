@@ -74,6 +74,11 @@ pub const QUIET: Duration = Duration::from_secs(3);
 /// The longest a change waits for its walk while names go on changing.
 pub const AT_MOST: Duration = Duration::from_secs(30);
 
+/// How often the Linux watch looks again for a granted folder that was
+/// missing ([`Watch::follow_due`]).
+#[cfg(target_os = "linux")]
+pub const REFOLLOW: Duration = Duration::from_secs(10);
+
 /// What the node asks Windows to tell (`FILE_NOTIFY_CHANGE_FILE_NAME`,
 /// `FILE_NOTIFY_CHANGE_DIR_NAME`): names of files and folders, nothing of
 /// their contents, times or security.
@@ -232,6 +237,12 @@ pub struct Watch {
     win: Mutex<win::Watches>,
     #[cfg(target_os = "linux")]
     linux: Mutex<linux::Watches>,
+    /// A granted folder had no watch at the last follow (Linux).
+    #[cfg(target_os = "linux")]
+    unwatched: std::sync::atomic::AtomicBool,
+    /// When the folders were last followed for that (Linux).
+    #[cfg(target_os = "linux")]
+    refollowed: Mutex<Option<Instant>>,
 }
 
 impl Watch {
@@ -352,7 +363,24 @@ impl Watch {
     /// to watch, or one the system's limit of watches leaves out, is left
     /// to the other syncs, and the log says so once (crate::grant_watch).
     pub fn follow_linux(&self, folders: &[PathBuf], owner: Option<crate::service::Account>) {
-        lock(&self.linux).follow(folders, owner, &self.pending);
+        let unwatched = lock(&self.linux).follow(folders, owner, &self.pending);
+        self.unwatched
+            .store(unwatched, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the supervisor follows the granted folders again at `now`:
+    /// one was missing at the last follow (a folder made later, or a drive
+    /// mounted later), and none was tried within [`REFOLLOW`].
+    pub fn follow_due(&self, now: Instant) -> bool {
+        if !self.unwatched.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let mut at = lock(&self.refollowed);
+        if at.is_some_and(|t| now.saturating_duration_since(t) < REFOLLOW) {
+            return false;
+        }
+        *at = Some(now);
+        true
     }
 }
 
@@ -565,10 +593,13 @@ mod linux {
     /// Which watch is on which folder, by granted folder.
     #[derive(Debug, Default)]
     pub struct State {
-        /// Each watch: its granted folder, and the folder it is on.
-        by_wd: HashMap<i32, (PathBuf, PathBuf)>,
-        /// The granted folders watched, each with its watches.
-        roots: HashMap<PathBuf, HashSet<i32>>,
+        /// Each watch: its granted folder (the one path all its watches
+        /// share), and the folder it is on.
+        by_wd: HashMap<i32, (Arc<Path>, PathBuf)>,
+        /// The granted folders watched, each with its watches. A folder
+        /// with no watch at all (missing, or not readable) is not here, so
+        /// that the next follow tries it again.
+        roots: HashMap<Arc<Path>, HashSet<i32>>,
         /// Granted folders to watch anew at the next follow: a folder in
         /// them moved away, or events were lost.
         stale: HashSet<PathBuf>,
@@ -584,9 +615,33 @@ mod linux {
 
     impl State {
         fn held(&mut self, root: &Path, wd: i32, dir: &Path) {
-            self.by_wd
-                .insert(wd, (root.to_path_buf(), dir.to_path_buf()));
-            self.roots.entry(root.to_path_buf()).or_default().insert(wd);
+            let root: Arc<Path> = match self.roots.get_key_value(root) {
+                Some((r, _)) => r.clone(),
+                None => Arc::from(root),
+            };
+            self.by_wd.insert(wd, (root.clone(), dir.to_path_buf()));
+            self.roots.entry(root).or_default().insert(wd);
+        }
+
+        /// `root` was walked anew and the walk found the watches `made`.
+        /// Those held before the walk (`before`) that it did not find are
+        /// forgotten and returned, for the caller to take off. A watch added
+        /// since the walk began, for a folder made while it ran, stays: the
+        /// walk may have listed that folder's parent already.
+        fn renewed(&mut self, root: &Path, before: &HashSet<i32>, made: &HashSet<i32>) -> Vec<i32> {
+            let gone: Vec<i32> = before.difference(made).copied().collect();
+            for wd in &gone {
+                self.by_wd.remove(wd);
+            }
+            if let Some(set) = self.roots.get_mut(root) {
+                for wd in &gone {
+                    set.remove(wd);
+                }
+                if set.is_empty() {
+                    self.roots.remove(root);
+                }
+            }
+            gone
         }
 
         /// The watches of `root`, which no longer count.
@@ -607,13 +662,34 @@ mod linux {
             self.stale.contains(Path::new(root))
         }
 
+        #[cfg(test)]
+        pub fn renewed_for_test(&mut self, root: &str, before: &[i32], made: &[i32]) -> Vec<i32> {
+            let (before, made) = (
+                before.iter().copied().collect(),
+                made.iter().copied().collect(),
+            );
+            let mut gone = self.renewed(Path::new(root), &before, &made);
+            gone.sort();
+            gone
+        }
+
+        #[cfg(test)]
+        pub fn watches_for_test(&self, root: &str) -> Vec<i32> {
+            let mut wds: Vec<i32> = self
+                .roots
+                .get(Path::new(root))
+                .map_or_else(Vec::new, |s| s.iter().copied().collect());
+            wds.sort();
+            wds
+        }
+
         /// What `e` asks for.
         pub fn react(&mut self, e: &Event) -> Asked {
             let mut asked = Asked::default();
             if e.mask & libc::IN_Q_OVERFLOW != 0 {
                 // What was lost may be anything: every granted folder is
                 // walked and watched anew.
-                asked.walk = self.roots.keys().cloned().collect();
+                asked.walk = self.roots.keys().map(|r| r.to_path_buf()).collect();
                 self.stale.extend(asked.walk.iter().cloned());
                 return asked;
             }
@@ -631,17 +707,17 @@ mod linux {
             if e.mask & (libc::IN_MOVE_SELF | libc::IN_DELETE_SELF) != 0 {
                 // The watch goes along with a folder moved away, which may
                 // now lie outside the granted folder.
-                self.stale.insert(root.clone());
-                asked.walk.push(root);
+                self.stale.insert(root.to_path_buf());
+                asked.walk.push(root.to_path_buf());
                 return asked;
             }
             let dir_made = e.mask & libc::IN_ISDIR != 0;
             let moved_in = e.mask & libc::IN_MOVED_TO != 0;
             if moved_in || dir_made {
                 if dir_made && let Some(name) = &e.name {
-                    asked.watch.push((root.clone(), dir.join(name)));
+                    asked.watch.push((root.to_path_buf(), dir.join(name)));
                 }
-                asked.walk.push(root);
+                asked.walk.push(root.to_path_buf());
             }
             asked
         }
@@ -656,6 +732,10 @@ mod linux {
         pending: Arc<Mutex<Pending>>,
         /// The granted folders left to the other syncs, and said so once.
         left: Mutex<HashSet<PathBuf>>,
+        /// The granted folders found missing (or not readable) when last
+        /// watched: once one is watched, it is walked, as what it holds now
+        /// may have come in since.
+        missing: Mutex<HashSet<PathBuf>>,
         most: usize,
         stop: AtomicBool,
     }
@@ -690,12 +770,15 @@ mod linux {
             }
         }
 
+        /// Watches `folders` and no other. True when a granted folder is
+        /// not watched yet because it is missing or cannot be read (not one
+        /// left for being too big): it is tried again at the next follow.
         pub fn follow(
             &mut self,
             folders: &[PathBuf],
             owner: Option<Account>,
             pending: &Arc<Mutex<Pending>>,
-        ) {
+        ) -> bool {
             if self.running.is_none() && !folders.is_empty() && !self.failed {
                 match start(pending.clone(), self.most.unwrap_or(MOST)) {
                     Ok(r) => self.running = Some(r),
@@ -708,38 +791,68 @@ mod linux {
                 }
             }
             let Some((inner, _)) = &self.running else {
-                return;
+                return false;
             };
             *lock(&inner.owner) = owner;
-            // A folder inside another is watched with it.
-            let roots: Vec<&PathBuf> = folders
+            // Each folder is tried once: one that has no watch afterwards
+            // (missing) waits for the next follow.
+            let mut tried: HashSet<PathBuf> = HashSet::new();
+            loop {
+                let roots = outermost(folders, &lock(&inner.left));
+                lock(&inner.left).retain(|f| roots.contains(f));
+                let (gone, new): (Vec<PathBuf>, Vec<PathBuf>) = {
+                    let st = lock(&inner.state);
+                    let left = lock(&inner.left);
+                    let gone = st
+                        .roots
+                        .keys()
+                        .map(|r| r.to_path_buf())
+                        .filter(|r| !roots.contains(r))
+                        .collect();
+                    let new = roots
+                        .iter()
+                        .filter(|r| !st.roots.contains_key(r.as_path()) || st.stale.contains(*r))
+                        .filter(|r| !left.contains(*r) && !tried.contains(*r))
+                        .cloned()
+                        .collect();
+                    (gone, new)
+                };
+                for root in gone {
+                    unwatch(inner, &root);
+                }
+                if new.is_empty() {
+                    break;
+                }
+                for root in new {
+                    inner.watch(&root, &root);
+                    tried.insert(root);
+                }
+            }
+            let roots = outermost(folders, &lock(&inner.left));
+            let st = lock(&inner.state);
+            let left = lock(&inner.left);
+            roots
                 .iter()
-                .filter(|f| !folders.iter().any(|o| o != *f && within(f, o)))
-                .collect();
-            lock(&inner.left).retain(|f| roots.contains(&f));
-            let (gone, new): (Vec<PathBuf>, Vec<PathBuf>) = {
-                let st = lock(&inner.state);
-                let gone = st
-                    .roots
-                    .keys()
-                    .filter(|r| !roots.contains(r))
-                    .cloned()
-                    .collect();
-                let new = roots
-                    .iter()
-                    .filter(|r| !st.roots.contains_key(**r) || st.stale.contains(**r))
-                    .filter(|r| !lock(&inner.left).contains(**r))
-                    .map(|r| (*r).clone())
-                    .collect();
-                (gone, new)
-            };
-            for root in gone {
-                unwatch(inner, &root);
-            }
-            for root in new {
-                inner.watch(&root, &root);
-            }
+                .any(|r| !left.contains(r) && !st.roots.contains_key(r.as_path()))
         }
+    }
+
+    /// The granted folders to watch for themselves: those not inside
+    /// another that is watched, as that one's watches reach them. A folder
+    /// inside one left out (too big) is one to watch for itself.
+    fn outermost(folders: &[PathBuf], left: &HashSet<PathBuf>) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = folders
+            .iter()
+            .filter(|f| {
+                !folders
+                    .iter()
+                    .any(|o| o != *f && within(f, o) && !left.contains(o))
+            })
+            .cloned()
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
     /// Starts the inotify instance and its thread.
@@ -759,6 +872,7 @@ mod linux {
             owner: Mutex::new(None),
             pending,
             left: Mutex::new(HashSet::new()),
+            missing: Mutex::new(HashSet::new()),
             most,
             stop: AtomicBool::new(false),
         });
@@ -781,8 +895,10 @@ mod linux {
         /// Watches `dir` and every folder below it as part of the granted
         /// folder `root`, as the owner; a watch already there stays. Where
         /// `dir` is the granted folder, its watches that are no longer on a
-        /// folder in it go. One too big, or past the system's limit, is not
-        /// watched at all, and the log says so once.
+        /// folder in it go, but not one the thread added meanwhile. One too
+        /// big, or past the system's limit, is not watched at all, and the
+        /// log says so once. A granted folder with nothing to watch (it is
+        /// missing) has no watches and is tried again at the next follow.
         fn watch(&self, root: &Path, dir: &Path) {
             let owner = lock(&self.owner).clone();
             let _as = owner.as_ref().and_then(|o| {
@@ -790,6 +906,15 @@ mod linux {
                     .inspect_err(|e| tracing::warn!("folder grants: cannot act as {}: {e}", o.name))
                     .ok()
             });
+            let before = if dir == root {
+                // Taken before the walk, and the mark off now, so that a
+                // folder moved away while it runs asks for another one.
+                let mut st = lock(&self.state);
+                st.stale.remove(root);
+                st.roots.get(root).cloned().unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
             let mut made = HashSet::new();
             let r = self.add_tree(root, dir, &mut made);
             let mut st = lock(&self.state);
@@ -806,14 +931,18 @@ mod linux {
             }
             if dir == root {
                 // Made anew: what the folders below hold now is all.
-                let old = st.roots.get(root).cloned().unwrap_or_default();
-                st.stale.remove(root);
-                for wd in old.difference(&made) {
-                    st.by_wd.remove(wd);
+                for wd in st.renewed(root, &before, &made) {
                     // SAFETY: a watch of this instance.
-                    unsafe { libc::inotify_rm_watch(self.fd.as_raw_fd(), *wd) };
+                    unsafe { libc::inotify_rm_watch(self.fd.as_raw_fd(), wd) };
                 }
-                st.roots.insert(root.to_path_buf(), made);
+                drop(st);
+                let mut missing = lock(&self.missing);
+                if made.is_empty() {
+                    missing.insert(root.to_path_buf());
+                } else if missing.remove(root) {
+                    // It is there now: what it holds may be new to the node.
+                    lock(&self.pending).changed(root, Instant::now());
+                }
             }
         }
 
@@ -854,19 +983,41 @@ mod linux {
                 if made.len().max(in_root) > self.most {
                     return Err(format!("it holds more than {} folders", self.most));
                 }
-                let Ok(entries) = std::fs::read_dir(&d) else {
-                    continue;
+                // What is queued counts as well, so the queue stays as
+                // short as the watches may be many.
+                let room = self.most.saturating_sub(made.len() + todo.len());
+                let Some(subs) = subfolders(&d, top.dev(), room) else {
+                    return Err(format!("it holds more than {} folders", self.most));
                 };
-                for e in entries.flatten() {
-                    if e.file_type().is_ok_and(|t| t.is_dir())
-                        && e.metadata().is_ok_and(|m| m.dev() == top.dev())
-                    {
-                        todo.push(e.path());
-                    }
-                }
+                todo.extend(subs);
             }
             Ok(())
         }
+    }
+
+    /// The folders directly in `dir` on the device `dev`, links not
+    /// followed; none when it cannot be read, and none at all when there
+    /// are more than `room`, so a folder with very many is not queued whole.
+    fn subfolders(dir: &Path, dev: u64, room: usize) -> Option<Vec<PathBuf>> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Some(Vec::new());
+        };
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) && e.metadata().is_ok_and(|m| m.dev() == dev)
+            {
+                if out.len() >= room {
+                    return None;
+                }
+                out.push(e.path());
+            }
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    pub fn subfolders_for_test(dir: &Path, dev: u64, room: usize) -> Option<Vec<PathBuf>> {
+        subfolders(dir, dev, room)
     }
 
     /// The thread: reads the events until the watches are dropped, marks
@@ -2179,5 +2330,136 @@ mod tests {
         std::fs::rename(root.join("m"), small.join("a/m")).unwrap();
         assert!(soon(|| !lock(&pending).folders.is_empty()));
         assert_eq!(lock(&pending).folders[0].path, small);
+    }
+    /// A granted folder inside one too big to watch is watched for itself:
+    /// the outer one is left to the other syncs, the inner one is small.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_granted_folder_inside_one_too_big_to_watch_is_watched_for_itself() {
+        // The outer folder says it is left out; with a log of this test's,
+        // as the test of that line has, so neither can hide it from the other.
+        use tracing_subscriber::layer::SubscriberExt;
+        let log = nerve_transport::log::Log::new(nerve_transport::log::Level::Info);
+        let sub = tracing_subscriber::Registry::default().with(log.layer());
+        let _guard = tracing::subscriber::set_default(sub);
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (outer, inner) = (root.join("outer"), root.join("outer/inner"));
+        for sub in ["a", "b", "c", "inner"] {
+            std::fs::create_dir_all(outer.join(sub)).unwrap();
+        }
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let mut w = linux::Watches::with_most(2);
+        let folders = [outer.clone(), inner.clone()];
+        w.follow(&folders, None, &pending);
+        w.follow(&folders, None, &pending);
+        std::fs::write(root.join("m"), "x").unwrap();
+        std::fs::rename(root.join("m"), inner.join("m")).unwrap();
+        assert!(
+            soon(|| !lock(&pending).folders.is_empty()),
+            "inner is not watched"
+        );
+        assert_eq!(lock(&pending).folders[0].path, inner);
+        // The outer one is left out: what is moved into it wakes nothing.
+        lock(&pending).folders.clear();
+        std::fs::write(root.join("n"), "x").unwrap();
+        std::fs::rename(root.join("n"), outer.join("a/n")).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(lock(&pending).folders.is_empty());
+    }
+
+    /// A granted folder that is missing has no watch and is tried again:
+    /// made later, or made again after it was moved away, it is watched and
+    /// walked, and the supervisor is told to look for it meanwhile.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_granted_folder_missing_is_watched_once_it_is_there() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let later = root.join("later");
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let mut w = linux::Watches::default();
+        let folders = std::slice::from_ref(&later);
+        assert!(
+            w.follow(folders, None, &pending),
+            "a missing folder is unwatched"
+        );
+        std::fs::create_dir_all(later.join("sub")).unwrap();
+        assert!(!w.follow(folders, None, &pending));
+        let walked = |p: &Arc<Mutex<Pending>>| lock(p).folders.iter().any(|f| f.path == later);
+        assert!(walked(&pending), "a folder that came walks");
+        lock(&pending).folders.clear();
+        let moved_in = |name: &str| {
+            std::fs::write(root.join(name), "x").unwrap();
+            std::fs::rename(root.join(name), later.join("sub").join(name)).unwrap();
+        };
+        moved_in("one");
+        assert!(soon(|| walked(&pending)), "the folder is not watched");
+        lock(&pending).folders.clear();
+        // Moved away and made again: the walk of the watch ends with
+        // nothing to watch, and the next follow finds the new folder.
+        std::fs::rename(&later, root.join("later.old")).unwrap();
+        assert!(soon(|| walked(&pending)), "a folder moved away walks");
+        lock(&pending).folders.clear();
+        assert!(w.follow(folders, None, &pending), "the folder is gone");
+        std::fs::create_dir_all(later.join("sub")).unwrap();
+        assert!(!w.follow(folders, None, &pending));
+        assert!(walked(&pending), "a folder made again walks");
+        lock(&pending).folders.clear();
+        moved_in("two");
+        assert!(soon(|| walked(&pending)), "the new folder is not watched");
+    }
+
+    /// The supervisor looks again for a missing granted folder, every
+    /// `REFOLLOW`, until it is there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_granted_folder_is_looked_for_again_now_and_then() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let later = root.join("later");
+        let w = Watch::default();
+        let t0 = Instant::now();
+        assert!(!w.follow_due(t0), "nothing was followed yet");
+        w.follow_linux(std::slice::from_ref(&later), None);
+        assert!(w.follow_due(t0));
+        assert!(!w.follow_due(t0 + Duration::from_secs(1)));
+        assert!(w.follow_due(t0 + REFOLLOW));
+        std::fs::create_dir(&later).unwrap();
+        w.follow_linux(std::slice::from_ref(&later), None);
+        assert!(!w.follow_due(t0 + REFOLLOW * 5), "it is watched now");
+    }
+
+    /// A watch the thread added while a granted folder was walked anew
+    /// stays; one the walk did not find goes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_made_during_a_rewalk_keeps_its_watch() {
+        let mut st = linux::State::default();
+        st.hold_for_test("/w/p", 1, "/w/p");
+        st.hold_for_test("/w/p", 2, "/w/p/old");
+        // The thread's, for a folder made while the walk ran.
+        st.hold_for_test("/w/p", 3, "/w/p/new");
+        assert_eq!(st.renewed_for_test("/w/p", &[1, 2], &[1]), [2]);
+        assert_eq!(st.watches_for_test("/w/p"), [1, 3]);
+        assert_eq!(st.renewed_for_test("/w/p", &[1, 3], &[]), [1, 3]);
+        assert!(st.watches_for_test("/w/p").is_empty());
+    }
+
+    /// A folder with more folders in it than the room left is not queued
+    /// whole.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_with_very_many_folders_is_not_queued_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        for n in 0..3 {
+            std::fs::create_dir(d.path().join(format!("d{n}"))).unwrap();
+        }
+        std::fs::write(d.path().join("file"), "x").unwrap();
+        let dev = std::fs::metadata(d.path()).unwrap().dev();
+        let got = linux::subfolders_for_test(d.path(), dev, 3).unwrap();
+        assert_eq!(got.len(), 3, "files are not folders");
+        assert!(linux::subfolders_for_test(d.path(), dev, 2).is_none());
     }
 }
