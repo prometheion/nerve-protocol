@@ -8,7 +8,9 @@
 //! program without the administrators' rights ([`restricted`]). The center
 //! also asks who runs a process ([`process`]) and which process holds a
 //! loopback connection ([`tcp`]). The machine's own
-//! folders come from Windows, not from the environment ([`folders`]). What
+//! folders come from Windows, not from the environment ([`folders`]), and
+//! the center's install puts its folder on the machine's `Path`
+//! ([`machine_path`]). What
 //! is plain logic is compiled and tested on every platform.
 
 pub mod dacl;
@@ -20,6 +22,7 @@ pub mod folders;
 pub mod job;
 #[cfg(windows)]
 pub mod job_object;
+pub mod machine_path;
 pub mod pipe;
 #[cfg(windows)]
 pub mod process;

@@ -358,11 +358,10 @@ fn the_notes_say_the_update_order() {
 }
 
 /// The README is the first thing a new user reads (#213): its quick start
-/// covers Linux and Windows, its desktop app comes as the .deb and the .rpm
-/// first, and it says what 0.1.0 keeps stable, linking the promise of the
-/// spec.
+/// covers Linux and Windows, and its desktop app comes as the .deb and the
+/// .rpm first.
 #[test]
-fn the_readme_starts_on_linux_and_windows_and_says_what_stays_stable() {
+fn the_readme_starts_on_linux_and_windows() {
     let readme = include_str!("../../../README.md");
     let section = |head: &str| {
         readme
@@ -397,12 +396,6 @@ fn the_readme_starts_on_linux_and_windows_and_says_what_stays_stable() {
         .unwrap();
     assert!(desktop.contains("Windows"), "{desktop}");
     assert!(readme.contains("owner token"));
-    let stable = section("## What 0.1.0 keeps stable");
-    assert!(
-        stable.contains("(docs/dev/spec/README.md#what-stays-stable-from-010)")
-            && stable.contains("migration"),
-        "{stable}"
-    );
 }
 
 /// The Breaks of 0.0.7 tell a user what to change in a script or a state

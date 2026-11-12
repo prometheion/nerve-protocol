@@ -94,15 +94,15 @@ without `-File` read their line again as commands, so a template with
 
 ## The center as a service
 
-Rename `nerve-center-x86_64-windows.exe` to `nerve-center.exe`, and put it
-in a folder on your `PATH`: a harness starts it from there. To run it as a
-service, in a terminal opened with **Run as administrator**:
+In a terminal opened with **Run as administrator**, in the download folder:
 
 ```powershell
-nerve-center install --name lab
+.\nerve-center-x86_64-windows.exe install --name lab
 ```
 
-It runs as the service `nerve-center`, keeps its state in
+It puts itself in `C:\Program Files\Nerve` as `nerve-center.exe`, on the
+machine's `Path`, so a harness and every terminal opened after it find
+`nerve-center`. It runs as the service `nerve-center`, keeps its state in
 `C:\ProgramData\nerve-center`, and adds the firewall rule `Nerve center` for
 the node port. Its settings are in `settings\center.env` there: change them
 as an administrator, then `Restart-Service nerve-center`. `nerve-center

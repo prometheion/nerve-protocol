@@ -153,8 +153,9 @@ The user guide's [Windows page](../user/windows.md) has the download, the
 check with `Get-FileHash`, SmartScreen, the install and the first run. The
 app does everything for the node from then on: pairing, settings, folders,
 rules, sudo, backups, update and uninstall. No terminal command is needed or
-offered. The center is renamed to `nerve-center.exe` and put on the `PATH`,
-where a harness starts it, or runs as a
+offered. The center's `install` puts it in `%ProgramFiles%\Nerve` as
+`nerve-center.exe` and that folder on the machine's `Path` (its uninstall
+takes it off again), where a harness starts it, and runs it as a
 [service](#the-center-as-a-windows-service).
 
 ## The node as a service on Windows

@@ -88,10 +88,10 @@ center.
 
 ### On Windows
 
-1. For the center, rename `nerve-center-x86_64-windows.exe` to
-   `nerve-center.exe`, put it on your `PATH`, and in a terminal opened with
-   **Run as administrator** run `nerve-center install`. It prints the web
-   UI's address and the owner token, as on Linux.
+1. For the center, in a terminal opened with **Run as administrator**, run
+   `.\nerve-center-x86_64-windows.exe install` in the download folder. It
+   puts the center on the `PATH` and prints the web UI's address and the
+   owner token, as on Linux.
 2. On each machine the agent may use, double-click
    `nerve-node-desktop-x86_64-windows.exe`. It is not signed: SmartScreen
    asks, **More info**, **Run anyway**. Its installer asks for your Windows
@@ -111,14 +111,6 @@ A harness can also start the center itself, over stdio:
 That center runs as you, so an agent with file or shell tools can read its
 owner token (`nerve-center owner-token`) and log in to its web UI. The
 service keeps the agent out ([center](docs/user/center.md)).
-
-## What 0.1.0 keeps stable
-
-0.1.0 is a beta, not 1.0.0. From 0.1.0 on, the wire protocol, the files
-the node and the center keep, the backup file and `--json` output change
-only with a migration: a newer program reads what an older one wrote, and a
-0.0.8 node still talks to a 0.1.0 center. Messages, the pages of the UIs and
-plain output may change ([what stays stable](docs/dev/spec/README.md#what-stays-stable-from-010)).
 
 ## The action checker
 

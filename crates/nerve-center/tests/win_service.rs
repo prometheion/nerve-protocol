@@ -317,6 +317,28 @@ fn the_center_runs_as_a_windows_service() {
     assert!(ok, "{said}");
     assert!(said.contains("runs as NT SERVICE\\nerve-center"), "{said}");
     assert!(said.contains("the service nerve-center runs"), "{said}");
+    // The program's folder is on the machine's Path, as /usr/local/bin is
+    // on Linux: a terminal opened from now on finds nerve-center.
+    let program_dir = nerve_service::win::folders::program_files().join("Nerve");
+    let on_path = || {
+        let path = system(
+            "reg.exe",
+            &[
+                "query",
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                "/v",
+                "Path",
+            ],
+        );
+        path.to_lowercase().split(';').any(|e| {
+            e.trim().trim_end_matches('\\') == program_dir.display().to_string().to_lowercase()
+        })
+    };
+    assert!(
+        on_path(),
+        "{} is not on the machine's Path",
+        program_dir.display()
+    );
     let token = said
         .lines()
         .find_map(|l| l.strip_prefix("Owner token: "))
@@ -990,6 +1012,12 @@ if ($wait.Wait(40000)) {{
     );
     assert!(said.contains("removed the Windows Firewall rule"), "{said}");
     assert!(said.contains("removed the source nerve-center"), "{said}");
+    assert!(said.contains("off the machine's Path"), "{said}");
+    assert!(
+        !on_path(),
+        "{} stays on the machine's Path",
+        program_dir.display()
+    );
     let (_, said) = center(&["status"]);
     assert!(said.contains("service: not installed"), "{said}");
     let rule = system(

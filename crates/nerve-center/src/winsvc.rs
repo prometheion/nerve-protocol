@@ -71,6 +71,12 @@ pub trait WinSystem {
     /// Removes that source; `false` when it was not registered. The entries
     /// stay in the log.
     fn delete_event_source(&self) -> Result<bool, String>;
+    /// Puts `dir` on the machine's `Path`, so that a terminal opened after
+    /// it finds the center by name; `false` when it was there already
+    /// (nerve_service::win::machine_path).
+    fn put_on_path(&self, dir: &Path) -> Result<bool, String>;
+    /// Takes `dir` off the machine's `Path`; `false` when it was not there.
+    fn remove_from_path(&self, dir: &Path) -> Result<bool, String>;
     /// What `<program> --version` prints, run without the administrators'
     /// rights.
     fn version_of(&self, program: &Path) -> Result<String, String>;
@@ -310,6 +316,16 @@ pub fn install(
     // What an update or an uninstall left behind when it ran from the
     // program it replaced or removed.
     clean_aside(&layout.bin, ASIDE);
+    // As Linux puts the program in /usr/local/bin: found by name in a
+    // terminal opened after the install, and by a harness that starts it.
+    if let Some(dir) = layout.bin.parent()
+        && sys.put_on_path(dir)?
+    {
+        steps.did(format!(
+            "put {} on the machine's Path: a terminal opened from now on finds nerve-center",
+            dir.display()
+        ));
+    }
     sys.put_service(layout)?;
     steps.did(format!(
         "registered the service {SERVICE_NAME}, which runs as {} and starts with the machine",
@@ -401,6 +417,11 @@ pub fn uninstall(
                 layout.bin.display()
             ));
         }
+    }
+    if let Some(dir) = layout.bin.parent()
+        && sys.remove_from_path(dir)?
+    {
+        steps.did(format!("took {} off the machine's Path", dir.display()));
     }
     if steps.done.is_empty() {
         let _ = writeln!(
@@ -554,6 +575,8 @@ mod tests {
         started: RefCell<Vec<String>>,
         /// Whether the Event Log source is registered.
         event_source: Cell<bool>,
+        /// The machine's `Path`.
+        path: RefCell<String>,
     }
 
     impl Fake {
@@ -569,6 +592,7 @@ mod tests {
                 held: RefCell::new(Vec::new()),
                 started: RefCell::new(Vec::new()),
                 event_source: Cell::new(false),
+                path: RefCell::new(r"%SystemRoot%\system32".into()),
             }
         }
 
@@ -659,6 +683,22 @@ mod tests {
         fn delete_event_source(&self) -> Result<bool, String> {
             self.call("delete_event_source");
             Ok(self.event_source.take())
+        }
+        fn put_on_path(&self, dir: &Path) -> Result<bool, String> {
+            self.call(format!("put_on_path {}", dir.display()));
+            let next = nerve_service::win::machine_path::with_dir(
+                &self.path.borrow(),
+                &dir.display().to_string(),
+            );
+            Ok(next.map(|p| *self.path.borrow_mut() = p).is_some())
+        }
+        fn remove_from_path(&self, dir: &Path) -> Result<bool, String> {
+            self.call(format!("remove_from_path {}", dir.display()));
+            let next = nerve_service::win::machine_path::without_dir(
+                &self.path.borrow(),
+                &dir.display().to_string(),
+            );
+            Ok(next.map(|p| *self.path.borrow_mut() = p).is_some())
         }
         fn version_of(&self, program: &Path) -> Result<String, String> {
             // A program here is a text file whose first line says its
@@ -767,6 +807,7 @@ mod tests {
         assert_eq!(
             calls,
             [
+                format!("put_on_path {}", l.bin.parent().unwrap().display()),
                 format!(
                     "put_service \"{}\" service --state-dir \"{}\"",
                     l.bin.display(),
@@ -778,6 +819,15 @@ mod tests {
             ]
         );
         assert!(sys.event_source.get());
+        // The program's folder is on the machine's Path once, as Linux has
+        // /usr/local/bin: a terminal finds nerve-center by name.
+        let dir = l.bin.parent().unwrap().display().to_string();
+        assert!(
+            sys.path.borrow().ends_with(&format!(";{dir}")),
+            "{}",
+            sys.path.borrow()
+        );
+        assert!(out.contains("on the machine's Path"), "{out}");
         assert!(
             out.contains("registered the source nerve-center in the Windows Event Log"),
             "{out}"
@@ -868,6 +918,9 @@ mod tests {
         assert!(out.contains("removed the Windows Firewall rule"), "{out}");
         assert!(!sys.event_source.get());
         assert!(out.contains("removed the source nerve-center"), "{out}");
+        let dir = l.bin.parent().unwrap().display().to_string();
+        assert!(!sys.path.borrow().contains(&dir), "{}", sys.path.borrow());
+        assert!(out.contains("off the machine's Path"), "{out}");
         let mut out = Vec::new();
         uninstall(&l, &sys, true, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
