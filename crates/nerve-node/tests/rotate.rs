@@ -4,17 +4,15 @@
 //! does not answer; the owner ends the grace of the old key; and the center
 //! tells the node of its own new key.
 
-#![cfg(unix)]
-
 mod common;
 
 use std::path::Path;
 use std::time::Duration;
 
-use common::cli;
+use common::{cli, options};
 use nerve_conformance::fake_center::{self, FakeCenter, Paired};
 use nerve_conformance::wire::{Conn, Recv};
-use nerve_node::{Daemon, NodeOptions, NodePaths};
+use nerve_node::{Daemon, NodePaths};
 use nerve_proto::Message;
 use nerve_proto::msg::method;
 use nerve_transport::keys::{NodeKey, verify_node_signature};
@@ -23,14 +21,6 @@ use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 
 const WAIT: Duration = Duration::from_secs(15);
-
-fn options(root: &Path) -> NodeOptions {
-    let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
-    o.home = root.join("home");
-    std::fs::create_dir_all(&o.home).unwrap();
-    o.full_rights = Some(false);
-    o
-}
 
 /// Pairs with `center` as `lab`, with `pin` stored as the center's pin
 /// (the fake center speaks plain HTTP, so the link does not check it), and
@@ -484,7 +474,9 @@ fn futures_block<F: std::future::Future>(f: F) -> F::Output {
 
 /// When node.toml cannot record the new key, the rotation is not settled:
 /// the old key stays, the new one stays aside, and the next link settles it
-/// with the key recorded, so a backup knows it.
+/// with the key recorded, so a backup knows it. Unix only: the test takes
+/// the write right of the config folder away by its mode.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_key_node_toml_cannot_record_is_settled_on_the_next_link() {
     use std::os::unix::fs::PermissionsExt;

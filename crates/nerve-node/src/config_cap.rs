@@ -42,16 +42,11 @@ pub fn offered(cfg: &NodeConfig, installed: bool) -> Vec<Capability> {
     offered_on(cfg, std::env::consts::OS, installed)
 }
 
-/// Why a node on `os` does not offer `c`, if it does not: it offers them on
-/// Linux and Windows, those of its platform, and only where it has
-/// `nerve-run` to run them as: a node run by hand (not `installed`) has
-/// none.
+/// Why a node on `os` does not offer `c`, if it does not: it offers those
+/// of its platform, and only where it has `nerve-run` to run them as: a
+/// node run by hand (not `installed`) has none.
 pub fn left_out(c: &ConfigCapability, os: &str, installed: bool) -> Option<String> {
-    if os != "linux" && os != "windows" {
-        Some(format!(
-            "a node on {os} offers no capability of node.toml yet (Linux and Windows only for now)"
-        ))
-    } else if !c.platform.takes(os) {
+    if !c.platform.takes(os) {
         Some(format!("for {} only", c.platform.as_str()))
     } else if !installed {
         Some(format!(
@@ -127,15 +122,10 @@ fn capabilities_of<'a>(
     caps.into_values().collect()
 }
 
-/// Why a node on `os` takes no capability from a center, if it does not:
-/// Linux and Windows take them, and a node run by hand has no `nerve-run`
-/// to run them as.
-pub fn center_refusal(os: &str, installed: bool) -> Option<String> {
-    if os != "linux" && os != "windows" {
-        Some(format!(
-            "a node on {os} offers no capability a center adds yet (Linux and Windows only for now)"
-        ))
-    } else if !installed {
+/// Why a node takes no capability from a center, if it does not: a node
+/// run by hand has no `nerve-run` to run them as.
+pub fn center_refusal(installed: bool) -> Option<String> {
+    if !installed {
         Some(format!(
             "a capability a center adds runs as {}, which only the installed node has; this one runs by hand",
             crate::account::RUN_USER
@@ -172,7 +162,7 @@ pub fn center_left_out(
     kept: bool,
 ) -> Option<String> {
     let cap = c.split().0;
-    if let Some(why) = center_refusal(os, installed) {
+    if let Some(why) = center_refusal(installed) {
         Some(why)
     } else if names(cfg, cap) {
         Some(format!("the owner declares {cap} in node.toml"))
@@ -953,8 +943,7 @@ platform = "linux"
             }
         }
         assert_eq!(left_out(&c.capabilities[0], "linux", true), None);
-        // Windows offers those of its platform as well (#149), elsewhere
-        // none.
+        // Windows offers those of its platform as well (#149).
         assert_eq!(
             ids(&offered_on(&c, "windows", true)),
             ["sensors.list", "sensors.read", "win.only"]
@@ -965,7 +954,6 @@ platform = "linux"
                 .unwrap()
                 .contains("Nerve's installer")
         );
-        assert!(offered_on(&c, "macos", true).is_empty());
         let caps = offered_on(&c, "linux", true);
         let sensors = caps.iter().find(|c| c.id == "sensors").unwrap();
         assert_eq!(sensors.provider, PROVIDER);
@@ -1121,19 +1109,8 @@ command = ["sensors", "-l"]
     /// and changed only by the center that added it.
     #[test]
     fn a_centers_capabilities_count_as_execute_behind_the_owners() {
-        assert_eq!(center_refusal("windows", true), None);
-        assert!(
-            center_refusal("windows", false)
-                .unwrap()
-                .contains("by hand")
-        );
-        assert!(
-            center_refusal("macos", true)
-                .unwrap()
-                .contains("Linux and Windows")
-        );
-        assert!(center_refusal("linux", false).unwrap().contains("by hand"));
-        assert_eq!(center_refusal("linux", true), None);
+        assert!(center_refusal(false).unwrap().contains("by hand"));
+        assert_eq!(center_refusal(true), None);
         for (declared, as_) in [
             (Effect::Read, Effect::Execute),
             (Effect::Write, Effect::Execute),
@@ -1186,17 +1163,17 @@ command = ["sensors", "-l"]
                 "{e:?}"
             );
         }
-        // A platform that takes none, also here.
+        // A node run by hand takes none, also here.
         let e = center_change(
             &mut c.clone(),
             "lab",
             CenterChange::Add(sent("other.x", "read")),
-            "macos",
-            true,
+            "linux",
+            false,
             &[],
         )
         .unwrap_err();
-        assert!(format!("{e:?}").contains("Linux and Windows"), "{e:?}");
+        assert!(format!("{e:?}").contains("by hand"), "{e:?}");
         let lab = c.center("lab").unwrap();
         let offered = center_offered(&c, lab, "linux", true, &programs);
         assert_eq!(ids(&offered), ["notes.show"]);

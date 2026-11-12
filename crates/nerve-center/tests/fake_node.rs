@@ -5299,8 +5299,7 @@ async fn a_stream_waits_for_a_place_on_the_node() {
 async fn a_session_takes_half_of_a_nodes_streams() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
-    let (e, node, mut seen, _task) = job_box(&r).await;
-    let link = r.center.link(&node).unwrap();
+    let (e, _node, mut seen, _task) = job_box(&r).await;
     let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
     assert_eq!(share, 8);
     let mut streams = Vec::new();
@@ -5318,21 +5317,20 @@ async fn a_session_takes_half_of_a_nodes_streams() {
         }
     }
     assert_eq!(opened, share);
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert!(seen.try_recv().is_err(), "a ninth stream opened");
-    assert_eq!(link.stream_count(), share);
 
-    // Another session's stream opens meanwhile.
+    // Another session's stream opens meanwhile, and the ninth of the first
+    // does not: nothing else came, then or by the time the other opened.
     let other = Engine::new(&r.center, "test");
     list_text(&other, json!({"node": "box-1", "capability": ["exec.run"]})).await;
     let reply = execute_as(&other, json!(1), "exec.run", json!({"command": "talkhang"})).await;
     stream_of(&reply);
     let Seen::Hang(_) = next_seen(&mut seen).await else {
-        panic!("no invoke")
+        panic!("a ninth stream opened, or no invoke")
     };
     let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
         panic!("the other session's stream did not open")
     };
+    assert!(seen.try_recv().is_err(), "a ninth stream opened");
 
     // One of the first session's own closes: its ninth opens.
     let closed = execute_as(

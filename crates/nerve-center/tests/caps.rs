@@ -5,8 +5,8 @@
 //! center edits and removes it, and a node without the grant is shown read
 //! only. The node runs by hand and stands for `nerve-run` with its own user
 //! (NodeOptions::config_caps_by_hand, as nerve-node's tests do), in user mode
-//! with no exec shim, so the commands run unconfined. Linux only: Windows
-//! takes none yet (issue #176).
+//! with no exec shim, so the commands run unconfined. Linux only: the
+//! commands are Linux programs (`echo`, `printf`).
 #![cfg(target_os = "linux")]
 
 use std::time::Duration;

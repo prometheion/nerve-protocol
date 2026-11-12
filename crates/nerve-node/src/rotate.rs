@@ -549,9 +549,5 @@ pub(crate) fn same_pin(a: &str, b: &str) -> bool {
 
 /// A center's text as the node repeats it: one line, cut.
 fn clip(s: &str) -> String {
-    let one: String = s
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    nerve_proto::text::clip(&one, 300)
+    nerve_proto::text::clip(&nerve_proto::text::one_line(s), 300)
 }

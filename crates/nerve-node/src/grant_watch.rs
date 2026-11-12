@@ -1604,7 +1604,7 @@ mod win {
     /// (a granted folder is one of its own), not one on another machine,
     /// and not one on a removable drive; and the object it is on, as the
     /// record names it ([`Folder::ids`]), when the system names one.
-    fn open(path: &Path) -> std::io::Result<(OwnedHandle, Option<String>)> {
+    pub(super) fn open(path: &Path) -> std::io::Result<(OwnedHandle, Option<String>)> {
         use std::io::{Error, ErrorKind};
         if let Some(link) = nerve_policy::paths::remote_link(path) {
             return Err(Error::new(
@@ -2350,6 +2350,24 @@ mod tests {
         assert!(asked);
     }
 
+    /// A folder's id as the sync's record keeps it (`grants.rs` takes it from
+    /// the sandbox's own look at the folder), not as the watcher reads it:
+    /// a test that took it from the watcher would compare the watcher with
+    /// itself. Windows opens a folder only with backup semantics, which a
+    /// plain `File::open` does not ask for.
+    #[cfg(windows)]
+    fn record_id(p: &Path) -> String {
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(p)
+            .unwrap();
+        nerve_sandbox::appcontainer::handle_id(&f)
+            .unwrap()
+            .to_string()
+    }
+
     /// On Windows: a watched folder tells a new name below it, also a hard
     /// link made there, and not a change of an access list or of a file's
     /// contents; a folder that goes ends its watch, and a folder no longer
@@ -2368,7 +2386,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+                ids: vec![record_id(p)],
             }]
         };
         w.follow(|| granted(&root), || Ok(()));
@@ -2421,7 +2439,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+                ids: vec![record_id(p)],
             }]
         };
         let told = |w: &Watch| -> bool {

@@ -49,11 +49,14 @@
 //! in the smaller tests below), and removes them and its folders again.
 #![cfg(windows)]
 
+mod common;
+
+use common::{linked_skipping_ended, wide};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
@@ -75,28 +78,6 @@ static APP: Edition = Edition {
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
-}
-
-fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    s.as_ref().encode_wide().chain(Some(0)).collect()
-}
-
-/// The first link of the node's that completes the handshake.
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let until = tokio::time::Instant::now() + WAIT;
-    let mut ended = Vec::new();
-    while let Some(mut inc) = center
-        .next_link(until.saturating_duration_since(tokio::time::Instant::now()))
-        .await
-    {
-        match fake_center::handshake(&mut inc.conn, &center.center_id, &paired).await {
-            Ok(_) => return inc.conn,
-            Err(e) => ended.push(e),
-        }
-    }
-    panic!("no link of the node completed the handshake; those that ended: {ended:?}");
 }
 
 async fn run_in(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> Result<Value, RpcError> {
@@ -442,7 +423,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     // b and c are linked where their commands run: the node drops a link
     // that sends it no frame for 45 s, and a fake center answers nothing
     // while the test is busy with another.
-    let mut conn_a = linked(&mut ca).await;
+    let mut conn_a = linked_skipping_ended(&mut ca, WAIT).await;
 
     // In its folder a command runs, as nerve-run, in its container, with
     // its home there.
@@ -1021,7 +1002,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
 
     // Allowlist mode runs as nerve-run too, in its own container, with its
     // home there, and reaches no other pairing's folder.
-    let mut conn_c = linked(&mut cc).await;
+    let mut conn_c = linked_skipping_ended(&mut cc, WAIT).await;
     let r = run_in(&mut conn_c, &c, &allowlisted)
         .await
         .expect("an allowlist command");
@@ -1106,7 +1087,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     );
 
     // Nor its processes: b's command waits, a's does not see or open it.
-    let mut conn_b = linked(&mut cb).await;
+    let mut conn_b = linked_skipping_ended(&mut cb, WAIT).await;
     let b_dir = b.clone();
     let waiting = tokio::spawn(async move {
         let r = run_in(
@@ -1252,7 +1233,7 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
         )
         .await;
     if ran.is_err() {
-        let mut again = linked(&mut ca).await;
+        let mut again = linked_skipping_ended(&mut ca, WAIT).await;
         let _ = run_in(&mut again, &a, "exit 0").await;
     }
     wait_for("b's container profile is still there", || {
@@ -1286,7 +1267,7 @@ async fn pair_d(
     })
     .await
     .expect("the owner's edit");
-    let conn = linked(&mut center).await;
+    let conn = linked_skipping_ended(&mut center, WAIT).await;
     (center, conn)
 }
 

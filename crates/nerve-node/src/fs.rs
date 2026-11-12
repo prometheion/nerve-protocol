@@ -249,11 +249,6 @@ pub fn accounts_own(path: &Path, account: &crate::service::Account) -> bool {
     nerve_policy::paths::within(path, &account.home)
 }
 
-#[cfg(not(any(unix, windows)))]
-pub fn accounts_own(_: &Path, _: &crate::service::Account) -> bool {
-    false
-}
-
 /// [`open_to_all`] on Windows: the call acts in the pairing's container
 /// (crate::win_user::FsAs::in_container), and what that container may open
 /// it may read, which [`readable`] asks: Windows opens to it its own
@@ -263,11 +258,6 @@ pub fn accounts_own(_: &Path, _: &crate::service::Account) -> bool {
 #[cfg(windows)]
 pub fn open_to_all(_: &Path) -> bool {
     true
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn open_to_all(_: &Path) -> bool {
-    false
 }
 
 /// Whether a call in folder mode may read `path`, which lies in no folder

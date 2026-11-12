@@ -3218,8 +3218,8 @@ impl Link {
 
     /// `settings.cap-add`, `cap-edit` and `cap-rm`: a change to the
     /// capabilities this center added itself (crate::config_cap::center_change),
-    /// saved and audited as this center's. A node that offers none (Windows
-    /// for now, a node run by hand) refuses it with the reason.
+    /// saved and audited as this center's. A node that offers none (a node
+    /// run by hand) refuses it with the reason.
     fn settings_cap(&self, action: &str, args: &Map<String, Value>) -> Result<Value, RpcError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -3232,7 +3232,7 @@ impl Link {
             name: String,
         }
         let os = std::env::consts::OS;
-        if let Some(why) = crate::config_cap::center_refusal(os, self.shared.config_caps) {
+        if let Some(why) = crate::config_cap::center_refusal(self.shared.config_caps) {
             return Err(RpcError::new(ErrorCode::Unavailable, why));
         }
         // Read before the store, as `settings.set` does.
@@ -3287,7 +3287,7 @@ impl Link {
                 v
             })
             .collect();
-        json!({"entries": entries, "refused": crate::config_cap::center_refusal(os, installed)})
+        json!({"entries": entries, "refused": crate::config_cap::center_refusal(installed)})
     }
 
     /// `settings.pause`: a center may pause itself, never unpause.
@@ -4307,20 +4307,6 @@ pub(crate) fn act_as(
             })
         })
         .transpose()
-}
-
-#[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn act_as(
-    account: Option<&crate::service::Account>,
-    _container: Option<&str>,
-) -> Result<Option<()>, RpcError> {
-    match account {
-        Some(a) => Err(RpcError::new(
-            ErrorCode::Unavailable,
-            format!("cannot act as {}: Linux only", a.name),
-        )),
-        None => Ok(None),
-    }
 }
 
 /// What the link walk of a call does with a folder it may not list, when it

@@ -1235,8 +1235,6 @@ impl Endpoint {
                 program: std::env::current_exe().ok()?,
             })
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
-        None
     }
 }
 

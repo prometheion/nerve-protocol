@@ -43,9 +43,8 @@ pub use nerve_service::prompt;
 // elevated parts take too.
 #[cfg(windows)]
 pub use nerve_service::win::folders;
-// Providers attach over the control socket, which is Unix's; the pipe on
-// Windows takes none yet.
-#[cfg_attr(not(unix), allow(dead_code))]
+// Providers attach over the control socket on Linux and over a pipe of
+// their own on Windows (crate::win_provider).
 mod provider;
 // The control pipe is Windows-only in use; its rules are tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]

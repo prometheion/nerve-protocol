@@ -289,16 +289,8 @@ pub async fn run(args: Args) -> Result<(), String> {
                 state.display()
             ));
         }
-        #[cfg(any(unix, windows))]
-        {
-            tracing::info!("attaching to the center that runs in {}", state.display());
-            return crate::attach::relay(&state).await;
-        }
-        #[cfg(not(any(unix, windows)))]
-        return Err(format!(
-            "another nerve-center already runs the center in {}",
-            state.display()
-        ));
+        tracing::info!("attaching to the center that runs in {}", state.display());
+        return crate::attach::relay(&state).await;
     };
     let running = start(&args, lock).await?;
     // The Windows service runs now; nothing where this is no service.
@@ -350,9 +342,5 @@ async fn signal() {
         } else {
             let _ = tokio::signal::ctrl_c().await;
         }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
     }
 }

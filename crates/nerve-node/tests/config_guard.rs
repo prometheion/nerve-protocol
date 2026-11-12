@@ -1,42 +1,47 @@
 //! The node's config is the owner's (issue #20): a command cannot write it,
 //! a file changed behind the node's back is refused and audited, and owner
-//! changes through the local interface are applied and signed.
-
-#![cfg(unix)]
+//! changes through the local interface are applied and signed. What a
+//! command tries runs on Linux, where it is a shell's; the rest also on
+//! Windows.
 
 mod common;
 
 use std::path::Path;
 use std::time::Duration;
 
-use common::{cli, linked, owner_edit};
+use common::{cli, owner_edit};
 use nerve_conformance::fake_center::FakeCenter;
-use nerve_conformance::wire::Conn;
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::audit::AuditLog;
-use serde_json::{Value, json};
-use tokio::net::TcpStream;
+use serde_json::Value;
+#[cfg(unix)]
+use {common::linked, nerve_conformance::wire::Conn, serde_json::json, tokio::net::TcpStream};
 
+#[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(15);
 
 /// A node whose config and state folders sit in its home, as they do by
-/// default (`~/.config/nerve`, `~/.local/state/nerve`).
+/// default (`~/.config/nerve`, `~/.local/state/nerve`). The home is where
+/// it really is, without Windows' `\\?\` prefix.
 fn options(root: &Path) -> NodeOptions {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let home = std::fs::canonicalize(&home).unwrap();
+    let home = std::path::PathBuf::from(nerve_policy::paths::win::strip_verbatim(
+        &std::fs::canonicalize(&home).unwrap().display().to_string(),
+    ));
     let paths = NodePaths::new(home.join(".config/nerve"), home.join(".local/state/nerve"));
     let mut o = NodeOptions::new(paths);
     o.home = home;
-    o.exe = Some(
-        std::env::var_os("NERVE_NODE_BIN")
-            .map(Into::into)
-            .unwrap_or_else(|| env!("CARGO_BIN_EXE_nerve-node").into()),
-    );
+    // As every node by hand of the tests: not the rights of whoever runs
+    // them, and this build's program.
+    let by_hand = common::options(root);
+    o.full_rights = by_hand.full_rights;
+    o.exe = by_hand.exe;
     o
 }
 
+#[cfg(unix)]
 fn wire(p: &Path) -> String {
     nerve_policy::paths::to_wire(p)
 }
@@ -59,6 +64,7 @@ fn rewrite_behind_the_node(file: &Path, f: impl Fn(&mut NodeConfig)) {
     cfg.save(file).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_cannot_write_the_config_or_read_its_key() {
     if !nerve_sandbox::Confinement::detect().by_hand().available() {
@@ -324,8 +330,9 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
     let work = o.home.join("work");
     std::fs::create_dir_all(&work).unwrap();
 
-    // The CLI reaches the running node over its control socket; the change
-    // is in force at once, with no file watch and no tick.
+    // The CLI reaches the running node over its control socket (its pipe
+    // on Windows); the change is in force at once, with no file watch and
+    // no tick.
     cli(&o.paths, &["folder", "add", work.to_str().unwrap(), "rw"])
         .await
         .unwrap();
@@ -362,6 +369,7 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
 /// is a read-write folder and the folder of the `nerve-node` binary one to
 /// run programs from: a command can then use the CLI to talk to the socket,
 /// as any program of the user can. `None` where Landlock is missing.
+#[cfg(unix)]
 async fn folder_node(dir: &Path) -> Option<(FakeCenter, NodeOptions)> {
     if !nerve_sandbox::Confinement::detect().by_hand().available() {
         eprintln!("skipped: Landlock is not available here");
@@ -411,6 +419,7 @@ async fn folder_node(dir: &Path) -> Option<(FakeCenter, NodeOptions)> {
 /// The program is reached under another name: the built-in guard refuses
 /// `nerve-node` by its name (a mistake guard), and these tests check what
 /// holds when a command runs the program anyway.
+#[cfg(unix)]
 fn nerve(o: &NodeOptions, args: &str) -> String {
     let alias = o.home.parent().unwrap().join("nrv");
     if !alias.exists() {
@@ -419,6 +428,7 @@ fn nerve(o: &NodeOptions, args: &str) -> String {
     format!("HOME={} {} {args}", o.home.display(), alias.display())
 }
 
+#[cfg(unix)]
 async fn run_command(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> Value {
     conn.call(
         "invoke",
@@ -432,8 +442,10 @@ async fn run_command(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> V
 }
 
 /// What the owner sees of the config, for a command to be kept from.
+#[cfg(unix)]
 const CENTER_SHOWN: &str = "lab";
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_cannot_read_the_config_over_the_control_socket() {
     let dir = tempfile::tempdir().unwrap();
@@ -477,6 +489,7 @@ async fn a_command_cannot_read_the_config_over_the_control_socket() {
 /// read the config file: the node refuses what stays below the command in the
 /// process tree. A process that leaves the tree is not caught, which is why
 /// the socket is no boundary against such a command.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -529,6 +542,7 @@ async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
 /// A process a command takes out of its process group (`setsid`) outlives the
 /// call, and with it the node's record of the command it descends from. The
 /// config stays the owner's all the same.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_process_that_outlives_its_command_cannot_change_the_config() {
     let dir = tempfile::tempdir().unwrap();

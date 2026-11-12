@@ -851,11 +851,6 @@ fn identify(uid: u32, pid: u32, allowed: &Path, exe: Option<&Path>) -> Result<Se
             .map_err(|e| format!("refused: the node cannot look as {}: {e}", account.name))?;
         look(pid, allowed)
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (exe, allowed);
-        Err("refused: providers attach on Linux only for now".into())
-    }
 }
 
 /// [`identify`] for `caller`, which must name its process. A process that
@@ -1552,10 +1547,12 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
 
 /// The provider socket's file name, beside the owner socket in the
 /// installed unit's runtime folder (crate::owner::RUNTIME_DIR).
+#[cfg(target_os = "linux")]
 pub const SOCKET_NAME: &str = "provider.sock";
 
 /// Why the provider socket refuses an account that is neither an owner of
 /// the node nor root.
+#[cfg(target_os = "linux")]
 pub const NOT_AN_OWNER: &str =
     "refused: only the owner of the installed node and root attach a provider to it";
 

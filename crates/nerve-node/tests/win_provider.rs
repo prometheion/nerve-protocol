@@ -24,20 +24,21 @@
 //! as the provider `wintest`, and takes both away again.
 #![cfg(windows)]
 
+mod common;
+
+use common::{linked_within, wide};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nerve_conformance::fake_center::{self, FakeCenter};
-use nerve_conformance::wire::Conn;
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
 use nerve_policy::config::AllowedProvider;
 use nerve_service::win::sid::well_known_sid;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE,
@@ -74,10 +75,6 @@ fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
 /// A process started as another account, ended when dropped.
 struct Started(HANDLE);
 
@@ -96,7 +93,7 @@ impl Drop for Started {
 /// its own that names only what Windows needs and [`PROVIDER`].
 fn start_as(user: &str, password: &str, exe: &Path, name: &str, log: &Path) -> Started {
     let _ = std::fs::remove_file(log);
-    let mut line = wide(&format!(
+    let mut line = wide(format!(
         "\"{}\" --ignored --exact --nocapture provider_program",
         exe.display()
     ));
@@ -283,15 +280,6 @@ fn said(log: &Path, started: Option<&Started>) -> String {
     }
 }
 
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
-}
-
 /// The provider this program is when [`PROVIDER`] names one: it says hello
 /// on the pipe, writes the first answer (or why it could not connect) to
 /// its log, then answers each call of `wintest.echo` with what it was given
@@ -398,7 +386,7 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
     })
     .await
     .expect("the owner's edit");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_within(&mut center, WAIT).await;
 
     // A client from the network is refused by the pipe itself.
     let e = tokio::net::windows::named_pipe::ClientOptions::new()

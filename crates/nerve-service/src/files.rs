@@ -95,18 +95,11 @@ impl Drop for NoDrop {
     fn drop(&mut self) {}
 }
 
+/// Windows has no uid to give a file to.
 #[cfg(not(target_os = "linux"))]
 fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::lchown(path, Some(uid), Some(gid))
-            .map_err(|e| format!("{}: {e}", path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, uid, gid);
-        Ok(())
-    }
+    let _ = (path, uid, gid);
+    Ok(())
 }
 
 /// Gives `path` and everything below it to `uid`:`gid`. Links are changed
@@ -233,22 +226,12 @@ pub fn become_owner(dirs: &[&Path], keep_root: bool) -> Result<(), String> {
         let Some(m) = owner_to_become(dirs) else {
             return Ok(());
         };
-        #[cfg(target_os = "linux")]
         let (setgid, setuid) = {
             let saved = |id: u32| if keep_root { 0 } else { id };
             (
                 // SAFETY: plain calls without pointers.
                 move |g: u32| unsafe { libc::setresgid(g, g, saved(g)) },
                 move |u: u32| unsafe { libc::setresuid(u, u, saved(u)) },
-            )
-        };
-        #[cfg(not(target_os = "linux"))]
-        let (setgid, setuid) = {
-            let _ = keep_root;
-            // SAFETY: plain calls without pointers.
-            (
-                |g: u32| unsafe { libc::setgid(g) },
-                |u: u32| unsafe { libc::setuid(u) },
             )
         };
         // SAFETY: the empty group list; groups first, the user last, while

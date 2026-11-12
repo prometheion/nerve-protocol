@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nerve_service::{Account, Steps, as_owner_of, set_mode, write_file};
+use nerve_service::{Steps, as_owner_of, set_mode, write_file};
 
 use nerve_transport::log::Level;
 
@@ -252,46 +252,7 @@ pub trait System: nerve_service::System {
 }
 
 /// This machine.
-pub struct Host;
-
-impl nerve_service::System for Host {
-    fn is_root(&self) -> bool {
-        nerve_service::Host.is_root()
-    }
-
-    fn has_systemd(&self) -> bool {
-        nerve_service::Host.has_systemd()
-    }
-
-    fn account(&self, name: &str) -> Result<Option<Account>, String> {
-        nerve_service::Host.account(name)
-    }
-
-    fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-        nerve_service::Host.add_account(name, home, mark)
-    }
-
-    fn remove_account(&self, name: &str) -> Result<(), String> {
-        nerve_service::Host.remove_account(name)
-    }
-
-    fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-        nerve_service::Host.systemctl(args)
-    }
-
-    fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        nerve_service::Host.give(path, uid, gid)
-    }
-
-    fn output_of(
-        &self,
-        program: &Path,
-        account: Option<&Account>,
-        args: &[&str],
-    ) -> Result<String, String> {
-        nerve_service::Host.output_of(program, account, args)
-    }
-}
+pub use nerve_service::Host;
 
 impl System for Host {
     fn wait_running(&self, state: &Path) -> Result<(), String> {
@@ -1202,6 +1163,7 @@ pub(crate) fn asset_name() -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::config::McpMode;
+    use nerve_service::Account;
 
     /// The machine of the node's service tests too
     /// ([`nerve_service::fake::Fake`]), with the center's user.
@@ -1242,39 +1204,6 @@ mod tests {
         Fake::new().me()
     }
 
-    impl nerve_service::System for Fake {
-        fn is_root(&self) -> bool {
-            self.0.is_root()
-        }
-        fn has_systemd(&self) -> bool {
-            self.0.has_systemd()
-        }
-        fn account(&self, name: &str) -> Result<Option<Account>, String> {
-            assert_eq!(name, USER);
-            self.0.account(name)
-        }
-        fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-            self.0.add_account(name, home, mark)
-        }
-        fn remove_account(&self, name: &str) -> Result<(), String> {
-            self.0.remove_account(name)
-        }
-        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-            self.0.systemctl(args)
-        }
-        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-            self.0.give(path, uid, gid)
-        }
-        fn output_of(
-            &self,
-            program: &Path,
-            account: Option<&Account>,
-            args: &[&str],
-        ) -> Result<String, String> {
-            self.0.output_of(program, account, args)
-        }
-    }
-
     impl System for Fake {
         fn wait_running(&self, _state: &Path) -> Result<(), String> {
             self.started()
@@ -1282,34 +1211,8 @@ mod tests {
         }
     }
 
-    /// A machine where the caller is not root.
-    struct NotRoot;
-    impl nerve_service::System for NotRoot {
-        fn is_root(&self) -> bool {
-            false
-        }
-        fn has_systemd(&self) -> bool {
-            true
-        }
-        fn account(&self, _: &str) -> Result<Option<Account>, String> {
-            unreachable!()
-        }
-        fn add_account(&self, _: &str, _: &Path, _: &str) -> Result<(), String> {
-            unreachable!()
-        }
-        fn remove_account(&self, _: &str) -> Result<(), String> {
-            unreachable!()
-        }
-        fn systemctl(&self, _: &[&str]) -> Result<(), String> {
-            unreachable!()
-        }
-        fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
-            unreachable!()
-        }
-        fn output_of(&self, _: &Path, _: Option<&Account>, _: &[&str]) -> Result<String, String> {
-            unreachable!()
-        }
-    }
+    use nerve_service::fake::NotRoot;
+
     impl System for NotRoot {
         fn wait_running(&self, _: &Path) -> Result<(), String> {
             unreachable!()

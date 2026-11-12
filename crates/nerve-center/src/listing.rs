@@ -933,17 +933,7 @@ fn how_used(kind: UnitKind) -> Option<&'static str> {
 /// `s` on one line: a node's text must not start lines of its own in an
 /// answer laid out by lines.
 pub fn one_line(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
+    nerve_proto::text::one_line(s).trim().to_string()
 }
 
 /// A node's own text laid out by lines, as it stands inside [`framed`]: no
@@ -1018,8 +1008,7 @@ pub fn json_text(v: &Value) -> String {
 /// One character of [`guarded`]'s text, into `out`. `start` holds while
 /// nothing that reads as a line's first mark came on its line.
 pub fn guard(c: char, start: &mut bool, out: &mut String) {
-    let line_break = matches!(c, '\u{2028}' | '\u{2029}');
-    let escaped = c != '\n' && c != '\t' && (c.is_control() || line_break);
+    let escaped = c != '\n' && c != '\t' && nerve_proto::text::breaks_line(c);
     match c {
         '\n' | '\t' => out.push(c),
         '[' if *start => out.push_str("\\["),

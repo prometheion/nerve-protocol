@@ -17,11 +17,14 @@
 //! which the running node takes at once, and restarts it.
 #![cfg(windows)]
 
+mod common;
+
+use common::linked_skipping_ended;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
@@ -58,25 +61,6 @@ fn restart_service() {
         .unwrap()
         .success();
     assert!(ok, "Restart-Service nerve-node");
-}
-
-/// The first link of the node's that completes the handshake. A link the
-/// node opened before a restart may still wait here: the stop closed it
-/// before its hello, and the node started again dials anew.
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let until = tokio::time::Instant::now() + WAIT;
-    let mut ended = Vec::new();
-    while let Some(mut inc) = center
-        .next_link(until.saturating_duration_since(tokio::time::Instant::now()))
-        .await
-    {
-        match fake_center::handshake(&mut inc.conn, &center.center_id, &paired).await {
-            Ok(_) => return inc.conn,
-            Err(e) => ended.push(e),
-        }
-    }
-    panic!("no link of the node completed the handshake; those that ended: {ended:?}");
 }
 
 async fn call(conn: &mut Conn<TcpStream>, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -211,7 +195,7 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     .await
     .expect("the owner's edit");
     // The running node took the pairing and the rules at once, and dialed.
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
 
     // The owner's password, as the app hands it to `password` where the
     // node has none that works: the running node checks it with a logon,
@@ -272,14 +256,27 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     let o = cli_on(&layout, &password);
     assert!(o.status.success(), "{o:?}");
     assert_eq!(state(&mut conn).await, "on");
+    // The sealed files are the two the node keeps, the owner's password and
+    // nerve-run's (crate::winsvc), and none holds the password as it is.
+    let utf16: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut sealed = Vec::new();
     for f in std::fs::read_dir(&paths.config_dir).unwrap() {
         let f = f.unwrap().path();
-        assert_ne!(
-            f.file_name().unwrap().to_string_lossy(),
-            "sudo.dpapi",
-            "the password is kept at rest"
-        );
+        let name = f.file_name().unwrap().to_string_lossy().to_string();
+        if !name.ends_with(".dpapi") {
+            continue;
+        }
+        let bytes = std::fs::read(&f).unwrap();
+        for plain in [password.as_bytes(), &utf16[..]] {
+            assert!(
+                !bytes.windows(plain.len()).any(|w| w == plain),
+                "{name} holds the password"
+            );
+        }
+        sealed.push(name);
     }
+    sealed.sort();
+    assert_eq!(sealed, ["owner-password.dpapi", "run-account.dpapi"]);
 
     // A command without sudo runs with the filtered token, one with sudo
     // with the full one.
@@ -339,7 +336,7 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
     assert!(o.status.success(), "{o:?}");
     assert_eq!(state(&mut conn).await, "on");
     restart_service();
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     assert_eq!(state(&mut conn).await, "off");
     let e = refused(
         run(&mut conn, "sudo whoami /groups").await,

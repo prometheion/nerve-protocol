@@ -903,31 +903,6 @@ impl Cgroups {
     }
 }
 
-/// Linux and Windows only: elsewhere no node holds commands to their
-/// limits.
-#[cfg(not(any(target_os = "linux", windows)))]
-#[derive(Debug)]
-pub enum Cgroups {}
-
-#[cfg(not(any(target_os = "linux", windows)))]
-impl Cgroups {
-    pub fn find() -> Result<Cgroups, String> {
-        Err("this node does not hold commands to their limits on this platform yet".into())
-    }
-
-    pub fn name(&self) -> &str {
-        match *self {}
-    }
-
-    pub fn enforced(&self) -> Vec<&'static str> {
-        match *self {}
-    }
-
-    pub fn lost(&self) -> Vec<&'static str> {
-        match *self {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

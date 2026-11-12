@@ -566,13 +566,16 @@ async fn a_command_in_flight_does_not_undo_a_panic() {
     let _one = SERIAL.lock().await;
     let d = tempfile::tempdir().unwrap();
     // The program of the owner socket, slow to start an unlock: the panic
-    // comes while the unlock has not read the config yet.
+    // comes while the unlock has not read the config yet. The unlock's
+    // process says who it is, so the test sees it end.
     let slow = d.path().join("slow-unlock.sh");
+    let pid_file = d.path().join("unlock.pid");
     std::fs::write(
         &slow,
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" unlock \"*) sleep 2;; esac\nexec {} \"$@\"\n",
-            program().display()
+            "#!/bin/sh\ncase \" $* \" in *\" unlock \"*) echo $$ > {pid}.tmp && mv {pid}.tmp {pid}; sleep 2;; esac\nexec {prog} \"$@\"\n",
+            pid = pid_file.display(),
+            prog = program().display()
         ),
     )
     .unwrap();
@@ -599,8 +602,25 @@ async fn a_command_in_flight_does_not_undo_a_panic() {
     // second line behind it.
     assert_eq!(r.status, 400, "{}", r.body);
     assert!(r.body.contains("so it was stopped"), "{}", r.body);
-    // The unlock would have written by now.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // Once the unlock's process is gone it writes nothing more. On a loaded
+    // machine the script may not have run its first line when the panic came
+    // (the script writes its pid whole, so a pid file is never half there);
+    // then nothing is known to wait for and the sleep covers its two seconds.
+    match std::fs::read_to_string(&pid_file) {
+        Ok(pid) => {
+            let state = Path::new("/proc").join(pid.trim()).join("stat");
+            let until = Instant::now() + Duration::from_secs(10);
+            while std::fs::read_to_string(&state).is_ok_and(|s| !s.contains(") Z ")) {
+                assert!(
+                    Instant::now() < until,
+                    "the unlock {} still runs",
+                    pid.trim()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Err(_) => tokio::time::sleep(Duration::from_millis(2500)).await,
+    }
     assert!(
         daemon.config().locked,
         "the unlock in flight undid the panic"

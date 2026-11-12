@@ -1039,9 +1039,7 @@ fn check_json_escaped(result: &Value, node: &str, id: &str, said: &str) -> Resul
     let text = text_of(result);
     let raw: Vec<char> = text
         .chars()
-        .filter(|&c| {
-            (c.is_control() && c != '\n' && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}')
-        })
+        .filter(|&c| c != '\n' && c != '\t' && nerve_proto::text::breaks_line(c))
         .collect();
     ensure(raw.is_empty(), format!("raw {raw:?} in the text: {text:?}"))?;
     check_framing_lines(&text)?;

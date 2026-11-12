@@ -2307,13 +2307,6 @@ pub async fn run(
     if let Some(r) = &opts.root {
         match *r {}
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
-    if let Some(a) = &opts.account {
-        return Err(RpcError::new(
-            ErrorCode::Unavailable,
-            format!("cannot run commands as {}: Linux and Windows only", a.name),
-        ));
-    }
     match &opts.account {
         Some(a) => {
             // Root's command gets nothing of the node's environment, and
@@ -2495,7 +2488,6 @@ pub async fn run(
             result["signal"] = name.into();
         }
     }
-    #[cfg(any(target_os = "linux", windows))]
     if let Some(mb) = out_of_memory {
         result["killed"] = "memory".into();
         result["reason"] = crate::cgroup::memory_reason(mb).into();

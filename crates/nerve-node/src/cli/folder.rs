@@ -269,7 +269,6 @@ async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
 /// What to tell when the node did not answer a walk of the folders in time:
 /// on a large tree the walk takes longer than the wait, and it goes on. A
 /// second call would only queue another walk.
-#[cfg(any(target_os = "linux", windows))]
 fn walk_goes_on(error: &str) -> Option<String> {
     // Windows has no `status` at the CLI: the app shows what the walk left.
     let left = if cfg!(windows) {
@@ -342,18 +341,11 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
         }
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-        let _ = paths;
-        let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
-        Ok(())
-    }
 }
 
 /// The report of the sync (`folder.grants`, crate::grants::Report) as the
 /// data of `folder sync --json`, beside its lines: the same fields on Linux
 /// and Windows.
-#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn report_also(v: &Value) {
     for k in ["errors", "stale", "unclosed", "failed", "skipped", "walked"] {
         super::json::also(k, v[k].clone());

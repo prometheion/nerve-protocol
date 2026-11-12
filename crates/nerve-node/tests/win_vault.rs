@@ -15,11 +15,14 @@
 //! pairing, the proxy and the keyring away again.
 #![cfg(windows)]
 
+mod common;
+
+use common::linked_skipping_ended;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
 
@@ -110,22 +113,8 @@ async fn the_service_keeps_its_secrets_in_its_own_credential_manager() {
     assert!(!key.exists());
     service("Restart");
     answers(&layout);
-    let paired = center.paired().expect("paired");
-    let until = tokio::time::Instant::now() + WAIT;
-    let mut linked = false;
-    while let Some(mut inc) = center
-        .next_link(until.saturating_duration_since(tokio::time::Instant::now()))
-        .await
-    {
-        if fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-            .await
-            .is_ok()
-        {
-            linked = true;
-            break;
-        }
-    }
-    assert!(linked, "the node did not link with its key in the vault");
+    // The node links with its key in the vault.
+    linked_skipping_ended(&mut center, WAIT).await;
 
     // A proxy with a login: its password goes there too, never into a file.
     let url = format!("http://alice:{PASSWORD}@127.0.0.1:9");

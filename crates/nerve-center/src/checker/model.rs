@@ -661,13 +661,21 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
             endpoint,
             "/v1/systemone",
             &body,
-            timeout + Duration::from_secs(5),
+            answer_wait(timeout),
             MAX_BODY,
         ),
     )
     .await
     .map_err(|_| ModelError::Unreachable(format!("timed out after {} ms", cfg.timeout_ms)))??;
     parse_noul(&value)
+}
+
+/// How long the read of a model's answer waits when the caller's own limit
+/// is `limit`: a little past it, so it is always the caller's limit that
+/// ends the call, and not the transport's 15 s head timeout, which cuts
+/// off a model that thinks longer (a 4B model, or a 2B one on a small CPU).
+fn answer_wait(limit: Duration) -> Duration {
+    limit + Duration::from_secs(5)
 }
 
 /// A call the local server took and has not answered after this many
@@ -832,7 +840,7 @@ async fn read_alone(
             &endpoint,
             "/v1/systemone",
             &body,
-            stuck + Duration::from_secs(5),
+            answer_wait(stuck),
             MAX_BODY,
         ),
     )
@@ -2022,27 +2030,77 @@ mod tests {
         }
     }
 
-    /// A model that thinks longer than the transport's usual 15 s head
-    /// timeout is still read when the checker's own timeout allows it (a
-    /// 4B model, or a 2B one on a small VM CPU, can take that long). Found on the
-    /// Windows test VM, where every call was cut at 15 s.
-    #[tokio::test]
-    async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    /// The model's answer is read within the wait the checker gives, not
+    /// the transport's usual 15 s head timeout: a model that thinks longer
+    /// (a 4B model, or a 2B one on a small VM CPU) is still read when the
+    /// checker's own timeout allows it. Found on the Windows test VM, where
+    /// every call was cut at 15 s. Shown here in two halves so the test takes
+    /// a second: `ask` gives the read a wait past the checker's timeout (a
+    /// checker timeout of 25 s waits longer than the transport's 15 s), and
+    /// the read holds to the wait it is given, short or long.
+    #[test]
+    fn a_slow_model_is_given_the_checkers_timeout_to_answer() {
+        let wait = answer_wait(Duration::from_millis(25_000));
+        assert!(wait > nerve_transport::http::HEAD_TIMEOUT, "{wait:?}");
+        assert!(wait > Duration::from_millis(25_000), "{wait:?}");
+    }
+
+    /// The other half, long: the read holds to a wait past the transport's
+    /// 15 s. Paused time, so the 16 s of thinking cost nothing; a read that
+    /// caps its wait at the transport's usual limit fails here.
+    #[tokio::test(start_paused = true)]
+    async fn a_model_that_thinks_past_the_transports_limit_is_still_read() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            tokio::time::sleep(think).await;
+            let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+            let _ = server
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        let r = nerve_transport::http::read_client_response(
+            &mut client,
+            MAX_BODY,
+            answer_wait(Duration::from_secs(25)),
+        )
+        .await
+        .unwrap();
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(parse_noul(&v).unwrap(), 0.9);
+    }
+
+    /// And `ask` gives the read that wait: a checker timeout of 25 s reads
+    /// a model that thinks 16 s, past the transport's usual limit. Paused
+    /// time, with the model in the same runtime, so the 16 s cost nothing.
+    #[tokio::test(start_paused = true)]
+    async fn ask_reads_a_model_that_thinks_past_the_transports_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            if let Ok((mut c, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                let _ = c.read(&mut buf);
-                std::thread::sleep(Duration::from_secs(16));
-                let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
-                let _ = write!(
-                    c,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-            }
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            let (mut c, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = c.read(&mut buf).await;
+            tokio::time::sleep(think).await;
+            let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+            let _ = c
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
         });
         let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
         let cfg = ModelConfig {
@@ -2053,6 +2111,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(score, 0.9);
+    }
+
+    /// The center's own server is read past the transport's limit too: a
+    /// call it reads for 16 s, after the caller's 2 s timeout but inside the
+    /// ten timeouts after which it counts as stuck, is read to its answer,
+    /// and the server is not taken to have ended on it. Paused time, as
+    /// above.
+    #[tokio::test(start_paused = true)]
+    async fn the_local_servers_read_waits_past_the_transports_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = c.read(&mut buf).await.unwrap_or(0);
+                    let body = if buf[..n].starts_with(b"POST /tokenize ") {
+                        json!({ "tokens": vec![100_000; 100] })
+                    } else {
+                        tokio::time::sleep(think).await;
+                        json!({
+                            "answers": {"danger": {"type": "noul", "noul": 0.9}},
+                            "usage": {"input_tokens": 100, "output_tokens": 0},
+                        })
+                    }
+                    .to_string();
+                    let _ = c
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        let budget = Arc::new(linear(8192, 0.5));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        };
+        let e = ask(&ep, &with_timeout(2000), json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
+        budget.idle().await;
+        assert!(!budget.died_on_call(), "the read gave up before the answer");
+    }
+
+    /// The other half: the read holds to the wait it is given, short or long.
+    #[tokio::test]
+    async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {
+        use std::io::{Read, Write};
+        let slow = |think: Duration| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut buf = [0u8; 8192];
+                    let _ = c.read(&mut buf);
+                    std::thread::sleep(think);
+                    let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+                    let _ = write!(
+                        c,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        };
+        let body = json!({"state": {"command": "rm -rf /"}});
+        let ep = slow(Duration::from_millis(1500));
+        let at = Instant::now();
+        let e = request(
+            &ep,
+            "/v1/systemone",
+            &body,
+            Duration::from_millis(300),
+            MAX_BODY,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e:?}");
+        assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+        let ep = slow(Duration::from_millis(500));
+        let v = request(
+            &ep,
+            "/v1/systemone",
+            &body,
+            Duration::from_secs(5),
+            MAX_BODY,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_noul(&v).unwrap(), 0.9);
     }
 
     #[test]

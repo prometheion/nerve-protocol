@@ -4,7 +4,8 @@
 //! entry, they are offered to it alone, counted as `execute`, and run as
 //! `nerve-run`, which a node run by hand does not have; here the node by
 //! hand stands for it with its own user (NodeOptions::config_caps_by_hand),
-//! as in config_caps.rs. Linux only: Windows takes none yet (issue #176).
+//! as in config_caps.rs. Linux only: the calls run a Linux program (`echo`)
+//! and a provider on the control socket.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -25,11 +26,7 @@ use tokio::net::{TcpStream, UnixStream};
 const WAIT: Duration = Duration::from_secs(15);
 
 fn options(root: &Path, by_hand: bool) -> NodeOptions {
-    let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
-    o.home = root.join("home");
-    std::fs::create_dir_all(&o.home).unwrap();
-    o.full_rights = Some(false);
-    o.exe = Some(env!("CARGO_BIN_EXE_nerve-node").into());
+    let mut o = common::options(root);
     // The node by hand runs them as its own user, for `nerve-run`, on a
     // kernel without Landlock (config_caps.rs says why).
     o.config_caps_by_hand = by_hand;
