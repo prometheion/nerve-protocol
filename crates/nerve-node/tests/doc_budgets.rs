@@ -24,7 +24,7 @@ const BUDGETS: &[(&str, usize)] = &[
     ("docs/user/watch-and-stop.md", 900),
     ("docs/user/troubleshooting.md", 1500),
     ("docs/user/commands.md", 600),
-    ("docs/user/safety.md", 950),
+    ("docs/user/safety.md", 1200),
 ];
 
 /// The most words a table cell may have.
@@ -267,6 +267,84 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
+        // The Windows limits (R): each on the Windows page, in safety.md,
+        // and the policy's.
+        ("docs/user/safety.md", "UAC is no boundary"),
+        ("docs/user/windows.md", "UAC is no boundary"),
+        (
+            "docs/user/safety.md",
+            "Your Windows password is stored on disk, sealed for this machine (DPAPI); only the folder's access list guards it",
+        ),
+        (
+            "docs/user/windows.md",
+            "Your Windows password is stored on disk, sealed for this machine (DPAPI); only the folder's access list guards it",
+        ),
+        (
+            "docs/user/safety.md",
+            "The administrators and the Backup Operators can read the node's keys and your stored password",
+        ),
+        (
+            "docs/user/windows.md",
+            "The administrators and the Backup Operators can read the node's keys and your stored password",
+        ),
+        (
+            "docs/user/safety.md",
+            "A folder mode command reads the Windows folder and Program Files",
+        ),
+        (
+            "docs/user/windows.md",
+            "A folder mode command reads the Windows folder and Program Files",
+        ),
+        (
+            "docs/user/safety.md",
+            "Pipes, RPC and COM servers open to every AppContainer are open to the commands",
+        ),
+        (
+            "docs/user/windows.md",
+            "Pipes, RPC and COM servers open to every AppContainer are open to the commands",
+        ),
+        (
+            "docs/user/safety.md",
+            "Work started through WMI, the task scheduler or a service runs outside the command's job",
+        ),
+        (
+            "docs/user/windows.md",
+            "Work started through WMI, the task scheduler or a service runs outside the command's job",
+        ),
+        (
+            "docs/user/safety.md",
+            "Sudo commands run as you with your administrator rights, outside the container and the folders",
+        ),
+        (
+            "docs/user/windows.md",
+            "Sudo commands run as you with your administrator rights, outside the container and the folders",
+        ),
+        (
+            "docs/user/safety.md",
+            "With the Firewall service stopped, a pairing whose network is off runs no command",
+        ),
+        (
+            "docs/user/windows.md",
+            "With the Firewall service stopped, a pairing whose network is off runs no command",
+        ),
+        (
+            "docs/user/safety.md",
+            "The guard does not catch a service or task made by writing the registry or the Tasks folder directly, the Startup folder, or WMI",
+        ),
+        (
+            "docs/user/windows.md",
+            "The guard does not catch a service or task made by writing the registry or the Tasks folder directly, the Startup folder, or WMI",
+        ),
+        ("docs/user/safety.md", "The programs are not signed"),
+        ("docs/user/windows.md", "The programs are not signed"),
+        ("SECURITY.md", "UAC is no boundary"),
+        (
+            "SECURITY.md",
+            "the config folder's access list is its only guard",
+        ),
+        ("SECURITY.md", "an administrator or a Backup Operator"),
+        ("SECURITY.md", "The guard has named holes"),
+        ("SECURITY.md", "The programs are not signed"),
     ];
     let mut missing = Vec::new();
     for (name, text) in KEPT {

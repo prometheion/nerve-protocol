@@ -134,7 +134,7 @@ save it under **Settings › General › Account for commands**.
 
 ## Limits
 
-These are in [safety](safety.md) too.
+These are in [safety](safety.md#windows) too.
 
 - UAC is no boundary: a command that runs as you, where you are an
   administrator, can take the full rights back and read the node's keys.

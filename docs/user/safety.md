@@ -15,8 +15,9 @@ leads to the detail.
 - With root as the owner, a center with the settings grant can switch
   itself to `user` mode and so run commands as root
   ([root as the owner](../dev/service.md#root-as-the-owner)).
-- Commands on the sudo list run as root, outside the folders. With the
-  network off they do not run
+- Commands on the sudo list run as root (on Windows as you, with your
+  administrator rights), outside the folders. With the network off they do
+  not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
 - Taking the grant back leaves what the center changed, still on.
   `center settings off` names it
@@ -128,6 +129,34 @@ leads to the detail.
 - A relay token reaches the relay's centers' host and port, and the other
   sites a reverse proxy serves there
   ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).
+
+## Windows
+
+- UAC is no boundary: a command that runs as you, where you are an
+  administrator, can take the full rights back and read the node's keys
+  ([Windows](windows.md#limits)).
+- Your Windows password is stored on disk, sealed for this machine (DPAPI);
+  only the folder's access list guards it
+  ([the install](../dev/windows.md#the-node-as-a-service-on-windows)).
+- The administrators and the Backup Operators can read the node's keys and
+  your stored password ([Windows](windows.md#limits)).
+- A folder mode command reads the Windows folder and Program Files
+  ([what it reaches](../dev/windows.md#what-the-appcontainer-does-not-stop)).
+- Pipes, RPC and COM servers open to every AppContainer are open to the
+  commands: a program that offers itself so can act for them, as you
+  ([what it reaches](../dev/windows.md#what-the-appcontainer-does-not-stop)).
+- Work started through WMI, the task scheduler or a service runs outside the
+  command's job: a stop and the limits do not reach it
+  ([Windows](../dev/windows.md#how-windows-differs)).
+- Sudo commands run as you with your administrator rights, outside the
+  container and the folders ([sudo](../dev/windows.md#sudo-on-windows)).
+- With the Firewall service stopped, a pairing whose network is off runs no
+  command ([network](network.md)).
+- The guard does not catch a service or task made by writing the registry or
+  the Tasks folder directly, the Startup folder, or WMI
+  ([guard](../dev/policy-engine.md#the-guard)).
+- The programs are not signed: SmartScreen warns, and Smart App Control can
+  block them ([Windows](windows.md#download-and-check)).
 
 ## Web UIs, updates and logs
 

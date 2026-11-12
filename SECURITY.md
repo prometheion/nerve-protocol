@@ -29,8 +29,7 @@ You get an answer within a week. Once a fix is released, the advisory is
 published, with your name if you want it there. Please keep the hole to
 yourself until then, or for 90 days, whichever comes first.
 
-Only the latest release gets fixes. There is no release older than that to
-keep up before 0.1.0.
+Only the latest release gets fixes.
 
 ## In scope
 
@@ -100,9 +99,31 @@ These are by design or not solved yet. The pages named say more.
   has `nerve-run`. Landlock holds a command's own processes, not the other
   programs of your account that run things on request
   ([modes](docs/dev/sandbox-linux.md#what-a-command-can-reach-in-folder-mode)).
-- **Root and the owner are trusted.** Whoever is root on the machine, or the
-  node's owner, controls the node. The node keeps its keys from the commands
-  it runs, not from root.
-- **Windows is not finished.** 0.0.7 is the finished Linux version, and
-  publishes no Windows program. Windows comes with 0.1.0
-  ([Windows](docs/dev/windows.md)).
+- **Root, the administrators and the owner are trusted.** Whoever is root
+  on the machine, on Windows an administrator or a Backup Operator, or the
+  node's owner, controls the node and can read its keys. The node keeps its
+  keys from the commands it runs, not from them.
+
+On Windows ([Windows](docs/user/windows.md#limits)):
+
+- **UAC is no boundary.** A command that runs as an administrator owner
+  (`user` mode, `--as-owner`) can take the full rights back and read the
+  node's keys.
+- **The owner's Windows password is on disk.** It is sealed with DPAPI for
+  the machine, so the config folder's access list is its only guard.
+- **A folder mode command reads more than its folders.** The Windows folder,
+  Program Files and what Windows opens to every AppContainer: pipes, RPC and
+  COM servers. A program that offers itself to all AppContainers can act for
+  a command, as that program's account.
+- **Some work leaves the command's job.** What WMI, the task scheduler or a
+  service starts for a command runs outside its job, its container and its
+  limits.
+- **Sudo commands run outside the container.** They run as the owner, with
+  the administrator's rights, and the folders do not hold them.
+- **The network switch needs the Windows Firewall service.** Without it a
+  pairing whose network is off runs no command.
+- **The guard has named holes.** A service or task made by writing the
+  registry or the Tasks folder directly, the Startup folder and WMI are not
+  covered.
+- **The programs are not signed.** SmartScreen warns, and Smart App Control
+  can block them ([#219](https://github.com/prometheion/nerve-protocol/issues/219)).
