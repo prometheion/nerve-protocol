@@ -439,14 +439,17 @@ impl Ui {
             ("POST", "/api/nodes/rename") => c
                 .rename(&s("id"), &s("name"))
                 .map(|_| json!({}))
-                .map_err(bad),
+                .map_err(unkept),
             ("POST", "/api/nodes/disable") => {
                 let Some(disabled) = b.get("disabled").and_then(Value::as_bool) else {
                     return Err(bad("disabled must be true or false"));
                 };
                 c.set_disabled(&s("id"), disabled)
                     .map(|_| json!({"disabled": disabled}))
-                    .map_err(|e| (404, json!({"error": e})))
+                    .map_err(|e| match unkept(e) {
+                        (400, e) => (404, e),
+                        e => e,
+                    })
             }
             ("POST", "/api/nodes/remove") => {
                 c.remove(&s("id")).await.map(|_| json!({})).map_err(unkept)
@@ -536,12 +539,11 @@ impl Ui {
                 c.apply_checker_config_if(cfg, Some(loaded))
                     .map(|_| json!({}))
                     .map_err(|e| {
-                        let status = if e == crate::center::CHECKER_STALE {
-                            409
+                        if e == crate::center::CHECKER_STALE {
+                            (409, json!({ "error": e }))
                         } else {
-                            400
-                        };
-                        (status, json!({ "error": e }))
+                            unkept(e)
+                        }
                     })
             }
             ("POST", "/api/checker/token") => {
@@ -564,7 +566,7 @@ impl Ui {
                 .remove_checker_model()
                 .await
                 .map(|_| json!({}))
-                .map_err(bad),
+                .map_err(unkept),
             // The allow buttons on a checker refusal: build the rule for the
             // entry and save it for every node, or for the one node.
             ("POST", "/api/checker/allow") => {
@@ -578,7 +580,7 @@ impl Ui {
                 let pin = pin.as_ref().map(|(f, v)| (f.as_str(), v));
                 c.add_checker_allow(&s("cap"), &s("action"), &s("target"), wildcard, pin, node)
                     .map(|rule| json!({"rule": rule}))
-                    .map_err(bad)
+                    .map_err(unkept)
             }
             // The tokens made here, and the one of the settings, which only
             // a change of the settings removes.
@@ -723,7 +725,7 @@ impl Ui {
                 if minutes.is_some_and(|m| m != old_minutes) {
                     changed.push("pairing code lifetime");
                 }
-                c.update(|st| {
+                c.update_saved(|st| {
                     if let Some(n) = name {
                         st.center_name = n;
                     }
@@ -733,9 +735,11 @@ impl Ui {
                     if let Some(m) = minutes {
                         st.pair_code_minutes = m as u32;
                     }
-                });
+                    Ok(())
+                })
+                .map_err(unkept)?;
                 if let Some(l) = level {
-                    c.set_log_level(l);
+                    c.set_log_level(l).map_err(unkept)?;
                 }
                 // The UI sends all its fields every time, so only what differs
                 // is told.
@@ -1217,6 +1221,56 @@ mod tests {
                     .await
             }
         }
+    }
+
+    /// The owner's changes that the state file cannot take are answered as
+    /// the center's error (500), not as saved, and are not made: a node
+    /// disabled that way would be enabled again at the next start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_change_the_state_file_cannot_take_is_not_answered_as_saved() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        c.update(|s| {
+            s.nodes.insert(
+                "n1".into(),
+                crate::center::tests::node_record("n1", "linux"),
+            );
+        });
+        let ui = Ui::new(&c, None, true);
+        let before = c.read(|s| s.clone());
+        let config = json!({"config": before.checker});
+        let mode = |m| std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        for (path, body) in [
+            ("/api/nodes/rename", json!({"id": "n1", "name": "box-2"})),
+            ("/api/nodes/disable", json!({"id": "n1", "disabled": true})),
+            ("/api/checker", config),
+            (
+                "/api/checker/allow",
+                json!({"cap": "exec", "action": "run", "target": "git status"}),
+            ),
+            ("/api/center", json!({"name": "other", "retention_days": 7})),
+            ("/api/center", json!({"log_level": "debug"})),
+        ] {
+            let (status, e) = ui
+                .api(&req("POST", path, &[], ""), &body)
+                .await
+                .unwrap_err();
+            assert_eq!(status, 500, "{path}: {e}");
+            let e = e["error"].as_str().unwrap();
+            assert!(e.starts_with(crate::center::UNWRITABLE), "{path}: {e}");
+        }
+        mode(0o700).unwrap();
+        let after = c.read(|s| s.clone());
+        assert_eq!(after.nodes["n1"].name, "n1");
+        assert!(!after.nodes["n1"].disabled);
+        assert_eq!(after.checker.version, before.checker.version);
+        assert!(after.checker.allow_rules.is_empty());
+        assert_eq!(after.center_name, before.center_name);
+        assert_eq!(after.retention_days, before.retention_days);
+        assert_eq!(after.log_level, before.log_level);
     }
 
     #[tokio::test]
@@ -3258,7 +3312,7 @@ mod tests {
     #[tokio::test]
     async fn saving_a_setting_under_the_flag_leaves_the_stored_level_alone() {
         let d = tempfile::tempdir().unwrap();
-        center(d.path()).set_log_level(Level::Debug);
+        center(d.path()).set_log_level(Level::Debug).unwrap();
         let c = Center::open(crate::center::Options {
             state_dir: d.path().to_path_buf(),
             name: Some("test".into()),

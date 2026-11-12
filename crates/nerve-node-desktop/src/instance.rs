@@ -638,18 +638,18 @@ mod tests {
     /// [`LINK_ON_STDIN`] (#198).
     #[test]
     fn a_handed_on_link_is_on_stdin_not_on_the_command_line() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let program = d.path().join("app");
-        std::fs::write(
+        // Written by a process of its own: a test thread that forks while
+        // this one holds the file open for writing keeps it busy (#168).
+        nerve_transport::files::write_program(
             &program,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > {0}/args\nprintf '%s' \"$WHO\" > {0}/env\ncat > {0}/input\n",
                 d.path().display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let link = "nerve://pair?center=x&code=c0de&pin=p1n";
         let mut child = hand_on(&program, link, &[("WHO", "software")]).unwrap();
         assert!(child.wait().unwrap().success());

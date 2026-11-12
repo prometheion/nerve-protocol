@@ -86,6 +86,12 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
             "{need}: {publish}"
         );
     }
+    assert!(
+        publish.contains(
+            "needs.windows-installed.result == (inputs.windows && 'success' || 'skipped')"
+        ),
+        "{publish}"
+    );
     // Two Linux programs on each of two machines and the Linux desktop app,
     // also as a .deb and an .rpm; Windows' two only with the switch.
     assert!(publish.contains("want=7\n"), "{publish}");
@@ -114,6 +120,53 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
         switch_on,
         "the first footer is the one with Windows: {publish}"
     );
+}
+
+/// The tag of a release with Windows waits for its own Windows programs,
+/// installed and driven on a runner (owner, 2026-11-11): `windows-installed`
+/// runs the installed tests of CI on the programs the `windows` job built
+/// for the release, not on debug ones, and `publish` needs it.
+#[test]
+fn the_release_installs_its_own_windows_programs_before_it_publishes() {
+    let installed = job("windows-installed");
+    for line in [
+        "needs: [check, windows]",
+        "if: ${{ inputs.windows }}",
+        "uses: ./.github/workflows/installed-windows.yml",
+        "programs: windows-release-programs",
+        "tests: windows-release-tests",
+        "ref: ${{ needs.check.outputs.sha }}",
+    ] {
+        assert!(
+            installed.lines().any(|l| l.trim() == line),
+            "{line}: {installed}"
+        );
+    }
+    let needs = job("publish")
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs:"))
+        .unwrap()
+        .to_string();
+    assert!(needs.contains(" windows-installed,"), "{needs}");
+    // The programs it installs are the release builds the `windows` job
+    // publishes, under the names the workflow runs them by.
+    let windows = job("windows");
+    assert!(
+        windows.contains("cp \"dist/$b-$SUFFIX.exe\" \"installed/$b.exe\""),
+        "{windows}"
+    );
+    assert!(
+        windows.contains(".github/scripts/windows-test-programs.sh installed/tests"),
+        "{windows}"
+    );
+    let uploads: Vec<&str> = windows
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("name: windows-release-"))
+        .collect();
+    assert_eq!(uploads, ["programs", "tests"], "{windows}");
+    // CI builds the same test programs, with the same script.
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    assert!(ci.contains(".github/scripts/windows-test-programs.sh dist/tests"));
 }
 
 /// The Linux desktop app comes as a .deb and an .rpm too (#212): packed
@@ -379,7 +432,9 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
             "Ubuntu 22.04 x86_64",
             "Ubuntu 24.04 x86_64",
             "Ubuntu 24.04 arm64",
-            "Debian 12 x86_64"
+            "Debian 12 x86_64",
+            "Debian 13 x86_64",
+            "Ubuntu 26.04 x86_64"
         ]
     );
     let install = include_str!("../../../docs/user/install.md");
@@ -387,7 +442,7 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
         .lines()
         .find(|l| l.starts_with("| Tested |"))
         .unwrap();
-    for name in ["Ubuntu 22.04 and 24.04, Debian 12", "aarch64"] {
+    for name in ["Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13", "aarch64"] {
         assert!(tested.contains(name), "{name}: {tested}");
     }
 }

@@ -2781,16 +2781,15 @@ async fn start_ctl(shared: Arc<Shared>) -> Result<JoinHandle<()>, String> {
         nerve_transport::files::create_private_dir(dir)
             .map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    // Fails early when another daemon holds the socket.
-    let listener = nerve_transport::ctl::bind(&path)
+    // Fails early when another daemon holds the socket. A command of the
+    // node's own user in `folder` mode can connect to the socket where
+    // Landlock does not reach it, and a process it left behind (`setsid`)
+    // is below no command the node knows. The token is in the own folders,
+    // which its rules leave out, and in place before the socket takes a
+    // connection.
+    let (listener, token) = nerve_transport::ctl::bind_with_token(&path)
         .await
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    // A command of the node's own user in `folder` mode can connect to the
-    // socket where Landlock does not reach it, and a process it left behind
-    // (`setsid`) is below no command the node knows. The token is in the
-    // own folders, which its rules leave out.
-    let token = nerve_transport::ctl::write_token(&path)
-        .map_err(|e| format!("{}: {e}", nerve_transport::ctl::token_file(&path).display()))?;
     let s = shared.clone();
     let task = tokio::spawn(async move {
         let r = nerve_transport::ctl::serve_on(listener, move |req, peer| {
@@ -3982,12 +3981,14 @@ mod tests {
         let socket = daemon.shared.paths.ctl_socket();
         // The listener's inode, from the kernel's list of Unix sockets:
         // `Num RefCount Protocol Flags Type St Inode Path`, a listener
-        // flagged 00010000.
+        // flagged 00010000. The path is the one it was bound at, beside the
+        // socket's (`ctl::bind_with_token` renames it into place).
         let unix = std::fs::read_to_string("/proc/net/unix").unwrap();
+        let bound = socket.with_extension("new").display().to_string();
         let inode = unix
             .lines()
             .map(|l| l.split_whitespace().collect::<Vec<_>>())
-            .find(|f| f.len() == 8 && f[3] == "00010000" && std::path::Path::new(f[7]) == socket)
+            .find(|f| f.len() == 8 && f[3] == "00010000" && f[7] == bound)
             .map(|f| f[6].to_string())
             .expect("the listener in /proc/net/unix");
         let held = || {

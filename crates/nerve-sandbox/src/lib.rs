@@ -1229,6 +1229,47 @@ pub mod acl {
         all.into_iter().filter(|(_, mask)| *mask != 0).collect()
     }
 
+    /// Whether the entries of two access lists, each as the bytes of its
+    /// ACEs one after the other, give the same access: equal but for the
+    /// order within a run of allowing entries of the same kind (its own or
+    /// inherited), which Windows reads as one, since allowed rights only add
+    /// up. Two grants on one folder swap their places when one of them is
+    /// put on again, and a walk that compared in order rewrote every file
+    /// below it twice (#40, node-1). Bytes that are not whole ACEs compare
+    /// as they are.
+    pub fn same_entries(a: &[u8], b: &[u8]) -> bool {
+        match (runs(a), runs(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => a == b,
+        }
+    }
+
+    /// The ACEs of `bytes` in runs: one ACE alone, or the allowing ones of
+    /// one kind that follow each other, sorted. `None` when they are not
+    /// whole ACEs.
+    fn runs(mut bytes: &[u8]) -> Option<Vec<Vec<&[u8]>>> {
+        let mut out: Vec<Vec<&[u8]>> = Vec::new();
+        let mut last: Option<u8> = None;
+        while !bytes.is_empty() {
+            let size = usize::from(u16::from_le_bytes([*bytes.get(2)?, *bytes.get(3)?]));
+            if size < 4 || size > bytes.len() {
+                return None;
+            }
+            let (ace, rest) = bytes.split_at(size);
+            bytes = rest;
+            let kind = (ace[0] == ALLOWED).then_some(ace[1] & INHERITED);
+            match (kind, last, out.last_mut()) {
+                (Some(k), Some(l), Some(run)) if k == l => run.push(ace),
+                _ => out.push(vec![ace]),
+            }
+            last = kind;
+        }
+        for run in &mut out {
+            run.sort_unstable();
+        }
+        Some(out)
+    }
+
     /// Whether two Windows paths name the same place by the same names, as
     /// NTFS compares them: in either case, by either separator, with or
     /// without the `\\?\` prefix.
@@ -2333,6 +2374,15 @@ pub mod appcontainer {
         }
     }
 
+    /// Whether two lists' entries ([`Sd::entries`]) give the same access
+    /// ([`acl::same_entries`]).
+    fn same_list(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => acl::same_entries(a, b),
+            (a, b) => a == b,
+        }
+    }
+
     /// The entries of `dacl`, byte for byte.
     fn ace_bytes(dacl: *mut ACL) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -2743,7 +2793,7 @@ pub mod appcontainer {
                 return Ok(Derived::Kept);
             }
             let new = inherited(&parent.new, &parent.was, &now, kind.folder, &self.token)?;
-            Ok(if now.entries()? == new.entries()? {
+            Ok(if same_list(&now.entries()?, &new.entries()?) {
                 Derived::Same(Lists {
                     new: now.clone(),
                     was: now,
@@ -2883,7 +2933,7 @@ pub mod appcontainer {
             };
             let reader = self.reader(obj, linked)?;
             let new = capped(base, linked, reader.as_deref())?;
-            Ok(if new.entries()? == now.entries()? {
+            Ok(if same_list(&new.entries()?, &now.entries()?) {
                 Derived::Same(Lists {
                     new: now.clone(),
                     was: now,
@@ -3282,8 +3332,15 @@ pub mod appcontainer {
         if !protected && let Some(parent) = parent_list(f) {
             sd = inherited(&parent, &parent, &sd, is_dir, &process_token()?)?;
         }
+        // The same entries in another order are the list it has: a grant
+        // put on again keeps its place, and the walk below derives from the
+        // order the objects there inherited.
+        let changed = !same_list(&sd.entries()?, &Some(ace_bytes(dacl)?));
+        if !changed {
+            sd = now.clone();
+        }
         Ok(Next {
-            changed: sd.entries()? != Some(ace_bytes(dacl)?),
+            changed,
             sd,
             was: now.clone(),
             is_dir,
@@ -3471,7 +3528,7 @@ pub mod appcontainer {
                 };
                 let reader = volume.reader(&top, &linked)?;
                 next.sd = capped(base, &linked, reader.as_deref())?;
-                next.changed = next.sd.entries()? != next.was.entries()?;
+                next.changed = !same_list(&next.sd.entries()?, &next.was.entries()?);
             }
         }
         let every = masks.is_none() || whole;
@@ -4110,6 +4167,44 @@ pub mod appcontainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two lists whose allowing entries of one kind stand in another order
+    /// give the same access; a deny moved past an allow, an entry of its
+    /// own moved among the inherited ones, or another entry do not (#40,
+    /// node-1: a walk compared in order and rewrote every file twice).
+    #[test]
+    fn allowing_entries_compare_in_any_order() {
+        // An ACE: type, flags, its size, the mask and a SID's bytes.
+        let ace = |kind: u8, flags: u8, mask: u32, sid: u8| {
+            let mut a = vec![kind, flags, 12, 0];
+            a.extend(mask.to_le_bytes());
+            a.extend([1, 0, 0, sid]);
+            a
+        };
+        let list = |aces: &[&Vec<u8>]| {
+            aces.iter()
+                .flat_map(|a| a.iter().copied())
+                .collect::<Vec<u8>>()
+        };
+        let (allow, deny, inherited) = (acl::ALLOWED, acl::DENIED, acl::INHERITED);
+        let (a, b, c) = (
+            ace(allow, 0, 0x1200a9, 1),
+            ace(allow, 0, 0x1301bf, 2),
+            ace(allow, inherited, 0x1f01ff, 3),
+        );
+        let d = ace(deny, 0, 0x2, 4);
+        let ai = ace(allow, inherited, 0x1200a9, 1);
+        let same = |x: &[&Vec<u8>], y: &[&Vec<u8>]| acl::same_entries(&list(x), &list(y));
+        assert!(same(&[&a, &b], &[&b, &a]));
+        assert!(same(&[&d, &a, &b, &c, &ai], &[&d, &b, &a, &ai, &c]));
+        assert!(!same(&[&d, &a], &[&a, &d]));
+        assert!(!same(&[&a, &c], &[&c, &a]));
+        assert!(!same(&[&a, &b], &[&a, &a]));
+        assert!(!same(&[&a, &b], &[&a]));
+        // Bytes that are not whole entries compare as they are.
+        assert!(acl::same_entries(&[1, 2, 3], &[1, 2, 3]));
+        assert!(!acl::same_entries(&a[..5], &b[..5]));
+    }
 
     /// A confined command may not write a terminal: it has none of its own,
     /// and the one it could reach would be the owner's.
@@ -5253,6 +5348,50 @@ mod tests {
         };
         appcontainer::set_below(&top, &name, None, false, false, None, below).unwrap();
         appcontainer::remove_profile(&name).unwrap();
+    }
+
+    /// Two grants on one folder, as the installed node puts the pairing's
+    /// container and nerve-run on every granted folder: putting one of them
+    /// on again, with a walk of everything below, changes nothing, and the
+    /// lists keep their order (#40, node-1: each walk swapped them and
+    /// rewrote every file below).
+    #[cfg(windows)]
+    #[test]
+    fn a_grant_put_on_again_beside_another_changes_nothing_below() {
+        let base = tempfile::tempdir().unwrap();
+        let top = base.path().join("top");
+        std::fs::create_dir_all(top.join("a").join("b")).unwrap();
+        std::fs::write(top.join("a").join("f.txt"), "f").unwrap();
+        std::fs::write(top.join("a").join("b").join("g.txt"), "g").unwrap();
+        let pid = std::process::id();
+        let (one, two) = (
+            format!("nerve.test.twice1.{pid}"),
+            format!("nerve.test.twice2.{pid}"),
+        );
+        let rw = acl::masks(true, true, false);
+        let put = |name: &str, masks: Option<acl::Masks>, whole: bool| {
+            let below = appcontainer::Below {
+                links: None,
+                progress: &mut |_| {},
+                maker: None,
+            };
+            appcontainer::set_below(&top, name, masks, false, whole, None, below)
+                .unwrap()
+                .1
+        };
+        put(&one, Some(rw), false);
+        put(&two, Some(rw), false);
+        let file = top.join("a").join("b").join("g.txt");
+        let (top_was, file_was) = (sddl(&top), sddl(&file));
+        for name in [&one, &two, &one] {
+            let walked = put(name, Some(rw), true);
+            assert!(walked.seen >= 4, "{name}: {walked:?}");
+            assert_eq!(walked.changed, 0, "{name}: {walked:?}");
+        }
+        assert_eq!(sddl(&top), top_was);
+        assert_eq!(sddl(&file), file_was);
+        put(&one, None, false);
+        put(&two, None, false);
     }
 
     /// A grant goes along when its folder is renamed: `look` sees it at the

@@ -1703,7 +1703,8 @@ process connecting to a socket file, and `setsid` takes a process out of the
 tree below its command. So the node makes
 a token at each start,
 `<state>/run/ctl.token` (0600), and answers a request only if it carries it.
-The CLI reads the file and sends it. The
+The token is written before the socket takes a connection (bound beside
+`ctl.sock` and renamed into place). The CLI reads the file and sends it. The
 file lies in the node's own folders, which a `folder` mode command's rules
 leave out, so such a command, and a process it left behind, are refused for
 every method. `install`, `update` and `setup` send the token too when they

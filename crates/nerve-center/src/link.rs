@@ -31,6 +31,10 @@ pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
 pub const DUPLICATE_PING: Duration = Duration::from_secs(3);
 /// No frame for this long is a dead link (§4.4).
 pub const DEAD_AFTER: Duration = Duration::from_secs(45);
+/// How long a `bye` or a ping waits for room in the send queue, and the
+/// writer for the socket once the reader ended: a node that stops reading
+/// fills both and must not hold up a stop, a remove or its own reconnect.
+pub const SEND_OUT_WAIT: Duration = Duration::from_secs(5);
 /// How long the center waits for a `describe`, `get` or `settings.set`.
 pub const SHORT_CALL: Duration = Duration::from_secs(30);
 /// The most of the node's call places (its `limits.calls`, 64 for
@@ -238,6 +242,22 @@ impl Link {
         Link::new(node_id, String::new(), Limits::default(), out, None)
     }
 
+    /// A link whose writer takes a second over its `bye`, as one on a slow
+    /// connection does.
+    #[cfg(test)]
+    pub(crate) fn for_test_slow_bye(node_id: &str) -> Link {
+        let (out, mut rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            while let Some(o) = rx.recv().await {
+                if matches!(o, Out::Bye(_)) {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
+        });
+        Link::new(node_id, String::new(), Limits::default(), out, None)
+    }
+
     /// The node key the hello of the connection now was signed with.
     pub fn auth_key(&self) -> String {
         lock(&self.auth_key).clone()
@@ -322,11 +342,15 @@ impl Link {
         }
     }
 
-    /// Sends a frame of the connection now only (a ping, a `bye`).
+    /// Sends a frame of the connection now only (a ping, a `bye`), waiting
+    /// at most [`SEND_OUT_WAIT`] for room.
     async fn send_out(&self, o: Out) -> bool {
         let out = lock(&self.wire).out.clone();
         match out {
-            Some(out) => out.send(o).await.is_ok(),
+            Some(out) => matches!(
+                tokio::time::timeout(SEND_OUT_WAIT, out.send(o)).await,
+                Ok(Ok(()))
+            ),
             None => false,
         }
     }
@@ -568,6 +592,23 @@ impl Link {
     /// Ends the connection with `bye {reason}`.
     pub async fn bye(&self, reason: ByeReason) {
         self.send_out(Out::Bye(reason)).await;
+    }
+
+    /// [`bye`](Self::bye), and waits until the writer has sent it and ended,
+    /// at most [`SEND_OUT_WAIT`] in all: a center that stops right after a
+    /// bye that is only queued may end before the writer sent it.
+    pub async fn bye_sent(&self, reason: ByeReason) {
+        let out = lock(&self.wire).out.clone();
+        if let Some(out) = out {
+            let _ = tokio::time::timeout(SEND_OUT_WAIT, async {
+                if out.send(Out::Bye(reason)).await.is_ok() {
+                    // The writer ends right after the bye, and its queue
+                    // closes with it.
+                    out.closed().await;
+                }
+            })
+            .await;
+        }
     }
 
     /// Whether the link answers a ping within `wait`.
@@ -1347,7 +1388,18 @@ pub async fn run(
             _ => {}
         }
     }
-    drop(writer);
+    // The writer may still send what is queued, a bye above all; one stuck
+    // on a node that reads nothing would keep the socket for as long as the
+    // kernel keeps trying.
+    tokio::spawn(async move {
+        let mut writer = writer;
+        if tokio::time::timeout(SEND_OUT_WAIT, &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+        }
+    });
     // A connection that dropped without a bye parks a link the node can
     // resume; its calls wait for the grace.
     if !said_bye && link.park(conn) {
@@ -1562,6 +1614,148 @@ mod tests {
         assert!(held.is_err(), "the queue had room");
         assert_eq!(link.waiting(), 1);
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// A `bye` to a node that reads nothing, whose send queue is full, gives
+    /// up after [`SEND_OUT_WAIT`]: a stop, a remove or the node's reconnect
+    /// would wait for it otherwise.
+    #[tokio::test(start_paused = true)]
+    async fn a_bye_to_a_node_that_reads_nothing_does_not_wait_for_ever() {
+        let (out, _rx) = mpsc::channel(1);
+        out.try_send(Out::Frame(WsMessage::text("{}"))).unwrap();
+        let link = Link::new("n1", String::new(), Limits::default(), out, None);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(60), link.bye(ByeReason::Shutdown))
+            .await
+            .expect("the bye waited for ever");
+        assert_eq!(started.elapsed(), SEND_OUT_WAIT);
+    }
+
+    /// A stop waits for its `bye` to be sent, not only queued: the runtime
+    /// ends right after, and a writer that has not run yet never sends it.
+    /// A writer that never gets to it holds the stop up for
+    /// [`SEND_OUT_WAIT`] at most.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_waits_until_the_bye_is_sent() {
+        let (out, mut rx) = mpsc::channel(4);
+        let link = Link::new("n1", String::new(), Limits::default(), out, None);
+        let writer = tokio::spawn(async move {
+            let Some(Out::Bye(_)) = rx.recv().await else {
+                panic!("no bye")
+            };
+            // The bye is on its way to the node; the writer ends after it.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let started = tokio::time::Instant::now();
+        link.bye_sent(ByeReason::Shutdown).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert!(writer.is_finished(), "the bye was only queued");
+
+        let (out, _rx) = mpsc::channel(4);
+        let link = Link::new("n2", String::new(), Limits::default(), out, None);
+        let started = tokio::time::Instant::now();
+        link.bye_sent(ByeReason::Shutdown).await;
+        assert_eq!(started.elapsed(), SEND_OUT_WAIT);
+    }
+
+    /// A node that reads nothing, but ends its link, does not keep the
+    /// socket: the writer, stuck on it, is given up [`SEND_OUT_WAIT`] after
+    /// the reader ended, and the socket closes with it.
+    #[tokio::test(start_paused = true)]
+    async fn a_writer_stuck_on_a_node_that_reads_nothing_is_given_up() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        nerve_transport::init_crypto();
+        let dir = tempfile::tempdir().unwrap();
+        let center = Center::open(crate::center::Options {
+            state_dir: dir.path().to_path_buf(),
+            name: None,
+            public_url: "http://127.0.0.1:7443".into(),
+            log: None,
+            log_level: None,
+        })
+        .unwrap();
+        let key = nerve_transport::keys::NodeKey::generate().unwrap();
+        let code =
+            nerve_proto::link::PairLink::parse(center.new_pairing()["link"].as_str().unwrap())
+                .unwrap()
+                .code;
+        let (status, paired) = center.pair(
+            json!({"code": code, "name": "box", "platform": "linux", "arch": "x86_64",
+                   "public_key": key.public_hex()})
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "{paired}");
+        let node_id = paired["node_id"].as_str().unwrap().to_string();
+
+        // A pipe too small for what the center sends, which the node never
+        // reads.
+        let (client, server) = tokio::io::duplex(1024);
+        let server =
+            WebSocketStream::from_raw_socket(Box::new(server) as BoxIo, Role::Server, None).await;
+        let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let peer = "127.0.0.1:50000".parse().unwrap();
+        tokio::spawn(run(
+            center.clone(),
+            server,
+            node_id.clone(),
+            crate::listen::Admitted::for_test(peer),
+        ));
+        let next = async |c: &mut WebSocketStream<tokio::io::DuplexStream>| {
+            let Some(Ok(WsMessage::Text(t))) = c.next().await else {
+                panic!("no text")
+            };
+            Message::decode(&t).unwrap()
+        };
+        let Message::Notification { params, .. } = next(&mut client).await else {
+            panic!("no challenge")
+        };
+        let nonce = msg::unhex(params["nonce"].as_str().unwrap()).unwrap();
+        let hello = json!({
+            "node_id": node_id,
+            "auth": {"sig": key.sign_connect(&center.id(), &nonce)},
+            "versions": ["0"],
+            "software": {"name": "t", "version": "1"},
+            "rev": 1,
+            "features": [],
+            "resume": {"link": msg::hex(&nerve_transport::keys::random_bytes(16)), "got": 0},
+        });
+        client
+            .send(WsMessage::text(
+                Message::notification(method::HELLO, hello).encode(),
+            ))
+            .await
+            .unwrap();
+        let Message::Notification { method: m, .. } = next(&mut client).await else {
+            panic!("no welcome")
+        };
+        assert_eq!(m, method::WELCOME);
+        // More than the pipe holds: the writer waits on the node.
+        center
+            .link(&node_id)
+            .expect("the link is up")
+            .notify("filler", json!({"pad": "x".repeat(8192)}))
+            .await;
+        // The node ends its link and still reads nothing.
+        let bye = Message::notification(method::BYE, json!({"reason": "shutdown"}));
+        client.send(WsMessage::text(bye.encode())).await.unwrap();
+        tokio::time::sleep(SEND_OUT_WAIT - Duration::from_secs(1)).await;
+        assert!(
+            client
+                .send(WsMessage::Ping(Vec::new().into()))
+                .await
+                .is_ok(),
+            "the socket closed before the writer's time was up"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            client
+                .send(WsMessage::Ping(Vec::new().into()))
+                .await
+                .is_err(),
+            "the center still holds the socket"
+        );
     }
 
     /// A `stream.open` in flight when the link resumes fails, and is not

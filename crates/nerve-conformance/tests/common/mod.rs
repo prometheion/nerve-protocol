@@ -47,70 +47,78 @@ pub fn bin(name: &str) -> PathBuf {
     dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// A port that was free a moment ago.
-pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 /// The command of a `nerve-center` with its own state folder, a node
-/// listener on a free port (pinned TLS when `tls`, else plain loopback) and
-/// the web UI on a free port; the port of the node listener.
-fn center_command(state: &Path, tls: bool, extra: &[(&str, &str)]) -> (Command, u16) {
-    let node_port = free_port();
+/// listener (pinned TLS when `tls`, else plain loopback) and the web UI,
+/// each on a port the center binds itself ([`Started`] reads them back): a
+/// port a test took and let go may be taken by another socket before the
+/// center binds it.
+fn center_command(state: &Path, tls: bool, extra: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(bin("nerve-center"));
     cmd.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", state)
         .env("NERVE_CENTER_STATE_DIR", state)
         .env("NERVE_CENTER_NAME", "e2e-center")
-        .env("NERVE_CENTER_LISTEN", format!("127.0.0.1:{node_port}"))
+        .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
         .env("NERVE_CENTER_UI", "127.0.0.1:0")
         .env("NERVE_CENTER_LOG", "info")
         .env("NERVE_CENTER_CALL_WAIT", "20");
     if tls {
-        cmd.env(
-            "NERVE_CENTER_PUBLIC_URL",
-            format!("https://127.0.0.1:{node_port}"),
-        );
+        cmd.env("NERVE_CENTER_PUBLIC_URL", "https://127.0.0.1:{port}");
     } else {
-        cmd.env("NERVE_CENTER_PLAIN_LOOPBACK", "true").env(
-            "NERVE_CENTER_PUBLIC_URL",
-            format!("http://127.0.0.1:{node_port}"),
-        );
+        cmd.env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+            .env("NERVE_CENTER_PUBLIC_URL", "http://127.0.0.1:{port}");
     }
     for (k, v) in extra {
         cmd.env(k, v);
     }
-    (cmd, node_port)
+    cmd
 }
 
-/// Passes the center's stderr on to ours and returns the address of its web
-/// UI, once it names it.
-fn ui_address(child: &mut Child) -> String {
-    let (ui_tx, ui_rx) = channel();
-    let stderr = child.stderr.take().unwrap();
-    std::thread::spawn(move || {
-        let mut sent = false;
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("[nerve-center] {line}");
-            if !sent && let Some(i) = line.find("web UI at http://") {
-                let addr = line[i + "web UI at http://".len()..]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let _ = ui_tx.send(addr);
-                sent = true;
+/// Where a started center listens, as its start line names it.
+struct Started {
+    node_port: u16,
+    /// `host:port` of the web UI.
+    ui: String,
+    /// `host:port` of MCP over HTTP, when it serves it.
+    mcp: Option<String>,
+}
+
+impl Started {
+    /// Passes the center's stderr on to ours and reads its start line.
+    fn read(child: &mut Child) -> Started {
+        let (tx, rx) = channel();
+        let stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut sent = false;
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("[nerve-center] {line}");
+                if !sent && let Some(s) = Started::of(&line) {
+                    let _ = tx.send(s);
+                    sent = true;
+                }
             }
-        }
-    });
-    ui_rx
-        .recv_timeout(Duration::from_secs(60))
-        .expect("nerve-center names its web UI address")
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("nerve-center names its node port and web UI address")
+    }
+
+    /// The start line's places: `(listening on 127.0.0.1:<port>)` for
+    /// nodes, `MCP at http://<addr>/mcp` and `web UI at http://<addr>`.
+    fn of(line: &str) -> Option<Started> {
+        let after = |word: &str| {
+            let i = line.find(word)?;
+            line[i + word.len()..]
+                .split([' ', ',', ')'])
+                .next()
+                .map(str::to_string)
+        };
+        let nodes = after("(listening on ")?;
+        let node_port = nodes.rsplit(':').next()?.parse().ok()?;
+        let ui = after("web UI at http://")?;
+        let mcp = after("MCP at http://").map(|m| m.trim_end_matches("/mcp").to_string());
+        Some(Started { node_port, ui, mcp })
+    }
 }
 
 /// A `nerve-center` that serves MCP over HTTP with a harness token and has no
@@ -129,13 +137,12 @@ impl HttpCenter {
     pub const CALL_WAIT: Duration = Duration::from_secs(2);
 
     pub fn start(state: &Path, token: &str) -> HttpCenter {
-        let mcp_addr = format!("127.0.0.1:{}", free_port());
         let wait = Self::CALL_WAIT.as_secs().to_string();
-        let (mut cmd, _) = center_command(
+        let mut cmd = center_command(
             state,
             false,
             &[
-                ("NERVE_CENTER_MCP", &mcp_addr),
+                ("NERVE_CENTER_MCP", "127.0.0.1:0"),
                 ("NERVE_CENTER_HARNESS_TOKEN", token),
                 ("NERVE_CENTER_CALL_WAIT", &wait),
             ],
@@ -146,15 +153,15 @@ impl HttpCenter {
             .stderr(Stdio::piped())
             .spawn()
             .expect("nerve-center starts");
-        let ui = ui_address(&mut child);
+        let started = Started::read(&mut child);
         HttpCenter {
             child,
+            mcp_addr: started.mcp.expect("nerve-center names its MCP address"),
             ui: Ui {
-                addr: ui,
+                addr: started.ui,
                 state: state.to_path_buf(),
                 session: Arc::new(Mutex::new(None)),
             },
-            mcp_addr,
             token: token.to_string(),
         }
     }
@@ -183,7 +190,7 @@ impl Mcp {
     /// Starts a center in `state`. `tls` picks a TLS node listener (pinned
     /// through the link) over plain HTTP on loopback.
     pub fn start(state: &Path, tls: bool, extra: &[(&str, &str)]) -> Mcp {
-        let (mut cmd, node_port) = center_command(state, tls, extra);
+        let mut cmd = center_command(state, tls, extra);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -205,18 +212,18 @@ impl Mcp {
                 }
             }
         });
-        let ui = ui_address(&mut child);
+        let started = Started::read(&mut child);
         let mut m = Mcp {
             child,
             stdin,
             out,
             notes: Vec::new(),
             ui: Ui {
-                addr: ui,
+                addr: started.ui,
                 state: state.to_path_buf(),
                 session: Arc::new(Mutex::new(None)),
             },
-            node_port,
+            node_port: started.node_port,
             next_id: 1,
         };
         let r = m.request(

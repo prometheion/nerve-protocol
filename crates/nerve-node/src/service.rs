@@ -892,10 +892,15 @@ impl System for Host {
 
 const LINUX_ONLY: &str = "works on Linux with systemd only; elsewhere run `nerve-node run` under your own service manager";
 
+/// What `what` says without root on Linux.
+pub(crate) fn needs_root(what: &str) -> String {
+    format!("{what} needs root: run `sudo nerve-node {what}`")
+}
+
 /// Whether `what` can run here: Linux, root and systemd.
 fn supported(sys: &dyn System, what: &str) -> Result<(), String> {
     if !sys.is_root() && cfg!(target_os = "linux") {
-        return Err(format!("{what} needs root: run `sudo nerve-node {what}`"));
+        return Err(needs_root(what));
     }
     supported_without_root(sys, what)
 }

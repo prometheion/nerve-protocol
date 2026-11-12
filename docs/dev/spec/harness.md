@@ -22,7 +22,7 @@ and `uninstall`, which run the center as a systemd service on Linux
 | `--state-dir` | `NERVE_CENTER_STATE_DIR` | `$XDG_STATE_HOME/nerve-center`, `~/.local/state/nerve-center`, `%LOCALAPPDATA%\nerve-center` | identity, paired nodes, statistics |
 | `--name` | `NERVE_CENTER_NAME` | `nerve-center` | center name shown to nodes |
 | `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | where nodes connect |
-| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links |
+| `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links; `{port}` in it is the port the center got, for a `--listen` with port 0 |
 | `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | plain HTTP for nodes, only on a loopback `--listen` |
 | `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | web UI address, or `off` |
 | `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off` (center only), `http` (HTTP MCP at `127.0.0.1:7481`) or an HTTP MCP address |

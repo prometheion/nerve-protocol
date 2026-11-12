@@ -83,7 +83,7 @@ See [building](building.md).
 
 | | Distributions |
 |---|---|
-| Tested | Ubuntu 22.04 and 24.04, Debian 12. CI installs the released programs on each and runs the node's and the center's whole install, use and uninstall there, on x86_64 and on Ubuntu 24.04 also on aarch64 |
+| Tested | Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13. CI installs the released programs on each and runs the node's and the center's whole install, use and uninstall there, on x86_64 and on Ubuntu 24.04 also on aarch64 |
 | Expected to work, not tested | Fedora, Arch Linux, and other distributions with systemd |
 | Not supported as a service | Distributions without systemd (Alpine with OpenRC, Void with runit, containers without an init, WSL 1): run the node by hand ([below](#a-node-you-run-by-hand)) |
 

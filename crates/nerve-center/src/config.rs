@@ -129,7 +129,7 @@ pub struct Args {
         global = true
     )]
     pub listen: String,
-    /// The URL put into pairing links; https://<host name>:<port> by default.
+    /// The URL in pairing links; `{port}` in it is the listening port
     #[arg(long, env = "NERVE_CENTER_PUBLIC_URL", global = true)]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP, on a loopback --listen only
@@ -369,10 +369,11 @@ impl Args {
         self.ui.eq_ignore_ascii_case("off")
     }
 
-    /// The public URL, from the flag or from the host name and the port.
+    /// The public URL, from the flag (with `{port}` as `port`) or from the
+    /// host name and the port.
     pub fn public_url(&self, port: u16) -> String {
         if let Some(u) = &self.public_url {
-            return u.clone();
+            return u.replace("{port}", &port.to_string());
         }
         if self.plain_loopback {
             return format!("http://127.0.0.1:{port}");
@@ -438,6 +439,14 @@ pub fn address_url(a: &str) -> String {
     }
 }
 
+/// [`address_url`] of `a` with the port the listener got, for a port 0.
+pub fn address_url_on(a: &str, port: u16) -> String {
+    match a.rsplit_once(':') {
+        Some((host, _)) => address_url(&format!("{host}:{port}")),
+        None => address_url(a),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// By hand at a terminal the center says what it waits for (round 2,
@@ -465,6 +474,16 @@ mod tests {
         assert_eq!(address_url("[::]:7481"), format!("https://{host}:7481"));
         assert_eq!(address_url("127.0.0.1:7481"), "http://127.0.0.1:7481");
         assert_eq!(address_url("10.0.0.5:7481"), "https://10.0.0.5:7481");
+        // A port 0 is named by the port the listener got.
+        assert_eq!(
+            address_url_on("0.0.0.0:0", 4321),
+            format!("https://{host}:4321")
+        );
+        assert_eq!(
+            address_url_on("[::]:0", 4321),
+            format!("https://{host}:4321")
+        );
+        assert_eq!(address_url_on("10.0.0.5:0", 4321), "https://10.0.0.5:4321");
     }
 
     /// Every command answers `--help` and `-h`, not only the top level
@@ -688,6 +707,15 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(a.public_url(9), "http://127.0.0.1:9");
+        // A URL given names the port the center got for a --listen of
+        // port 0 (#40, shared-2).
+        let given = |url: &str| {
+            Args::try_parse_from(["nerve-center", "--public-url", url])
+                .unwrap()
+                .public_url(4711)
+        };
+        assert_eq!(given("https://127.0.0.1:{port}"), "https://127.0.0.1:4711");
+        assert_eq!(given("https://c.example:7443"), "https://c.example:7443");
         assert!(a.ui_off());
         // The web UI always logs in with the owner token: there is no
         // password of its own and no switch to turn the login off.

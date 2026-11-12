@@ -98,6 +98,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     }
 
     let mut mcp = None;
+    let mut mcp_url = None;
     let told = |mode: &str, url: Option<String>, pin: Option<String>| {
         if let Some(p) = &page {
             p.set_mcp(mode, url, pin);
@@ -115,10 +116,18 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         // The URL a harness on this machine uses, or the address it was
         // given beyond it, with the certificate's pin to trust.
         let url = match tls {
-            true => format!("{}/mcp", crate::config::address_url(at)),
+            true => format!(
+                "{}/mcp",
+                crate::config::address_url_on(at, server.local_addr().port())
+            ),
             false => format!("http://{}/mcp", server.local_addr()),
         };
-        told("http", Some(url), tls.then(|| center.pin()).flatten());
+        told(
+            "http",
+            Some(url.clone()),
+            tls.then(|| center.pin()).flatten(),
+        );
+        mcp_url = Some(url);
         if !has_token {
             center.log().record(
                 Level::Warn,
@@ -165,11 +174,12 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         Level::Info,
         None,
         &format!(
-            "nerve-center {}: center {} ({}) for nodes at {}{}",
+            "nerve-center {}: center {} ({}) for nodes at {} (listening on {nodes}){}{}",
             env!("CARGO_PKG_VERSION"),
             center.name(),
             center.id(),
             center.public_url(),
+            mcp_url.map(|u| format!(", MCP at {u}")).unwrap_or_default(),
             ui.map(|u| format!(
                 ", web UI at {}://{u}",
                 if is_loopback(&u.to_string()) {
@@ -296,7 +306,16 @@ pub async fn run(args: Args) -> Result<(), String> {
     nerve_service::win::dispatch::running();
     match args.mcp {
         McpMode::Stdio => {
-            crate::mcp::serve_stdio(running.center.clone()).await;
+            // A harness may end its server with SIGTERM, and a Ctrl+C in its
+            // terminal sends SIGINT: both stop the center cleanly, with a
+            // bye to the nodes and the statistics written.
+            tokio::select! {
+                _ = crate::mcp::serve_stdio(running.center.clone()) => {}
+                _ = signal() => {
+                    running.stop().await;
+                    return Ok(());
+                }
+            }
             // The harness that started us is gone; harnesses that attached
             // keep the center until they end too.
             while running.center.session_count() > 0 {

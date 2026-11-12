@@ -57,12 +57,18 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
    Linux binaries that were just built, the ones to be released, with
    `NERVE_CENTER_BIN` and `NERVE_NODE_BIN` set to them. `x86_64` runs on an
    x86_64 runner and `aarch64` on an arm64 runner. Then it installs them on
-   Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, and
-   runs the real-machine tests, the keyring path and the center as a service
-   there, as CI does (`.github/workflows/installed.yml`,
-   [building](building.md#checks)). Windows binaries, with `windows`, are
-   built but not run by the workflow.
-4. Publishes a GitHub Release with `SHA256SUMS` and the five Linux binaries:
+   Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04), Ubuntu 26.04 and
+   Debian 12 and 13, and runs the real-machine tests, the keyring path and
+   the center as a service there, as CI does
+   (`.github/workflows/installed.yml`, [building](building.md#checks)). With
+   `windows`, `windows-installed` does the same with the Windows programs it
+   built, as CI's `windows-installed` does with debug ones
+   (`.github/workflows/installed-windows.yml`); its test programs are debug
+   builds of the same commit (`.github/scripts/windows-test-programs.sh`).
+   The release's Windows tests are these installed ones, not the whole
+   `cargo test --workspace` of CI's `windows` job.
+4. Publishes, only once every job above passed (the Windows ones too, with
+   `windows`), a GitHub Release with `SHA256SUMS` and the five Linux binaries:
    `nerve-center` and `nerve-node` for each machine, and
    `nerve-node-desktop-x86_64-linux`, which also comes as
    `nerve-node-desktop_<version>_amd64.deb` and

@@ -525,7 +525,7 @@ async fn prepare_into(
     let staged = staged_model(state, p.model_id);
     set(shared, |s| s.phase = Phase::Verifying);
     let have = model.metadata().map(|m| m.len()).unwrap_or(0) == bytes
-        && sha256_file(&model).as_deref() == Ok(sha);
+        && sha256_of(&model).await.as_deref() == Ok(sha);
     if have {
         // A download an earlier, interrupted install left is not needed.
         let _ = std::fs::remove_file(&staged);
@@ -643,7 +643,7 @@ async fn stage_build(
     .await
     .map_err(|e| format!("downloading {asset}: {e}"))?;
     set(shared, |s| s.phase = Phase::Unpacking);
-    unpack(&archive, staging)?;
+    unpack_off(&archive, staging).await?;
     let _ = std::fs::remove_file(&archive);
     if find_file(staging, server_name()).is_none() {
         return Err("the llama.cpp archive has no llama-server in it".into());
@@ -696,7 +696,7 @@ async fn download_file(
             ));
         }
     }
-    if sha256_file(&tmp)?.as_str() != sha {
+    if sha256_of(&tmp).await?.as_str() != sha {
         let _ = std::fs::remove_file(&tmp);
         return Err("the download does not match its pinned SHA-256".into());
     }
@@ -880,6 +880,25 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// [`sha256_file`] on a thread for blocking work: the model is 1 to 3 GB,
+/// and a runtime worker that hashes it holds up the links, MCP calls and
+/// pages it serves meanwhile (on a 2-vCPU machine half of the center's).
+async fn sha256_of(path: &Path) -> Result<String, String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sha256_file(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// [`unpack`] on a thread for blocking work, as [`sha256_of`]: `tar` runs
+/// for seconds.
+async fn unpack_off(archive: &Path, dest: &Path) -> Result<(), String> {
+    let (archive, dest) = (archive.to_path_buf(), dest.to_path_buf());
+    tokio::task::spawn_blocking(move || unpack(&archive, &dest))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The SHA-256 of a file, lower-case hex.
@@ -1103,6 +1122,70 @@ mod tests {
         assert!(e.contains("unsafe path"), "{e}");
         assert!(!evil.exists(), "an entry was written outside the target");
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    }
+
+    /// Feeds `data` to the FIFO `fifo` once the test says `go` (or after
+    /// 5 s); `true` when the test said it first, so the test ran while the
+    /// other side waited for the data.
+    #[cfg(unix)]
+    fn feed(
+        fifo: &Path,
+        data: Vec<u8>,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<bool>) {
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a terminated path and a mode.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (go, said) = std::sync::mpsc::channel();
+        let fifo = fifo.to_path_buf();
+        let fed = std::thread::spawn(move || {
+            let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+            let first = said.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            let _ = std::io::Write::write_all(&mut w, &data);
+            first
+        });
+        (go, fed)
+    }
+
+    /// The hash of the model and the unpack of the build run off the
+    /// runtime's workers: on this one-thread runtime the test's own task
+    /// runs while they wait for their file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hash_and_unpack_hold_no_runtime_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("model");
+        let (go, fed) = feed(&fifo, b"abc".to_vec());
+        let hash = tokio::spawn(async move { sha256_of(&fifo).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = go.send(());
+        assert_eq!(
+            hash.await.unwrap().unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(fed.join().unwrap(), "the hash held the only worker");
+
+        // An archive `unpack` refuses after its list, so it reads it once.
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(dir.path().join("evil.txt"), b"x").unwrap();
+        let tar = std::process::Command::new("tar")
+            .arg("-cPf")
+            .arg("-")
+            .arg("-C")
+            .arg(&src)
+            .arg("../evil.txt")
+            .output()
+            .unwrap()
+            .stdout;
+        let archive = dir.path().join("build.tar");
+        let (go, fed) = feed(&archive, tar);
+        let dest = dir.path().to_path_buf();
+        let unpacked = tokio::spawn(async move { unpack_off(&archive, &dest).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = go.send(());
+        let e = unpacked.await.unwrap().unwrap_err();
+        assert!(e.contains("unsafe path"), "{e}");
+        assert!(fed.join().unwrap(), "the unpack held the only worker");
     }
 
     /// `commit` swaps a staged build and model in, keeps nothing of the old

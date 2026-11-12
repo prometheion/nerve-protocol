@@ -943,6 +943,54 @@ mod unix {
         Ok(listener)
     }
 
+    /// [`bind`] for a server with a token ([`write_token`]): the token is
+    /// written before anything at `path` takes a connection, since a socket
+    /// listens as soon as it is bound, and a client that connected first
+    /// read no token or the one of a run before and was refused. The socket
+    /// is bound beside `path` and renamed into place once the token is
+    /// there.
+    pub async fn bind_with_token(path: &Path) -> std::io::Result<(UnixListener, String)> {
+        bind_then(path, || write_token(path)).await
+    }
+
+    /// [`bind`], running `before` while nothing at `path` takes a connection
+    /// yet.
+    async fn bind_then<T>(
+        path: &Path,
+        before: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<(UnixListener, T)> {
+        if let Some(dir) = path.parent() {
+            crate::files::create_private_dir(dir)?;
+        }
+        if path.exists() && UnixStream::connect(path).await.is_ok() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("{} is in use: is the node running already?", path.display()),
+            ));
+        }
+        // A name no longer than `path`'s own: a socket path is at most 107
+        // bytes, and a longer staging name would take 4 off the longest state
+        // folder that works.
+        let new = path.with_extension("new");
+        let _ = std::fs::remove_file(&new);
+        let listener = UnixListener::bind(&new)?;
+        let made = (|| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o600))?;
+            let made = before()?;
+            // Over a socket file a run before left behind.
+            std::fs::rename(&new, path)?;
+            Ok(made)
+        })();
+        match made {
+            Ok(made) => Ok((listener, made)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&new);
+                Err(e)
+            }
+        }
+    }
+
     /// Binds `path` for every account, mode 0666, in a folder that is there
     /// already: a socket whose server checks each caller itself
     /// ([`serve_anyone`]). A stale socket file is replaced; a live one is an
@@ -980,7 +1028,7 @@ mod unix {
         }
     }
 
-    /// Makes a token for the server on `socket` that [`bind`] just made: a
+    /// Makes a token for the server on `socket` ([`bind_with_token`]): a
     /// new one per start, in [`token_file`], readable by its user only. The
     /// server compares what requests carry with it ([`token_ok`]).
     pub fn write_token(socket: &Path) -> std::io::Result<String> {
@@ -996,8 +1044,8 @@ mod unix {
     }
 
     /// The request a client sends on the socket `path`. The token is read
-    /// after the connection is made: a server writes it right after it binds
-    /// the socket.
+    /// after the connection is made: a server writes it before its socket
+    /// takes one ([`bind_with_token`]).
     pub fn request_line(path: &Path, method: &str, params: Value) -> Value {
         let token = std::fs::read_to_string(token_file(path)).ok();
         json!(CtlRequest {
@@ -1084,6 +1132,47 @@ mod unix {
         use super::*;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::sync::mpsc;
+
+        /// The server's token is in place before its socket takes a
+        /// connection, also over the socket and the token a run before left
+        /// behind: a client right after a start was refused for want of it
+        /// (#40, shared-1).
+        #[tokio::test]
+        async fn the_token_is_written_before_the_socket_answers() {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("run/ctl.sock");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            drop(std::os::unix::net::UnixListener::bind(&p).unwrap());
+            std::fs::write(token_file(&p), "old").unwrap();
+            let answers = || std::os::unix::net::UnixStream::connect(&p).is_ok();
+            let (listener, before) = bind_then(&p, || Ok(answers())).await.unwrap();
+            assert!(!before, "the socket answered before the token was there");
+            assert!(answers());
+            drop(listener);
+            let (_listener, token) = bind_with_token(&p).await.unwrap();
+            assert_eq!(std::fs::read_to_string(token_file(&p)).unwrap(), token);
+            assert!(!p.with_extension("new").exists());
+        }
+
+        /// The longest socket path that works still binds: the socket is
+        /// bound under a name beside it, which may not be longer than the
+        /// path (a socket path is at most 107 bytes on Linux).
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn the_longest_socket_path_still_binds() {
+            let d = tempfile::tempdir().unwrap();
+            let name = "ctl.sock";
+            let pad = 107usize
+                .checked_sub(d.path().as_os_str().len() + 2 + name.len())
+                .filter(|p| *p > 0)
+                .expect("a temp folder short enough");
+            let dir = d.path().join("x".repeat(pad));
+            std::fs::create_dir(&dir).unwrap();
+            let p = dir.join(name);
+            assert_eq!(p.as_os_str().len(), 107);
+            let (_listener, token) = bind_with_token(&p).await.unwrap();
+            assert_eq!(std::fs::read_to_string(token_file(&p)).unwrap(), token);
+        }
 
         /// A file sent with the request on the open socket reaches the
         /// handler, open, and only there: the line still reads whole, a
@@ -1812,8 +1901,8 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{
-    CANNOT_CONNECT, bind, bind_open, call, follow, node_is_there, request_line, send_files, serve,
-    serve_anyone, serve_on, serve_providers, token_ok, write_token,
+    CANNOT_CONNECT, bind, bind_open, bind_with_token, call, follow, node_is_there, request_line,
+    send_files, serve, serve_anyone, serve_on, serve_providers, token_ok, write_token,
 };
 
 #[cfg(test)]

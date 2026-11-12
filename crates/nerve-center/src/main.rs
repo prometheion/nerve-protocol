@@ -156,7 +156,12 @@ fn main() -> std::process::ExitCode {
             eprintln!("{say}");
         }
     }
-    match rt.block_on(nerve_center::server::run(args)) {
+    let ran = rt.block_on(nerve_center::server::run(args));
+    // A center stopped by a signal while its harness still holds the pipe
+    // open has a read of stdin waiting on a runtime thread, which would hold
+    // up the runtime's end for as long as the pipe stays open.
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
+    match ran {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");

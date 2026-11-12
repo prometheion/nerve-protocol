@@ -40,7 +40,13 @@
 #   actions, its web UI in Chrome, what a standard account and the
 #   administrator's other account can and cannot do to it and to its pipe, a
 #   second center that attaches to a first, backup and restore, update (also
-#   to another build) and uninstall (crates/nerve-center/tests/win_service.rs).
+#   to another build) and uninstall (crates/nerve-center/tests/win_service.rs);
+# - what the install puts on the machine as Windows has it: the Start menu's
+#   link, the handler of nerve:// links, the entry in Apps & features; then
+#   the entry's quiet uninstall (winget's), which keeps the data, and
+#   `--silent`, which installs again without a question.
+# The release calls it too, with the release-profile programs it is about to
+# publish.
 # A test that skips fails the job. The account's password is masked in the
 # log and goes nowhere but the tests of this job.
 name: Installed on Windows
@@ -49,7 +55,7 @@ on:
   workflow_call:
     inputs:
       programs:
-        description: "The artifact with nerve-node-desktop.exe and nerve-center.exe"
+        description: "The artifact with nerve-node-desktop.exe and nerve-center.exe (CI's debug ones, or the release's)"
         type: string
         required: true
       tests:
@@ -164,6 +170,33 @@ jobs:
           $run = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\nerve-run' }
           if (-not $run) { throw 'nerve-run has no profile' }
           if ((Get-Service nerve-run-profile).Status -ne 'Running') { throw 'nerve-run-profile does not run' }
+      # What the install put on the machine, read as Windows reads it: the
+      # Start menu's link, the handler of nerve:// links, and the entry in
+      # Apps & features with the quiet uninstall winget runs.
+      - name: The Start menu, nerve:// and Apps & features
+        run: |
+          $exe = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk"
+          if (-not (Test-Path $link)) { throw "no Start menu link at $link" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
+          if ($target -ne $exe) { throw "the Start menu link leads to $target, not $exe" }
+          $scheme = Get-Item 'Registry::HKEY_CLASSES_ROOT\nerve'
+          if ($null -eq $scheme.GetValue('URL Protocol')) { throw 'nerve is no URL protocol' }
+          $open = (Get-Item 'Registry::HKEY_CLASSES_ROOT\nerve\shell\open\command').GetValue('')
+          if ($open -ne "`"$exe`" `"%1`"") { throw "a nerve:// link runs $open" }
+          # The app's program has no console: piped, PowerShell waits for it.
+          $version = ((& $exe --version | Out-String).Trim() -split ' ')[-1]
+          $entry = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nerve'
+          $want = @{
+            DisplayName = 'Nerve'
+            DisplayVersion = $version
+            UninstallString = "`"$exe`" __desktop-uninstall"
+            QuietUninstallString = "`"$exe`" uninstall"
+          }
+          foreach ($k in $want.Keys) {
+            if ($entry.$k -ne $want[$k]) { throw "Apps & features: $k is '$($entry.$k)', not '$($want[$k])'" }
+          }
+          "the Start menu link, nerve:// and Apps & features (Nerve $version)" >> $env:GITHUB_STEP_SUMMARY
       - name: Sudo, providers, limits, the command account, the batch logon, a virtual disk
         run: |
           $runs = @(
@@ -242,6 +275,28 @@ jobs:
           Write-Host $said
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the center service test did not run' }
+      # winget's way: the entry's quiet uninstall, which keeps the data, and
+      # the silent install, which asks nothing and takes the owner and the
+      # data that stayed.
+      - name: The quiet uninstall keeps the data, --silent installs again
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nerve'
+          $quiet = (Get-ItemProperty $key).QuietUninstallString
+          if ($quiet -notmatch '^"([^"]+)" (\S+)$') { throw "a quiet uninstall of another form: $quiet" }
+          $exe, $arg = $Matches[1], $Matches[2]
+          & $exe $arg 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the quiet uninstall failed ($LASTEXITCODE)" }
+          if (Get-Service nerve -ErrorAction SilentlyContinue) { throw 'the service stays' }
+          if (Test-Path $key) { throw 'the Apps & features entry stays' }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk") { throw 'the Start menu link stays' }
+          if (Test-Path 'Registry::HKEY_CLASSES_ROOT\nerve') { throw 'the nerve:// handler stays' }
+          if (-not (Test-Path 'C:\ProgramData\Nerve\config\node.toml')) { throw 'the data went with it' }
+          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
+          & dist/nerve-node-desktop.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the silent install failed ($LASTEXITCODE)" }
+          if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the node does not run after the silent install' }
+          if (-not (Test-Path $key)) { throw 'no Apps & features entry after the silent install' }
+          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk")) { throw 'no Start menu link after the silent install' }
       - name: Uninstall
         if: success() || failure()
         run: |

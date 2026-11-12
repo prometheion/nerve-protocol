@@ -446,6 +446,58 @@ fn with_the_center(
     Ok(job)
 }
 
+/// Starts `cmd` so that the kernel kills it when the center ends, also by a
+/// signal or a hard kill that runs no Drop: llama-server is in a process
+/// group of its own, so neither a terminal's Ctrl+C nor `kill_on_drop`
+/// reaches it then, and it would keep its model in memory.
+/// `PR_SET_PDEATHSIG` follows the thread that forked, not the process, and
+/// a runtime worker may end before the center does (after `block_in_place`
+/// it can become a blocking thread that ends when idle), so the fork runs on
+/// a thread of its own that lives as long as the center.
+#[cfg(target_os = "linux")]
+async fn spawn_held(mut cmd: Command) -> std::io::Result<tokio::process::Child> {
+    type Fork = Box<dyn FnOnce() + Send>;
+    static FORKS: std::sync::OnceLock<Option<Mutex<std::sync::mpsc::Sender<Fork>>>> =
+        std::sync::OnceLock::new();
+    let center = std::process::id();
+    // SAFETY: prctl and getppid with plain integer arguments, both safe
+    // between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+            // A center that ended before the line above sends no signal.
+            if libc::getppid() as u32 != center {
+                return Err(std::io::Error::other("the center ended"));
+            }
+            Ok(())
+        });
+    }
+    let forks = FORKS.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Fork>();
+        std::thread::Builder::new()
+            .name("llama-server start".into())
+            .spawn(move || rx.into_iter().for_each(|fork| fork()))
+            .ok()
+            .map(|_| Mutex::new(tx))
+    });
+    let Some(forks) = forks else {
+        return Err(std::io::Error::other(
+            "cannot start the thread that starts llama-server",
+        ));
+    };
+    let runtime = tokio::runtime::Handle::current();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let fork: Fork = Box::new(move || {
+        let _in = runtime.enter();
+        let _ = tx.send(cmd.spawn());
+    });
+    lock(forks)
+        .send(fork)
+        .map_err(|_| std::io::Error::other("the thread that starts llama-server ended"))?;
+    rx.await
+        .map_err(|_| std::io::Error::other("the thread that starts llama-server ended"))?
+}
+
 async fn run_once(
     program: &PathBuf,
     args: &[String],
@@ -471,7 +523,11 @@ async fn run_once(
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = match cmd.spawn() {
+    #[cfg(target_os = "linux")]
+    let spawned = spawn_held(cmd).await;
+    #[cfg(not(target_os = "linux"))]
+    let spawned = cmd.spawn();
+    let mut child = match spawned {
         Ok(c) => c,
         Err(e) => return RunEnd::StartFailed(e.to_string()),
     };
@@ -759,6 +815,65 @@ mod tests {
     }
 
     use super::*;
+
+    /// The server ends with the center, also when the center is killed and
+    /// runs no Drop; and it does not end with the runtime thread that
+    /// started it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_server_ends_with_a_killed_center() {
+        const CHILD: &str = "NERVE_TEST_HELD_SERVER";
+        if std::env::var_os(CHILD).is_some() {
+            // The center: starts a long sleep from a runtime whose thread
+            // ends right after, says its pid and waits to be killed.
+            let pid = std::thread::spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut cmd = Command::new("sleep");
+                    cmd.arg("60");
+                    spawn_held(cmd).await.unwrap().id().unwrap()
+                })
+            })
+            .join()
+            .unwrap();
+            println!("held {pid}");
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let mut center = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checker::server::tests::the_server_ends_with_a_killed_center",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(center.stdout.take().unwrap());
+        let pid: i32 = std::io::BufRead::lines(out)
+            // The test harness may print the test's name on the same line.
+            .find_map(|l| l.ok()?.rsplit_once("held ")?.1.parse().ok())
+            .expect("the center says the server's pid");
+        // A zombie waits for its reaper; it no longer runs.
+        let runs = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| !r.starts_with(" Z")))
+        };
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(runs(), "the server ended with the thread that started it");
+        center.kill().unwrap();
+        center.wait().unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while runs() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!runs(), "the server outlived the killed center");
+    }
 
     #[test]
     fn cpu_and_gpu_args() {
