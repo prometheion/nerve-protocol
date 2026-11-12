@@ -94,7 +94,12 @@ without `-File` read their line again as commands, so a template with
 
 ## The center as a service
 
-In a terminal opened with **Run as administrator**, in the download folder:
+Double-click `nerve-center-x86_64-windows.exe`. After the UAC prompt it
+installs itself, and its window shows the web UI's address and the owner
+token until you press Enter. A newer one double-clicked later installs over
+it, and the settings stay. To give
+it a name or other settings, run it in a terminal opened with **Run as
+administrator**, in the download folder:
 
 ```powershell
 .\nerve-center-x86_64-windows.exe install --name lab

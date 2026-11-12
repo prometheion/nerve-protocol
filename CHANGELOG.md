@@ -96,8 +96,9 @@ and every limit is in
   services, which ask the first questions; tested on Ubuntu 22.04, 24.04 and
   26.04 and Debian 12 and 13 (x86_64), and Ubuntu 24.04 (aarch64).
 - Windows: the desktop app's installer (also `--silent`, and a quiet
-  uninstall that keeps the data), and `nerve-center install` in an
-  administrator's terminal, which puts the center on the machine's `Path`;
+  uninstall that keeps the data), and the center by a double-click (or
+  `nerve-center install` in an administrator's terminal), which installs it
+  as a service and puts it on the machine's `Path`;
   tested on Windows 11 Pro and Windows Server 2025.
 - `update` checks the download against the release's `SHA256SUMS` and puts
   the old program back if the new one does not start. The programs are not

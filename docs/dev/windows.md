@@ -156,7 +156,13 @@ rules, sudo, backups, update and uninstall. No terminal command is needed or
 offered. The center's `install` puts it in `%ProgramFiles%\Nerve` as
 `nerve-center.exe` and that folder on the machine's `Path` (its uninstall
 takes it off again), where a harness starts it, and runs it as a
-[service](#the-center-as-a-windows-service).
+[service](#the-center-as-a-windows-service). A double-click on the
+downloaded center runs that `install`: with no arguments, its console as
+stdin and alone on that console (`GetConsoleProcessList`), it starts itself
+again as `install` with `runas` (the UAC prompt), and the new window waits
+for Enter at its end (`nerve_service::win::console`). A harness gives a pipe
+on stdin and a terminal shares its console with the shell, so both still
+get the MCP center.
 
 ## The node as a service on Windows
 

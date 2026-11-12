@@ -88,10 +88,11 @@ center.
 
 ### On Windows
 
-1. For the center, in a terminal opened with **Run as administrator**, run
-   `.\nerve-center-x86_64-windows.exe install` in the download folder. It
-   puts the center on the `PATH` and prints the web UI's address and the
-   owner token, as on Linux.
+1. For the center, double-click `nerve-center-x86_64-windows.exe`. After the
+   UAC prompt it installs itself as a service, puts itself on the `PATH`, and
+   shows the web UI's address and the owner token, as on Linux. (Or run
+   `.\nerve-center-x86_64-windows.exe install` in a terminal opened with
+   **Run as administrator**.)
 2. On each machine the agent may use, double-click
    `nerve-node-desktop-x86_64-windows.exe`. It is not signed: SmartScreen
    asks, **More info**, **Run anyway**. Its installer asks for your Windows

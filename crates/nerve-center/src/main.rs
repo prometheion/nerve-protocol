@@ -43,6 +43,23 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
+    // A double-click in Explorer installs the center, as the desktop app
+    // installs the node: it starts itself again as `install` with the
+    // administrators' rights (the UAC prompt), in a window that stays open
+    // until it was read (#213).
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal;
+        if args.cmd.is_none()
+            && nerve_center::config::double_clicked(
+                std::env::args_os().len() - 1,
+                std::io::stdin().is_terminal(),
+                nerve_service::win::console::alone(),
+            )
+        {
+            return install_by_double_click();
+        }
+    }
     // An administrator's command takes the proxy and the trusted
     // certificates from the machine, not from the variables of the account
     // that other programs of it may set (round 7, security 2). No thread
@@ -104,13 +121,15 @@ fn main() -> std::process::ExitCode {
             }
             _ => nerve_center::backup::run(&state, cmd, &settle, &mut out),
         };
-        return match done {
+        let code = match done {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("nerve-center: {e}");
                 std::process::ExitCode::FAILURE
             }
         };
+        hold_own_window();
+        return code;
     }
     // The level of the settings replaces this one once the state is opened.
     nerve_transport::log::install(args.log.unwrap_or_default(), true);
@@ -147,13 +166,15 @@ fn main() -> std::process::ExitCode {
                 value.map(|v| (*var, v))
             })
             .collect();
-        return match rt.block_on(nerve_center::service::execute(cmd, &given, &set, &mut out)) {
+        let code = match rt.block_on(nerve_center::service::execute(cmd, &given, &set, &mut out)) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("nerve-center: {e}");
                 std::process::ExitCode::FAILURE
             }
         };
+        hold_own_window();
+        return code;
     }
     // Started by hand at a terminal, it would seem to hang: it waits for a
     // harness on stdin.
@@ -176,6 +197,38 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Keeps a window of its own open until the person has read it: the one
+/// the double-click's `install` runs in, which closes with the program.
+fn hold_own_window() {
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() && nerve_service::win::console::alone() {
+            nerve_service::win::console::hold(&mut std::io::stdout());
+        }
+    }
+}
+
+/// What a double-click does: `install` again with the administrators'
+/// rights, in a window of its own; this window closes once that started.
+#[cfg(windows)]
+fn install_by_double_click() -> std::process::ExitCode {
+    let started = std::env::current_exe()
+        .map_err(|e| format!("this program: {e}"))
+        .and_then(|exe| nerve_service::win::console::run_elevated(&exe, "install"));
+    match started {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "nerve-center: a double-click installs the center as a service, which needs the administrator rights: {e}. Or run `{} install` in a terminal opened with Run as administrator.",
+                nerve_center::config::started_as(std::env::args_os().next())
+            );
+            nerve_service::win::console::hold(&mut std::io::stderr());
             std::process::ExitCode::FAILURE
         }
     }

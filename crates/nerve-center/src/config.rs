@@ -427,6 +427,15 @@ pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool, program: &str) ->
     })
 }
 
+/// Whether a double-click in Explorer started the center: no arguments,
+/// a console of its own (`alone`, nerve_service::win::console) and that
+/// console as stdin. A person meant to install it then, not to run a
+/// harness's center in a window that ends it when it closes; a harness
+/// gives a pipe on stdin, and a terminal shares its console with the shell.
+pub fn double_clicked(arguments: usize, stdin_is_terminal: bool, alone: bool) -> bool {
+    arguments == 0 && stdin_is_terminal && alone
+}
+
 /// The program as the person started it, for [`terminal_notice`]:
 /// `nerve-center` when it was found by name, else the path given.
 pub fn started_as(arg0: Option<std::ffi::OsString>) -> String {
@@ -517,6 +526,20 @@ mod tests {
         };
         assert_eq!(spaced, want);
         assert_eq!(terminal_notice(&McpMode::Off, true, "nerve-center"), None);
+    }
+
+    /// A double-click installs (#213): no arguments, a console of its own
+    /// as stdin. A harness (a pipe), a terminal (shared with the shell) and
+    /// any command keep the center as it was.
+    #[test]
+    fn only_a_double_click_installs() {
+        assert!(double_clicked(0, true, true));
+        assert!(!double_clicked(0, false, true), "a harness gives a pipe");
+        assert!(
+            !double_clicked(0, true, false),
+            "a terminal's shell shares it"
+        );
+        assert!(!double_clicked(1, true, true), "a command was given");
     }
 
     use super::*;
