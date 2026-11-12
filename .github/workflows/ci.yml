@@ -151,7 +151,9 @@ jobs:
               acl::tests::remove_all_gives_what_nerve_run_made_to_the_owner \
               acl::tests::remove_all_gives_no_file_with_a_second_name \
               acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale \
-              acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale
+              acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale \
+              grant_watch::tests::a_granted_folder_unmounted_and_mounted_again_is_watched_again \
+              grant_watch::tests::a_drive_mounted_over_a_watched_granted_folder_is_watched_instead
             cargo test --locked -p nerve-node --test own_proc -- --show-output --exact \
               a_root_node_keeps_its_rights_over_other_accounts_files
           } 2>&1 | tee "$RUNNER_TEMP/root.log"

@@ -35,8 +35,8 @@ leads to the detail.
 - A folder with `none` is closed to file calls. A command started in the
   folder around it still reaches it
   ([folders](../dev/policy-engine.md#folders-and-rights)).
-- A file you move into a granted folder keeps its own access list. Run
-  `nerve-node folder sync`
+- A file you move into a granted folder keeps its own access list for a
+  few seconds, until the node walks the folder
   ([why](../dev/sandbox-linux.md#a-folder-keeps-the-place-you-added)).
 - Without Landlock, `nerve-run` can read every file in your home that other
   accounts may read, once you give it a folder there. `status` warns

@@ -226,7 +226,9 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
    of every program it starts. The unit hands the node its cgroup (`Delegate=cpu memory
    pids`), so each command runs held to its [limits](sandbox-linux.md#limits-per-command), and keeps
    the node running when one of them is killed for its memory
-   (`OOMPolicy=continue`).
+   (`OOMPolicy=continue`). It raises the soft limit of open files to 65,536 and keeps the hard one at systemd's
+   default 524,288 (`LimitNOFILE=65536:524288`): the walks of a granted folder hold a file per
+   level, and a command can still raise its own limit as far as it could before.
 
 #### Root as the owner
 
@@ -266,7 +268,7 @@ Nothing in Nerve holds them back: the [guard](policy-engine.md#the-guard-against
 and the center's [action checker](action-checker.md#the-checker-as-the-owner-sets-it-up) only catch mistakes.
 `folder` mode and `allowlist` mode run as `nerve-run`, as on any node, and
 get the folders root gives them. `~` in folders and rules is `/root`.
-`status` says `owner: root is the owner: …` (`"owner_is_root": true` with
+`status` says `owner: root is the owner: …` (`"owner_full_rights": true` with
 `--json`), and so does the [desktop app](desktop.md). Root needs no polkit
 files to start and stop the service, so `install` writes none. No center can
 turn [sudo](policy-engine.md#sudo-as-the-owner-uses-it) on, since sudo checks no password of root's: root does,
@@ -393,7 +395,8 @@ No file lets the owner manage other units. Over SSH it needs `sudo`. Root
 as the owner needs none of these files, and `install` writes none for it. A
 stopped service starts again with the machine. A node that ends with an error
 or a signal starts again after 5 seconds (`Restart=on-failure`; on Windows
-the service's failure actions, three times a day at most). The node and the
+the service's failure actions, after a stop with an error too: 5 seconds,
+5 seconds, then every minute, without end). The node and the
 center end so on purpose when a lock is poisoned
 ([logging](logging.md#a-poisoned-lock)). `status` says whether
 the node is installed as a service, whether it runs, whether it starts with

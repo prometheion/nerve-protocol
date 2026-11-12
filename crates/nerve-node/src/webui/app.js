@@ -48,8 +48,8 @@ function pageOverview() {
       ? btn("Unlock", "primary", act(unlock), "ok", "unlock")
       : btn("Panic", "danger", act(panic), "ban", "panic")),
     o.locked ? banner("warn", "lock", "The node is locked: every link is closed and nothing runs until you unlock it.") : null,
-    o.owner_is_root ? banner("warn", "alert", "Root is the owner: user-mode commands run as root, with every right here.") : null,
-    o.owner_is_root ? more("root-owner", "More", el("p", { class: "meta" }, "Commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.")) : null,
+    o.owner_full_rights ? banner("warn", "alert", "Root is the owner: user-mode commands run as root, with every right here.") : null,
+    o.owner_full_rights ? more("root-owner", "More", el("p", { class: "meta" }, "Commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.")) : null,
     o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Centers", "The centers this machine is paired with.", null,
       o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerCard)) : empty("No center is paired yet.", "server")),

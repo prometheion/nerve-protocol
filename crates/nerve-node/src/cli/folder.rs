@@ -252,7 +252,10 @@ async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
     )
     .await
     {
-        Ok(v) => tell_grants_of(&v, out),
+        Ok(v) => {
+            tell_grants_of(&v, out);
+            grants_also(&v);
+        }
         Err(e) => {
             if let Some(line) = walk_goes_on(&e) {
                 let _ = writeln!(out, "{line}");
@@ -304,10 +307,12 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
                 crate::grants::apply_outside(paths, &cfg, &crate::paths::home_dir(), &mut |m| {
                     eprintln!("{m}")
                 })
-                .json(walked)
+                .report(walked)
+                .json()
             }
             Err(e) => return Err(walk_goes_on(&e).unwrap_or(e)),
         };
+        report_also(&v);
         for line in windows_sync_lines(&v) {
             let _ = writeln!(out, "{line}");
         }
@@ -322,6 +327,7 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
         )
         .await
         .map_err(sync_failed)?;
+        report_also(&v);
         if v["service"] != true {
             let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
             return Ok(());
@@ -341,6 +347,16 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
         let _ = paths;
         let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
         Ok(())
+    }
+}
+
+/// The report of the sync (`folder.grants`, crate::grants::Report) as the
+/// data of `folder sync --json`, beside its lines: the same fields on Linux
+/// and Windows.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn report_also(v: &Value) {
+    for k in ["errors", "stale", "unclosed", "failed", "skipped", "walked"] {
+        super::json::also(k, v[k].clone());
     }
 }
 
@@ -378,6 +394,13 @@ fn tell_grants_of(v: &Value, out: &mut dyn Write) {
     for line in grant_lines(v) {
         let _ = writeln!(out, "warning: {line}");
     }
+}
+
+/// What a folder change's `--json` says of the grants besides its lines:
+/// the errors and the stale folders, when there are any (`folder sync`
+/// gives the whole report instead, [`report_also`]).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn grants_also(v: &Value) {
     let errors = texts(&v["errors"]);
     if !errors.is_empty() {
         json::also("grant_errors", json!(errors));
@@ -1120,6 +1143,42 @@ mod tests {
             tell_grants(&paths, every, &mut Vec::new()).await;
             assert_eq!(got.lock().unwrap().last().unwrap().1["every"], want);
         }
+    }
+
+    /// `folder sync --json` gives the sync's report as its data, the same
+    /// fields on Linux and Windows (crate::grants::Report), beside its
+    /// lines.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_sync_json_gives_the_report() {
+        let (_d, paths) = setup(&["home"]);
+        let report = crate::grants::Report {
+            failed: vec!["/home/alice/usb".into()],
+            skipped: 2,
+            walked: 3,
+            ..Default::default()
+        };
+        let mut answer = report.json();
+        answer["service"] = json!(true);
+        grants_node(&paths, answer);
+        let cli = crate::cli::Cli::try_parse_from([
+            "nerve-node".as_ref(),
+            "--config-dir".as_ref(),
+            paths.config_dir.as_os_str(),
+            "--state-dir".as_ref(),
+            paths.state_dir.as_os_str(),
+            "--json".as_ref(),
+            "folder".as_ref(),
+            "sync".as_ref(),
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+        crate::cli::execute(cli, &mut out).await.unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        for (k, want) in report.json().as_object().unwrap() {
+            assert_eq!(&v[k], want, "{k}: {v}");
+        }
+        assert!(v["messages"].is_array(), "{v}");
     }
 
     /// A walk that outlasts the wait for the node's answer goes on: the

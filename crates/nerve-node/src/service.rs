@@ -352,6 +352,7 @@ Environment=HOME={home}
 {owner}AmbientCapabilities=CAP_SETUID CAP_SETGID
 Delegate=cpu memory pids
 OOMPolicy=continue
+LimitNOFILE=65536:524288
 ExecStart={bin} --config-dir {config} --state-dir {state} run
 ExecReload=kill -HUP $MAINPID
 RuntimeDirectory={runtime}
@@ -3104,6 +3105,11 @@ pub(crate) mod tests {
         // The cgroup of the service is the node's, for one per command.
         assert!(unit.contains("\nDelegate=cpu memory pids\n"), "{unit}");
         assert!(unit.contains("\nOOMPolicy=continue\n"), "{unit}");
+        // The walks of a granted folder hold a file for each level they are
+        // in; systemd's soft limit of 1024 is less than a deep folder needs.
+        // Only the soft limit rises: the hard one stays systemd's default, so
+        // a command can raise its own limit as far as it could before.
+        assert!(unit.contains("\nLimitNOFILE=65536:524288\n"), "{unit}");
         // A node that ends with an error or a signal is started again: one
         // that found a lock poisoned ends so (nerve_transport::sync).
         assert!(unit.contains("\nRestart=on-failure\n"), "{unit}");

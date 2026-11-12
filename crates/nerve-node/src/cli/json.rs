@@ -353,8 +353,7 @@ fn stopped(cfg: &NodeConfig, owner: Option<String>, sudo: bool, centers: Vec<Val
         "daemon": "not running",
         "version": cfg.version,
         "locked": cfg.locked,
-        "owner_is_root": crate::owner::is_root(owner.as_deref()),
-        "owner_is_admin": crate::owner::admin_owner(owner.as_deref()).is_some(),
+        "owner_full_rights": crate::owner::full_rights(owner.as_deref()),
         "owner": owner,
         "sudo": if sudo { "on" } else { "off" },
         "command_limits": crate::cgroup::status(
@@ -512,10 +511,13 @@ mod tests {
         let cfg = NodeConfig::default();
         let v = stopped(&cfg, Some("root".into()), false, Vec::new());
         assert_eq!(v["owner"], "root");
-        assert_eq!(v["owner_is_root"], !cfg!(windows));
+        assert_eq!(v["owner_full_rights"], !cfg!(windows));
+        // What holds the limits has one name on both platforms.
+        let limits = v["command_limits"].as_object().unwrap();
+        assert!(limits.contains_key("held_by"), "{limits:?}");
         for owner in [Some("alice".to_string()), None] {
             let v = stopped(&cfg, owner.clone(), false, Vec::new());
-            assert_eq!(v["owner_is_root"], false, "{owner:?}");
+            assert_eq!(v["owner_full_rights"], false, "{owner:?}");
             assert_eq!(v["owner"], json!(owner));
         }
     }

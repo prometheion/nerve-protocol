@@ -584,7 +584,7 @@ fn the_app_drives_the_cli_end_to_end() {
         .unwrap();
         st["owner"] = owner.clone();
         st["centers"][0]["account"] = serde_json::json!("nerve-run");
-        st["centers"][0]["landlock"] = serde_json::json!(false);
+        st["centers"][0]["confined"] = serde_json::json!(false);
         st["centers"][0]["no_network"] = serde_json::json!(true);
         st["network_rules"] = serde_json::json!(false);
         st["home_warning"] = serde_json::json!({"warning": "Without Landlock, nerve-run can read every file in your home /home/alice that other accounts may read (mode 755)"});
@@ -662,15 +662,17 @@ fn the_app_drives_the_cli_end_to_end() {
         assert!(!perm.get_separate() && perm.get_runs_as_owner());
     }
     // Root as the owner (#151): the page knows, so its texts say root.
-    let mut st = serde_json::json!({"daemon": "running", "owner": "root", "owner_is_root": true,
+    let mut st = serde_json::json!({"daemon": "running", "owner": "root", "owner_full_rights": true,
         "centers": [{"name": "home", "mode": "user", "account": "root"}]});
     ctl.show_status(Ok(st.clone()));
-    assert!(perm.get_owner_is_root());
+    // On Windows the same field is an administrator as the owner.
+    assert_eq!(perm.get_owner_is_root(), !cfg!(windows));
+    assert_eq!(perm.get_owner_is_admin(), cfg!(windows));
     assert_eq!(perm.get_account(), "root");
     st["owner"] = serde_json::json!("alice");
-    st["owner_is_root"] = serde_json::json!(false);
+    st["owner_full_rights"] = serde_json::json!(false);
     ctl.show_status(Ok(st));
-    assert!(!perm.get_owner_is_root());
+    assert!(!perm.get_owner_is_root() && !perm.get_owner_is_admin());
     ctl.refresh_status();
     until(&ctl, "the node's own status", || {
         perm.get_landlock() && perm.get_home_warning() == "" && perm.get_stale() == ""

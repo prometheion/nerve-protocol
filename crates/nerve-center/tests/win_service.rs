@@ -87,6 +87,10 @@ fn http(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (u16,
     (status, body)
 }
 
+/// Where the center's Event Log source is registered, below
+/// `HKEY_LOCAL_MACHINE`.
+const EVENT_SOURCE: &str = nerve_service::eventlog::CENTER_SOURCE_KEY;
+
 /// What the tools say of the installed folders: `icacls` and `netsh`.
 fn system(program: &str, args: &[&str]) -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
@@ -387,19 +391,17 @@ fn the_center_runs_as_a_windows_service() {
         let failure = system("sc.exe", &["qfailure", "nerve-center"]);
         // The last action is repeated for every later failure, so the
         // service is never left down for the day (round 2, correctness 3).
-        let restarts: Vec<&str> = failure
+        // The words around a delay are the Windows language's; the number
+        // after the `=` is not.
+        let restarts: Vec<u32> = failure
             .lines()
-            .filter_map(|l| l.find("RESTART -- Delay").map(|at| l[at..].trim()))
+            .filter(|l| l.contains("RESTART --"))
+            .filter_map(|l| {
+                let after = &l[l.find('=')? + 1..];
+                after.split_whitespace().next()?.parse().ok()
+            })
             .collect();
-        assert_eq!(
-            restarts,
-            [
-                "RESTART -- Delay = 5000 milliseconds.",
-                "RESTART -- Delay = 5000 milliseconds.",
-                "RESTART -- Delay = 60000 milliseconds.",
-            ],
-            "{failure}"
-        );
+        assert_eq!(restarts, [5000, 5000, 60000], "{failure}");
         assert!(!failure.contains("NONE"), "{failure}");
         let flag = system("sc.exe", &["qfailureflag", "nerve-center"]);
         assert!(flag.contains("TRUE"), "{flag}");
@@ -411,6 +413,22 @@ fn the_center_runs_as_a_windows_service() {
         );
         let sidtype = system("sc.exe", &["qsidtype", "nerve-center"]);
         assert!(sidtype.contains("UNRESTRICTED"), "{sidtype}");
+        // Its start is in the Event Log, with its text from the program
+        // (arch-2: the center's source).
+        let source = system("reg.exe", &["query", &format!("HKLM\\{EVENT_SOURCE}")]);
+        assert!(source.contains("EventMessageFile"), "{source}");
+        let started = system(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+            &[
+                "-NoProfile",
+                "-Command",
+                "Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'nerve-center'; Id = 1 } -MaxEvents 1 | ForEach-Object { $_.Message }",
+            ],
+        );
+        assert!(
+            started.contains("The Nerve center started. Its log is "),
+            "{started}"
+        );
         // A standard account reads nothing of the state, the owner token
         // least (the point of the service's own account), where an
         // administrator reads it; the files the install made before the
@@ -971,6 +989,7 @@ if ($wait.Wait(40000)) {{
         "{said}"
     );
     assert!(said.contains("removed the Windows Firewall rule"), "{said}");
+    assert!(said.contains("removed the source nerve-center"), "{said}");
     let (_, said) = center(&["status"]);
     assert!(said.contains("service: not installed"), "{said}");
     let rule = system(

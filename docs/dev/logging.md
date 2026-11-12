@@ -103,17 +103,18 @@ keys. Whether they take the rule too is an open owner question.
 
 ## The Windows Event Log
 
-The installed node on Windows also writes its start, its stop, a start that
-fails and a crash to the Application log, as the source `nerve-node`
-(`crate::win_service::event`, ids in `crate::eventlog`). It does so only when
-the service control manager started it. `running()` writes the start once the
+The installed node and center on Windows also write their start, their stop,
+a start that fails and a crash to the Application log, as the source
+`nerve-node` or `nerve-center` (`nerve_service::win::dispatch::event`, ids
+in `nerve_service::eventlog`). They do so only when the service control
+manager started them; both run under that one dispatcher. `running()` writes the start once the
 daemon runs; `run_body`, which `service_main` calls, writes the stop, or,
 when the body returned an error, "did not start" before `running()` and
 "stopped with an error" after it. A panic hook writes a crash and calls the hook it replaced; it does
 not touch the log file, whose lock the panicking thread may hold. A panic in
 the body's thread (`run_body`) is caught there and ends the program with
-`abort`, so the service's failure actions start it again (three times a day
-at most, as `install` sets them; the entry says so) and the frame of
+`abort`, so the service's failure actions start it again (as often as it
+takes, as `install` sets them) and the frame of
 `service_main`, which cannot unwind, adds no second panic. A panic on another
 thread, such as a task tokio catches, is written as a part of the node that
 panicked; the node runs on, unless the panic left a lock poisoned: the next

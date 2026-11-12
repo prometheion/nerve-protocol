@@ -7,6 +7,8 @@
 - The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
 - `--public-url` of the center takes `{port}` for the port it listens on for nodes, for a `--listen` with port 0. Its start line in the log also names that address and the HTTP MCP URL.
 - The node and the center are installed and tested on Ubuntu 26.04 and Debian 13 too, before each release.
+- The installed Linux node watches the folders it gives `nerve-run`: a file or folder you move or copy into one (`mv` of a download or a clone, `cp -a`, also from another file system) gets the folder's access entries a few seconds later by itself, as on Windows. **Sync folders** (`nerve-node folder sync`) is a step by hand only now, for a folder too large to watch (the log says so).
+- `nerve-node folder sync --json` gives what the sync left as data, and `folder.grants` answers it, the same on Linux and Windows: `errors`, `stale`, `unclosed`, `failed`, `skipped`, `walked`; so does `status`'s `folder_access`.
 
 ### Fixed
 
@@ -19,6 +21,10 @@
 - A command right after a node was started by hand is no longer refused for want of the control socket's token: the node writes the token before its socket takes a connection.
 - The center stays responsive while it installs the local model (the hash and the unpack run off its workers), and its harness socket no longer spins a CPU when the center runs out of file descriptors.
 
+### Breaks
+
+- `nerve-node status --json` names what Linux and Windows both have the same, before 0.1.0 freezes the names: each center's `landlock` is `confined`, with `confinement` (`"landlock"`, `"appcontainer"` or `null`); `command_limits.cgroup` is `command_limits.held_by`; `owner_is_root` and `owner_is_admin` are one `owner_full_rights` (root as the owner on Linux, an administrator as the owner on Windows).
+
 ### Windows (with 0.1.0)
 
 Built and tested, not released: the releases before 0.1.0 publish the Linux programs only.
@@ -30,6 +36,10 @@ Built and tested, not released: the releases before 0.1.0 publish the Linux prog
 - On Windows a capability of `node.toml`, or one a center adds, whose program is `cmd`, a `.bat` or `.cmd` file, or PowerShell without `-File` is refused when a `{field}` goes into it, with the safe form `powershell -NoProfile -File script.ps1 {field}`: those read a value again as commands, so `&` or `;` in it ran more than the capability.
 - On Windows the file with your stored password is `owner-password.dpapi` (it was `command-account.dpapi`, which the install now deletes); it, `run-account.dpapi` and `keys\vault.pending` hold their format inside the seal, and one of another format is refused.
 - On Windows install, update, uninstall and restore, and every command of the app's elevated broker, take `C:\ProgramData`, `C:\Program Files`, the proxy and the trusted certificates from the machine, not from your account's variables, which any program of yours may set; an elevated command refuses `NERVE_NODE_CONFIG_DIR` and `NERVE_NODE_STATE_DIR`. The app's user comes to the broker's commands as an argument, no longer as a variable.
+- On Windows the app's **Permissions** page shows a folder grant that failed or stayed on, as on Linux: `status --json`'s `folder_access` says what the last sync of the grants left (`errors`, `stale`, `unclosed`); it was `null` on Windows.
+- On Windows the node's service starts again after every failure, as the center's and the Linux unit do: 5 seconds after the first two, then every minute, and also after a stop with an error (a start that failed). It gave up after three failures a day, and a start that failed was not tried again.
+- On Windows **Update** in the app also gives the services the settings the new program names (their privileges, who may start and stop them, what follows a failure, what they need first), and a new program that does not start goes back with the old ones, as the Linux update does with the service's files. `nerve-center update` does the same.
+- The center installed on Windows writes its start, its stop and its failures to the Windows Event Log too, as the source `nerve-center`.
 - On Windows the node is the desktop app, `nerve-node-desktop-x86_64-windows.exe`: the release has no `nerve-node-x86_64-windows.exe` any more, and Windows gets the app and `nerve-center-x86_64-windows.exe` (seven programs in all). Started with arguments, the app's program is the app's interface to the node and takes no terminal's console.
 - `nerve-node run` on Windows starts the node only as the installed service: from a terminal or a script it is refused, on any folders, and says that the app's installer installs the node and **Start** on the Overview starts it.
 - No message of the node on Windows sends the owner to a terminal any more (`Restart-Service nerve-node`, "Run as administrator", `nerve-node.exe setup`, the CLI edition): each says where in the app to do it (Settings › App › Update, Permissions › Sudo, Settings › General › Account for commands, Start or Restart on the Overview). The app shows every `nerve-node …` command a message or a log line names as the place in the app that does it, and the options of `restore` as the boxes of its restore.

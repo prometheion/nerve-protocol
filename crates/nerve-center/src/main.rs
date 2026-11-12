@@ -74,9 +74,18 @@ fn main() -> std::process::ExitCode {
             // What `update` asks the new program (or, when it is the same
             // one, the installed one), which it runs as root with an
             // empty environment: the files of its service.
+            // On Windows the settings of its service, which `update` gives
+            // the service (nerve_service::win::update).
             nerve_center::config::Cmd::ServiceFiles => {
-                let layout = nerve_center::service::Layout::system();
-                println!("{}", nerve_center::service::service_files_text(&layout));
+                #[cfg(windows)]
+                println!("{}", nerve_center::winsvc::service_files_text());
+                #[cfg(not(windows))]
+                println!(
+                    "{}",
+                    nerve_center::service::service_files_text(
+                        &nerve_center::service::Layout::system()
+                    )
+                );
                 Ok(())
             }
             nerve_center::config::Cmd::OwnerToken { new } => {

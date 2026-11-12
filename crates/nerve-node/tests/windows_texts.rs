@@ -17,6 +17,18 @@ const SOURCES: &[(&str, &str)] = &[
         "eventlog.rs",
         include_str!("../../nerve-service/src/eventlog.rs"),
     ),
+    (
+        "win/dispatch.rs",
+        include_str!("../../nerve-service/src/win/dispatch.rs"),
+    ),
+    (
+        "win/service.rs",
+        include_str!("../../nerve-service/src/win/service.rs"),
+    ),
+    (
+        "win/update.rs",
+        include_str!("../../nerve-service/src/win/update.rs"),
+    ),
 ];
 
 /// What sends a person to a terminal.

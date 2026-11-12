@@ -221,7 +221,13 @@ The install does this, and the installer shows each step:
    and only the service manager loads it for an account that is not signed
    in.
 7. Registers the service `nerve-node`, which runs as `nerve`, starts with the
-   machine (after `nerve-run-profile`) and starts again after a failure.
+   machine (after `nerve-run-profile`) and starts again after every failure:
+   5 seconds after the first two, then a minute after each, as long as it
+   takes. A node that stops with an error at its start (a folder that is not
+   the administrators', an address that is not there yet at boot) counts as
+   a failure too, as with the Linux unit's `Restart=on-failure`.
+   `nerve-run-profile` restarts the same way. Both go through
+   `nerve_service::win::service`, as the center's service does.
 8. Registers the source `nerve-node` in the Windows Event Log, then starts
    the service. It waits until the node runs.
 
@@ -364,7 +370,7 @@ processes of `nerve-run` outside one; no command runs so.
 UAC is no security boundary: a command that runs as you, where you are an
 administrator, can get the group's rights back and read the keys. The
 install warns about an owner in Administrators or Backup Operators, and so
-do the Overview (`status`'s `owner_is_admin`) and giving a center the
+do the Overview (`status`'s `owner_full_rights`) and giving a center the
 settings grant, as a center with the grant can set its own mode to `user`:
 the twin of root as the owner on Linux.
 [Sudo on Windows](#sudo-on-windows) needs you to be an administrator.
@@ -402,8 +408,17 @@ command gets them.
 **Settings**, **App**, **Update** downloads
 `nerve-node-desktop-x86_64-windows.exe` and checks it as above, or takes a
 file you downloaded. It stops the service, moves the old program aside, puts
-the new one in its place and starts the service; if the new one does not
-start, the old one goes back. The old program goes once nothing holds it, or
+the new one in its place, gives the services the settings the new program
+names, and starts the service; if the new one does not start, the old one
+goes back with its settings. The settings are what the new program says on
+`service-files` (asked without the administrators' rights): for
+`nerve-node` and `nerve-run-profile` their privileges, who may start and
+stop them (the owner's SID, which the update hands it), what follows a
+failure and the services they need first. That is the Linux update's
+`service-files`, which writes the new program's unit. A setting the
+running program does not know is named in a warning, and the installer
+gives it. The node's and the center's update share this code
+(`nerve_service::win::update`). The old program goes once nothing holds it, or
 at the next restart of Windows when Windows still holds it: when the update
 ran from it, or when the Event Log read the text of the node's entries from
 it. An install over an installed node moves the old program aside the same
@@ -453,7 +468,9 @@ The install does this, and says each step:
 3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
-   service: no password, no user to keep. It starts with the machine and
+   service: no password, no user to keep. Its start, stop and failures also
+   go to the Windows Event Log, source `nerve-center`
+   ([below](#the-windows-event-log)). It starts with the machine and
    again after a failure: 5 seconds after the first two, then a minute after
    each, as long as it takes (the manager repeats the last action). A
    center that finds a lock poisoned ends and starts again, and so does one
@@ -495,13 +512,15 @@ cannot steer its download. In an administrator's terminal `status`,
 flags), and `backup` and `restore` say which folder they used.
 
 `nerve-center update` stops the service, moves the old program aside, puts
-the new one in place and starts the service; a new program that does not
-start is replaced by the old one again. It asks the new program its version
+the new one in place, gives the service the settings the new program names
+(as the node's update does) and starts the service; a new program that does
+not start is replaced by the old one again, with the old settings. It asks the new program its version
 without the administrators' rights, with an environment of `SystemRoot`
 alone, in the system folder, and in a job object that ends what it starts;
 it still runs as the administrator's own account, so it comes from the
 administrator's own hand (`--from`) or a release asset. `nerve-center
-uninstall` removes the service, its account, the firewall rule and the program; the folders stay,
+uninstall` removes the service, its account, the firewall rule, the Event
+Log source `nerve-center` and the program; the folders stay,
 open to the administrators only, and `--purge` deletes them. Run from the
 installed program, it moves that aside, and Windows deletes it at its next
 start.
@@ -623,7 +642,9 @@ runs in the container as well, unless the pairing runs as you.
   next start or by **Sync folders**.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
-  none runs). What the watch costs, as NTFS sets it:
+  none runs): a step by hand only, for a folder the watch leaves alone.
+  The Linux node watches its granted folders the same way
+  ([Linux](sandbox-linux.md#the-account-nerve-run)). What the watch costs, as NTFS sets it:
   - While a folder is granted, the folders above it cannot be renamed or
     moved, or deleted to the Recycle Bin: Explorer says the folder is open
     in another program. Rename it before you grant the folder below, or
@@ -1127,20 +1148,22 @@ reach the relay's port.
 
 ## The Windows Event Log
 
-The node installed as a service on Windows also writes four events to the
-Windows Event Log, so they show in the Event Viewer under **Windows Logs >
-Application**, source `nerve-node`:
+The node and the center installed as services on Windows also write four
+events to the Windows Event Log, so they show in the Event Viewer under
+**Windows Logs > Application**, source `nerve-node` or `nerve-center`. Both
+services run under one dispatcher (`nerve_service::win::dispatch`), which
+writes them:
 
 | ID | Kind | When |
 |---|---|---|
-| 1 | Information | The node started. The entry names the log file |
-| 2 | Information | The node stopped, because the service was stopped or Windows shut down |
-| 3 | Error | The node did not start: it refused to (for example `refusing to run as root`, or a `node.toml` whose MAC does not match) or could not. The entry says why |
-| 4 | Error | The node crashed: a panic in its main thread ended it. The service's recovery settings start it again, three times a day at most; after that it stays stopped. Or a part of the node panicked and the node runs on; the entry says which. Or the node stopped with an error after it ran |
+| 1 | Information | The node (or center) started. Every entry names the log file |
+| 2 | Information | It stopped, because the service was stopped or Windows shut down |
+| 3 | Error | It did not start: it refused to (for example `refusing to run as root`, or a `node.toml` whose MAC does not match) or could not. The entry says why. The service's recovery settings start it again |
+| 4 | Error | It crashed: a panic in its main thread ended it. The service's recovery settings start it again, as often as it takes. Or a part of it panicked and it runs on; the entry says which. Or it stopped with an error after it ran |
 
 The log file has the details, and the app's **Log** page shows it. In the
 Event Viewer, **Filter Current Log…** with the event source `nerve-node`
-lists the node's entries alone.
+lists the node's entries alone (`nerve-center` the center's).
 
 After an uninstall the entries stay, but Windows no longer shows their text
 in the description. Their text is still in them, under **Details**.

@@ -353,6 +353,13 @@ pub fn admin_owner(owner: Option<&str>) -> Option<String> {
     }
 }
 
+/// Whether what runs as the owner has the machine's full rights: root as
+/// the owner on Linux, an owner that is an administrator (or in a group
+/// that reads every file) on Windows. `status`'s `owner_full_rights`.
+pub fn full_rights(owner: Option<&str>) -> bool {
+    is_root(owner) || admin_owner(owner).is_some()
+}
+
 /// What `status` and the app say of an administrator as the owner
 /// ([`admin_owner`]).
 pub fn admin_owner_note(name: &str) -> String {
@@ -2987,7 +2994,8 @@ mod tests {
             } else {
                 eprintln!("not elevated: the administrators' side of the check is skipped");
             }
-            let owner = crate::win_user::restricted().unwrap();
+            let owner =
+                crate::win_user::Token::from(nerve_service::win::restricted::restricted().unwrap());
             let acting = Acting::token(&owner);
             let made = crate::pipe::instance(&name, &sd, false).map(drop);
             let opened = nerve_service::win::pipe::open_limited(&name).map(drop);

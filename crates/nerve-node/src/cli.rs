@@ -235,7 +235,7 @@ pub enum Cmd {
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
     #[command(hide = true)]
     ServiceFiles {
-        /// The owner the unit names.
+        /// The owner the unit names (on Windows its SID).
         #[arg(long, value_name = "ACCOUNT")]
         owner: Option<String>,
         /// What polkit takes here: rules, a .pkla file (polkit 0.105), or none.
@@ -689,9 +689,9 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Give nerve-run its access to every granted folder again (installed Linux node)
+    /// Give nerve-run its access to every granted folder again
     ///
-    /// Give nerve-run its access to everything in the folders of every center again, also what was moved into them (the installed node on Linux): a pass over every granted folder.
+    /// Walk every granted folder of every center and give nerve-run its access to everything in it again. The node does this by itself for what is moved in; use this for a folder it does not watch (too large; the log says so).
     Sync,
 }
 

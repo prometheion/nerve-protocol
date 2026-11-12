@@ -125,12 +125,18 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
             );
         }
     }
-    // Root as the owner is said whether the node runs or not: what runs as
-    // the owner runs as root.
-    if v["owner_is_root"] == true {
-        warnings.push(ROOT_OWNER.into());
-    } else if v["owner_is_admin"] == true {
-        warnings.push(ADMIN_OWNER.into());
+    // An owner with the machine's full rights is said whether the node runs
+    // or not: what runs as the owner runs as root, or as an administrator
+    // on Windows.
+    if v["owner_full_rights"] == true {
+        warnings.push(
+            if cfg!(windows) {
+                ADMIN_OWNER
+            } else {
+                ROOT_OWNER
+            }
+            .into(),
+        );
     }
     let n = |k: &str| limits[k].as_u64().unwrap_or_default();
     let limits_text = if held || limits_restart || !limits_off.is_empty() {
@@ -2092,10 +2098,14 @@ mod tests {
         assert!(!off.contains("administrator"), "{off}");
         assert!(off.contains("What it changed stays"), "{off}");
         for daemon in ["running", "not running"] {
-            let v =
-                json!({"daemon": daemon, "owner": "alice", "owner_is_admin": true, "centers": []});
+            let v = json!({"daemon": daemon, "owner": "alice", "owner_full_rights": true, "centers": []});
             let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
-            assert_eq!(w, [SharedString::from(ADMIN_OWNER)], "{daemon}");
+            let full = if cfg!(windows) {
+                ADMIN_OWNER
+            } else {
+                ROOT_OWNER
+            };
+            assert_eq!(w, [SharedString::from(full)], "{daemon}");
         }
     }
 
@@ -2112,17 +2122,21 @@ mod tests {
         }
     }
 
-    /// Root as the owner is a warning on the Overview, running or not.
+    /// Root as the owner (an administrator on Windows) is a warning on the
+    /// Overview, running or not.
     #[test]
     fn root_as_the_owner_is_said() {
+        let full = if cfg!(windows) {
+            ADMIN_OWNER
+        } else {
+            ROOT_OWNER
+        };
         for daemon in ["running", "not running"] {
-            let v =
-                json!({"daemon": daemon, "owner": "root", "owner_is_root": true, "centers": []});
+            let v = json!({"daemon": daemon, "owner": "root", "owner_full_rights": true, "centers": []});
             let (st, _) = status(&v, NOW);
             let w: Vec<SharedString> = st.warnings.iter().collect();
-            assert_eq!(w, [SharedString::from(ROOT_OWNER)], "{daemon}");
-            let v =
-                json!({"daemon": daemon, "owner": "alice", "owner_is_root": false, "centers": []});
+            assert_eq!(w, [SharedString::from(full)], "{daemon}");
+            let v = json!({"daemon": daemon, "owner": "alice", "owner_full_rights": false, "centers": []});
             assert_eq!(status(&v, NOW).0.warnings.row_count(), 0, "{daemon}");
         }
     }

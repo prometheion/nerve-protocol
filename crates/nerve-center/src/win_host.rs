@@ -7,16 +7,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use nerve_service::win::dispatch::{self, Served};
-use nerve_service::win::service::{self as svc, Spec};
+use nerve_service::eventlog::{CENTER_SOURCE, CENTER_SOURCE_KEY};
+use nerve_service::win::dispatch::{self, Events, Served};
+use nerve_service::win::service::{self as svc, Settings, Spec};
 use nerve_transport::log::Level;
 
 use crate::service::Layout;
 use crate::winsvc::{ASIDE, FIREWALL_RULE, SERVICE_NAME, WinSystem, firewall_args};
-
-/// The privileges the service keeps: to pass through folders it may not
-/// list, as every account may. Windows takes every other from its token.
-const PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// A program of Windows itself, by its whole path: a program of that name
 /// in the folder this one started from (the downloads, as an administrator)
@@ -43,6 +40,7 @@ impl WinSystem for WinHost {
     }
 
     fn put_service(&self, layout: &Layout) -> Result<(), String> {
+        let settings = crate::winsvc::service_settings();
         svc::put(&Spec {
             name: SERVICE_NAME,
             shown: "Nerve center",
@@ -51,7 +49,8 @@ impl WinSystem for WinHost {
                 env!("CARGO_PKG_REPOSITORY")
             ),
             line: &crate::winsvc::command_line(layout),
-            privileges: PRIVILEGES,
+            logon: None,
+            settings: &settings[0].1,
         })
     }
 
@@ -97,44 +96,42 @@ impl WinSystem for WinHost {
         Ok(true)
     }
 
+    fn put_event_source(&self, layout: &Layout) -> Result<(), String> {
+        nerve_service::win::event::put_source(CENTER_SOURCE_KEY, CENTER_SOURCE, &layout.bin)
+    }
+
+    fn delete_event_source(&self) -> Result<bool, String> {
+        nerve_service::win::event::delete_source(CENTER_SOURCE_KEY, CENTER_SOURCE)
+    }
+
     fn version_of(&self, program: &Path) -> Result<String, String> {
-        let (code, out) = nerve_service::win::restricted::output_of(
-            program,
-            &["--version"],
-            Duration::from_secs(30),
-        )
-        .map_err(|e| format!("{} --version: {e}", program.display()))?;
-        if code != 0 {
-            return Err(format!("{} --version: exit code {code}", program.display()));
-        }
-        Ok(String::from_utf8_lossy(&out).trim().to_string())
+        output_of(program, &["--version"])
+    }
+
+    fn settings_of(&self, program: &Path) -> Result<String, String> {
+        output_of(program, &[nerve_service::SERVICE_FILES])
+    }
+
+    fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String> {
+        svc::configure(name, s)
     }
 
     fn remove_program(&self, path: &Path) -> Result<bool, String> {
-        let at = |e: std::io::Error| format!("{}: {e}", path.display());
-        let dir = path.parent().unwrap_or(Path::new("."));
-        match std::fs::remove_file(path) {
-            Ok(()) => {
-                // The folder goes too when nothing else (the node's app) is
-                // in it.
-                let _ = std::fs::remove_dir(dir);
-                Ok(true)
-            }
-            // A program that runs cannot be deleted, but it can be renamed:
-            // it moves aside, so its name is free for a later install, and
-            // Windows deletes it at its next start.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                let aside = dir.join(format!(
-                    "{ASIDE}{}.del",
-                    nerve_transport::keys::random_token(8)
-                ));
-                std::fs::rename(path, &aside).map_err(at)?;
-                svc::delete_at_restart(&aside)?;
-                Ok(false)
-            }
-            Err(e) => Err(at(e)),
-        }
+        nerve_service::win::update::remove_program(path, ASIDE)
     }
+}
+
+/// What `<program> <args>` prints, run without the administrators' rights
+/// and with a bare environment (nerve_service::win::restricted::output_of).
+fn output_of(program: &Path, args: &[&str]) -> Result<String, String> {
+    let line = format!("{} {}", program.display(), args.join(" "));
+    let (code, out) =
+        nerve_service::win::restricted::output_of(program, args, Duration::from_secs(30))
+            .map_err(|e| format!("{line}: {e}"))?;
+    if code != 0 {
+        return Err(format!("{line}: exit code {code}"));
+    }
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
 /// Runs `netsh` with `args`; its output, or an error with what it said.
@@ -186,10 +183,16 @@ pub fn take_settings(layout: &Layout) -> Result<(), String> {
 
 /// `nerve-center service`: the center as the service, until the service
 /// control manager stops it. A center that does not start writes why to
-/// its log, which the install's wait names.
+/// its log, which the install's wait names. Its start, its stop and its
+/// failures go to the Windows Event Log too, as [`CENTER_SOURCE`].
 pub fn serve(args: crate::config::Args) -> ExitCode {
     nerve_transport::log::install(args.log.unwrap_or_default(), false);
     let log = nerve_transport::log::file_in(&args.state_dir());
+    let events = Events {
+        source: CENTER_SOURCE,
+        what: "Nerve center",
+        log: log.clone(),
+    };
     let body = Box::new(move || {
         let r = tokio::runtime::Runtime::new()
             .map_err(|e| e.to_string())
@@ -204,7 +207,7 @@ pub fn serve(args: crate::config::Args) -> ExitCode {
         }
         r
     });
-    match dispatch::serve(SERVICE_NAME, body) {
+    match dispatch::serve(SERVICE_NAME, body, Some(events)) {
         Ok(Served::Ran(None)) => ExitCode::SUCCESS,
         Ok(Served::Ran(Some(_))) => ExitCode::FAILURE,
         Ok(Served::NotAService) => {

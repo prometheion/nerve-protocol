@@ -2606,7 +2606,7 @@ async fn a_call_asks_for_limits_up_to_the_owners_most() {
     let limits = &node.status()["command_limits"];
     assert_eq!(limits["memory_mb"], 512, "{limits}");
     assert_eq!(limits["memory_max_mb"], 1024, "{limits}");
-    assert_eq!(limits["cgroup"], Value::Null, "{limits}");
+    assert_eq!(limits["held_by"], Value::Null, "{limits}");
     assert_eq!(limits["off"], "no cgroup for this test", "{limits}");
     node.stop().await;
 }
@@ -2669,7 +2669,7 @@ async fn a_command_killed_for_its_memory_is_said_in_its_result_and_the_audit() {
     assert_eq!(r["reason"], why, "{r}");
     let status = node.status();
     assert_eq!(
-        status["command_limits"]["cgroup"], "/node.scope",
+        status["command_limits"]["held_by"], "/node.scope",
         "{status}"
     );
     let audit = node.paths().audit_log();

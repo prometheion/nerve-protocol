@@ -335,15 +335,65 @@ impl Synced {
         })
     }
 
-    /// What `folder sync` hears of the sync: its errors, the folders of the
-    /// grants left stale, and how many grants it walked (`walked`).
-    pub fn json(&self, walked: usize) -> serde_json::Value {
-        serde_json::json!({
-            "errors": self.errors,
-            "stale": self.stale.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
-            "unclosed": self.unclosed.iter().map(|g| g.path.display().to_string()).collect::<Vec<_>>(),
-            "walked": walked,
-        })
+    /// What it left as the [`Report`] of both platforms, `walked` grants
+    /// walked again into every folder below them.
+    pub fn report(&self, walked: usize) -> Report {
+        let paths = |l: &[Grant]| -> Vec<String> {
+            l.iter().map(|g| g.path.display().to_string()).collect()
+        };
+        Report {
+            errors: self.errors.clone(),
+            stale: paths(&self.stale),
+            unclosed: paths(&self.unclosed),
+            walked,
+            ..Report::default()
+        }
+    }
+}
+
+/// What a sync of the folder grants left, said the same on Linux and
+/// Windows: the answer of `folder.grants`, the data of `folder sync
+/// --json`, and `status`'s `folder_access`. A field one platform does not
+/// have stays empty there.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Report {
+    /// Each change that failed, `<path>: <why>`.
+    pub errors: Vec<String>,
+    /// Folders that keep a grant they should have lost: no command of
+    /// `nerve-run` (on Windows: of that pairing) runs while one is left.
+    pub stale: Vec<String>,
+    /// Folders closed to a pairing that are not closed (Windows): as
+    /// `stale`.
+    pub unclosed: Vec<String>,
+    /// Granted folders that did not get every entry (Linux): tried again.
+    pub failed: Vec<String>,
+    /// Files and folders left as they are (Linux): another account's, with
+    /// a second name, or on another file system.
+    pub skipped: usize,
+    /// How many grants it walked again into every folder below them
+    /// besides those that changed: every one (`folder sync`), or those where
+    /// something was moved in (crate::grant_watch).
+    pub walked: usize,
+}
+
+impl Report {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    /// The report of a sync of the Linux node's ACLs (crate::acl).
+    #[cfg(target_os = "linux")]
+    pub fn of_acl(r: &crate::acl::Report) -> Report {
+        let paths =
+            |l: &[PathBuf]| -> Vec<String> { l.iter().map(|p| p.display().to_string()).collect() };
+        Report {
+            errors: r.errors.clone(),
+            stale: paths(&r.stale),
+            failed: paths(&r.failed),
+            skipped: r.skipped,
+            walked: r.walked,
+            ..Report::default()
+        }
     }
 }
 
@@ -5237,9 +5287,14 @@ mod tests {
         f.changes.clear();
         sync(&file, &want, &mut f);
         assert!(f.changes.is_empty(), "{:?}", f.changes);
-        let json = s.json(2);
+        let json = s.report(2).json();
         assert_eq!(json["walked"], 2);
         assert_eq!(json["errors"], serde_json::json!([]));
+        // The report of both platforms: every field there, those Windows
+        // does not have empty.
+        assert_eq!(json["failed"], serde_json::json!([]));
+        assert_eq!(json["skipped"], 0);
+        assert_eq!(json["unclosed"], serde_json::json!([]));
         // No record yet: nothing to walk.
         assert_eq!(walk_every(&d.path().join("none.json")), Ok(0));
     }

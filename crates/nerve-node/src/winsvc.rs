@@ -17,11 +17,14 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use nerve_service::win::service::{Settings, settings_text};
+use nerve_service::win::update::{clean_aside, previous, staged};
+
 use crate::account::{RUN_MARK, RUN_USER};
 use crate::paths::NodePaths;
 use crate::service::{
     Account, Layout, ServiceAction, ServiceState, Steps, USER, USER_MARK, asset_name, audit,
-    fetch_release, put_parts, uninstall_parts, write_file,
+    put_parts, uninstall_parts, write_file,
 };
 
 /// The name the service is registered under.
@@ -47,6 +50,60 @@ pub const RUN_SECRET_FILE: &str = "run-account.dpapi";
 /// manager loads it for a service of that account. It runs the node's
 /// program, does nothing, and the node's service depends on it.
 pub const PROFILE_SERVICE: &str = "nerve-run-profile";
+
+/// The privileges the service keeps; Windows takes every other from its
+/// token, SeImpersonatePrivilege included: to start a process with another
+/// account's token (two), and to pass through folders it may not list.
+const SERVICE_PRIVILEGES: &[&str] = &[
+    "SeAssignPrimaryTokenPrivilege",
+    "SeIncreaseQuotaPrivilege",
+    "SeChangeNotifyPrivilege",
+];
+
+/// The privileges [`PROFILE_SERVICE`] keeps: none but the one every process
+/// has.
+const PROFILE_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// The settings of the services `install` registers, by name: the node's,
+/// which needs [`PROFILE_SERVICE`] first and lets the owner with the SID
+/// `owner` start and stop it ([`service_dacl`]), and that one. Both restart
+/// after every failure, a stop with an error too
+/// (nerve_service::win::service::FAILURE). `update` gives the services what
+/// the new program says here (`service-files`), as Linux writes its unit.
+pub fn service_settings(owner: Option<&str>) -> Vec<(&'static str, Settings)> {
+    vec![
+        (
+            SERVICE_NAME,
+            Settings::new(
+                SERVICE_PRIVILEGES,
+                &[PROFILE_SERVICE],
+                Some(service_dacl(owner)),
+            ),
+        ),
+        (
+            PROFILE_SERVICE,
+            Settings::new(PROFILE_PRIVILEGES, &[], None),
+        ),
+    ]
+}
+
+/// What `service-files` prints on Windows: [`service_settings`].
+pub fn service_files_text(owner: Option<&str>) -> String {
+    settings_text(&service_settings(owner))
+}
+
+/// The settings of the service `name` that `install` registers: those of
+/// [`service_settings`], but who may control it, which the owner's step
+/// sets ([`WinSystem::put_owner`]).
+pub fn registered_settings(name: &str) -> Settings {
+    let mut s = service_settings(None)
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, s)| s)
+        .unwrap_or_else(|| Settings::new(&[], &[], None));
+    s.dacl = None;
+    s
+}
 
 /// The two local accounts `install` makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +217,12 @@ pub trait WinSystem {
     /// What `<program> --version` prints, run without the administrators'
     /// rights.
     fn version_of(&self, program: &Path) -> Result<String, String>;
+    /// What `<program> service-files <args>` prints, run so too: the
+    /// settings of the services it installs ([`service_settings`]).
+    fn settings_of(&self, program: &Path, args: &[String]) -> Result<String, String>;
+    /// Gives the registered service `name` the settings `s`
+    /// (nerve_service::win::service::configure).
+    fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String>;
     /// Removes the program file and its folder when that is empty; `false`
     /// when Windows holds the program (this command started from it, or the
     /// Event Log reads the text of the node's entries from it): it then
@@ -709,21 +772,6 @@ fn new_password() -> String {
 /// Windows, until it goes at the next start ([`WinSystem::remove_program`]).
 pub(crate) const ASIDE: &str = "nerve-node.";
 
-fn stem(bin: &Path) -> String {
-    bin.file_stem()
-        .map_or_else(|| "nerve-node".into(), |s| s.to_string_lossy().into_owned())
-}
-
-/// Where `update` puts the new program before it replaces the old one, and
-/// where the old one waits until the new one runs.
-fn staged(bin: &Path) -> PathBuf {
-    bin.with_file_name(format!("{}.new.exe", stem(bin)))
-}
-
-fn previous(bin: &Path) -> PathBuf {
-    bin.with_file_name(format!("{}.old.exe", stem(bin)))
-}
-
 /// Whether `what` can run here: as an elevated administrator.
 fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
     if !sys.is_admin() {
@@ -873,19 +921,7 @@ fn install_steps(
     // What an update or an uninstall left behind when it ran from the
     // program it replaced or removed, or moved aside because the Event Log
     // held it: a name of [`ASIDE`].
-    let _ = std::fs::remove_file(previous(&layout.bin));
-    let _ = std::fs::remove_file(staged(&layout.bin));
-    if let Some(dir) = layout.bin.parent()
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(ASIDE) && name.ends_with(".del") {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
+    clean_aside(&layout.bin, ASIDE);
     sys.put_profile_service(layout, RUN_USER, &run_password)?;
     steps.did(format!(
         "registered and started the service {PROFILE_SERVICE}, which runs as {RUN_USER} and keeps its profile loaded, where the commands' AppContainers keep theirs"
@@ -1269,104 +1305,64 @@ async fn update_steps(
     from: Option<&Path>,
     steps: &mut Steps<'_>,
 ) -> Result<(), String> {
-    let program = layout.edition.program;
     sys.account(USER)?
         .filter(|a| a.comment == USER_MARK)
         .ok_or_else(|| format!("the user {USER} is missing; {INSTALL_AGAIN}"))?;
-    let new = match from {
-        Some(f) => {
-            let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
-            steps.did(format!("read the new program from {}", f.display()));
-            b
-        }
-        None => {
-            let asset = asset_name(layout.edition.program)?;
-            let b = fetch_release(&layout.release, &asset).await?;
-            steps.did(format!(
-                "downloaded {asset} from {} and checked it against its SHA256SUMS",
-                layout.release
-            ));
-            b
-        }
+    // The owner the new program's DACL names: the one install wrote.
+    let owner = sys.owner()?.map(|(sid, _)| sid);
+    let p = nerve_service::win::update::Program {
+        name: layout.edition.program,
+        bin: &layout.bin,
+        release: &layout.release,
+        asset: asset_name(layout.edition.program),
+        service: SERVICE_NAME,
+        services: &[SERVICE_NAME, PROFILE_SERVICE],
+        settings_args: settings_args(owner.as_deref()),
+        install: "the installer (the downloaded nerve-node-desktop file)",
     };
-    let bin = &layout.bin;
-    let old = std::fs::read(bin).map_err(|e| format!("{}: {e}", bin.display()))?;
-    if new == old {
-        steps.did("the installed program is that one already; nothing to update");
-        return Ok(());
+    let machine = Machine { sys, layout };
+    if nerve_service::win::update::update(&p, &machine, from, steps).await? {
+        put_parts(layout, steps)?;
     }
-    let new_path = staged(bin);
-    write_file(&new_path, &new, 0o755)?;
-    let checked = (|| {
-        let said = sys.version_of(&new_path)?;
-        let new_v = crate::service::program_version(layout, &said)
-            .ok_or_else(|| format!("the new program is not {program}: it says {said:?}"))?;
-        let old_v = sys
-            .version_of(bin)
-            .ok()
-            .and_then(|s| crate::service::program_version(layout, &s));
-        if let Some(o) = old_v
-            && new_v < o
-        {
-            return Err(format!(
-                "the new program is {program} {new_v}, older than the installed {o}; nothing changed"
-            ));
-        }
-        Ok((old_v, new_v))
-    })();
-    let (old_v, new_v) = match checked {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&new_path);
-            return Err(e);
-        }
-    };
-    // A running program cannot be overwritten, but it can be renamed: the
-    // old one moves aside, also when this command runs from it.
-    if let Err(e) = sys.stop() {
-        let _ = std::fs::remove_file(&new_path);
-        return Err(e);
+    Ok(())
+}
+
+/// What `update` asks the new program besides `service-files`: the owner's
+/// SID, which its service's DACL names.
+pub fn settings_args(owner: Option<&str>) -> Vec<String> {
+    owner
+        .map(|o| vec!["--owner".to_string(), o.to_string()])
+        .unwrap_or_default()
+}
+
+/// The machine as `update` sees it (nerve_service::win::update::Installed).
+struct Machine<'a> {
+    sys: &'a dyn WinSystem,
+    layout: &'a Layout,
+}
+
+impl nerve_service::win::update::Installed for Machine<'_> {
+    fn start(&self) -> Result<(), String> {
+        self.sys.start()
     }
-    let old_path = previous(bin);
-    let _ = std::fs::remove_file(&old_path);
-    let swap = |from: &Path, to: &Path| {
-        std::fs::rename(from, to)
-            .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
-    };
-    // When the new one cannot be put in place, the old one runs on.
-    let moved = swap(bin, &old_path).and_then(|()| {
-        swap(&new_path, bin).inspect_err(|_| {
-            let _ = swap(&old_path, bin);
-        })
-    });
-    if let Err(e) = moved {
-        let _ = std::fs::remove_file(&new_path);
-        let _ = sys.start();
-        return Err(e);
+    fn stop(&self) -> Result<(), String> {
+        self.sys.stop()
     }
-    let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    steps.did(format!("replaced {program} {old_v} with {new_v}"));
-    let started = sys.start().and_then(|()| sys.wait_running(layout));
-    if let Err(e) = started {
-        let _ = sys.stop();
-        let back = swap(bin, &new_path)
-            .and_then(|()| swap(&old_path, bin))
-            .and_then(|()| sys.start())
-            .and_then(|()| sys.wait_running(layout));
-        let _ = std::fs::remove_file(&new_path);
-        steps.did(format!("put {program} {old_v} back"));
-        return Err(match back {
-            Ok(()) => format!("the new program did not start ({e}); the old one runs again"),
-            Err(e2) => format!(
-                "the new program did not start ({e}), and the old one does not either ({e2})"
-            ),
-        });
+    fn wait_running(&self) -> Result<(), String> {
+        self.sys.wait_running(self.layout)
     }
-    steps.did(format!("restarted the service {SERVICE_NAME}"));
-    // This command may run from the old program; then it goes at the next
-    // restart, or with the next update or install.
-    let _ = sys.remove_program(&old_path);
-    put_parts(layout, steps)
+    fn version_of(&self, program: &Path) -> Result<String, String> {
+        self.sys.version_of(program)
+    }
+    fn settings_of(&self, program: &Path, args: &[String]) -> Result<String, String> {
+        self.sys.settings_of(program, args)
+    }
+    fn configure(&self, name: &str, s: &Settings) -> Result<(), String> {
+        self.sys.configure_service(name, s)
+    }
+    fn remove_program(&self, path: &Path) -> Result<bool, String> {
+        self.sys.remove_program(path)
+    }
 }
 
 /// `service start`, `stop` and `restart` on Windows: the installed
@@ -1929,6 +1925,18 @@ pub(crate) mod tests {
         fn version_of(&self, program: &Path) -> Result<String, String> {
             let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
             Ok(text.lines().next().unwrap_or_default().to_string())
+        }
+        /// Its second line, where it has one; else what this build says.
+        fn settings_of(&self, program: &Path, args: &[String]) -> Result<String, String> {
+            let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
+            Ok(match text.lines().nth(1) {
+                Some(l) => l.to_string(),
+                None => service_files_text(args.get(1).map(String::as_str)),
+            })
+        }
+        fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String> {
+            self.call(format!("configure {name} {}", s.privileges.join(",")));
+            Ok(())
         }
         fn remove_program(&self, path: &Path) -> Result<bool, String> {
             self.removed.borrow_mut().push(path.to_path_buf());
@@ -3540,6 +3548,83 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("put nerve-node 1.2.0 back")
         );
+    }
+
+    /// A new program that names other settings for a service (here a
+    /// privilege more) gives them to it before it starts, the owner's DACL
+    /// among them; the service it names the same for is left alone, and
+    /// the old settings go back with the old program (node-5).
+    #[tokio::test]
+    async fn update_gives_the_services_the_new_program_s_settings() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let owner = sys.owner().unwrap().unwrap().0;
+        let mut settings = service_settings(Some(&owner));
+        settings[0].1.privileges.push("SeBackupPrivilege".into());
+        let new = d.path().join("new.exe");
+        std::fs::write(
+            &new,
+            format!("nerve-node 1.1.0\n{}\n", settings_text(&settings)),
+        )
+        .unwrap();
+        let mine = "configure nerve-node SeAssignPrimaryTokenPrivilege,SeIncreaseQuotaPrivilege,SeChangeNotifyPrivilege";
+        let wanted = format!("{mine},SeBackupPrivilege");
+        *sys.broken.borrow_mut() = Some("nerve-node 1.1.0".into());
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("the old one runs again"), "{e}");
+        assert_eq!(
+            sys.calls()[calls..],
+            ["stop", &wanted, "start", "stop", mine, "start"]
+        );
+        sys.broken.borrow_mut().take();
+        let calls = sys.calls().len();
+        let mut out = Vec::new();
+        update(&l, &sys, Some(&new), &mut out).await.unwrap();
+        assert_eq!(sys.calls()[calls..], ["stop", &wanted, "start"]);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("gave the service nerve-node the new program's settings"),
+            "{out}"
+        );
+    }
+
+    /// The node's service and the one that keeps nerve-run's profile loaded
+    /// restart after every failure, a stop with an error too, and never
+    /// give up (arch-1): the Linux unit's `Restart=on-failure`. The node's
+    /// needs the profile service first, and lets its owner start and stop
+    /// it.
+    #[test]
+    fn the_services_restart_after_every_failure() {
+        let owner = "S-1-5-21-1-2-3-1001";
+        let all = service_settings(Some(owner));
+        let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, [SERVICE_NAME, PROFILE_SERVICE]);
+        for (name, s) in &all {
+            assert_eq!(s.restart_secs, [5, 5, 60], "{name}");
+            assert!(s.restart_on_error_stop, "{name}");
+        }
+        assert_eq!(all[0].1.after, [PROFILE_SERVICE]);
+        assert_eq!(
+            all[0].1.dacl.as_deref(),
+            Some(&service_dacl(Some(owner))[..])
+        );
+        assert!(
+            !all[0]
+                .1
+                .privileges
+                .iter()
+                .any(|p| p == "SeImpersonatePrivilege")
+        );
+        assert_eq!(all[1].1.privileges, ["SeChangeNotifyPrivilege"]);
+        // What install registers leaves the DACL to the owner's step.
+        assert_eq!(registered_settings(SERVICE_NAME).dacl, None);
+        assert_eq!(registered_settings(SERVICE_NAME).after, [PROFILE_SERVICE]);
+        assert_eq!(settings_args(Some(owner)), ["--owner", owner]);
+        assert!(settings_args(None).is_empty());
     }
 
     /// The desktop app's parts, as a file beside the program.

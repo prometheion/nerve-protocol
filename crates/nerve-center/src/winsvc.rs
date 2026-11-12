@@ -17,9 +17,11 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use nerve_service::eventlog::CENTER_SOURCE;
 use nerve_service::win::dacl::{dacl_of, owned_by_admins};
-use nerve_service::win::service::{service_sid, virtual_account};
-use nerve_service::{Steps, Version, fetch_release, write_file};
+use nerve_service::win::service::{Settings, service_sid, virtual_account};
+use nerve_service::win::update::{clean_aside, previous, staged};
+use nerve_service::{Steps, write_file};
 
 use crate::service::{Layout, check_setting, done_lines, setting_in};
 
@@ -62,14 +64,45 @@ pub trait WinSystem {
     fn put_firewall(&self, layout: &Layout, port: u16) -> Result<(), String>;
     /// Removes that rule; `false` when there was none.
     fn delete_firewall(&self) -> Result<bool, String>;
+    /// Registers the source of the center's entries in the Windows Event
+    /// Log ([`CENTER_SOURCE`]), with `layout.bin` as the file that holds
+    /// their text (nerve_service::eventlog), or changes it.
+    fn put_event_source(&self, layout: &Layout) -> Result<(), String>;
+    /// Removes that source; `false` when it was not registered. The entries
+    /// stay in the log.
+    fn delete_event_source(&self) -> Result<bool, String>;
     /// What `<program> --version` prints, run without the administrators'
     /// rights.
     fn version_of(&self, program: &Path) -> Result<String, String>;
+    /// What `<program> service-files` prints, run so too: the settings of
+    /// its service ([`service_settings`]).
+    fn settings_of(&self, program: &Path) -> Result<String, String>;
+    /// Gives the registered service `name` the settings `s`
+    /// (nerve_service::win::service::configure).
+    fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String>;
     /// Removes the program file and its folder when that is empty; `false`
     /// when Windows holds the program (this command started from it): it
     /// then moves aside to a `nerve-center.*.del` beside it and goes at the
     /// next restart.
     fn remove_program(&self, path: &Path) -> Result<bool, String>;
+}
+
+/// The privileges the service keeps: to pass through folders it may not
+/// list, as every account may. Windows takes every other from its token.
+const PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// The settings of the service `install` registers, by name: restarted
+/// after every failure, a stop with an error too
+/// (nerve_service::win::service::FAILURE), with Windows' own DACL. `update`
+/// gives the service what the new program says here (`service-files`), as
+/// Linux writes its unit.
+pub fn service_settings() -> Vec<(&'static str, Settings)> {
+    vec![(SERVICE_NAME, Settings::new(PRIVILEGES, &[], None))]
+}
+
+/// What `service-files` prints on Windows: [`service_settings`].
+pub fn service_files_text() -> String {
+    nerve_service::win::service::settings_text(&service_settings())
 }
 
 /// The SID of the service's virtual account.
@@ -190,16 +223,6 @@ pub fn firewall_args(program: &Path, port: u16) -> Vec<String> {
     ]
 }
 
-/// Where `update` puts the new program before it replaces the old one, and
-/// where the old one waits until the new one runs.
-fn staged(bin: &Path) -> PathBuf {
-    bin.with_file_name("nerve-center.new.exe")
-}
-
-fn previous(bin: &Path) -> PathBuf {
-    bin.with_file_name("nerve-center.old.exe")
-}
-
 /// Whether `what` can run here: as an elevated administrator.
 pub(crate) fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
     if !sys.is_admin() {
@@ -286,23 +309,16 @@ pub fn install(
     }
     // What an update or an uninstall left behind when it ran from the
     // program it replaced or removed.
-    let _ = std::fs::remove_file(previous(&layout.bin));
-    let _ = std::fs::remove_file(staged(&layout.bin));
-    if let Some(dir) = layout.bin.parent()
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(ASIDE) && name.ends_with(".del") {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
+    clean_aside(&layout.bin, ASIDE);
     sys.put_service(layout)?;
     steps.did(format!(
         "registered the service {SERVICE_NAME}, which runs as {} and starts with the machine",
         virtual_account(SERVICE_NAME)
+    ));
+    sys.put_event_source(layout)?;
+    steps.did(format!(
+        "registered the source {CENTER_SOURCE} in the Windows Event Log (Application): the service's start, stop and failures go there as well as to {}",
+        nerve_transport::log::file_in(&layout.state).display()
     ));
     let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
     let port = node_port(&file);
@@ -340,6 +356,11 @@ pub fn uninstall(
     if sys.delete_firewall()? {
         steps.did(format!(
             "removed the Windows Firewall rule \"{FIREWALL_RULE}\""
+        ));
+    }
+    if sys.delete_event_source()? {
+        steps.did(format!(
+            "removed the source {CENTER_SOURCE} from the Windows Event Log; its entries stay"
         ));
     }
     let top = home(layout);
@@ -423,101 +444,49 @@ async fn update_steps(
     from: Option<&Path>,
     steps: &mut Steps<'_>,
 ) -> Result<(), String> {
-    let program = SERVICE_NAME;
-    let new = match from {
-        Some(f) => {
-            let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
-            steps.did(format!("read the new program from {}", f.display()));
-            b
-        }
-        None => {
-            let asset = crate::service::asset_name()?;
-            let b = fetch_release(&layout.release, &asset).await?;
-            steps.did(format!(
-                "downloaded {asset} from {} and checked it against its SHA256SUMS",
-                layout.release
-            ));
-            b
-        }
+    let p = nerve_service::win::update::Program {
+        name: SERVICE_NAME,
+        bin: &layout.bin,
+        release: &layout.release,
+        asset: crate::service::asset_name(),
+        service: SERVICE_NAME,
+        services: &[SERVICE_NAME],
+        settings_args: Vec::new(),
+        install: "`nerve-center install` in an administrator's terminal",
     };
-    let bin = &layout.bin;
-    let old = std::fs::read(bin).map_err(|e| format!("{}: {e}", bin.display()))?;
-    if new == old {
-        steps.did("the installed program is that one already; nothing to update");
-        return Ok(());
+    nerve_service::win::update::update(&p, &Machine { sys, layout }, from, steps)
+        .await
+        .map(|_| ())
+}
+
+/// The machine as `update` sees it (nerve_service::win::update::Installed).
+struct Machine<'a> {
+    sys: &'a dyn WinSystem,
+    layout: &'a Layout,
+}
+
+impl nerve_service::win::update::Installed for Machine<'_> {
+    fn start(&self) -> Result<(), String> {
+        start(self.sys, self.layout)
     }
-    let new_path = staged(bin);
-    write_file(&new_path, &new, 0o755)?;
-    let checked = (|| {
-        let said = sys.version_of(&new_path)?;
-        let new_v = Version::parse_of(program, &said)
-            .ok_or_else(|| format!("the new program is not {program}: it says {said:?}"))?;
-        let old_v = sys
-            .version_of(bin)
-            .ok()
-            .and_then(|s| Version::parse_of(program, &s));
-        if let Some(o) = old_v
-            && new_v < o
-        {
-            return Err(format!(
-                "the new program is {program} {new_v}, older than the installed {o}; nothing changed"
-            ));
-        }
-        Ok((old_v, new_v))
-    })();
-    let (old_v, new_v) = match checked {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&new_path);
-            return Err(e);
-        }
-    };
-    // A running program cannot be overwritten, but it can be renamed: the
-    // old one moves aside, also when this command runs from it.
-    if let Err(e) = sys.stop() {
-        let _ = std::fs::remove_file(&new_path);
-        return Err(e);
+    fn stop(&self) -> Result<(), String> {
+        self.sys.stop()
     }
-    let old_path = previous(bin);
-    let _ = std::fs::remove_file(&old_path);
-    let swap = |from: &Path, to: &Path| {
-        std::fs::rename(from, to)
-            .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
-    };
-    // When the new one cannot be put in place, the old one runs on.
-    let moved = swap(bin, &old_path).and_then(|()| {
-        swap(&new_path, bin).inspect_err(|_| {
-            let _ = swap(&old_path, bin);
-        })
-    });
-    if let Err(e) = moved {
-        let _ = std::fs::remove_file(&new_path);
-        let _ = sys.start();
-        return Err(e);
+    fn wait_running(&self) -> Result<(), String> {
+        self.sys.wait_running(self.layout)
     }
-    let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    steps.did(format!("replaced {program} {old_v} with {new_v}"));
-    let started = start(sys, layout).and_then(|()| sys.wait_running(layout));
-    if let Err(e) = started {
-        let _ = sys.stop();
-        let back = swap(bin, &new_path)
-            .and_then(|()| swap(&old_path, bin))
-            .and_then(|()| start(sys, layout))
-            .and_then(|()| sys.wait_running(layout));
-        let _ = std::fs::remove_file(&new_path);
-        steps.did(format!("put {program} {old_v} back"));
-        return Err(match back {
-            Ok(()) => format!("the new program did not start ({e}); the old one runs again"),
-            Err(e2) => format!(
-                "the new program did not start ({e}), and the old one does not either ({e2})"
-            ),
-        });
+    fn version_of(&self, program: &Path) -> Result<String, String> {
+        self.sys.version_of(program)
     }
-    steps.did(format!("restarted the service {SERVICE_NAME}"));
-    // This command may run from the old program; then it goes at the next
-    // restart, or with the next update or install.
-    let _ = sys.remove_program(&old_path);
-    Ok(())
+    fn settings_of(&self, program: &Path, _: &[String]) -> Result<String, String> {
+        self.sys.settings_of(program)
+    }
+    fn configure(&self, name: &str, s: &Settings) -> Result<(), String> {
+        self.sys.configure_service(name, s)
+    }
+    fn remove_program(&self, path: &Path) -> Result<bool, String> {
+        self.sys.remove_program(path)
+    }
 }
 
 /// Starts the service. A center that ends before it reaches the manager (a
@@ -583,6 +552,8 @@ mod tests {
         held: RefCell<Vec<PathBuf>>,
         /// What a program said each time the service started it.
         started: RefCell<Vec<String>>,
+        /// Whether the Event Log source is registered.
+        event_source: Cell<bool>,
     }
 
     impl Fake {
@@ -597,6 +568,7 @@ mod tests {
                 firewall: Cell::new(None),
                 held: RefCell::new(Vec::new()),
                 started: RefCell::new(Vec::new()),
+                event_source: Cell::new(false),
             }
         }
 
@@ -679,10 +651,33 @@ mod tests {
             self.call("delete_firewall");
             Ok(self.firewall.take().is_some())
         }
+        fn put_event_source(&self, layout: &Layout) -> Result<(), String> {
+            self.call(format!("put_event_source {}", layout.bin.display()));
+            self.event_source.set(true);
+            Ok(())
+        }
+        fn delete_event_source(&self) -> Result<bool, String> {
+            self.call("delete_event_source");
+            Ok(self.event_source.take())
+        }
         fn version_of(&self, program: &Path) -> Result<String, String> {
-            // A program here is a text file that says its version.
+            // A program here is a text file whose first line says its
+            // version.
             let said = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
-            Ok(said.trim().replace(" broken", ""))
+            let first = said.lines().next().unwrap_or_default();
+            Ok(first.trim().replace(" broken", ""))
+        }
+        /// Its second line, where it has one; else what this build says.
+        fn settings_of(&self, program: &Path) -> Result<String, String> {
+            let said = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
+            Ok(said
+                .lines()
+                .nth(1)
+                .map_or_else(service_files_text, String::from))
+        }
+        fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String> {
+            self.call(format!("configure {name} {}", s.privileges.join(",")));
+            Ok(())
         }
         fn remove_program(&self, path: &Path) -> Result<bool, String> {
             self.call(format!(
@@ -777,9 +772,15 @@ mod tests {
                     l.bin.display(),
                     l.state.display()
                 ),
+                format!("put_event_source {}", l.bin.display()),
                 format!("put_firewall {} 7443", l.bin.display()),
                 "start".to_string(),
             ]
+        );
+        assert!(sys.event_source.get());
+        assert!(
+            out.contains("registered the source nerve-center in the Windows Event Log"),
+            "{out}"
         );
         assert!(out.contains("runs as NT SERVICE\\nerve-center"), "{out}");
         assert!(out.contains("the node port 7443"), "{out}");
@@ -865,6 +866,8 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("removed the Windows Firewall rule"), "{out}");
+        assert!(!sys.event_source.get());
+        assert!(out.contains("removed the source nerve-center"), "{out}");
         let mut out = Vec::new();
         uninstall(&l, &sys, true, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -963,6 +966,50 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e, NOT_INSTALLED);
+    }
+
+    /// A new program that names other settings for the service gives them
+    /// to it before it starts, and the old ones go back with the old
+    /// program (node-5); the service restarts after every failure, a stop
+    /// with an error too (arch-1).
+    #[tokio::test]
+    async fn update_gives_the_service_the_new_program_s_settings() {
+        let all = service_settings();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, SERVICE_NAME);
+        assert_eq!(all[0].1.restart_secs, [5, 5, 60]);
+        assert!(all[0].1.restart_on_error_stop);
+        assert_eq!(all[0].1.privileges, ["SeChangeNotifyPrivilege"]);
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let mut more = service_settings();
+        more[0].1.privileges.push("SeBackupPrivilege".into());
+        let new = d.path().join("new.exe");
+        let said = nerve_service::win::service::settings_text(&more);
+        let text = |v: &str| format!("nerve-center {v}\n{said}\n");
+        std::fs::write(&new, text("1.1.0 broken")).unwrap();
+        sys.calls.borrow_mut().clear();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("the old one runs again"), "{e}");
+        let wanted = "configure nerve-center SeChangeNotifyPrivilege,SeBackupPrivilege";
+        assert_eq!(
+            sys.calls(),
+            [
+                "stop",
+                wanted,
+                "start",
+                "stop",
+                "configure nerve-center SeChangeNotifyPrivilege",
+                "start"
+            ]
+        );
+        std::fs::write(&new, text("1.1.0")).unwrap();
+        sys.calls.borrow_mut().clear();
+        update(&l, &sys, Some(&new), &mut Vec::new()).await.unwrap();
+        assert_eq!(sys.calls()[..3], ["stop", wanted, "start"]);
     }
 
     /// The start checks the settings folder and the state folder, both,
