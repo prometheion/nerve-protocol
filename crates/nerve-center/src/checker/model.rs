@@ -2045,6 +2045,38 @@ mod tests {
         assert!(wait > Duration::from_millis(25_000), "{wait:?}");
     }
 
+    /// The other half, long: the read holds to a wait past the transport's
+    /// 15 s. Paused time, so the 16 s of thinking cost nothing; a read that
+    /// caps its wait at the transport's usual limit fails here.
+    #[tokio::test(start_paused = true)]
+    async fn a_model_that_thinks_past_the_transports_limit_is_still_read() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            tokio::time::sleep(think).await;
+            let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+            let _ = server
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        let r = nerve_transport::http::read_client_response(
+            &mut client,
+            MAX_BODY,
+            answer_wait(Duration::from_secs(25)),
+        )
+        .await
+        .unwrap();
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(parse_noul(&v).unwrap(), 0.9);
+    }
+
     /// The other half: the read holds to the wait it is given, short or long.
     #[tokio::test]
     async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {

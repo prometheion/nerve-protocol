@@ -2350,6 +2350,17 @@ mod tests {
         assert!(asked);
     }
 
+    /// A folder's id as the sync's record keeps it (`grants.rs` takes it from
+    /// the sandbox's own look at the folder), not as the watcher reads it:
+    /// a test that took it from the watcher would compare the watcher with
+    /// itself. std opens a folder with backup semantics on Windows.
+    #[cfg(windows)]
+    fn record_id(p: &Path) -> String {
+        nerve_sandbox::appcontainer::handle_id(&std::fs::File::open(p).unwrap())
+            .unwrap()
+            .to_string()
+    }
+
     /// On Windows: a watched folder tells a new name below it, also a hard
     /// link made there, and not a change of an access list or of a file's
     /// contents; a folder that goes ends its watch, and a folder no longer
@@ -2368,7 +2379,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![super::win::open(p).unwrap().1.unwrap()],
+                ids: vec![record_id(p)],
             }]
         };
         w.follow(|| granted(&root), || Ok(()));
@@ -2421,7 +2432,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![super::win::open(p).unwrap().1.unwrap()],
+                ids: vec![record_id(p)],
             }]
         };
         let told = |w: &Watch| -> bool {
