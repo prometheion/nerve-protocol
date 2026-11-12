@@ -501,7 +501,19 @@ When a part is missing, the app says so:
 | The portal | The button that opens a file or folder dialog says "No file dialog: …" and names the portal packages |
 | `update-desktop-database` | Installing goes on, and its last step warns that the desktop may not know about the `nerve://` handler yet |
 
-Windows needs nothing besides the app.
+Windows needs no other program for the app itself. What it uses:
+
+- An owner account with a password: Windows logs no program on to an account
+  without one, so `user` mode, `allowlist` mode with `--as-owner` and sudo
+  run nothing as an owner without a password, and the app says so.
+- A state folder on a drive with access lists (NTFS): one on FAT32 or exFAT is
+  refused.
+- The Windows Firewall service, which keeps a pairing's AppContainer off the
+  network when its network switch is off; without it the node runs none of
+  that pairing's commands.
+- Windows PowerShell 5.1, the shell of the commands (`machine.shell`).
+
+All of this is in [Windows](windows.md).
 
 ## In a terminal (Linux)
 
