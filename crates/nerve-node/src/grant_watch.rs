@@ -316,13 +316,17 @@ impl Watch {
             pause = false;
             Rewalk::Every
         } else {
-            let due = p.due(now);
-            if !due.is_empty() {
-                Rewalk::At(due)
-            } else if granted != Some(version) {
+            // A new config syncs first and alone: the folders due wait for
+            // the next sync, so a command filling a folder cannot hold a
+            // folder taken away behind its walk.
+            if granted != Some(version) {
                 Rewalk::None
             } else {
-                return None;
+                let due = p.due(now);
+                if due.is_empty() {
+                    return None;
+                }
+                Rewalk::At(due)
             }
         };
         p.begin(now, walk != Rewalk::None, pause);
@@ -2053,7 +2057,13 @@ mod tests {
         changed(&w);
         assert_eq!(
             sync(&w, Some(1), 2, later),
-            Some(Rewalk::At(vec![proj.clone()]))
+            Some(Rewalk::None),
+            "a new config does not wait for a walk of a folder due"
+        );
+        assert_eq!(
+            sync(&w, Some(2), 2, later),
+            Some(Rewalk::At(vec![proj.clone()])),
+            "the folder is still due after it"
         );
         assert_eq!(
             sync(&Watch::default(), Some(1), 2, later),

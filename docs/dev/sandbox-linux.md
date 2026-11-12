@@ -457,7 +457,7 @@ Keep nothing there that the machine's other accounts must not read.
   thread that reads the events while it waits for a path (a share that does
   not answer). The watch keeps a descriptor open for each level of the
   folder it walks (a command can make a very deep one), so the installed
-  node's unit says `LimitNOFILE=65536`. A folder whose
+  node's unit says `LimitNOFILE=65536:524288`. A folder whose
   path is 4,096 bytes or longer, and everything below it, is not watched
   (a command can make a chain deeper than any path, and each watch keeps its
   path); the walks reach it all the same. The node also walks
@@ -465,7 +465,10 @@ Keep nothing there that the machine's other accounts must not read.
   over everything in the granted folder, which takes a while for large
   trees. `status` and the
   commands of `nerve-run` do not wait for it while the folders' entries are
-  up to date; a change of the folders made meanwhile waits for it. A folder of yours
+  up to date; a change of the folders made meanwhile waits for it. The sync of a changed config
+  never walks the folders the watch found due: it comes first and alone, and those
+  folders are walked after it, so a command filling a folder it may write cannot hold
+  back a folder taken from it. A folder of yours
   above a grant that others may not enter gets an entry that lets it pass
   through it: with Landlock that is all it does there, without Landlock its
   commands can then read what others may read inside that folder ([your
