@@ -501,7 +501,8 @@ the node's [log](logging.md#the-log-as-the-owner-reads-it) have the reason too.
 On a Linux machine with no Secret Service (no desktop session), `proxy set`
 with a header or a password refuses and changes nothing. A proxy without
 either works there. The node installed as a service on Windows has no such
-gap: a header or a password goes into the service's Credential Manager
+gap: a header goes into the service's Credential Manager, and an `https://`
+proxy's password goes where the node's keys are, in files by default
 ([above](windows.md#a-proxy-for-the-service-on-windows)).
 
 A `node.toml` that holds header values or a login in the file is refused when

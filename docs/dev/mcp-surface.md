@@ -289,9 +289,9 @@ that start in it, but a command started in the folder around it still
 reaches it; the center tells the model so. A folder whose name cannot be
 shown on one line (a line break or another control character in it, a blank
 at either end) is left out and counted, and marks the folder around it the
-same way where it allows less. Where the machine runs no command in
-`folder` mode (a node you run yourself on a kernel without Landlock),
-no folder is shown with `x`. Where Landlock or an AppContainer
+same way where it allows less. Where the machine runs no `folder` mode
+command for that center (no sandbox, keys a command could reach, or a
+network switch the node cannot hold), no folder is shown with `x`. Where Landlock or an AppContainer
 holds the commands, the center says the sandbox keeps them to the folders;
 on the installed Linux node without Landlock it says they reach what
 `nerve-run` may reach.
