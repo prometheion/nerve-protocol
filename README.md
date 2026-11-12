@@ -61,6 +61,13 @@ On ARM, take the `aarch64` files.
    also read what every account on the machine may read.
    `nerve-node status` shows the node and what to do next.
 
+5. To manage the machine from the center's web UI instead (its mode,
+   folders, rules and capabilities), give that center the settings grant:
+   `nerve-node center settings on <center>`, or the **Settings grant** switch
+   on the app's **Centers** page. It is the easy way, but the center can then
+   widen its own rights up to `user` mode: give it only to a center you would
+   also give a shell ([the settings grant](docs/user/rules.md#the-settings-grant)).
+
 The node has a web UI of its own, off until you turn it on. It listens on
 `http://127.0.0.1:7470` and shows its first token once:
 
