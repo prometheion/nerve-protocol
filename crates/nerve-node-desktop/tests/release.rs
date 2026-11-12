@@ -304,6 +304,54 @@ fn the_notes_say_the_update_order() {
     );
 }
 
+/// The README is the first thing a new user reads (#213): its quick start
+/// covers Linux and Windows, its desktop app comes as the .deb and the .rpm
+/// first, and it says what 0.1.0 keeps stable, linking the promise of the
+/// spec.
+#[test]
+fn the_readme_starts_on_linux_and_windows_and_says_what_stays_stable() {
+    let readme = include_str!("../../../README.md");
+    let section = |head: &str| {
+        readme
+            .split(&format!("\n{head}\n"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("README has no {head}"))
+            .split("\n#")
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let windows = section("### On Windows");
+    for needed in [
+        "nerve-center-x86_64-windows.exe",
+        "nerve-node-desktop-x86_64-windows.exe",
+        "Run as administrator",
+        "(docs/user/windows.md)",
+    ] {
+        assert!(windows.contains(needed), "{needed}: {windows}");
+    }
+    let app = section("### The desktop app");
+    let deb = app.find(".deb").expect("the .deb");
+    assert!(app.contains(".rpm"), "{app}");
+    assert!(
+        deb < app.find("nerve-node-desktop-x86_64-linux").unwrap(),
+        "{app}"
+    );
+    let table = readme.split("\n## Quick start\n").next().unwrap();
+    let desktop = table
+        .lines()
+        .find(|l| l.starts_with("| `nerve-node-desktop`"))
+        .unwrap();
+    assert!(desktop.contains("Windows"), "{desktop}");
+    assert!(readme.contains("owner token"));
+    let stable = section("## What 0.1.0 keeps stable");
+    assert!(
+        stable.contains("(docs/dev/spec/README.md#what-stays-stable-from-010)")
+            && stable.contains("migration"),
+        "{stable}"
+    );
+}
+
 /// The Breaks of 0.0.7 tell a user what to change in a script or a state
 /// folder from 0.0.6: the renames of the commands and options, and the
 /// steps of the one change that stops a center (the local model d1-3B).

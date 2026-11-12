@@ -9,11 +9,12 @@ Three programs:
 | Program | Job | Put it on |
 |---|---|---|
 | `nerve-center` | The center. Your harness reaches it as an MCP server and gets two tools, `list` and `execute`. It pairs machines and serves a web UI | the machine where the harness runs, or a server it reaches |
-| `nerve-node` | The node: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each machine the agent may use |
-| `nerve-node-desktop` | The node with a desktop app: the same node and CLI, and a window that does what the CLI does | each machine the agent may use that has a desktop: Linux x86_64 with GNOME or KDE Plasma |
+| `nerve-node` | The node: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each Linux machine the agent may use |
+| `nerve-node-desktop` | The node with a desktop app: a window that does what the CLI does | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
 
-A machine runs one node: `nerve-node` or `nerve-node-desktop`. This release
-is for Linux, x86_64 and aarch64; Windows comes with 0.1.0.
+A machine runs one node. Nerve runs on Linux (x86_64, aarch64) and Windows
+(x64). On Windows the node is always the desktop app, with no CLI; the
+center runs there too.
 
 ## Quick start
 
@@ -69,16 +70,28 @@ nerve-node ui on
 
 ### The desktop app
 
-On a Linux desktop, take `nerve-node-desktop-x86_64-linux` in place of
-`nerve-node`:
-
-1. In the file's **Properties**, switch on **Executable as Program** (GNOME
-   Files) or tick **Is executable** under **Permissions** (KDE Dolphin).
-2. Open it, and press **Install**.
-
-It installs the node as a service and the app, with **Nerve** in the
-application menu. Then it pairs your first center
+On a Linux desktop, take the desktop app in place of `nerve-node`: the
+`.deb` (Ubuntu, Debian) or the `.rpm` (Fedora). Double-click it, install it,
+then open **Nerve** and press **Install**. The plain
+`nerve-node-desktop-x86_64-linux` works too
 ([install](docs/user/install.md#the-desktop-app)).
+
+It installs the node as a service, and its first steps pair your first
+center.
+
+### On Windows
+
+1. For the center, rename `nerve-center-x86_64-windows.exe` to
+   `nerve-center.exe`, put it on your `PATH`, and in a terminal opened with
+   **Run as administrator** run `nerve-center install`. It prints the web
+   UI's address and the owner token, as on Linux.
+2. On each machine the agent may use, double-click
+   `nerve-node-desktop-x86_64-windows.exe`. It is not signed: SmartScreen
+   asks, **More info**, **Run anyway**. Its installer asks for your Windows
+   password, installs the node as a service, and pairs your first center.
+
+The owner must be a local account with a password. Everything else is in
+the app ([Nerve on Windows](docs/user/windows.md)).
 
 ### A center your harness starts
 
@@ -91,6 +104,14 @@ A harness can also start the center itself, over stdio:
 That center runs as you, so an agent with file or shell tools can read its
 owner token (`nerve-center owner-token`) and log in to its web UI. The
 service keeps the agent out ([center](docs/user/center.md)).
+
+## What 0.1.0 keeps stable
+
+0.1.0 is a beta, not 1.0.0. From 0.1.0 on, the wire protocol, the files
+the node and the center keep, the backup file and `--json` output change
+only with a migration: a newer program reads what an older one wrote, and a
+0.0.8 node still talks to a 0.1.0 center. Messages, the pages of the UIs and
+plain output may change ([what stays stable](docs/dev/spec/README.md#what-stays-stable-from-010)).
 
 ## The action checker
 
