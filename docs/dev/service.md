@@ -17,8 +17,8 @@ A center and a node can share a machine.
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has these files and a `SHA256SUMS` file (seven for Linux, two more
-with Windows).
+release has these nine files, seven for Linux and two for Windows, and a
+`SHA256SUMS` file.
 
 | System | Files |
 |---|---|

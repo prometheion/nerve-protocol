@@ -12,10 +12,10 @@
 # that were built (the ones that will be released), on a runner of their own
 # architecture, and `installed` installs and drives them on the distributions
 # Nerve supports (.github/workflows/installed.yml); the desktop app's .deb and
-# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`). With the
-# input `windows`, `windows-installed` installs and drives the Windows programs
-# the release built (.github/workflows/installed-windows.yml), as CI does with
-# its debug ones. `publish` is the only job
+# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`).
+# `windows` builds the Windows programs, and `windows-installed` installs and
+# drives them (.github/workflows/installed-windows.yml), as CI does with its
+# debug ones. `publish` is the only job
 # that may write: it tags the commit and publishes the release only after
 # every check, build, the conformance run and the install tests passed, so a
 # failed run leaves no tag. Tags are never moved or reused.
@@ -44,13 +44,6 @@ on:
         description: "Version x.y.z, the one in the workspace Cargo.toml"
         type: string
         required: true
-      # Off until 0.1.0, which turns it on: 0.0.7 publishes the Linux programs
-      # only (docs/dev/releasing.md).
-      windows:
-        description: "Build and publish the Windows programs too (off until 0.1.0)"
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -74,7 +67,6 @@ env:
   BRANCH: ${{ inputs.branch }}
   KIND: ${{ inputs.kind }}
   VERSION: ${{ inputs.version }}
-  WINDOWS: ${{ inputs.windows }}
   # The git ref the programs' help links to for the user guide: a release
   # links its own tag (made after the run, before anyone has the programs), a
   # pre-release links main, since its tag exists only after the run.
@@ -450,10 +442,10 @@ jobs:
       tests: tests-{0}-linux
       ref: ${{ needs.check.outputs.sha }}
 
-  # Only with the input `windows`: 0.0.7 publishes no Windows program.
+  # The Windows programs: the desktop app, which is the node there, and the
+  # center.
   windows:
     needs: check
-    if: ${{ inputs.windows }}
     runs-on: windows-2025
     env:
       TARGET: x86_64-pc-windows-msvc
@@ -533,7 +525,6 @@ jobs:
   # for it, as for the Linux install test (owner, 2026-11-11).
   windows-installed:
     needs: [check, windows]
-    if: ${{ inputs.windows }}
     uses: ./.github/workflows/installed-windows.yml
     with:
       programs: windows-release-programs
@@ -544,23 +535,10 @@ jobs:
   # The release is made as a draft with its files first, then the tag, then the
   # draft is published, so that the step most likely to fail (the upload) runs
   # before there is a tag. If anything here fails, the last step removes the
-  # draft and the tag this run created, and nothing else (see there). The
-  # Windows jobs are skipped without the input `windows`, which would skip this
-  # job too, so it says itself what it needs: every other job passed, and the
-  # Windows jobs passed with the input or were skipped without it.
+  # draft and the tag this run created, and nothing else (see there). It runs
+  # only once every job it needs passed.
   publish:
     needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, windows, windows-installed, conformance, installed]
-    if: >-
-      ${{ !cancelled()
-      && needs.check.result == 'success'
-      && needs.linux.result == 'success'
-      && needs.desktop-linux.result == 'success'
-      && needs.desktop-packages.result == 'success'
-      && needs.desktop-packages-test.result == 'success'
-      && needs.conformance.result == 'success'
-      && needs.installed.result == 'success'
-      && needs.windows.result == (inputs.windows && 'success' || 'skipped')
-      && needs.windows-installed.result == (inputs.windows && 'success' || 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -584,13 +562,10 @@ jobs:
         run: |
           cd dist
           # Two Linux programs on each of two machines and the Linux desktop
-          # app, also as a .deb and an .rpm; with Windows also its two
-          # (nerve-node-* takes the desktop app's as well; Windows has no
-          # nerve-node of its own).
-          want=7
-          if [ "$WINDOWS" = true ]; then
-            want=9
-          fi
+          # app, also as a .deb and an .rpm, and Windows' two (nerve-node-*
+          # takes the desktop app's as well; Windows has no nerve-node of its
+          # own).
+          want=9
           files=(nerve-center-* nerve-node-*)
           if [ "${#files[@]}" != "$want" ]; then
             echo "expected $want binaries, got: ${files[*]}" >&2
@@ -610,11 +585,7 @@ jobs:
               prerelease=true
               ;;
           esac
-          if [ "$WINDOWS" = true ]; then
-            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
-          else
-            footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm), built from $SHA. Windows comes with 0.1.0. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
-          fi
+          footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/install.md)."
           # A pre-release's body is the footer alone.
           if [ "$KIND" = release ]; then
             { cat notes/changelog.md; echo; echo "$footer"; } > release-notes.md

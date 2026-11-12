@@ -19,7 +19,8 @@ here. A user page keeps to these rules:
    page.
 6. Say what the user does and sees. How the node does it goes here.
 7. No history. A break is one CHANGELOG line.
-8. Linux only until 0.1.0. Over budget means it belongs here.
+8. Linux and Windows: what differs on Windows is a line on the task's
+   page and a row in `windows.md`. Over budget means it belongs here.
 9. `<details>` folds reference lists and long examples, never a limit: a
    limit stays visible.
 
@@ -45,7 +46,7 @@ budget by 20 %, or a table cell over 40 words, fails it.
 | [web-uis.md](web-uis.md) | The center's and the node's web UI: login, sessions, TLS, the pages |
 | [desktop.md](desktop.md) | The desktop app: installer, rights, settings, what it needs |
 | [messages.md](messages.md) | The messages Nerve shows, with their causes and fixes |
-| [windows.md](windows.md) | Windows, until it comes back with 0.1.0 |
+| [windows.md](windows.md) | Windows: the service, its accounts, the AppContainer, sudo, the center |
 
 ## Build and release
 

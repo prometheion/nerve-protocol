@@ -1,9 +1,9 @@
-# Windows (until 0.1.0)
+# Windows
 
-The releases before 0.1.0 publish the Linux programs only; Windows comes with 0.1.0.
-The user guide is Linux only until then. This page keeps everything it said
-about Windows, for the work toward 0.1.0. It comes back to the user guide,
-short, with that release.
+How Nerve works on Windows, in depth: the node as a service and its
+accounts, the AppContainer, the folder grants, sudo, the center as a
+service. The user guide's [Windows page](../user/windows.md) is the short
+version, task by task.
 
 ## Linux and Windows
 

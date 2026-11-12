@@ -1,7 +1,6 @@
-//! That the releases before 0.1.0 publish the Linux programs only, and what the release gives
-//! Windows once its switch is on: the desktop app and the center, and no
+//! What every release gives Windows: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
-//! (docs/dev/windows.md); what the released app keeps for the licence it
+//! (docs/user/windows.md); what the released app keeps for the licence it
 //! uses Slint under; and that the Linux programs are installed and tested
 //! where the docs say before they are published; and that the security
 //! policy names a way in that needs no repository setting.
@@ -22,32 +21,22 @@ fn job(name: &str) -> String {
         .join("\n")
 }
 
-/// The releases before 0.1.0 publish the Linux programs only: the input `windows`,
-/// off by default, gates the Windows job, and the publish job then counts
-/// seven files (five programs, the app's .deb and .rpm) and names no
-/// Windows program in its footer. 0.1.0 turns it
-/// on, and the Windows job builds the app and the center, no `nerve-node`.
+/// From 0.1.0 every release publishes Windows too (the switch of the
+/// releases before is gone): the Windows job builds the app and the center,
+/// no `nerve-node`; the publish job needs it and its install test like every
+/// other job, counts nine files (the Linux programs, the app's .deb and .rpm,
+/// Windows' two) and names them in its one footer.
 #[test]
-fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
-    let inputs = RELEASE
-        .split("    inputs:\n")
-        .nth(1)
-        .unwrap()
-        .split("\npermissions:")
-        .next()
-        .unwrap();
-    let switch = inputs
-        .split("      windows:\n")
-        .nth(1)
-        .expect("an input windows");
-    assert!(switch.contains("type: boolean"), "{switch}");
-    assert!(switch.contains("default: false"), "{switch}");
-    assert!(RELEASE.contains("  WINDOWS: ${{ inputs.windows }}\n"));
+fn every_release_has_windows_the_app_and_the_center() {
+    assert!(!RELEASE.contains("inputs.windows"), "a switch is left");
+    assert!(
+        !RELEASE.contains("$WINDOWS") && !RELEASE.contains(" WINDOWS:"),
+        "a switch is left"
+    );
+    assert!(!RELEASE.contains("0.1.0"), "a line of the releases before");
     let windows = job("windows");
     assert!(
-        windows
-            .lines()
-            .any(|l| l.trim() == "if: ${{ inputs.windows }}"),
+        !windows.lines().any(|l| l.starts_with("    if:")),
         "{windows}"
     );
     assert!(windows.contains("x86_64-pc-windows-msvc"), "{windows}");
@@ -65,60 +54,44 @@ fn windows_waits_for_its_switch_and_gets_the_app_and_the_center() {
             assert!(!words.contains(&"nerve-node"), "{line}");
         }
     }
-    // The publish job waits for a Windows job that ran with the switch, and
-    // takes one that was skipped without it.
+    // The publish job runs only once every job passed: no condition of its
+    // own that could let a skipped one through.
     let publish = job("publish");
-    assert!(
-        publish.contains("needs.windows.result == (inputs.windows && 'success' || 'skipped')"),
-        "{publish}"
-    );
+    let needs: Vec<&str> = publish
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("needs: ["))
+        .and_then(|l| l.strip_suffix(']'))
+        .unwrap()
+        .split(", ")
+        .collect();
     for need in [
         "check",
         "linux",
         "desktop-linux",
         "desktop-packages",
         "desktop-packages-test",
+        "windows",
+        "windows-installed",
         "conformance",
         "installed",
     ] {
-        assert!(
-            publish.contains(&format!("needs.{need}.result == 'success'")),
-            "{need}: {publish}"
-        );
+        assert!(needs.contains(&need), "{need}: {needs:?}");
     }
     assert!(
-        publish.contains(
-            "needs.windows-installed.result == (inputs.windows && 'success' || 'skipped')"
-        ),
+        !publish.lines().any(|l| l.starts_with("    if:")),
         "{publish}"
     );
-    // Two Linux programs on each of two machines and the Linux desktop app,
-    // also as a .deb and an .rpm; Windows' two only with the switch.
-    assert!(publish.contains("want=7\n"), "{publish}");
-    assert!(
-        publish.contains("if [ \"$WINDOWS\" = true ]; then\n            want=9"),
-        "{publish}"
-    );
+    assert!(publish.contains("want=9\n"), "{publish}");
     let footers: Vec<&str> = publish
         .lines()
         .filter(|l| l.trim_start().starts_with("footer="))
         .collect();
-    assert_eq!(footers.len(), 2, "{publish}");
-    let (on, off) = (footers[0], footers[1]);
-    assert!(on.contains("no \\`nerve-node\\` for Windows"), "{on}");
+    assert_eq!(footers.len(), 1, "{publish}");
     assert!(
-        off.contains("Windows comes with 0.1.0") && !off.contains("Windows x86_64"),
-        "{off}"
-    );
-    let switch_on = publish
-        .split("footer=")
-        .next()
-        .unwrap()
-        .trim_end()
-        .ends_with("if [ \"$WINDOWS\" = true ]; then");
-    assert!(
-        switch_on,
-        "the first footer is the one with Windows: {publish}"
+        footers[0].contains("Windows x86_64")
+            && footers[0].contains("no \\`nerve-node\\` for Windows"),
+        "{}",
+        footers[0]
     );
 }
 
@@ -131,7 +104,6 @@ fn the_release_installs_its_own_windows_programs_before_it_publishes() {
     let installed = job("windows-installed");
     for line in [
         "needs: [check, windows]",
-        "if: ${{ inputs.windows }}",
         "uses: ./.github/workflows/installed-windows.yml",
         "programs: windows-release-programs",
         "tests: windows-release-tests",
@@ -274,6 +246,58 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
         .find("nerve-node-desktop-x86_64-linux")
         .expect("install.md names the plain program");
     assert!(deb < plain, "the package comes first in install.md: {app}");
+}
+
+/// The docs know that Windows is released: no page, workflow or policy says
+/// it waits for 0.1.0 (only the CHANGELOG's history does), and the user
+/// guide's table lists the Windows page right after the install.
+#[test]
+fn no_page_says_windows_waits_for_its_release() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p
+                .extension()
+                .is_some_and(|e| e == "md" || e == "yml" || e == "sh")
+            {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = vec![
+        root.join("README.md"),
+        root.join("SECURITY.md"),
+        root.join("CONTRIBUTING.md"),
+    ];
+    walk(&root.join("docs"), &mut files);
+    walk(&root.join(".github"), &mut files);
+    let mut found = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for stale in [
+            "comes with 0.1.0",
+            "until 0.1.0",
+            "Linux only until",
+            "publishes no Windows program",
+            "inputs.windows",
+        ] {
+            if flat.contains(stale) {
+                found.push(format!("{}: {stale}", f.display()));
+            }
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+    let guide = std::fs::read_to_string(root.join("docs/user/README.md")).unwrap();
+    let rows: Vec<&str> = guide
+        .lines()
+        .filter(|l| l.starts_with("| [") && l.contains(".md]("))
+        .collect();
+    assert!(rows[0].starts_with("| [install.md]"), "{rows:?}");
+    assert!(rows[1].starts_with("| [windows.md]"), "{rows:?}");
 }
 
 /// The notes of a release name everything it changed, Windows too (owner,
