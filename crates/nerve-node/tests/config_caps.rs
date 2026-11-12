@@ -5,12 +5,15 @@
 //! arguments, never through a shell. They run as `nerve-run`, which a node
 //! run by hand does not have, so it offers none; here the node by hand
 //! stands for it with its own user (NodeOptions::config_caps_by_hand), and
-//! the installed node's runs as `nerve-run` are in real_account.rs. Linux
-//! only: Windows reads them and offers none yet.
-#![cfg(target_os = "linux")]
+//! the installed node's runs as `nerve-run` are in real_account.rs. What
+//! the node offers is checked on Linux and Windows; the calls run Linux
+//! programs (`id`, `echo`, `sleep`) and a provider on the control socket, so
+//! those tests are Linux's.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod common;
 
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -22,8 +25,12 @@ use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{AllowedProvider, CapSetting, ConfigCapability, SettingsGrant};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(target_os = "linux")]
+use {
+    tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    tokio::net::UnixStream,
+};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -32,12 +39,7 @@ fn scratch() -> tempfile::TempDir {
 }
 
 fn options(root: &Path) -> NodeOptions {
-    let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
-    o.home = root.join("home");
-    std::fs::create_dir_all(&o.home).unwrap();
-    // Not the rights of whoever runs the tests: an elevated run must pass.
-    o.full_rights = Some(false);
-    o.exe = Some(env!("CARGO_BIN_EXE_nerve-node").into());
+    let mut o = common::options(root);
     // The node by hand runs the config's capabilities as its own user, for
     // `nerve-run`, on a kernel without Landlock (as on a machine that lacks
     // it): the folders of a pairing by hand are not that account's.
@@ -164,6 +166,7 @@ fn user_mode(p: &mut nerve_policy::CenterPolicy) {
 
 /// What a value of an argument holds reaches the program as one argument,
 /// as it is: no shell reads it, so `;`, `$( )` and backquotes run nothing.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn arguments_are_data_never_shell() {
     let dir = scratch();
@@ -237,6 +240,7 @@ params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type
 
 /// A value that looks like an option is an argument after a `--` of the
 /// command, where the program reads no options; before one it is refused.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_option_like_value_after_double_dash_stays_an_argument() {
     let dir = scratch();
@@ -272,6 +276,7 @@ params = '{"type": "object", "properties": {"name": {"type": "string"}}, "requir
 /// A path argument marked in the schema is held to the folders as an `fs`
 /// call's path is: outside them the call is refused and its program never
 /// runs; inside it runs with the path as the node resolved it.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_path_arg_outside_the_folders_is_refused() {
     let dir = scratch();
@@ -352,6 +357,7 @@ params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-
 /// The audit keeps a path argument as the node resolved it, which is what
 /// the rules match: a deny rule an audit button pins from it refuses the
 /// call again, however the path was spelled (through a link, with `..`).
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_path_argument_names_the_place_the_call_reached() {
     let dir = scratch();
@@ -411,6 +417,7 @@ params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-
 /// schema names (a call cannot fill the log with names of its own, nor push
 /// the real ones out), and no path before it is resolved: a call refused as
 /// off would pin the spelling the agent gave, not the place.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_audit_keeps_only_the_arguments_the_schema_names() {
     let dir = scratch();
@@ -451,6 +458,7 @@ params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-
 }
 
 /// Whether a process runs `sleep` with the argument `arg`.
+#[cfg(target_os = "linux")]
 fn sleeping(arg: &str) -> bool {
     std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
         std::fs::read(e.path().join("cmdline")).is_ok_and(|c| {
@@ -464,6 +472,7 @@ fn sleeping(arg: &str) -> bool {
 
 /// A call of a config capability counts toward `limits.max_running` as a
 /// command does: while one runs, a second one is `busy`.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_counts_toward_max_running() {
     let dir = scratch();
@@ -502,6 +511,7 @@ command = ["sleep", "41.625"]"#);
 
 /// A command past its `timeout_secs` is killed and its call fails
 /// `timeout`, naming its own limit.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_timeout_ends_it() {
     let dir = scratch();
@@ -527,6 +537,7 @@ timeout_secs = 1"#);
 
 /// A call the center cancels ends its command, as a timeout does: the call
 /// fails `cancelled` and the command is gone within seconds.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_call_ends_the_command() {
     let dir = scratch();
@@ -570,6 +581,7 @@ command = ["sleep", "41.5"]"#);
 /// first process's exit, and the audit log says so as for `exec.run`. The
 /// cgroups are plain folders here, and the command writes what the kernel
 /// would into its `memory.events` (as link.rs's test of `exec.run`).
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_killed_for_its_memory_fails_and_is_in_the_audit() {
     use std::sync::Arc;
@@ -638,6 +650,7 @@ command = ["sh"]"#)
 
 /// Only stdout's own cut counts for what a call returns: stderr past the
 /// node's output cap leaves a whole JSON result whole.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn stderr_past_the_cap_leaves_the_result_whole() {
     let dir = scratch();
@@ -669,6 +682,7 @@ result = '{"type": "object"}'"#);
 /// its stderr in the error's data (the command's words, not the node's);
 /// one whose result is JSON returns it parsed, and fails where it does not
 /// fit the result schema.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_command_is_an_error_and_json_is_parsed() {
     let dir = scratch();
@@ -711,6 +725,7 @@ result = '{"type": "object", "properties": {"t": {"type": "integer"}}, "required
 
 /// A program may not add a capability the config declares, and one
 /// attached is let go when the owner declares one of its names.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_clash_with_a_provider_is_refused() {
     let dir = scratch();
@@ -767,10 +782,10 @@ command = ["true"]"#);
     daemon.stop().await;
 }
 
-/// A capability for Windows only is not offered on Linux; a call of it
-/// names an unknown capability.
+/// A capability for one platform is offered there only: on the other a
+/// call of it names an unknown capability.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_windows_only_capability_is_not_offered_on_linux() {
+async fn a_capability_for_one_platform_is_offered_there_only() {
     let dir = scratch();
     let mut center = FakeCenter::start(false).await.unwrap();
     let caps = vec![
@@ -794,9 +809,15 @@ command = ["id", "-un"]"#),
         .filter(|(_, p)| p == "config")
         .map(|(n, _)| n)
         .collect();
-    assert_eq!(now, ["any.who", "lin.who"]);
-    let e = invoke(&mut conn, "win.who", json!({})).await.unwrap_err();
+    let (here, elsewhere) = if cfg!(windows) {
+        ("win.who", "lin.who")
+    } else {
+        ("lin.who", "win.who")
+    };
+    assert_eq!(now, ["any.who", here]);
+    let e = invoke(&mut conn, elsewhere, json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "unknown_capability", "{}", e.message);
+    #[cfg(target_os = "linux")]
     for name in ["lin.who", "any.who"] {
         invoke(&mut conn, name, json!({}))
             .await
@@ -831,25 +852,32 @@ command = ["id"]"#);
     assert!(!now.iter().any(|(_, p)| p == "config"), "{now:?}");
     let e = invoke(&mut conn, "who.am", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "unknown_capability", "{}", e.message);
-    let why =
-        "left out: runs as nerve-run, which only the installed node has (sudo nerve-node install)";
+    let why = format!(
+        "left out: runs as nerve-run, which only the installed node has ({})",
+        if cfg!(windows) {
+            "Nerve's installer"
+        } else {
+            "sudo nerve-node install"
+        }
+    );
     let paths = daemon.paths().clone();
     let ls = cli(&paths, &["cap"]).await;
     let row = ls
         .lines()
         .find(|l| l.starts_with("who.am"))
         .unwrap_or_else(|| panic!("{ls}"));
-    assert!(row.ends_with(why), "{ls}");
+    assert!(row.ends_with(&why), "{ls}");
     assert!(ls.contains("capability who.am: id\n"), "{ls}");
     // So does the CLI while no node runs.
     daemon.stop().await;
     let ls = cli(&paths, &["cap"]).await;
-    assert!(ls.contains(why), "{ls}");
+    assert!(ls.contains(&why), "{ls}");
 }
 
 /// A capability of the config that senses is offered and runs only once
 /// the owner sets it to on; a center with the settings grant cannot, though
 /// it may turn on one that only reads.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn sense_needs_the_owners_on() {
     let dir = scratch();
@@ -1003,6 +1031,7 @@ async fn set_caps(conn: &mut Conn<TcpStream>, caps: Value) -> Result<Value, nerv
 /// A center may not turn on a capability whose action senses although this
 /// node does not offer that action now (it is for another platform): once
 /// the owner makes it offered, the center's `on` would cover it.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capability_that_senses_where_it_is_not_offered_stays_the_owners() {
     let dir = scratch();
@@ -1046,6 +1075,7 @@ platform = "windows""#);
 /// `config accept` of a node.toml the owner wrote with an action that
 /// senses switches it off where an earlier switch covered it, as `cap add`
 /// does, and says so; so does any other write the running node takes.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn config_accept_holds_an_action_that_comes_to_sense() {
     let dir = scratch();
@@ -1115,6 +1145,7 @@ command = ["echo", "sound"]"#));
 /// A node.toml that names an `account` for a capability is refused in
 /// words wherever the node takes the file: by `config accept` to the
 /// running node, which keeps the config it had, and to a stopped one.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn config_accept_refuses_an_account_in_words() {
     let dir = scratch();
@@ -1136,7 +1167,7 @@ command = ["echo", "temp"]"#);
     )
     .unwrap();
     let why = "capability probe.list: account is no setting any more: a capability of node.toml always runs as nerve-run";
-    let e = try_cli(&paths, &["config", "accept"])
+    let e = common::cli(&paths, &["config", "accept"])
         .await
         .expect_err("an account is refused");
     assert!(e.contains(why), "{e}");
@@ -1147,7 +1178,7 @@ command = ["echo", "temp"]"#);
     );
     // So is it while no node runs.
     daemon.stop().await;
-    let e = try_cli(&paths, &["config", "accept"])
+    let e = common::cli(&paths, &["config", "accept"])
         .await
         .expect_err("an account is refused");
     assert!(e.contains(why), "{e}");
@@ -1157,6 +1188,7 @@ command = ["echo", "temp"]"#);
 /// like a folder-mode command, its arguments whole: it reads in its folders
 /// and nowhere else. (The installed node runs those of `nerve-run` so;
 /// real_account.rs runs one there.)
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_program_runs_whole_through_the_shim_under_landlock() {
     use nerve_node::exec::{self, RunCall, RunOptions};
@@ -1227,12 +1259,14 @@ async fn a_program_runs_whole_through_the_shim_under_landlock() {
 }
 
 /// A provider's connection on the control socket.
+#[cfg(target_os = "linux")]
 struct Provider {
     lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
     /// Held: the connection stays while it is.
     _w: tokio::net::unix::OwnedWriteHalf,
 }
 
+#[cfg(target_os = "linux")]
 impl Provider {
     async fn next(&mut self) -> Option<Value> {
         let line = tokio::time::timeout(WAIT, self.lines.next_line())
@@ -1244,6 +1278,7 @@ impl Provider {
 }
 
 /// `hello` as the provider `desk` (this test program) with `caps`.
+#[cfg(target_os = "linux")]
 async fn hello(socket: &Path, caps: Value) -> (Provider, Value) {
     let token = std::fs::read_to_string(socket.with_file_name("ctl.token")).unwrap();
     let (r, mut w) = UnixStream::connect(socket).await.unwrap().into_split();
@@ -1260,28 +1295,12 @@ async fn hello(socket: &Path, caps: Value) -> (Provider, Value) {
 
 /// What `nerve-node <words>` prints, run in this process.
 async fn cli(paths: &NodePaths, words: &[&str]) -> String {
-    try_cli(paths, words).await.unwrap()
-}
-
-/// The same, or the error it ends with.
-async fn try_cli(paths: &NodePaths, words: &[&str]) -> Result<String, String> {
-    use clap::Parser;
-    let mut args = vec![
-        "nerve-node".into(),
-        "--config-dir".into(),
-        paths.config_dir.clone(),
-        "--state-dir".into(),
-        paths.state_dir.clone(),
-    ];
-    args.extend(words.iter().map(PathBuf::from));
-    let cli = nerve_node::cli::Cli::parse_from(args);
-    let mut out = Vec::new();
-    nerve_node::cli::execute(cli, &mut out).await?;
-    Ok(String::from_utf8(out).unwrap())
+    common::cli(paths, words).await.unwrap()
 }
 
 /// `cap add` takes a schema on stdin, as the owner pipes it in, and the
 /// running node offers what it declares at once; `cap` asks the node.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
     use std::io::Write;
@@ -1371,6 +1390,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
 /// A capability of node.toml is decided like any other: in `allowlist`
 /// mode only an allow rule lets a call through, a deny rule or `off` stops
 /// it, and `cap rm` takes it from the running node at once.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn rules_switches_and_cap_rm_hold_a_config_capability() {
     let dir = scratch();

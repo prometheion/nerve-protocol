@@ -18,10 +18,11 @@ use std::time::Duration;
 
 use common::linked;
 use nerve_conformance::fake_center::{self, FakeCenter};
-use nerve_conformance::wire::Conn;
+use nerve_conformance::wire::{Conn, Recv};
 use nerve_node::{Daemon, Hold, HoldAt, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{Access, CapSetting, Folder, Mode};
+use nerve_proto::Message;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
@@ -459,12 +460,36 @@ async fn a_command_running_when_the_network_goes_off_is_ended() {
         "{log}"
     );
     // Back on: the switch going on is what ends commands, not its state.
+    // Another change of the config has the link look at its commands again,
+    // as its 5 s tick does: the command with the network goes on.
     set(false).await;
     let call = long(&mut conn, &work).await;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let extra = root.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    nerve_node::cli::edit(&paths, |c| {
+        c.centers[0].policy.folders.push(Folder {
+            path: extra.display().to_string(),
+            access: Access::parse("r").unwrap(),
+        });
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    loop {
+        match conn.recv(WAIT).await {
+            Recv::Msg(Message::Notification { method, params })
+                if method == "event" && params["name"] == "descriptor_changed" =>
+            {
+                break;
+            }
+            Recv::Msg(Message::Notification { .. }) => {}
+            other => panic!("the link did not look again: {other:?}"),
+        }
+    }
     let mut others = Vec::new();
     assert!(
-        conn.answer(call, Duration::from_millis(200), &mut others)
+        conn.answer(call, Duration::from_secs(1), &mut others)
             .await
             .is_err_and(|e| e.contains("no answer")),
         "a command with the network was ended"

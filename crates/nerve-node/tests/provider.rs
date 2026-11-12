@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::owner_edit;
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::config::{AllowedProvider, SettingsGrant};
@@ -64,19 +64,14 @@ async fn node(
 }
 
 async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
+    let mut conn = common::linked(center).await;
     // Answered once the node serves the link, with the rev it compares to:
     // a provider that attaches from now on changes it.
-    inc.conn
-        .call("describe", json!({"detail": "summary"}), WAIT)
+    conn.call("describe", json!({"detail": "summary"}), WAIT)
         .await
         .unwrap()
         .expect("describe");
-    inc.conn
+    conn
 }
 
 /// A provider's connection.

@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::owner_edit;
+use common::{options, owner_edit};
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
-use nerve_node::{Daemon, NodeOptions, NodePaths};
+use nerve_node::{Daemon, NodePaths};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
@@ -22,19 +22,11 @@ fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
-fn options(root: &Path) -> NodeOptions {
-    let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
-    o.home = root.join("home");
-    std::fs::create_dir_all(&o.home).unwrap();
-    // Not the rights of whoever runs the tests: an elevated run must pass.
-    o.full_rights = Some(false);
-    // NERVE_NODE_BIN lets the built tests run on another machine.
-    o.exe = Some(
-        std::env::var_os("NERVE_NODE_BIN")
-            .map(Into::into)
-            .unwrap_or_else(|| env!("CARGO_BIN_EXE_nerve-node").into()),
-    );
-    o
+/// Where the folder `p` really is, without Windows' `\\?\` prefix.
+fn real(p: &Path) -> PathBuf {
+    PathBuf::from(nerve_policy::paths::win::strip_verbatim(
+        &std::fs::canonicalize(p).unwrap().display().to_string(),
+    ))
 }
 
 /// Pairs with `center` and starts the daemon.
@@ -155,7 +147,6 @@ async fn handshake_describe_and_an_allowed_read() {
 }
 
 /// The next `node.descriptor_changed` on `conn`: its rev.
-#[cfg(unix)]
 async fn changed_rev(conn: &mut Conn<TcpStream>) -> u64 {
     use nerve_conformance::wire::Recv;
     use nerve_proto::rpc::Message;
@@ -173,7 +164,6 @@ async fn changed_rev(conn: &mut Conn<TcpStream>) -> u64 {
 }
 
 /// The tools a center can build: `cap.action` of the full descriptor.
-#[cfg(unix)]
 async fn offered(conn: &mut Conn<TcpStream>) -> (u64, Vec<String>) {
     let d = conn
         .call("describe", json!({"detail": "full"}), WAIT)
@@ -193,10 +183,8 @@ async fn offered(conn: &mut Conn<TcpStream>) -> (u64, Vec<String>) {
 
 /// Under default deny the center is shown only the actions a rule covers;
 /// an added or removed rule moves the rev and the node tells the center.
-/// Unix only: the rule reaches the running daemon through its control
-/// socket, and Windows has none (the CLI writes the file and the
-/// node takes it at its next start, docs/dev/spec/node-local.md §1).
-#[cfg(unix)]
+/// The rule reaches the running daemon through its control socket (its
+/// control pipe on Windows).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rule_edit_changes_what_the_center_is_offered() {
     let dir = tempdir();
@@ -225,8 +213,7 @@ async fn a_rule_edit_changes_what_the_center_is_offered() {
 
 /// A folder the owner grants while the link is up reaches the center: the
 /// node tells it the descriptor changed, and the access block names the
-/// folder with its flags, the mode and the account. Unix only, as above.
-#[cfg(unix)]
+/// folder with its flags, the mode and the account.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_grant_through_the_owner_tells_the_center() {
     let dir = tempdir();
@@ -255,7 +242,7 @@ async fn a_folder_grant_through_the_owner_tells_the_center() {
 
     let proj = dir.path().join("proj");
     std::fs::create_dir_all(&proj).unwrap();
-    let proj = std::fs::canonicalize(&proj).unwrap();
+    let proj = real(&proj);
     owner_edit(node.paths(), |c| {
         c.centers[0].policy.folders = vec![nerve_policy::config::Folder {
             path: proj.display().to_string(),
@@ -298,12 +285,6 @@ async fn each_center_is_told_only_its_own_folders() {
     for d in [&proj, &secret] {
         std::fs::create_dir_all(d).unwrap();
     }
-    // Where the folder really is, without Windows' `\\?\` prefix.
-    let real = |p: &Path| {
-        std::path::PathBuf::from(nerve_policy::paths::win::strip_verbatim(
-            &std::fs::canonicalize(p).unwrap().display().to_string(),
-        ))
-    };
     let (proj, secret) = (real(&proj), real(&secret));
     owner_edit(&o.paths, |c| {
         for (e, folder) in c.centers.iter_mut().zip([&proj, &secret]) {
@@ -994,7 +975,8 @@ async fn a_streams_close_comes_after_its_last_frame() {
     use nerve_proto::Message;
 
     let dir = tempdir();
-    let script = "sleep 0.5\ni=0\nwhile [ $i -lt 60 ]; do head -c 1000000 /dev/zero | tr '\\0' b; i=$((i+1)); done\n";
+    // It says when it printed everything, beside itself.
+    let script = "sleep 0.5\ni=0\nwhile [ $i -lt 60 ]; do head -c 1000000 /dev/zero | tr '\\0' b; i=$((i+1)); done\ntouch \"$(dirname \"$0\")/printed\"\n";
     let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
     let run = lab
         .request("invoke", session_run(&command, "s1"))
@@ -1009,7 +991,17 @@ async fn a_streams_close_comes_after_its_last_frame() {
         .as_u64()
         .unwrap();
     // Not read while the command prints and ends: its last frames wait.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let printed = dir.path().join("home/printed");
+    let until = std::time::Instant::now() + WAIT;
+    while !printed.exists() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the command did not print"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // And a moment for the node to see it end.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     // A frame counts by its payload, a gap by the bytes it says were dropped.
     let size = |f: &nerve_proto::frame::Frame| f.gap_bytes().unwrap_or(f.payload.len() as u64);
     let mut got = lab.take_frames().iter().map(size).sum::<u64>();

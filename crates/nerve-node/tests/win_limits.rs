@@ -13,10 +13,13 @@
 //! It pairs the service with a center named `winlimits` and removes it again.
 #![cfg(windows)]
 
+mod common;
+
+use common::linked_within;
 use std::process::Command;
 use std::time::Duration;
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use nerve_node::edition::{DESKTOP_PROGRAM, Edition};
 use nerve_node::service::Layout;
@@ -35,15 +38,6 @@ static APP: Edition = Edition {
     program: DESKTOP_PROGRAM,
     parts: None,
 };
-
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
-        .await
-        .expect("handshake");
-    inc.conn
-}
 
 async fn run(conn: &mut Conn<TcpStream>, command: &str) -> Result<Value, RpcError> {
     let id = conn
@@ -104,7 +98,7 @@ async fn the_installed_service_holds_a_command_to_its_memory_limit() {
     })
     .await
     .expect("the owner's edit");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_within(&mut center, WAIT).await;
 
     let r = run(&mut conn, BIG).await.expect("the command runs");
     // Back as they were, whatever the result.

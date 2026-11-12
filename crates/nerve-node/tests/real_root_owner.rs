@@ -16,11 +16,14 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
+
+use common::linked_skipping_ended;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use nerve_conformance::fake_center::{self, FakeCenter};
+use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::Conn;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -136,21 +139,6 @@ fn out(v: &Value) -> String {
     )
 }
 
-/// The running node's link to `center`, once the handshake is through.
-/// Each node an install started and stopped meanwhile dialled too: its link
-/// waits in the queue, closed, and is passed over.
-async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
-    let paired = center.paired().expect("paired");
-    for _ in 0..20 {
-        let mut inc = center.next_link(WAIT).await.expect("the node dials");
-        match fake_center::handshake(&mut inc.conn, &center.center_id, &paired).await {
-            Ok(_) => return inc.conn,
-            Err(e) => eprintln!("passed over a link of a node that stopped: {e:?}"),
-        }
-    }
-    panic!("no link of the running node");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "installs the node on this machine as root; NERVE_NODE_REAL names it"]
 async fn root_is_the_owner_only_when_it_says_so() {
@@ -222,7 +210,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(ok, "{said}");
     let (ok, said) = sh(Command::new(BIN).args(["mode", "user"]));
     assert!(ok, "{said}");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     let e = run(&mut conn, work, "id -u").await.unwrap_err();
     assert!(e.contains("this node has no owner"), "{e}");
     drop(conn);
@@ -260,7 +248,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(sh(Command::new(BIN).args(["center", "settings", "off"])).0);
 
     // User mode runs as root, with root's home.
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     let r = run(&mut conn, work, "id -u").await.unwrap();
     assert_eq!(out(&r), "0\n", "{r}");
     let r = run(&mut conn, work, "printenv HOME").await.unwrap();
@@ -357,7 +345,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     // center reads it any more.
     let (ok, said) = sh(Command::new(BIN).args(["folder", "rm", "/srv/nrv151"]));
     assert!(ok, "{said}");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     let r = run(&mut conn, Path::new("/tmp"), "cat /srv/nrv151/data.txt").await;
     let shown = r.as_ref().map(out).unwrap_or_else(|e| e.clone());
     assert!(!shown.contains("root's data"), "{shown}");
@@ -393,7 +381,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
         .arg(&proj)
         .arg("rwx"));
     assert!(ok, "{said}");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     let r = run(&mut conn, &proj, "cat a.txt").await.unwrap();
     assert_eq!(out(&r), "alice's\n", "{r}");
     drop(conn);
@@ -418,7 +406,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     );
     assert_eq!(owner_in_unit().as_deref(), Some("root"));
     assert!(!has_entry(&a, &run_uid), "{}", acl(&a));
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
     let r = run(&mut conn, Path::new("/tmp"), "id -un").await;
     assert_eq!(r.as_ref().map(out).as_deref(), Ok("nerve-run\n"), "{r:?}");
     let r = run(
@@ -566,7 +554,7 @@ async fn a_program_of_root_attaches_as_a_provider() {
     assert!(sh(Command::new(BIN).args(["mode", "user"])).0);
     let (ok, said) = sh(Command::new(BIN).args(["provider", "add", "rootprov", &python]));
     assert!(ok, "{said}");
-    let mut conn = linked(&mut center).await;
+    let mut conn = linked_skipping_ended(&mut center, WAIT).await;
 
     let at = "/run/nerve-node/provider.sock";
     let script = script.to_str().unwrap();

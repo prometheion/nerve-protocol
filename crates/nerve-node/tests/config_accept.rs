@@ -5,27 +5,10 @@
 
 mod common;
 
-use std::path::Path;
-
-use common::cli;
+use common::{cli, options};
 use nerve_conformance::fake_center::FakeCenter;
-use nerve_node::{Daemon, NodeOptions, NodePaths};
+use nerve_node::Daemon;
 use nerve_policy::NodeConfig;
-
-fn options(root: &Path) -> NodeOptions {
-    let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
-    o.home = root.join("home");
-    std::fs::create_dir_all(&o.home).unwrap();
-    // Not the rights of whoever runs the tests: an elevated run must pass.
-    o.full_rights = Some(false);
-    // NERVE_NODE_BIN lets the built tests run on another machine.
-    o.exe = Some(
-        std::env::var_os("NERVE_NODE_BIN")
-            .map(Into::into)
-            .unwrap_or_else(|| env!("CARGO_BIN_EXE_nerve-node").into()),
-    );
-    o
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_node_takes_the_file_the_owner_edited() {
