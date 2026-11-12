@@ -1,9 +1,11 @@
-//! The installed node's entries in the Windows Event Log: its start, its
-//! stop, a start that fails and a crash (docs/dev/windows.md). The program
-//! carries the message table that gives each entry its text: nerve-node's
-//! `build.rs` links the resource [`resource`] makes into `nerve-node.exe`,
-//! and `install` registers the program as the message file of the source
-//! [`SOURCE`] in the Application log ([`crate::win::event::put_source`]).
+//! The installed node's and center's entries in the Windows Event Log: the
+//! service's start, its stop, a start that fails and a crash
+//! (docs/dev/windows.md, crate::win::dispatch). The program carries the
+//! message table that gives each entry its text: the `build.rs` of
+//! nerve-node and of nerve-center link the resource [`resource`] makes into
+//! the program, and `install` registers the program as the message file of
+//! the source ([`SOURCE`], [`CENTER_SOURCE`]) in the Application log
+//! ([`crate::win::event::put_source`]).
 //! Without that the Event Viewer still shows an entry, with a note that its
 //! description is missing.
 //!
@@ -11,14 +13,21 @@
 //! the tests check the resource on every platform; the writing itself is
 //! [`crate::win::event::report`].
 
-/// The source the entries come from: the service's name.
+/// The source the node's entries come from: its service's name.
 pub const SOURCE: &str = "nerve-node";
 
 /// Where the source is registered, below `HKEY_LOCAL_MACHINE`.
 pub const SOURCE_KEY: &str =
     "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\nerve-node";
 
-/// An entry the node makes, by its event id.
+/// The source the center's entries come from: its service's name.
+pub const CENTER_SOURCE: &str = "nerve-center";
+
+/// Where that source is registered.
+pub const CENTER_SOURCE_KEY: &str =
+    "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\nerve-center";
+
+/// An entry a service makes, by its event id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// The node runs; the entry says where its log is.
@@ -49,7 +58,7 @@ impl Event {
     }
 }
 
-/// The text of every event: the one string the node gives it.
+/// The text of every event: the one string the service gives it.
 const MESSAGE: &str = "%1\r\n";
 /// `RT_MESSAGETABLE`.
 const MESSAGE_TABLE: u16 = 11;
@@ -180,5 +189,6 @@ mod tests {
         let errors: Vec<Event> = Event::ALL.into_iter().filter(|e| e.is_error()).collect();
         assert_eq!(errors, [Event::NotStarted, Event::Crashed]);
         assert!(SOURCE_KEY.ends_with(&format!("\\Application\\{SOURCE}")));
+        assert!(CENTER_SOURCE_KEY.ends_with(&format!("\\Application\\{CENTER_SOURCE}")));
     }
 }

@@ -39,8 +39,10 @@ fn last() -> io::Error {
 /// This process's token without the administrators' rights. What it makes
 /// belongs to its user and is open to that user and SYSTEM, as an
 /// administrator's own token would give it to the Administrators group:
-/// the program could not open its own process then.
-fn restricted() -> io::Result<OwnedHandle> {
+/// the program could not open its own process then. The node's `update`
+/// asks a program its version with it, and its tests act as an owner with
+/// it.
+pub fn restricted() -> io::Result<OwnedHandle> {
     let own = token(
         None,
         TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT,

@@ -261,8 +261,9 @@ jobs:
           }
           if ($failed) { throw "$failed of the installed tests failed" }
       # A node from before the install's check, or a folder changed after it,
-      # may be another account's: the service does not start on it (security-1)
-      # and starts again once the administrators own the folder.
+      # may be another account's: the service does not start on it (security-1).
+      # Such a stop with an error is a failure to the manager, which starts the
+      # node again by itself once the administrators own the folder (arch-1).
       - name: The service does not start on a folder another account owns
         run: |
           $state = 'C:\ProgramData\Nerve\state'
@@ -278,8 +279,13 @@ jobs:
           $status = (Get-Service nerve-node).Status
           icacls $state /setowner '*S-1-5-32-544' | Out-Null
           if ($started -or $status -eq 'Running') { throw "the service started on a folder of $std" }
-          Start-Service nerve-node -ErrorAction Stop
-          if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the service does not start on the administrators'' folder' }
+          # Restarts 5 s, 5 s, then every 60 s after a failure.
+          $until = (Get-Date).AddSeconds(150)
+          while ((Get-Service nerve-node).Status -ne 'Running') {
+            if ((Get-Date) -gt $until) { throw 'the manager did not start the node again after its stop with an error' }
+            Start-Sleep -Seconds 2
+          }
+          "the manager started the node again after its stop with an error" >> $env:GITHUB_STEP_SUMMARY
       # A local account named as a Windows set up offline names it, with a
       # blank and an umlaut, installs the node again and owns it: its folder
       # is granted and user mode runs as it (windows-1). A standard account:

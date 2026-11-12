@@ -29,25 +29,19 @@ use windows_sys::Win32::NetworkManagement::NetManagement::{
     LG_INCLUDE_INDIRECT, LOCALGROUP_USERS_INFO_0, NERR_UserNotFound, NetApiBufferFree,
     NetUserGetInfo, NetUserGetLocalGroups, USER_INFO_23,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    ConvertStringSidToSidW, SDDL_REVISION_1,
-};
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
     CryptUnprotectData,
 };
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, EqualSid, GetLengthSid,
-    GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    ImpersonateLoggedOnUser, IsWellKnownSid, LOGON32_LOGON, LOGON32_LOGON_BATCH,
-    LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES, LogonUserW,
-    LookupAccountSidW, LookupPrivilegeValueW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SID_NAME_USE,
-    SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS,
-    TOKEN_OWNER, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups,
-    TokenOwner, TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid,
+    AdjustTokenPrivileges, EqualSid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
+    GetTokenInformation, ImpersonateLoggedOnUser, IsWellKnownSid, LOGON32_LOGON,
+    LOGON32_LOGON_BATCH, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES,
+    LogonUserW, LookupAccountSidW, LookupPrivilegeValueW, PSID, RevertToSelf, SE_PRIVILEGE_ENABLED,
+    SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SID_NAME_USE, TOKEN_ADJUST_PRIVILEGES, TOKEN_GROUPS,
+    TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
+    TokenGroups, TokenPrivileges, TokenUser, WinBuiltinAdministratorsSid,
     WinBuiltinBackupOperatorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -100,6 +94,14 @@ pub struct Token(OwnedHandle);
 impl Token {
     pub(crate) fn raw(&self) -> HANDLE {
         self.0.as_raw_handle() as HANDLE
+    }
+}
+
+/// A token made elsewhere, as this process's own without the
+/// administrators' rights (nerve_service::win::restricted::restricted).
+impl From<OwnedHandle> for Token {
+    fn from(h: OwnedHandle) -> Token {
+        Token(h)
     }
 }
 
@@ -1478,108 +1480,6 @@ unsafe fn env_vars(mut p: *const u16) -> Vec<String> {
         }
     }
     out
-}
-
-/// This process's token without its privileges and with Administrators as
-/// a group that only denies: what `update` runs a downloaded program with.
-pub fn restricted() -> io::Result<Token> {
-    // The new token has the rights this handle has; it is changed below.
-    let own =
-        process_token(TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT)?;
-    let admins = well_known_sid(WinBuiltinAdministratorsSid)?;
-    let deny = [SID_AND_ATTRIBUTES {
-        Sid: admins.as_ptr() as PSID,
-        Attributes: 0,
-    }];
-    let mut h: HANDLE = std::ptr::null_mut();
-    // SAFETY: an open token, one SID to deny, a place for the new token.
-    let ok = unsafe {
-        CreateRestrictedToken(
-            own.raw(),
-            DISABLE_MAX_PRIVILEGE,
-            1,
-            deny.as_ptr(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            &mut h,
-        )
-    };
-    if ok == 0 {
-        return Err(last());
-    }
-    // SAFETY: CreateRestrictedToken returned a token this code now owns.
-    let t = Token(unsafe { OwnedHandle::from_raw_handle(h as _) });
-    // An administrator's token makes Administrators the owner of what it
-    // makes, and lets only them and SYSTEM in: the program could not open
-    // its own process. Its user takes their place.
-    let user = token_info(own.raw(), TokenUser)?;
-    // SAFETY: the buffer holds a TOKEN_USER, whose SID points into it.
-    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let owner = TOKEN_OWNER { Owner: sid };
-    // SAFETY: the new token, opened with every right, and a TOKEN_OWNER.
-    if unsafe {
-        SetTokenInformation(
-            t.raw(),
-            TokenOwner,
-            (&raw const owner).cast(),
-            std::mem::size_of::<TOKEN_OWNER>() as u32,
-        )
-    } == 0
-    {
-        return Err(last());
-    }
-    let mut text: *mut u16 = std::ptr::null_mut();
-    // SAFETY: a valid SID; the string is freed with LocalFree.
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
-        return Err(last());
-    }
-    // SAFETY: a NUL-terminated string, freed once.
-    let sid = unsafe {
-        let s = from_wide(text);
-        LocalFree(text.cast());
-        s
-    };
-    let sddl = wide(format!("D:(A;;GA;;;{sid})(A;;GA;;;SY)"));
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: a NUL-terminated SDDL string; the descriptor is freed below.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut sd,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(last());
-    }
-    let (mut present, mut defaulted) = (0, 0);
-    let mut acl = std::ptr::null_mut();
-    // SAFETY: the descriptor just made; the ACL points into it, which lives
-    // until LocalFree.
-    let r = unsafe {
-        if GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted) == 0 {
-            Err(last())
-        } else {
-            let d = TOKEN_DEFAULT_DACL { DefaultDacl: acl };
-            if SetTokenInformation(
-                t.raw(),
-                TokenDefaultDacl,
-                (&raw const d).cast(),
-                std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
-            ) == 0
-            {
-                Err(last())
-            } else {
-                Ok(())
-            }
-        }
-    };
-    // SAFETY: the descriptor from the conversion, freed once.
-    unsafe { LocalFree(sd) };
-    r.map(|()| t)
 }
 
 /// Runs `line` with token `t` and waits up to `limit` for it; its exit

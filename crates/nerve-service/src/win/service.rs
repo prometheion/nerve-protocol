@@ -1,9 +1,9 @@
-//! A service of the service control manager that runs as its own virtual
-//! account (`NT SERVICE\<name>`), as the center's does: registered,
-//! started, stopped, asked and removed. Windows makes the account with the
-//! service and removes it with it; it has no password, no profile to keep
-//! and no logon of its own. The node's service runs as a local user and
-//! keeps its own calls (nerve-node's `win_host`).
+//! A service of the service control manager: registered, started, stopped,
+//! asked and removed, for the node's and the center's alike. The center's
+//! runs as its own virtual account (`NT SERVICE\<name>`), which Windows
+//! makes with the service and removes with it: no password, no profile to
+//! keep and no logon of its own. The node's services run as local accounts
+//! of their own, whose passwords the manager keeps.
 
 /// The virtual account of the service `name`, as the service control
 /// manager takes it.
@@ -66,6 +66,143 @@ pub const FAILURE: Failure = Failure {
     on_error_stop: true,
 };
 
+/// What the manager is told of a service besides its program and account:
+/// what [`put`] registers, and what `update` gives the service again when a
+/// new program names other settings (the program says them on
+/// `service-files`, [`settings_text`]), as Linux writes the new unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// The privileges it keeps; Windows takes every other from its token.
+    pub privileges: Vec<String>,
+    /// The services it needs running first.
+    pub after: Vec<String>,
+    /// Seconds from a failure to the restart ([`Failure::delays_secs`]).
+    pub restart_secs: Vec<u32>,
+    /// [`Failure::on_error_stop`].
+    pub restart_on_error_stop: bool,
+    /// Who may start, stop and ask it, as SDDL; `None` leaves what Windows
+    /// gave it.
+    pub dacl: Option<String>,
+}
+
+/// The names of [`Settings`] in what `service-files` prints.
+const SETTINGS: [&str; 5] = [
+    "privileges",
+    "after",
+    "restart_secs",
+    "restart_on_error_stop",
+    "dacl",
+];
+
+impl Settings {
+    /// A service's settings with the restarts of [`FAILURE`].
+    pub fn new(privileges: &[&str], after: &[&str], dacl: Option<String>) -> Settings {
+        Settings {
+            privileges: privileges.iter().map(|p| p.to_string()).collect(),
+            after: after.iter().map(|a| a.to_string()).collect(),
+            restart_secs: FAILURE.delays_secs.to_vec(),
+            restart_on_error_stop: FAILURE.on_error_stop,
+            dacl,
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "privileges": self.privileges,
+            "after": self.after,
+            "restart_secs": self.restart_secs,
+            "restart_on_error_stop": self.restart_on_error_stop,
+            "dacl": self.dacl,
+        })
+    }
+
+    /// The settings of `v`, and the names in it this program does not know
+    /// (a later program's): those it cannot give the service.
+    fn of(v: &serde_json::Value) -> Result<(Settings, Vec<String>), String> {
+        let map = v.as_object().ok_or("not an object")?;
+        let names = |k: &str| -> Result<Vec<String>, String> {
+            map.get(k)
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("{k}: not a list"))?
+                .iter()
+                .map(|n| {
+                    n.as_str()
+                        .map(String::from)
+                        .ok_or(format!("{k}: not names"))
+                })
+                .collect()
+        };
+        let restart_secs = map
+            .get("restart_secs")
+            .and_then(|v| v.as_array())
+            .ok_or("restart_secs: not a list")?
+            .iter()
+            .map(|n| {
+                n.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or("restart_secs: not seconds")
+            })
+            .collect::<Result<Vec<u32>, _>>()?;
+        let restart_on_error_stop = map
+            .get("restart_on_error_stop")
+            .and_then(|v| v.as_bool())
+            .ok_or("restart_on_error_stop: not true or false")?;
+        let dacl = match map.get("dacl") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(d)) => Some(d.clone()),
+            Some(_) => return Err("dacl: neither a text nor null".into()),
+        };
+        let unknown = map
+            .keys()
+            .filter(|k| !SETTINGS.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        Ok((
+            Settings {
+                privileges: names("privileges")?,
+                after: names("after")?,
+                restart_secs,
+                restart_on_error_stop,
+                dacl,
+            },
+            unknown,
+        ))
+    }
+}
+
+/// The settings of services, by name.
+pub type Named = Vec<(String, Settings)>;
+
+/// What a Windows program prints on `service-files`: the settings of each
+/// service it installs, by name.
+pub fn settings_text(services: &[(&str, Settings)]) -> String {
+    let map: serde_json::Map<String, serde_json::Value> = services
+        .iter()
+        .map(|(name, s)| (name.to_string(), s.json()))
+        .collect();
+    serde_json::Value::Object(map).to_string()
+}
+
+/// The settings `said` names (what `service-files` printed) of the services
+/// `known`; and what it names that this program cannot give: another
+/// service, or a setting it does not know.
+pub fn settings_from(said: &str, known: &[&str]) -> Result<(Named, Vec<String>), String> {
+    let v: serde_json::Value = serde_json::from_str(said).map_err(|e| format!("not JSON: {e}"))?;
+    let map = v.as_object().ok_or("not an object")?;
+    let mut services = Vec::new();
+    let mut unknown = Vec::new();
+    for (name, s) in map {
+        if !known.contains(&name.as_str()) {
+            unknown.push(name.clone());
+            continue;
+        }
+        let (s, new) = Settings::of(s).map_err(|e| format!("{name}: {e}"))?;
+        unknown.extend(new.into_iter().map(|k| format!("{name}: {k}")));
+        services.push((name.clone(), s));
+    }
+    Ok((services, unknown))
+}
+
 /// What [`put`] registers.
 pub struct Spec<'a> {
     /// The service's name, which is also its virtual account's.
@@ -76,12 +213,17 @@ pub struct Spec<'a> {
     /// The command line the manager starts: the program in quotes, then its
     /// arguments.
     pub line: &'a str,
-    /// The privileges it keeps; Windows takes every other from its token.
-    pub privileges: &'a [&'a str],
+    /// The local account it runs as and that account's password; `None`:
+    /// its own virtual account, with the service's SID in its token.
+    pub logon: Option<(&'a str, &'a str)>,
+    pub settings: &'a Settings,
 }
 
 #[cfg(windows)]
-pub use sys::{delete, delete_at_restart, put, registered, start, state, stop, wait_running};
+pub use sys::{
+    configure, delete, delete_at_restart, put, registered, set_dacl, start, state, stop,
+    wait_running,
+};
 
 #[cfg(windows)]
 mod sys {
@@ -99,13 +241,14 @@ mod sys {
         SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
         SERVICE_CONFIG_SERVICE_SID_INFO, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
         SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONSW,
-        SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW,
-        SERVICE_RUNNING, SERVICE_SID_INFO, SERVICE_SID_TYPE_UNRESTRICTED, SERVICE_START,
-        SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED,
-        SERVICE_WIN32_OWN_PROCESS, StartServiceW,
+        SERVICE_NO_CHANGE, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+        SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_SID_INFO,
+        SERVICE_SID_TYPE_UNRESTRICTED, SERVICE_START, SERVICE_START_PENDING, SERVICE_STATUS,
+        SERVICE_STOP, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS,
+        StartServiceW,
     };
 
-    use super::{FAILURE, Spec, State, virtual_account};
+    use super::{Settings, Spec, State, virtual_account};
     use crate::win::scm::Scm;
     use crate::win::sid::wide;
 
@@ -174,23 +317,43 @@ mod sys {
         }))
     }
 
+    /// A list of names as the manager takes it: each ended by a NUL, and
+    /// one NUL more; an empty one is two NULs.
+    fn names(list: &[String]) -> Vec<u16> {
+        let mut out: Vec<u16> = list
+            .iter()
+            .flat_map(|n| n.encode_utf16().chain(Some(0)))
+            .collect();
+        if out.is_empty() {
+            out.push(0);
+        }
+        out.push(0);
+        out
+    }
+
     /// Registers the service of `spec`, or changes it: its command line,
-    /// its virtual account, started with the machine and again after a
-    /// failure ([`FAILURE`]). A failure is a process that ends without
-    /// saying it stopped, as one that found a lock poisoned does
-    /// (nerve_transport::sync), and a stop with an error code, as a center
-    /// that cannot bind its address yet does.
+    /// its account, started with the machine and again after a failure
+    /// ([`FAILURE`]), with its settings ([`configure`]). A failure is a
+    /// process that ends without saying it stopped, as one that found a
+    /// lock poisoned does (nerve_transport::sync), and a stop with an error
+    /// code, as a center that cannot bind its address yet does, or a node
+    /// whose folders are not the administrators'.
     pub fn put(spec: &Spec) -> Result<(), String> {
         let name = spec.name;
         let line = wide(spec.line);
-        let user = wide(virtual_account(name));
+        let (user, password) = match spec.logon {
+            Some((account, password)) => (wide(format!(".\\{account}")), Some(wide(password))),
+            None => (wide(virtual_account(name)), None),
+        };
+        // A virtual account has no password.
+        let password = password.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
         let shown = wide(spec.shown);
+        let after = names(&spec.settings.after);
         let m = Scm::open(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
         let s = match m.service(name, SERVICE_ALL_ACCESS)? {
             Some(s) => {
                 // SAFETY: an open service and NUL-terminated strings; null
-                // leaves the rest as it is, and a virtual account has no
-                // password.
+                // leaves the rest as it is.
                 let ok = unsafe {
                     ChangeServiceConfigW(
                         s.0,
@@ -200,9 +363,9 @@ mod sys {
                         line.as_ptr(),
                         std::ptr::null(),
                         std::ptr::null_mut(),
-                        std::ptr::null(),
+                        after.as_ptr(),
                         user.as_ptr(),
-                        std::ptr::null(),
+                        password,
                         shown.as_ptr(),
                     )
                 };
@@ -225,9 +388,9 @@ mod sys {
                         line.as_ptr(),
                         std::ptr::null(),
                         std::ptr::null_mut(),
-                        std::ptr::null(),
+                        after.as_ptr(),
                         user.as_ptr(),
-                        std::ptr::null(),
+                        password,
                     )
                 };
                 if h.is_null() {
@@ -240,8 +403,80 @@ mod sys {
         let description = SERVICE_DESCRIPTIONW {
             lpDescription: about.as_mut_ptr(),
         };
-        let mut actions: Vec<SC_ACTION> = FAILURE
-            .delays_secs
+        change(
+            &s,
+            SERVICE_CONFIG_DESCRIPTION,
+            (&raw const description).cast(),
+            "its description",
+        )?;
+        if spec.logon.is_none() {
+            // The service's own SID in its token: what its folders are
+            // opened to.
+            let sid = SERVICE_SID_INFO {
+                dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
+            };
+            change(
+                &s,
+                SERVICE_CONFIG_SERVICE_SID_INFO,
+                (&raw const sid).cast(),
+                "its SID",
+            )?;
+        }
+        settle(&s, spec.settings)
+    }
+
+    /// One part of the configuration of the open service `s`.
+    fn change(
+        s: &Scm,
+        level: u32,
+        info: *const core::ffi::c_void,
+        what: &str,
+    ) -> Result<(), String> {
+        // SAFETY: an open service and the structure of the level.
+        if unsafe { ChangeServiceConfig2W(s.0, level, info) } == 0 {
+            return Err(format!(
+                "cannot set {what} of the service {}: {}",
+                s.1,
+                last()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Gives the registered service `name` the settings `settings`, and
+    /// leaves its program and account as they are: what `update` does when
+    /// the new program names other settings, and puts back with the old
+    /// program.
+    pub fn configure(name: &str, settings: &Settings) -> Result<(), String> {
+        let s = open(name, SERVICE_ALL_ACCESS)?;
+        let after = names(&settings.after);
+        // SAFETY: an open service and a NUL-terminated list; the rest is
+        // left as it is.
+        let ok = unsafe {
+            ChangeServiceConfigW(
+                s.0,
+                SERVICE_NO_CHANGE,
+                SERVICE_NO_CHANGE,
+                SERVICE_NO_CHANGE,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                after.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            return Err(format!("cannot change the service {name}: {}", last()));
+        }
+        settle(&s, settings)
+    }
+
+    /// The settings but the dependencies, which go with the configuration.
+    fn settle(s: &Scm, settings: &Settings) -> Result<(), String> {
+        let mut actions: Vec<SC_ACTION> = settings
+            .restart_secs
             .iter()
             .map(|secs| SC_ACTION {
                 Type: SC_ACTION_RESTART,
@@ -256,56 +491,74 @@ mod sys {
             lpsaActions: actions.as_mut_ptr(),
         };
         let on_error_stop = SERVICE_FAILURE_ACTIONS_FLAG {
-            fFailureActionsOnNonCrashFailures: i32::from(FAILURE.on_error_stop),
+            fFailureActionsOnNonCrashFailures: i32::from(settings.restart_on_error_stop),
         };
-        // A list of names, each ended by a NUL, and one NUL more.
-        let mut privileges: Vec<u16> = spec
-            .privileges
-            .iter()
-            .flat_map(|p| p.encode_utf16().chain(Some(0)))
-            .chain(Some(0))
-            .collect();
+        let mut privileges = names(&settings.privileges);
         let required = SERVICE_REQUIRED_PRIVILEGES_INFOW {
             pmszRequiredPrivileges: privileges.as_mut_ptr(),
         };
-        // The service's own SID in its token: what its folders are opened to.
-        let sid = SERVICE_SID_INFO {
-            dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
+        change(
+            s,
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            (&raw const failure).cast(),
+            "what follows a failure",
+        )?;
+        change(
+            s,
+            SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+            (&raw const on_error_stop).cast(),
+            "what follows a stop with an error",
+        )?;
+        change(
+            s,
+            SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+            (&raw const required).cast(),
+            "its privileges",
+        )?;
+        if let Some(dacl) = &settings.dacl {
+            dacl_of_open(s, dacl)?;
+        }
+        Ok(())
+    }
+
+    /// Gives the service `name` the DACL `sddl`: who may start, stop and
+    /// ask it.
+    pub fn set_dacl(name: &str, sddl: &str) -> Result<(), String> {
+        dacl_of_open(&open(name, SERVICE_ALL_ACCESS)?, sddl)
+    }
+
+    fn dacl_of_open(s: &Scm, sddl: &str) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
-        for (level, info, what) in [
-            (
-                SERVICE_CONFIG_DESCRIPTION,
-                (&raw const description).cast(),
-                "its description",
-            ),
-            (
-                SERVICE_CONFIG_FAILURE_ACTIONS,
-                (&raw const failure).cast(),
-                "what follows a failure",
-            ),
-            (
-                SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
-                (&raw const on_error_stop).cast(),
-                "what follows a stop with an error",
-            ),
-            (
-                SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
-                (&raw const required).cast(),
-                "its privileges",
-            ),
-            (
-                SERVICE_CONFIG_SERVICE_SID_INFO,
-                (&raw const sid).cast(),
-                "its SID",
-            ),
-        ] {
-            // SAFETY: an open service and the structure of each level.
-            if unsafe { ChangeServiceConfig2W(s.0, level, info) } == 0 {
-                return Err(format!(
-                    "cannot set {what} of the service {name}: {}",
-                    last()
-                ));
-            }
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        use windows_sys::Win32::System::Services::SetServiceObjectSecurity;
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated SDDL string; the descriptor is freed
+        // below.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(sddl).as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(format!(
+                "cannot make the DACL of the service {}: {}",
+                s.1,
+                last()
+            ));
+        }
+        // SAFETY: an open service and a valid descriptor.
+        let ok = unsafe { SetServiceObjectSecurity(s.0, DACL_SECURITY_INFORMATION, sd) };
+        let e = last();
+        // SAFETY: the descriptor from the conversion, freed once.
+        unsafe { LocalFree(sd) };
+        if ok == 0 {
+            return Err(format!("cannot set the DACL of the service {}: {e}", s.1));
         }
         Ok(())
     }
@@ -439,5 +692,49 @@ mod tests {
         // day (round 2, correctness 3).
         assert_eq!(f.delays_secs, &[5, 5, 60]);
         assert!(f.delays_secs.iter().all(|s| *s > 0));
+    }
+
+    /// What a program says on `service-files` comes back as it said it,
+    /// with the restarts of [`FAILURE`]; a service or a setting this
+    /// program does not know is named, not given (node-5).
+    #[test]
+    fn the_settings_a_program_says_come_back() {
+        let node = Settings::new(
+            &["SeChangeNotifyPrivilege"],
+            &["nerve-run-profile"],
+            Some("D:(A;;GA;;;SY)".into()),
+        );
+        assert_eq!(node.restart_secs, [5, 5, 60]);
+        assert!(node.restart_on_error_stop);
+        let profile = Settings::new(&["SeChangeNotifyPrivilege"], &[], None);
+        let text = settings_text(&[
+            ("nerve-node", node.clone()),
+            ("nerve-run-profile", profile.clone()),
+        ]);
+        let (got, unknown) = settings_from(&text, &["nerve-node", "nerve-run-profile"]).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(
+            got,
+            [
+                ("nerve-node".to_string(), node.clone()),
+                ("nerve-run-profile".to_string(), profile)
+            ]
+        );
+        let mut later: serde_json::Value = serde_json::from_str(&text).unwrap();
+        later["nerve-node"]["sid_type"] = serde_json::json!("restricted");
+        later["nerve-helper"] = later["nerve-node"].clone();
+        let (got, unknown) = settings_from(&later.to_string(), &["nerve-node"]).unwrap();
+        assert_eq!(got, [("nerve-node".to_string(), node)]);
+        assert_eq!(
+            unknown,
+            ["nerve-helper", "nerve-node: sid_type", "nerve-run-profile"]
+        );
+        for bad in [
+            "[]",
+            r#"{"nerve-node": {"privileges": "x"}}"#,
+            r#"{"nerve-node": {"privileges": [], "after": [], "restart_secs": [-1], "restart_on_error_stop": true}}"#,
+        ] {
+            assert!(settings_from(bad, &["nerve-node"]).is_err(), "{bad}");
+        }
     }
 }

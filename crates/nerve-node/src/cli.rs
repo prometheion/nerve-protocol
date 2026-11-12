@@ -235,7 +235,7 @@ pub enum Cmd {
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
     #[command(hide = true)]
     ServiceFiles {
-        /// The owner the unit names.
+        /// The owner the unit names (on Windows its SID).
         #[arg(long, value_name = "ACCOUNT")]
         owner: Option<String>,
         /// What polkit takes here: rules, a .pkla file (polkit 0.105), or none.

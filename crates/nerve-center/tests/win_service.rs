@@ -87,6 +87,10 @@ fn http(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (u16,
     (status, body)
 }
 
+/// Where the center's Event Log source is registered, below
+/// `HKEY_LOCAL_MACHINE`.
+const EVENT_SOURCE: &str = nerve_service::eventlog::CENTER_SOURCE_KEY;
+
 /// What the tools say of the installed folders: `icacls` and `netsh`.
 fn system(program: &str, args: &[&str]) -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
@@ -411,6 +415,22 @@ fn the_center_runs_as_a_windows_service() {
         );
         let sidtype = system("sc.exe", &["qsidtype", "nerve-center"]);
         assert!(sidtype.contains("UNRESTRICTED"), "{sidtype}");
+        // Its start is in the Event Log, with its text from the program
+        // (arch-2: the center's source).
+        let source = system("reg.exe", &["query", &format!("HKLM\\{EVENT_SOURCE}")]);
+        assert!(source.contains("EventMessageFile"), "{source}");
+        let started = system(
+            "WindowsPowerShell\\v1.0\\powershell.exe",
+            &[
+                "-NoProfile",
+                "-Command",
+                "Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'nerve-center'; Id = 1 } -MaxEvents 1 | ForEach-Object { $_.Message }",
+            ],
+        );
+        assert!(
+            started.contains("The Nerve center started. Its log is "),
+            "{started}"
+        );
         // A standard account reads nothing of the state, the owner token
         // least (the point of the service's own account), where an
         // administrator reads it; the files the install made before the
@@ -971,6 +991,7 @@ if ($wait.Wait(40000)) {{
         "{said}"
     );
     assert!(said.contains("removed the Windows Firewall rule"), "{said}");
+    assert!(said.contains("removed the source nerve-center"), "{said}");
     let (_, said) = center(&["status"]);
     assert!(said.contains("service: not installed"), "{said}");
     let rule = system(

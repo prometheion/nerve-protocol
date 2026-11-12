@@ -26,6 +26,38 @@ fn said(i: &Install<'_>) -> String {
     format!("did {did:#?}\nwarned {warn:#?}\nerror {}", i.get_error())
 }
 
+/// What the manager does when the service `name` fails, as `sc.exe` says
+/// it: three restarts, the last repeated for every later failure, and a
+/// stop with an error counted as one (arch-1), as the center's.
+#[cfg(windows)]
+fn restarts_without_end(name: &str) {
+    let sc = |args: &[&str]| {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let o = std::process::Command::new(std::path::Path::new(&root).join("System32\\sc.exe"))
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let failure = sc(&["qfailure", name]);
+    let restarts: Vec<&str> = failure
+        .lines()
+        .filter_map(|l| l.find("RESTART -- Delay").map(|at| l[at..].trim()))
+        .collect();
+    assert_eq!(
+        restarts,
+        [
+            "RESTART -- Delay = 5000 milliseconds.",
+            "RESTART -- Delay = 5000 milliseconds.",
+            "RESTART -- Delay = 60000 milliseconds.",
+        ],
+        "{name}: {failure}"
+    );
+    assert!(!failure.contains("NONE"), "{name}: {failure}");
+    let flag = sc(&["qfailureflag", name]);
+    assert!(flag.contains("TRUE"), "{name}: {flag}");
+}
+
 /// The service's state, from `status`, as the app reads it.
 fn service(runner: &Runner) -> serde_json::Value {
     runner.run(&["status"]).unwrap()["service"].clone()
@@ -67,6 +99,10 @@ fn install_control_update_and_uninstall_on_this_machine() {
     assert_eq!(s["state"], "running", "{s}");
     assert_eq!(s["present"], true, "{s}");
     assert!(layout.bin.is_file());
+    #[cfg(windows)]
+    for name in ["nerve-node", "nerve-run-profile"] {
+        restarts_without_end(name);
+    }
     install.invoke_open_app();
     assert_eq!(
         opened.lock().unwrap().as_slice(),
@@ -118,6 +154,11 @@ fn install_control_update_and_uninstall_on_this_machine() {
     assert_eq!(install.get_step(), "done", "{}", said(&install));
     assert_eq!(std::fs::read(&layout.bin).unwrap(), bytes);
     assert_eq!(service(&cli)["state"], "running");
+    // The update gave the services the settings the program names.
+    #[cfg(windows)]
+    for name in ["nerve-node", "nerve-run-profile"] {
+        restarts_without_end(name);
+    }
     let _ = std::fs::remove_file(&copy);
     std::thread::sleep(Duration::from_millis(500));
 

@@ -134,12 +134,20 @@ pub(super) async fn update(from: Option<PathBuf>, out: &mut dyn Write) -> Result
     crate::service::update(&layout, &Host, from.as_deref(), out).await
 }
 
-/// `service-files`: the files `install` writes for the service, as text.
+/// `service-files`: the files `install` writes for the service, as text;
+/// on Windows the settings it gives the services
+/// (crate::winsvc::service_settings), `owner` being the owner's SID.
 pub(super) fn service_files(
     owner: Option<String>,
     polkit: String,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    let text = {
+        let _ = polkit;
+        crate::winsvc::service_files_text(owner.as_deref())
+    };
+    #[cfg(not(windows))]
     let text = crate::service::service_files_text(
         &Layout::system(),
         owner.as_deref(),
@@ -440,6 +448,7 @@ mod tests {
     /// `service-files` takes: a flag renamed on one side is refused at the
     /// next update, so the two are held together here, for every owner and
     /// every polkit.
+    #[cfg(not(windows))]
     #[test]
     fn service_files_takes_what_update_asks() {
         use crate::service::{Polkit, files_args, service_files_text};
@@ -468,6 +477,29 @@ mod tests {
                 );
                 assert_eq!(said.trim(), want, "{argv:?}");
             }
+        }
+    }
+
+    /// On Windows `service-files` says the services' settings for the
+    /// owner `update` names (crate::winsvc::settings_args).
+    #[cfg(windows)]
+    #[test]
+    fn service_files_says_the_settings_update_asks_for() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for owner in [None, Some("S-1-5-21-1-2-3-1001")] {
+            let mut argv = vec!["nerve-node".to_string(), "service-files".to_string()];
+            argv.extend(crate::winsvc::settings_args(owner));
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let mut said = Vec::new();
+            rt.block_on(execute(cli, &mut said)).unwrap();
+            let said = String::from_utf8(said).unwrap();
+            assert_eq!(
+                said.trim(),
+                crate::winsvc::service_files_text(owner),
+                "{argv:?}"
+            );
         }
     }
 }

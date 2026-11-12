@@ -2987,7 +2987,8 @@ mod tests {
             } else {
                 eprintln!("not elevated: the administrators' side of the check is skipped");
             }
-            let owner = crate::win_user::restricted().unwrap();
+            let owner =
+                crate::win_user::Token::from(nerve_service::win::restricted::restricted().unwrap());
             let acting = Acting::token(&owner);
             let made = crate::pipe::instance(&name, &sd, false).map(drop);
             let opened = nerve_service::win::pipe::open_limited(&name).map(drop);
