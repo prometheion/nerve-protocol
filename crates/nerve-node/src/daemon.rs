@@ -1956,8 +1956,6 @@ impl Shared {
             .grant_watch
             .last()
             .map_or(Value::Null, |s| s.report(0).json());
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let v = Value::Null;
         v
     }
 
@@ -2494,8 +2492,6 @@ impl Daemon {
             }
             _ => None,
         };
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let providers = None;
         // The web UI is the installed node's, for the owners of its
         // endpoint; it listens only while the config says so.
         #[cfg(target_os = "linux")]

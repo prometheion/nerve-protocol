@@ -612,8 +612,7 @@ async fn profile_steps(
     )?;
 
     // §7.4.2: a capability of this center's own. A node may take none
-    // (Windows for now, one without the account it runs them as), and says
-    // why; one that takes it offers it to this center as `center-added`,
+    // (one without the account it runs them as), and says why; one that takes it offers it to this center as `center-added`,
     // counted as `execute` whatever it declares.
     let probe = json!({"name": "conformance.probe", "effect": "read",
                        "summary": "Says a word back.", "command": ["echo", "nerve-conformance"]});

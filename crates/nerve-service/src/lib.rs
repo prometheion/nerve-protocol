@@ -252,8 +252,6 @@ pub async fn owner_check(sockets: &[PathBuf]) -> Result<(), String> {
         let _ = sockets;
         owner_answer(win::pipe::node_owner_check().await)?;
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = sockets;
     Ok(())
 }
 

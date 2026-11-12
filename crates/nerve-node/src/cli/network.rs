@@ -148,8 +148,6 @@ fn network_rules_here() -> bool {
     return nerve_sandbox::net_filter::available();
     #[cfg(windows)]
     return crate::win_host::firewall_runs();
-    #[cfg(not(any(target_os = "linux", windows)))]
-    false
 }
 
 #[cfg(test)]

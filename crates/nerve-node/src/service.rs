@@ -667,68 +667,27 @@ fn pkexec_program() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// This machine.
-pub struct Host;
+/// This machine. On Windows the services go through
+/// [`crate::win_host::WinHost`]; this one is Linux's.
+pub use nerve_service::Host;
 
-impl Host {
-    /// [`System::end_session`] for the generator at `generator` and the
-    /// linger files in `linger`. What setup wrote for the session of the
-    /// node's user (crate::keyring_setup) goes first, whether or not the user
-    /// lingers: it must not stay for the next account to get the uid.
-    fn end_session_of(&self, name: &str, generator: &Path, linger: &Path) -> Result<bool, String> {
-        let _ = std::fs::remove_file(generator);
-        if !linger.join(name).exists() {
-            return Ok(false);
-        }
-        run("loginctl", &["disable-linger", name])?;
-        // userdel refuses a user whose processes (the keyring) still run;
-        // systemctl waits until the session's manager has stopped them.
-        if let Ok(Some(a)) = self.account(name) {
-            let _ = run("systemctl", &["stop", &format!("user@{}.service", a.uid)]);
-        }
-        let _ = run("loginctl", &["terminate-user", name]);
-        Ok(true)
+/// [`System::end_session`] for the generator at `generator` and the
+/// linger files in `linger`. What setup wrote for the session of the
+/// node's user (crate::keyring_setup) goes first, whether or not the user
+/// lingers: it must not stay for the next account to get the uid.
+fn end_session_of(name: &str, generator: &Path, linger: &Path) -> Result<bool, String> {
+    let _ = std::fs::remove_file(generator);
+    if !linger.join(name).exists() {
+        return Ok(false);
     }
-}
-
-impl nerve_service::System for Host {
-    fn is_root(&self) -> bool {
-        nerve_service::Host.is_root()
+    run("loginctl", &["disable-linger", name])?;
+    // userdel refuses a user whose processes (the keyring) still run;
+    // systemctl waits until the session's manager has stopped them.
+    if let Ok(Some(a)) = Host.account(name) {
+        let _ = run("systemctl", &["stop", &format!("user@{}.service", a.uid)]);
     }
-
-    fn has_systemd(&self) -> bool {
-        nerve_service::Host.has_systemd()
-    }
-
-    /// Also on Windows, where Windows is asked.
-    fn account(&self, name: &str) -> Result<Option<Account>, String> {
-        crate::account::lookup(name)
-    }
-
-    fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-        nerve_service::Host.add_account(name, home, mark)
-    }
-
-    fn remove_account(&self, name: &str) -> Result<(), String> {
-        nerve_service::Host.remove_account(name)
-    }
-
-    fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-        nerve_service::Host.systemctl(args)
-    }
-
-    fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        nerve_service::Host.give(path, uid, gid)
-    }
-
-    fn output_of(
-        &self,
-        program: &Path,
-        account: Option<&Account>,
-        args: &[&str],
-    ) -> Result<String, String> {
-        nerve_service::Host.output_of(program, account, args)
-    }
+    let _ = run("loginctl", &["terminate-user", name]);
+    Ok(true)
 }
 
 impl System for Host {
@@ -788,7 +747,7 @@ impl System for Host {
     }
 
     fn end_session(&self, name: &str) -> Result<bool, String> {
-        self.end_session_of(
+        end_session_of(
             name,
             Path::new(crate::keyring_setup::SESSION_GENERATOR),
             Path::new("/var/lib/systemd/linger"),
@@ -2794,38 +2753,6 @@ pub(crate) mod tests {
 
     use nerve_service::fake::other;
 
-    impl nerve_service::System for Fake {
-        fn is_root(&self) -> bool {
-            self.machine.is_root()
-        }
-        fn has_systemd(&self) -> bool {
-            self.machine.has_systemd()
-        }
-        fn account(&self, name: &str) -> Result<Option<Account>, String> {
-            self.machine.account(name)
-        }
-        fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-            self.machine.add_account(name, home, mark)
-        }
-        fn remove_account(&self, name: &str) -> Result<(), String> {
-            self.machine.remove_account(name)
-        }
-        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-            self.machine.systemctl(args)
-        }
-        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-            self.machine.give(path, uid, gid)
-        }
-        fn output_of(
-            &self,
-            program: &Path,
-            account: Option<&Account>,
-            args: &[&str],
-        ) -> Result<String, String> {
-            self.machine.output_of(program, account, args)
-        }
-    }
-
     impl System for Fake {
         fn landlock(&self) -> bool {
             self.landlock.get()
@@ -3820,10 +3747,10 @@ pub(crate) mod tests {
         let linger = d.path().join("linger");
         std::fs::create_dir(&linger).unwrap();
         // Nobody lingers in this folder, so nothing is run.
-        assert_eq!(Host.end_session_of("nerve", &gen_file, &linger), Ok(false));
+        assert_eq!(end_session_of("nerve", &gen_file, &linger), Ok(false));
         assert!(!gen_file.exists(), "the generator is still there");
         // A generator that is not there is no error.
-        assert_eq!(Host.end_session_of("nerve", &gen_file, &linger), Ok(false));
+        assert_eq!(end_session_of("nerve", &gen_file, &linger), Ok(false));
     }
 
     /// The installed node is known by its folders, not by how it started.
@@ -4009,6 +3936,16 @@ pub(crate) mod tests {
         chown_tree(&tree, me.uid, me.gid).unwrap();
     }
 
+    use nerve_service::fake::NotRoot;
+    impl System for NotRoot {
+        fn wait_running(&self, _: &NodePaths) -> Result<(), String> {
+            unreachable!()
+        }
+        fn unit_state(&self) -> Result<ServiceState, String> {
+            unreachable!()
+        }
+    }
+
     #[test]
     fn install_refuses_a_user_it_did_not_make_and_needs_root() {
         let d = tempfile::tempdir().unwrap();
@@ -4023,46 +3960,6 @@ pub(crate) mod tests {
         assert!(!l.bin.exists() && !l.unit.exists());
         assert!(sys.calls().is_empty());
 
-        struct NotRoot;
-        impl nerve_service::System for NotRoot {
-            fn is_root(&self) -> bool {
-                false
-            }
-            fn has_systemd(&self) -> bool {
-                true
-            }
-            fn account(&self, _: &str) -> Result<Option<Account>, String> {
-                unreachable!()
-            }
-            fn add_account(&self, _: &str, _: &Path, _: &str) -> Result<(), String> {
-                unreachable!()
-            }
-            fn remove_account(&self, _: &str) -> Result<(), String> {
-                unreachable!()
-            }
-            fn systemctl(&self, _: &[&str]) -> Result<(), String> {
-                unreachable!()
-            }
-            fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
-                unreachable!()
-            }
-            fn output_of(
-                &self,
-                _: &Path,
-                _: Option<&Account>,
-                _: &[&str],
-            ) -> Result<String, String> {
-                unreachable!()
-            }
-        }
-        impl System for NotRoot {
-            fn wait_running(&self, _: &NodePaths) -> Result<(), String> {
-                unreachable!()
-            }
-            fn unit_state(&self) -> Result<ServiceState, String> {
-                unreachable!()
-            }
-        }
         for (what, e) in [
             (
                 "install",

@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use nerve_proto::Effect;
+use nerve_proto::text::breaks_line;
 
 use crate::command::Shell;
 use crate::conditions::Arg;
@@ -300,14 +301,13 @@ fn plain_command(line: &str) -> bool {
 fn not_plain(line: &str) -> Option<String> {
     // Control characters, the Unicode line breaks and the typographic quotes
     // PowerShell reads as quotes.
-    let odd =
-        |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{2018}'..='\u{201F}');
+    let odd = |c: char| breaks_line(c) || matches!(c, '\u{2018}'..='\u{201F}');
     if let Some(c) = line
         .chars()
         .find(|c| SHELL_CONTROL.contains(c) || EXPRESSION.contains(c) || odd(*c))
     {
         // One the owner cannot see is named by its number.
-        return Some(if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+        return Some(if breaks_line(c) {
             format!("the invisible character U+{:04X}", u32::from(c))
         } else {
             format!("`{c}`")

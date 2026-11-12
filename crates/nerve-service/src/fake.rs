@@ -184,3 +184,69 @@ impl System for Fake {
         }
     }
 }
+
+/// A test machine that is this one with more of its own (the node's tests
+/// add polkit, Landlock and a keyring's session): what the services share
+/// it answers as this one does.
+impl<T: std::ops::Deref<Target = Fake>> System for T {
+    fn is_root(&self) -> bool {
+        (**self).is_root()
+    }
+    fn has_systemd(&self) -> bool {
+        (**self).has_systemd()
+    }
+    fn account(&self, name: &str) -> Result<Option<Account>, String> {
+        (**self).account(name)
+    }
+    fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
+        (**self).add_account(name, home, mark)
+    }
+    fn remove_account(&self, name: &str) -> Result<(), String> {
+        (**self).remove_account(name)
+    }
+    fn systemctl(&self, args: &[&str]) -> Result<(), String> {
+        (**self).systemctl(args)
+    }
+    fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+        (**self).give(path, uid, gid)
+    }
+    fn output_of(
+        &self,
+        program: &Path,
+        account: Option<&Account>,
+        args: &[&str],
+    ) -> Result<String, String> {
+        (**self).output_of(program, account, args)
+    }
+}
+
+/// A machine where the caller is not root: every service command refuses
+/// before it asks anything else.
+pub struct NotRoot;
+
+impl System for NotRoot {
+    fn is_root(&self) -> bool {
+        false
+    }
+    fn has_systemd(&self) -> bool {
+        true
+    }
+    fn account(&self, _: &str) -> Result<Option<Account>, String> {
+        unreachable!()
+    }
+    fn add_account(&self, _: &str, _: &Path, _: &str) -> Result<(), String> {
+        unreachable!()
+    }
+    fn remove_account(&self, _: &str) -> Result<(), String> {
+        unreachable!()
+    }
+    fn systemctl(&self, _: &[&str]) -> Result<(), String> {
+        unreachable!()
+    }
+    fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
+        unreachable!()
+    }
+    fn output_of(&self, _: &Path, _: Option<&Account>, _: &[&str]) -> Result<String, String> {
+        unreachable!()
+    }
+}

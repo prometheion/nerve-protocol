@@ -2022,37 +2022,58 @@ mod tests {
         }
     }
 
-    /// A model that thinks longer than the transport's usual 15 s head
-    /// timeout is still read when the checker's own timeout allows it (a
-    /// 4B model, or a 2B one on a small VM CPU, can take that long). Found on the
-    /// Windows test VM, where every call was cut at 15 s.
+    /// The model's answer is read within the wait the checker gives, not
+    /// the transport's usual 15 s head timeout: a model that thinks longer
+    /// (a 4B model, or a 2B one on a small VM CPU) is still read when the
+    /// checker's own timeout allows it. Found on the Windows test VM, where
+    /// every call was cut at 15 s. Shown here the other way round, with a
+    /// wait shorter than the transport's, so the test takes a second.
     #[tokio::test]
     async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            if let Ok((mut c, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                let _ = c.read(&mut buf);
-                std::thread::sleep(Duration::from_secs(16));
-                let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
-                let _ = write!(
-                    c,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-            }
-        });
-        let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
-        let cfg = ModelConfig {
-            timeout_ms: 25_000,
-            ..Default::default()
+        let slow = |think: Duration| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut buf = [0u8; 8192];
+                    let _ = c.read(&mut buf);
+                    std::thread::sleep(think);
+                    let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+                    let _ = write!(
+                        c,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
         };
-        let score = ask(&ep, &cfg, json!({"command": "rm -rf /"}))
-            .await
-            .unwrap();
-        assert_eq!(score, 0.9);
+        let body = json!({"state": {"command": "rm -rf /"}});
+        let ep = slow(Duration::from_millis(1500));
+        let at = Instant::now();
+        let e = request(
+            &ep,
+            "/v1/systemone",
+            &body,
+            Duration::from_millis(300),
+            MAX_BODY,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e:?}");
+        assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+        let ep = slow(Duration::from_millis(500));
+        let v = request(
+            &ep,
+            "/v1/systemone",
+            &body,
+            Duration::from_secs(5),
+            MAX_BODY,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_noul(&v).unwrap(), 0.9);
     }
 
     #[test]

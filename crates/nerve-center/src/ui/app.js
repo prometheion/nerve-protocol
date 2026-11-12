@@ -1311,8 +1311,8 @@ function capUnitRow(u) {
 }
 
 // The capabilities this center added on the machine, and the form to add
-// or change one. The machine says when it takes none (Windows for now, or
-// one run by hand) and why.
+// or change one. The machine says when it takes none (one run by hand) and
+// why.
 function addedSection(d) {
   const a = d.added;
   const c = state.caps;

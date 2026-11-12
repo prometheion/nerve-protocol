@@ -599,26 +599,6 @@ mod imp {
     }
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-mod imp {
-    use super::{SHIM_FAILED, ShimSpec};
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    pub fn run(spec: ShimSpec) -> i32 {
-        if spec.landlock.is_some() || spec.container.is_some() || spec.own_proc {
-            eprintln!("nerve-node: no Landlock on this system");
-            return SHIM_FAILED;
-        }
-        let e = Command::new(&spec.program)
-            .args(&spec.args)
-            .stdin(Stdio::null())
-            .exec();
-        eprintln!("nerve-node: cannot start {}: {e}", spec.program.display());
-        127
-    }
-}
-
 #[cfg(windows)]
 mod imp {
     use super::{SHIM_FAILED, ShimSpec};
@@ -883,6 +863,7 @@ pub mod acl {
     pub const DELETE: u32 = 0x1_0000;
     pub const READ_CONTROL: u32 = 0x2_0000;
     pub const WRITE_DAC: u32 = 0x4_0000;
+    #[cfg(test)]
     pub const WRITE_OWNER: u32 = 0x8_0000;
     pub const SYNCHRONIZE: u32 = 0x10_0000;
 
@@ -1594,14 +1575,14 @@ pub mod appcontainer {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, ExtendedFileIdType, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0,
-        FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-        FileAttributeTagInfo, FileFullDirectoryInfo, FileIdExtdDirectoryInfo, FileIdInfo,
-        FileStandardInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        GetLogicalDrives, GetLongPathNameW, OpenFileById, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+        FILE_FULL_DIR_INFO, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileFullDirectoryInfo,
+        FileIdExtdDirectoryInfo, FileIdInfo, FileStandardInfo, FindFirstVolumeW, FindNextVolumeW,
+        FindVolumeClose, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        GetFinalPathNameByHandleW, GetLogicalDrives, GetLongPathNameW, OpenFileById, READ_CONTROL,
+        SYNCHRONIZE, WRITE_DAC,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
     use windows_sys::Win32::System::Threading::{
@@ -1770,7 +1751,9 @@ pub mod appcontainer {
         })
     }
 
-    /// Which object is at `path` now.
+    /// Which object is at `path` now (the tests'; the node asks by the
+    /// handle it holds, [`handle_id`]).
+    #[cfg(test)]
     pub fn file_id(path: &Path) -> io::Result<FileId> {
         id_of(&open(path, FILE_READ_ATTRIBUTES)?)
     }
@@ -1778,45 +1761,6 @@ pub mod appcontainer {
     /// Which object the open handle `h` is on.
     pub fn handle_id(h: &impl AsRawHandle) -> io::Result<FileId> {
         id_by(h.as_raw_handle())
-    }
-
-    /// `path` opened for `access` alone, as [`open`] does, but a link or
-    /// junction at `path` as itself, not followed.
-    fn open_itself(path: &Path, access: u32) -> io::Result<std::fs::File> {
-        use std::os::windows::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .access_mode(access)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-    }
-
-    /// How many names (hard links) the object at `path` has. A link or
-    /// junction at `path` is opened as itself, not followed.
-    pub fn names(path: &Path) -> io::Result<u32> {
-        let f = open_itself(path, FILE_READ_ATTRIBUTES)?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: an open handle and a buffer for the answer.
-        check(unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) })?;
-        Ok(info.nNumberOfLinks)
-    }
-
-    /// `path` whole and with the `\\?\` prefix, which Windows takes past
-    /// the 260 characters of a plain path, as Rust's own file calls do.
-    fn verbatim(path: &Path) -> io::Result<Vec<u16>> {
-        let abs: Vec<u16> = std::path::absolute(path)?
-            .as_os_str()
-            .encode_wide()
-            .collect();
-        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
-        let out = if abs.starts_with(&w(r"\\?\")) || abs.starts_with(&w(r"\\.\")) {
-            abs
-        } else if let Some(rest) = abs.strip_prefix(&w(r"\\")[..]) {
-            [w(r"\\?\UNC\"), rest.to_vec()].concat()
-        } else {
-            [w(r"\\?\"), abs].concat()
-        };
-        Ok(out.into_iter().chain(std::iter::once(0)).collect())
     }
 
     /// `path` without the `\\?\` prefix, as the policy compares paths.
@@ -1830,71 +1774,6 @@ pub mod appcontainer {
             path
         };
         PathBuf::from(std::ffi::OsString::from_wide(&out))
-    }
-
-    /// Every name (hard link) of the file at `path`, as whole paths on its
-    /// volume. Windows lists them without the volume, so each is joined to
-    /// the folder the volume of `path` is reached by (`C:\`, or a folder it
-    /// is mounted in). `path` goes to Windows with the `\\?\` prefix, so a
-    /// path past 260 characters is listed too; the names come back without
-    /// it.
-    pub fn all_names(path: &Path) -> io::Result<Vec<PathBuf>> {
-        use windows_sys::Win32::Foundation::{ERROR_HANDLE_EOF, ERROR_MORE_DATA};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FindClose, FindFirstFileNameW, FindNextFileNameW, GetVolumePathNameW,
-        };
-        let p = verbatim(path)?;
-        let mut vol = vec![0u16; p.len() + 64];
-        // SAFETY: a NUL-terminated path and a buffer of the length given.
-        check(unsafe { GetVolumePathNameW(p.as_ptr(), vol.as_mut_ptr(), vol.len() as u32) })?;
-        let n = vol.iter().position(|&c| c == 0).unwrap_or(vol.len());
-        let volume = plain(vol[..n].to_vec());
-        let mut buf = vec![0u16; 512];
-        let mut out = Vec::new();
-        let mut take = |buf: &[u16], len: u32| {
-            let name = &buf[..(len as usize).min(buf.len())];
-            let name = name.split(|&c| c == 0).next().unwrap_or(name);
-            let name = std::ffi::OsString::from_wide(name);
-            let rest = name.to_string_lossy();
-            out.push(volume.join(rest.trim_start_matches('\\')));
-        };
-        let more = |e: &io::Error| e.raw_os_error() == Some(ERROR_MORE_DATA as i32);
-        // The first name, with a buffer as large as Windows asks for.
-        let h = loop {
-            let mut len = buf.len() as u32;
-            // SAFETY: a NUL-terminated path and a buffer of `len` u16s.
-            let h = unsafe { FindFirstFileNameW(p.as_ptr(), 0, &mut len, buf.as_mut_ptr()) };
-            if h != INVALID_HANDLE_VALUE {
-                take(&buf, len);
-                break h;
-            }
-            let e = io::Error::last_os_error();
-            if !more(&e) {
-                return Err(e);
-            }
-            buf.resize(len as usize + 1, 0);
-        };
-        let rest = loop {
-            let mut len = buf.len() as u32;
-            // SAFETY: the search handle from above and a buffer of `len` u16s.
-            if unsafe { FindNextFileNameW(h, &mut len, buf.as_mut_ptr()) } != 0 {
-                take(&buf, len);
-                continue;
-            }
-            let e = io::Error::last_os_error();
-            if more(&e) {
-                buf.resize(len as usize + 1, 0);
-                continue;
-            }
-            break if e.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
-                Ok(())
-            } else {
-                Err(e)
-            };
-        };
-        // SAFETY: the search handle from above, closed once.
-        unsafe { FindClose(h) };
-        rest.map(|()| out)
     }
 
     /// What is at `path` (its [`FileId`], `None` where the volume gives

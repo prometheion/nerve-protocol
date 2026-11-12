@@ -218,7 +218,8 @@ impl Help {
 
     /// Every command the page covers: the verbs and the commands that only
     /// hold more commands.
-    pub fn command_names(&self) -> Vec<&str> {
+    #[cfg(test)]
+    fn command_names(&self) -> Vec<&str> {
         let cards = self.sections.iter().flat_map(|s| &s.cards);
         let holds = cards.clone().flat_map(|c| &c.holds).map(String::as_str);
         let verbs = self.verbs().map(|v| v.name.as_str());

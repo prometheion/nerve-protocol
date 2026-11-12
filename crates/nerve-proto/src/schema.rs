@@ -83,14 +83,7 @@ impl std::error::Error for SchemaError {}
 /// characters. The pointer and the reason hold property names and keywords
 /// of the schema as they are, and those are the publisher's choice.
 pub fn brief(text: &str) -> String {
-    let one: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    match one.char_indices().nth(BRIEF_MAX) {
-        Some((end, _)) => format!("{}…", &one[..end]),
-        None => one,
-    }
+    crate::text::clip(&crate::text::one_line(text), BRIEF_MAX)
 }
 
 /// Which argument does not fit and what was expected there. `field` is a
@@ -2047,6 +2040,8 @@ mod tests {
         assert_eq!(b.chars().count(), BRIEF_MAX + 1);
         assert!(b.ends_with('…'), "{b}");
         assert_eq!(brief("short"), "short");
+        // The Unicode line breaks start no line of their own either.
+        assert_eq!(brief("a\u{2028}b\u{2029}c"), "a b c");
     }
 
     #[test]

@@ -1604,7 +1604,7 @@ mod win {
     /// (a granted folder is one of its own), not one on another machine,
     /// and not one on a removable drive; and the object it is on, as the
     /// record names it ([`Folder::ids`]), when the system names one.
-    fn open(path: &Path) -> std::io::Result<(OwnedHandle, Option<String>)> {
+    pub(super) fn open(path: &Path) -> std::io::Result<(OwnedHandle, Option<String>)> {
         use std::io::{Error, ErrorKind};
         if let Some(link) = nerve_policy::paths::remote_link(path) {
             return Err(Error::new(
@@ -2368,7 +2368,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+                ids: vec![super::win::open(p).unwrap().1.unwrap()],
             }]
         };
         w.follow(|| granted(&root), || Ok(()));
@@ -2421,7 +2421,7 @@ mod tests {
         let granted = |p: &Path| {
             vec![Folder {
                 path: p.to_path_buf(),
-                ids: vec![nerve_sandbox::appcontainer::file_id(p).unwrap().to_string()],
+                ids: vec![super::win::open(p).unwrap().1.unwrap()],
             }]
         };
         let told = |w: &Watch| -> bool {

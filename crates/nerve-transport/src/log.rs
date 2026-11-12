@@ -599,11 +599,7 @@ fn hide(text: &str, secret: &str) -> String {
 /// Log of the node) goes through this too. It takes no lock, so a panic hook
 /// may call it.
 pub fn scrub(text: &str) -> String {
-    let flat: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    clip(&redact(&flat), MSG_MAX)
+    clip(&redact(&nerve_proto::text::one_line(text)), MSG_MAX)
 }
 
 /// A length of time for a person: `850 ms`, `12 s`, `3 min 4 s`, `10 min`,
@@ -1467,6 +1463,8 @@ mod tests {
         let long = scrub(&"x".repeat(MSG_MAX + 5));
         assert_eq!(long.chars().count(), MSG_MAX + 1);
         assert!(long.ends_with('…'));
+        // Nor does a Unicode line break start a line of its own in the log.
+        assert_eq!(scrub("a\u{2028}b\u{2029}c"), "a b c");
     }
 
     /// A short password held back is hidden where it stands alone, and a word

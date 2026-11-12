@@ -728,7 +728,8 @@ pub struct NodeSecrets {
     /// the keys in files in memory, and every `folder` mode command it starts
     /// gets a sandbox that leaves the session bus open while the keys are in
     /// the keyring; its count of such commands is not in this process either.
-    /// On Windows `folder` mode runs no command.
+    /// On Windows a command's AppContainer is the same wherever the keys
+    /// are, so the move may wait.
     defers_keyring: bool,
     /// The running node's count of commands its Landlock does not keep off
     /// the session bus (crate::daemon::Shared::open_to_bus): while one runs,

@@ -237,7 +237,8 @@ impl Codes {
         }
     }
 
-    pub fn open_count(&mut self, now: Instant) -> usize {
+    #[cfg(test)]
+    fn open_count(&mut self, now: Instant) -> usize {
         self.prune(now);
         self.open.len()
     }

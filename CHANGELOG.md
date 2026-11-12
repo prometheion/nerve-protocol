@@ -24,6 +24,7 @@
 ### Breaks
 
 - `nerve-node status --json` names what Linux and Windows both have the same, before 0.1.0 freezes the names: each center's `landlock` is `confined`, with `confinement` (`"landlock"`, `"appcontainer"` or `null`); `command_limits.cgroup` is `command_limits.held_by`; `owner_is_root` and `owner_is_admin` are one `owner_full_rights` (root as the owner on Linux, an administrator as the owner on Windows).
+- Nerve builds for Linux and Windows only. The code for other systems, which no release built and no test ran, is gone, and with it the refusals "Linux and Windows only for now" of capabilities, providers, the sudo switch and commands as another account: a build for another system now stops when it compiles.
 
 ### Windows (with 0.1.0)
 

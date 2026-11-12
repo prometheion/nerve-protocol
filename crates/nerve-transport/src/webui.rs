@@ -252,10 +252,6 @@ pub fn posted_secret(req: &Request) -> String {
     given.unwrap_or_default().trim().to_string()
 }
 
-pub fn see_other(to: &str) -> Response {
-    Response::new(303, "text/plain; charset=utf-8", Vec::new()).with_header("Location", to)
-}
-
 /// The name of a `Host` header, without its port.
 fn host_name(h: &str) -> &str {
     if let Some(rest) = h.strip_prefix('[') {

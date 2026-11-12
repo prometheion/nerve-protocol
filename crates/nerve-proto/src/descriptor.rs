@@ -364,10 +364,7 @@ impl FolderAccess {
 /// ends with no blank. A center puts a node's text on one line and trims
 /// it, so a folder name that is not plain would be shown as another place.
 pub fn plain_line(s: &str) -> bool {
-    s.trim() == s
-        && !s
-            .chars()
-            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    s.trim() == s && !s.chars().any(crate::text::breaks_line)
 }
 
 /// An optional field read so that a value it cannot take is left out

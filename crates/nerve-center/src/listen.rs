@@ -83,8 +83,8 @@ enum Accounts {
     /// By the process Windows' table of connections names.
     #[cfg(windows)]
     Windows,
-    /// Not at all: every loopback peer is one.
-    #[cfg_attr(any(target_os = "linux", windows), allow(dead_code))]
+    /// Not at all: every loopback peer is one (a test's).
+    #[cfg(test)]
     None,
     /// By address, as any other peer: a test's second address is another
     /// peer.
@@ -131,10 +131,8 @@ impl Peer {
             }
             #[cfg(test)]
             Accounts::ByAddress => Peer::Addr(ip),
-            Accounts::None => {
-                let _ = local;
-                Peer::Local
-            }
+            #[cfg(test)]
+            Accounts::None => Peer::Local,
         }
     }
 
@@ -288,8 +286,6 @@ impl Server {
         let accounts = Accounts::Kernel(nerve_transport::peer::Lookup::for_listener(local));
         #[cfg(windows)]
         let accounts = Accounts::Windows;
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let accounts = Accounts::None;
         Ok(Server {
             listener,
             tls,

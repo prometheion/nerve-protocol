@@ -34,9 +34,6 @@ pub(super) async fn add_provider(
     })
     .await?;
     w(out, format!("provider {name} added: {exe}"));
-    if let Some(note) = NO_PROVIDERS_HERE {
-        w(out, note.to_string());
-    }
     Ok(())
 }
 
@@ -71,14 +68,6 @@ pub(super) async fn show_providers(paths: NodePaths, out: &mut dyn Write) -> Res
     Ok(())
 }
 
-/// What `provider add` and `provider` add where no program attaches: the
-/// node tells a provider's program by what Linux and Windows show of it.
-const NO_PROVIDERS_HERE: Option<&str> = if cfg!(any(target_os = "linux", windows)) {
-    None
-} else {
-    Some("programs attach as providers on Linux and Windows only: this node takes none")
-};
-
 /// The lines of `provider`: each program allowed, and whether it is
 /// attached.
 pub(super) fn program_lines(v: &Value) -> Vec<String> {
@@ -86,7 +75,7 @@ pub(super) fn program_lines(v: &Value) -> Vec<String> {
     if programs.is_empty() {
         return vec!["no program is allowed as a provider".into()];
     }
-    let mut lines: Vec<String> = programs
+    programs
         .iter()
         .map(|p| {
             let state = match p["attached"].as_bool() {
@@ -100,9 +89,7 @@ pub(super) fn program_lines(v: &Value) -> Vec<String> {
                 p["exe"].as_str().unwrap_or_default()
             )
         })
-        .collect();
-    lines.extend(NO_PROVIDERS_HERE.map(str::to_string));
-    lines
+        .collect()
 }
 
 #[cfg(test)]
@@ -127,13 +114,6 @@ mod tests {
             said.starts_with(&format!("provider desk added: {a}\n")),
             "{said}"
         );
-        // Where no program attaches, the owner is told so.
-        let elsewhere = "programs attach as providers on Linux and Windows only";
-        assert_eq!(
-            said.contains(elsewhere),
-            cfg!(not(any(target_os = "linux", windows))),
-            "{said}"
-        );
         run(&paths, &["provider", "add", "desk", &b]).unwrap();
         run(&paths, &["provider", "add", "lamp-2", &lamp]).unwrap();
         let cfg =
@@ -145,15 +125,11 @@ mod tests {
             .map(|p| (p.name.as_str(), p.exe.as_str()))
             .collect();
         assert_eq!(allowed, [("desk", b.as_str()), ("lamp-2", lamp.as_str())]);
-        let note = match cfg!(any(target_os = "linux", windows)) {
-            true => String::new(),
-            false => format!("{elsewhere}: this node takes none\n"),
-        };
         assert_eq!(
             run(&paths, &["provider"]).unwrap(),
             format!(
                 "program desk: {b}, the node does not run\nprogram lamp-2: {lamp}, the node does \
-                 not run\n{note}"
+                 not run\n"
             )
         );
         let v = json_of(&paths, &["provider"]);

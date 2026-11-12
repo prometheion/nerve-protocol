@@ -150,11 +150,6 @@ impl Shared {
     /// password leaves the switch as it was.
     pub async fn sudo_switch_on(&self, by: Writer<'_>, password: String) -> Result<u64, SetError> {
         let password = Secret::new(password);
-        if !cfg!(any(target_os = "linux", windows)) {
-            return Err(SetError::Invalid(
-                "the sudo switch works on Linux and Windows only".into(),
-            ));
-        }
         if let Writer::Center(c) = by {
             let grant = self.config().center(c).map(|e| e.settings);
             if grant != Some(nerve_policy::config::SettingsGrant::Write) {
