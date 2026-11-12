@@ -300,13 +300,16 @@ fn no_page_says_windows_waits_for_its_release() {
     assert!(rows[1].starts_with("| [windows.md]"), "{rows:?}");
 }
 
-/// The notes of a release name everything it changed, Windows too (owner,
-/// 2026-11-07), and begin with the update order; the Windows items of 0.0.7
-/// and before wait under `## Unreleased` for the release log of 0.1.0.
+/// The notes of a release begin with the update order (owner, 2026-11-07).
+/// Those of 0.1.0, the first release with Windows, are a log of everything
+/// Nerve does on Linux and Windows (owner, 2026-11-12): they also say that a
+/// 0.0.8 node still talks to a 0.1.0 center, what a 0.0.6 Windows node does,
+/// and what stays stable, and they keep the renames of `status --json` as
+/// Breaks. No Windows section waits for its release any more.
 #[test]
 fn the_notes_say_the_update_order() {
     let changelog = include_str!("../../../CHANGELOG.md");
-    // The newest release's notes: the first `## x.y.z` below `## Unreleased`.
+    // The newest release's notes: the first `## x.y.z`.
     let notes = changelog
         .split("\n## ")
         .find(|s| s.starts_with(|c: char| c.is_ascii_digit()))
@@ -314,18 +317,40 @@ fn the_notes_say_the_update_order() {
         .split_once('\n')
         .unwrap()
         .1;
-    assert!(notes.contains("Update the center first, then the nodes."));
-    let unreleased = changelog
-        .split("\n## Unreleased\n")
+    let first_bold = notes
+        .lines()
+        .find(|l| l.starts_with("**"))
+        .expect("a bold line");
+    assert!(
+        first_bold.starts_with("**Update the center first, then the nodes.**"),
+        "{first_bold}"
+    );
+    assert!(notes.find(first_bold) < notes.find("\n### "), "{notes}");
+    let log = changelog
+        .split("\n## 0.1.0\n")
         .nth(1)
-        .unwrap()
+        .expect("the notes of 0.1.0")
         .split("\n## ")
         .next()
         .unwrap();
-    assert!(
-        unreleased.contains("### Windows (with 0.1.0)"),
-        "{unreleased}"
-    );
+    let flat = log.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needed in [
+        "A 0.0.8 node still talks to a 0.1.0 center.",
+        "from 0.0.6: open the 0.1.0 installer over it",
+        "change only with a migration",
+        "spec/README.md#what-stays-stable-from-010",
+        "### On Windows",
+        "### The desktop app",
+        "`owner_full_rights`",
+        "`command_limits.held_by`",
+    ] {
+        assert!(flat.contains(needed), "the notes lack {needed}");
+    }
+    let breaks = log.split("\n### Breaks\n").nth(1).expect("Breaks");
+    assert!(breaks.contains("`confined`"), "{breaks}");
+    // Said of the Windows guide before it had a page: now false.
+    assert!(!flat.contains("The user docs name no terminal command"));
+    assert!(!changelog.contains("### Windows (with 0.1.0)"));
 }
 
 /// The README is the first thing a new user reads (#213): its quick start
