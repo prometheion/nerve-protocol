@@ -12,8 +12,9 @@ leads to the detail.
 - A command that runs as you can change the node's settings as you can:
   the node refuses only the simple ways, as a guard against mistakes
   ([user mode](../dev/policy-engine.md#user-mode)).
-- With root as the owner, a center with the settings grant can switch
-  itself to `user` mode and so run commands as root
+- With root as the owner (on Windows an administrator), a center with the
+  settings grant can switch itself to `user` mode and so run commands as
+  root (on Windows with your administrator rights)
   ([root as the owner](../dev/service.md#root-as-the-owner)).
 - Commands on the sudo list run as root (on Windows as you, with your
   administrator rights), outside the folders. With the network off they do

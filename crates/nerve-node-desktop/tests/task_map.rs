@@ -24,6 +24,8 @@ fn the_task_map_has_the_places_the_messages_name() {
         "Permissions › Sudo",
         "Settings › Keys",
         "Centers › New key…",
+        // The network switch, where the app's reference has it.
+        "Permissions › Mode › No network for its commands",
     ] {
         assert!(places.contains(&place), "{place}: {places:?}");
     }
@@ -34,6 +36,12 @@ fn the_task_map_has_the_places_the_messages_name() {
             && HELP.contains("/docs/user/windows.md#where-each-task-is\");"),
         "Help links the Windows page on Windows"
     );
+    // The Permissions page has no Network section: the switch is a chip of
+    // Mode, as the app's reference and the Windows page say.
+    assert!(!places.contains(&"Permissions › Network"), "{places:?}");
+    let reference = include_str!("../src/reference.rs");
+    assert!(reference.contains("\"Permissions › Mode › No network for its commands\""));
+    assert!(page.contains("**Permissions › Mode › No network for its commands**"));
     // The messages name the same place.
     let winsvc = include_str!("../../nerve-node/src/winsvc.rs");
     assert!(winsvc.contains("Settings › General › Account for commands"));

@@ -410,6 +410,15 @@ ran from it, or when the Event Log read the text of the node's entries from
 it. An install over an installed node moves the old program aside the same
 way.
 
+A node of 0.0.6 cannot be updated or installed over. Its install wrote the
+account of the commands into `node.toml` (`machine.user`), which this version
+refuses, and the file is signed with a key the installer does not hold. So
+the install refuses before it changes anything when `node.toml` holds that
+key (`winsvc::check_not_from_0_0_6`), and says to uninstall with **Delete the
+data** and pair again. The 0.0.6 app's **Update** finds that the new program
+does not start and puts the old one back. 0.0.6 also named its owners in the
+registry value `Owners`, which this version does not read.
+
 **Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
 and removes the service, the service `nerve-run-profile`, the source
 `nerve-node` of the Event Log (its entries stay), the users `nerve` and

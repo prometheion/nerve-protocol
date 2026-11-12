@@ -68,8 +68,10 @@ the 20 seconds; keep it below your harness's own timeout for a tool call
 | 7481 | harnesses over HTTP, this machine only | `--mcp`, `NERVE_CENTER_MCP` |
 
 Set `--public-url` when nodes reach the center under another name than its
-host name, such as a DNS name or a forwarded port. `--harness-token` adds a
-fixed harness token, for a harness a script sets up. `nerve-center --help`
+host name, such as a DNS name or a forwarded port.
+`NERVE_CENTER_HARNESS_TOKEN` adds a fixed harness token, for a harness a
+script sets up; `--harness-token` does too, but shows it in the process
+list. `nerve-center --help`
 lists every setting. For the service they live in
 `/etc/nerve-center/center.env`; change them there, then
 `sudo systemctl restart nerve-center`. On Windows the file is

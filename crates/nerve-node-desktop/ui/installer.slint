@@ -148,7 +148,7 @@ export component UninstallChoice {
         OptionTile {
             icon: @image-url("icons/archive.svg");
             title: "Keep the data";
-            text: "Settings, pairings, keys and the audit log stay for a new install.";
+            text: Install.windows ? "Settings, pairings, keys, your stored Windows password and the audit log stay for a new install." : "Settings, pairings, keys and the audit log stay for a new install.";
             selected: !Install.purge;
             clicked => {
                 Install.purge = false;

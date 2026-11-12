@@ -336,6 +336,21 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
             "The guard does not catch a service or task made by writing the registry or the Tasks folder directly, the Startup folder, or WMI",
         ),
         ("docs/user/safety.md", "The programs are not signed"),
+        // What an uninstall that keeps the data keeps.
+        (
+            "docs/user/windows.md",
+            "The data holds your stored Windows password too, open to the administrators: **Delete the data** deletes it",
+        ),
+        // The settings grant reaches an administrator owner's rights.
+        (
+            "docs/user/safety.md",
+            "With root as the owner (on Windows an administrator), a center with the settings grant can switch itself to `user` mode",
+        ),
+        // A harness token in a flag is in the process list.
+        (
+            "docs/user/center.md",
+            "`--harness-token` does too, but shows it in the process list",
+        ),
         ("docs/user/windows.md", "The programs are not signed"),
         ("SECURITY.md", "UAC is no boundary"),
         (

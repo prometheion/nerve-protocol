@@ -61,7 +61,7 @@ and a folder you add gives no access.
 | Choose what it may do | **Permissions › Mode** | `user` mode and allowlist as you use your Windows password |
 | Give it a folder | **Permissions › Folders** | Commands run as `nerve-run` in an AppContainer of the pairing's own; network folders and mapped drives are refused |
 | Run commands with sudo | **Permissions › Sudo** | Only an administrator owner; only here, never from a center; off after a restart |
-| Keep commands off the network | **Permissions › Network** | Name lookups fail too |
+| Keep commands off the network | **Permissions › Mode › No network for its commands** | Name lookups fail too |
 | Limits per command | **Settings › Limits** | Held by the command's job object |
 | Capabilities, programs | **Capabilities** | A program attaches over a pipe |
 | Where the keys live | **Settings › Keys** | Files, or the service's own Credential Manager |
@@ -119,13 +119,15 @@ old one comes back. The center: `nerve-center update` as an administrator.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. The quiet uninstall of Apps & features
-keeps it. The Event Log's entries stay. A profile folder of `nerve` or
+keeps it. The data holds your stored Windows password too, open to the
+administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
 `nerve-run` that Windows still holds goes after a restart; the uninstall
 says where.
 
-**From 0.0.6:** open the 0.1.0 installer over it. The app's **Update** of
-0.0.6 replaces only the program; if the node then asks for your password,
-save it under **Settings › General › Account for commands**.
+**From 0.0.6:** uninstall it with **Delete the data** (Apps & features),
+install this version, and pair the node again. The installer refuses to
+install over 0.0.6, whose settings it cannot read, and the app's **Update**
+of 0.0.6 puts the old program back.
 
 ## What Windows does not have
 

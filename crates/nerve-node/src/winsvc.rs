@@ -403,6 +403,27 @@ fn check_install_folders(layout: &Layout, sys: &dyn WinSystem) -> Result<(), Str
     Ok(())
 }
 
+/// Why an install over a node of 0.0.6 is refused, and the way that works.
+pub const FROM_0_0_6: &str = "this node was installed by Nerve 0.0.6, whose settings this version cannot read: uninstall it with Delete the data (Apps & features), then install again and pair the node with its centers again";
+
+/// Refuses the install before it changes anything over a node of 0.0.6:
+/// its install wrote the account of the commands into `node.toml`
+/// (`machine.user`), which this version refuses, so the service it starts
+/// would not start, and nothing here can sign the file anew without it.
+/// The file's MAC line is a TOML comment, so the text is read as it is.
+fn check_not_from_0_0_6(paths: &NodePaths) -> Result<(), String> {
+    let Ok(text) = std::fs::read_to_string(paths.config_file()) else {
+        return Ok(());
+    };
+    let Ok(doc) = toml::from_str::<toml::Table>(&text) else {
+        return Ok(());
+    };
+    match doc.get("machine").and_then(|m| m.get("user")) {
+        Some(_) => Err(FROM_0_0_6.into()),
+        None => Ok(()),
+    }
+}
+
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
 /// the administrators, read for the interactive and service users), and to
 /// the owner the right to start, stop and ask it, nothing more.
@@ -813,6 +834,7 @@ pub fn install(
     // Before anything is written, the audit log too: a folder another
     // account owns is not written in.
     check_install_folders(layout, sys)?;
+    check_not_from_0_0_6(&layout.paths)?;
     let mut steps = Steps {
         done: Vec::new(),
         out,
@@ -2763,6 +2785,35 @@ pub(crate) mod tests {
         std::fs::write(&old, "sealed").unwrap();
         save_owner_password(&l.paths, &sys, "alice's").unwrap();
         assert!(!old.exists());
+    }
+
+    /// An install over a node of 0.0.6, whose `node.toml` names the account
+    /// of the commands, is refused before it changes anything, with the way
+    /// that works; one over a node of this version is not.
+    #[test]
+    fn an_install_over_a_node_of_0_0_6_is_refused_before_it_changes_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        std::fs::create_dir_all(&l.paths.config_dir).unwrap();
+        let old = "# mac hmac-sha256 00 (nerve-node refuses this file once it is changed outside nerve-node)\n[machine]\nuser = \"alice\"\n";
+        std::fs::write(l.paths.config_file(), old).unwrap();
+        sys.types("alice's");
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        assert!(!l.bin.exists());
+        assert_eq!(std::fs::read_to_string(l.paths.config_file()).unwrap(), old);
+        // Without the key the install goes on.
+        std::fs::write(
+            l.paths.config_file(),
+            "# mac hmac-sha256 00\n[machine]\nshell = \"pwsh\"\n",
+        )
+        .unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
     }
 
     /// The SID decides who is local: this machine's and one number more.
