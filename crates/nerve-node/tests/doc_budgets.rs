@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 /// Each user page and its budget in words. A new page needs a line here.
 const BUDGETS: &[(&str, usize)] = &[
     ("README.md", 900),
-    ("docs/user/README.md", 250),
+    ("docs/user/README.md", 300),
     ("docs/user/install.md", 1500),
+    ("docs/user/windows.md", 1200),
     ("docs/user/center.md", 1200),
     ("docs/user/pair.md", 1200),
     ("docs/user/folders-and-modes.md", 1800),
@@ -340,6 +341,117 @@ fn every_doc_page_the_code_names_exists() {
     // A test that feeds a made-up command its own path of the docs.
     found.retain(|f| !f.contains("nerve-policy/tests/guard.rs"));
     assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The anchors GitHub gives the headings of a Markdown page: the heading in
+/// lower case, without its punctuation, a blank as `-`, and `-1`, `-2` after
+/// a heading that came before.
+fn anchors(page: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let mut fence = false;
+    for line in page.lines() {
+        if line.starts_with("```") {
+            fence = !fence;
+        }
+        let Some(heading) = line.trim_start_matches('#').strip_prefix(' ') else {
+            continue;
+        };
+        if fence || !line.starts_with('#') {
+            continue;
+        }
+        let slug: String = heading
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
+            .map(|c| if c == ' ' { '-' } else { c })
+            .collect();
+        let n = seen.iter().filter(|s| **s == slug).count();
+        out.push(if n == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{n}")
+        });
+        seen.push(slug);
+    }
+    out
+}
+
+/// Every link of the guide, the README, the policy and the dev docs to
+/// another page of the repository leads to a file that is there, and to a
+/// heading of it that is there: the Windows page and the limits link into
+/// the dev pages by their headings, which move.
+#[test]
+fn every_link_of_the_docs_leads_to_a_page_and_heading_that_exist() {
+    let mut pages = vec![
+        root().join("README.md"),
+        root().join("SECURITY.md"),
+        root().join("CONTRIBUTING.md"),
+    ];
+    fn md(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                md(&p, out);
+            } else if p.extension().is_some_and(|e| e == "md") {
+                out.push(p);
+            }
+        }
+    }
+    md(&root().join("docs"), &mut pages);
+    let mut found = Vec::new();
+    for page in &pages {
+        let text = std::fs::read_to_string(page).unwrap();
+        let mut fence = false;
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with("```") {
+                fence = !fence;
+            }
+            if fence {
+                continue;
+            }
+            for (at, _) in line.match_indices("](") {
+                let link: String = line[at + 2..]
+                    .chars()
+                    .take_while(|c| *c != ')' && !c.is_whitespace())
+                    .collect();
+                if link.contains(':') && !link.starts_with('#') {
+                    continue;
+                }
+                let (file, anchor) = link.split_once('#').unwrap_or((&link, ""));
+                let target = if file.is_empty() {
+                    page.clone()
+                } else {
+                    page.parent().unwrap().join(file)
+                };
+                let at = format!("{}:{}: {link}", page.display(), i + 1);
+                if !target.exists() {
+                    found.push(format!("{at}: no such file"));
+                } else if !anchor.is_empty()
+                    && target.extension().is_some_and(|e| e == "md")
+                    && !anchors(&std::fs::read_to_string(&target).unwrap())
+                        .iter()
+                        .any(|a| a == anchor)
+                {
+                    found.push(format!("{at}: no such heading"));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+    // The rule for a heading's anchor, on the forms these pages use.
+    assert_eq!(
+        anchors(
+            "# The control pipe is not the node's (Windows)\n## `nerve-run`, a home\n## A\n## A\n"
+        ),
+        [
+            "the-control-pipe-is-not-the-nodes-windows",
+            "nerve-run-a-home",
+            "a",
+            "a-1"
+        ]
+    );
 }
 
 /// Every `.rs`, `.js`, `.md` and `.json` file below `dir`, except build

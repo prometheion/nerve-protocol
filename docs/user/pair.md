@@ -22,8 +22,10 @@ Pairing links a machine to a center. Do it once per machine and center.
    ```
 
 The machine shows as online in the web UI. With the desktop app, paste the
-link under **Centers › Pair a center** instead. `sudo nerve-node install`
-and `nerve-node setup` ask for the link too.
+link under **Centers › Pair a center** instead; on Windows, open the link and
+Nerve shows it there. `sudo nerve-node install` and `nerve-node setup` ask for
+the link too. `center add --name lab` gives the center another name here, and
+`--yes` pairs without asking.
 
 A new pairing is in `folder` mode, with no folder of yours, and the center
 may not change settings. Give it a folder next:
@@ -97,7 +99,8 @@ nerve-node proxy off
 ```
 
 The center's pin is still checked inside the proxy's tunnel, so the proxy
-sees only TLS. The login is kept with the node's keys, never in `node.toml`.
+sees only TLS. The login is kept with the node's keys, never in `node.toml`
+(on Windows set it under **Settings › Network**).
 Without `proxy set`, the node uses `HTTPS_PROXY` and `NO_PROXY`. It never
 falls back to a direct connection
 ([proxy](../dev/node-link.md#a-proxy-as-the-owner-sets-it-up)).

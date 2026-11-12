@@ -1,8 +1,8 @@
 # Install, update and remove
 
 Put the center where your harness runs, and a node on each machine the agent
-may use. A center and a node can share a machine. This release is for Linux;
-Windows comes with 0.1.0.
+may use. A center and a node can share a machine. On Windows the node is
+the desktop app: [Nerve on Windows](windows.md) has its install.
 
 ## Download
 
@@ -13,6 +13,7 @@ Get the programs from
 |---|---|
 | x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`; the desktop app as `nerve-node-desktop_<version>_amd64.deb`, `nerve-node-desktop-<version>.x86_64.rpm` or `nerve-node-desktop-x86_64-linux` |
 | ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
+| Windows x64 | `nerve-center-x86_64-windows.exe`, the desktop app `nerve-node-desktop-x86_64-windows.exe` ([Windows](windows.md)) |
 
 `nerve-center` and `nerve-node` are static and need no libraries. The
 desktop app needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
@@ -26,6 +27,8 @@ broken download, not a changed release:
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
 ```
+
+On Windows, `Get-FileHash` ([Windows](windows.md#download-and-check)).
 
 ## The node as a service
 
@@ -141,7 +144,9 @@ Harnesses:   http://127.0.0.1:7481/mcp, with a harness token: …
 next. `journalctl -u nerve-center` shows its output.
 
 The installed center sees no GPU: its local model runs on the CPU
-([the service](../dev/service.md#settings-of-the-service)).
+([the service](../dev/service.md#settings-of-the-service)). On Windows,
+install it in an administrator's terminal
+([Windows](windows.md#the-center-as-a-service)).
 
 ## What it needs
 
@@ -151,6 +156,7 @@ The installed center sees no GPU: its local model runs on the CPU
 | Expected to work | Fedora, Arch Linux, other distributions with systemd |
 | As a service | systemd, polkit, cgroup v2, a file system with ACLs (ext4, XFS, Btrfs) |
 | Not as a service | Alpine with OpenRC, Void with runit, WSL 1: run the node by hand |
+| Windows | Windows 11 and Server 2025, x64 ([what it needs](windows.md#what-it-needs)) |
 
 How well pairings are kept apart depends on the kernel. On the stock
 kernels of these distributions:
@@ -179,8 +185,8 @@ release's `SHA256SUMS`, and restarts the service. `--from <file>` takes a
 file you checked yourself. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own
 to a unit belong in `sudo systemctl edit nerve-node`, which `update` leaves
-alone. The desktop app updates under **Settings › App › Update…**; from a
-package, it installs the release's newer package with `apt` or `dnf`, and a
+alone. The desktop app updates under **Settings › App › Update…**, also on
+Windows; from a package, it installs the release's newer package with `apt` or `dnf`, and a
 newer package you install yourself updates the node's service too.
 
 ## Uninstall

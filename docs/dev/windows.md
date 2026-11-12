@@ -149,27 +149,13 @@ name.
 
 ## Install on Windows
 
-In PowerShell, compare each hash with its line in `SHA256SUMS`:
-
-```powershell
-(Get-FileHash .\nerve-node-desktop-x86_64-windows.exe).Hash
-```
-
-Then double-click `nerve-node-desktop-x86_64-windows.exe`. Its installer
-installs the node as a service that starts with the machine, and the app with
-**Nerve** in the Start menu ([desktop app](desktop.md#install)). The app does
-everything for the node from then on: pairing, settings, folders, rules,
-sudo, backups, update and uninstall. No terminal command is needed or
-offered.
-
-For the center, rename `nerve-center-x86_64-windows.exe` to `nerve-center.exe`
-and put it in a folder on your `PATH`. A harness starts it from there, or it
-runs as a [service](#the-center-as-a-windows-service).
-
-### Let the file run (Windows)
-
-Double-click the file. It is not signed, so Windows may show "Windows
-protected your PC": **More info**, then **Run anyway**.
+The user guide's [Windows page](../user/windows.md) has the download, the
+check with `Get-FileHash`, SmartScreen, the install and the first run. The
+app does everything for the node from then on: pairing, settings, folders,
+rules, sudo, backups, update and uninstall. No terminal command is needed or
+offered. The center is renamed to `nerve-center.exe` and put on the `PATH`,
+where a harness starts it, or runs as a
+[service](#the-center-as-a-windows-service).
 
 ## The node as a service on Windows
 

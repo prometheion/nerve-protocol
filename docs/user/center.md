@@ -9,7 +9,8 @@ nerve-center status
 ```
 
 `status` says whether it runs, its addresses and its machines, and ends
-with its log command, `journalctl -u nerve-center`.
+with its log command, `journalctl -u nerve-center`. On Windows, run these in
+an administrator's terminal ([Windows](windows.md#the-center-as-a-service)).
 
 ## Log in to the web UI
 
@@ -53,6 +54,11 @@ Allowing `execute` allows all a machine lets this center do, so decide that
 on the machine: its [mode](folders-and-modes.md) and [rules](rules.md)
 ([the tools](../dev/mcp-surface.md#the-tools-the-model-gets)).
 
+A call still running after 20 seconds becomes a job: `execute` answers its
+id at once, and `job.status` gives the result later. `--call-wait` changes
+the 20 seconds; keep it below your harness's own timeout for a tool call
+([jobs](../dev/mcp-surface.md#long-calls-become-jobs)).
+
 ## Ports
 
 | Port | For | Setting |
@@ -62,10 +68,13 @@ on the machine: its [mode](folders-and-modes.md) and [rules](rules.md)
 | 7481 | harnesses over HTTP, this machine only | `--mcp`, `NERVE_CENTER_MCP` |
 
 Set `--public-url` when nodes reach the center under another name than its
-host name, such as a DNS name or a forwarded port. `nerve-center --help`
+host name, such as a DNS name or a forwarded port. `--harness-token` adds a
+fixed harness token, for a harness a script sets up. `nerve-center --help`
 lists every setting. For the service they live in
 `/etc/nerve-center/center.env`; change them there, then
-`sudo systemctl restart nerve-center`.
+`sudo systemctl restart nerve-center`. On Windows the file is
+`C:\ProgramData\nerve-center\settings\center.env`, and
+`Restart-Service nerve-center` restarts it.
 
 ### Which setting wins
 

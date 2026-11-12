@@ -276,30 +276,11 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
     assert!(deb < plain, "the package comes first in install.md: {app}");
 }
 
-/// The user guide is Linux only until 0.1.0 (Q9 of the PR 6 plan): it names
-/// Windows once, in "Windows comes with 0.1.0", and every Windows text is in
-/// docs/dev/windows.md until then. The notes of a release name everything it
-/// changed, Windows too (owner, 2026-11-07), and begin with the update order;
-/// the Windows items of 0.0.7 and before wait under `## Unreleased` for the
-/// release log of 0.1.0.
+/// The notes of a release name everything it changed, Windows too (owner,
+/// 2026-11-07), and begin with the update order; the Windows items of 0.0.7
+/// and before wait under `## Unreleased` for the release log of 0.1.0.
 #[test]
-fn the_user_guide_is_linux_only_and_the_notes_say_the_update_order() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut found = Vec::new();
-    let mut pages = vec![root.join("README.md")];
-    for entry in std::fs::read_dir(root.join("docs/user")).unwrap() {
-        pages.push(entry.unwrap().path());
-    }
-    for path in pages {
-        let text = std::fs::read_to_string(&path).unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let rest = line.replace("Windows comes with 0.1.0", "");
-            if rest.contains("Windows") || rest.contains(".exe") {
-                found.push(format!("{}:{}: {line}", path.display(), i + 1));
-            }
-        }
-    }
-    assert!(found.is_empty(), "{}", found.join("\n"));
+fn the_notes_say_the_update_order() {
     let changelog = include_str!("../../../CHANGELOG.md");
     // The newest release's notes: the first `## x.y.z` below `## Unreleased`.
     let notes = changelog

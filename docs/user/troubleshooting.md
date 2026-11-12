@@ -11,7 +11,22 @@ nerve-node log --problems --last 20
 The refusal in the audit log is the text the agent saw. One that starts with
 `the center's action checker` comes from the center: look at the center's
 Audit and Log pages. Every message, with its cause and fix, is in
-[messages](../dev/messages.md).
+[messages](../dev/messages.md). On Windows the app's **Overview**, **Audit**
+and **Log** pages show the same.
+
+<details>
+<summary>On Windows</summary>
+
+| What you see | Fix |
+|---|---|
+| "Windows protected your PC" | **More info**, then **Run anyway**: the programs are not signed |
+| Smart App Control blocks the installer | None yet: it lets no unsigned program run, and signed ones come later |
+| The app asks for your Windows password again | Save the new one under **Settings › General › Account for commands** |
+| A pairing with the network off runs nothing | Start the Windows Firewall service |
+
+More messages: [Windows](windows.md#when-something-fails).
+
+</details>
 
 <details>
 <summary>The agent sees <code>forbidden</code></summary>
