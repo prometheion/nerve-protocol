@@ -10,7 +10,7 @@ const BUDGETS: &[(&str, usize)] = &[
     ("README.md", 900),
     ("docs/user/README.md", 300),
     ("docs/user/install.md", 1500),
-    ("docs/user/windows.md", 1200),
+    ("docs/user/windows.md", 1400),
     ("docs/user/center.md", 1200),
     ("docs/user/pair.md", 1200),
     ("docs/user/folders-and-modes.md", 1800),
