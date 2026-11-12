@@ -429,12 +429,15 @@ Keep nothing there that the machine's other accounts must not read.
   of a download or a clone) keeps the ACL it had, so `nerve-run` reaches it
   only as any other account would, until the node walks that folder. The
   node watches the granted folders (inotify, a watch on each folder in
-  them; `crate::grant_watch`): a file or folder moved in, or a folder made,
-  marks its granted folder, which the node walks once the names are quiet
+  them, each added from a descriptor opened below the granted folder, so a
+  link put in the way is not followed; `crate::grant_watch`): a name made or
+  moved in marks its granted folder, which the node walks once the names are quiet
   for 3 seconds, and no later than 30 seconds after the first change while
   they go on, with a pause twice as long as the walk after it, as on
   Windows. A lost event (the queue ran over) walks every granted folder. A
-  file made needs no walk: it gets the folder's default entries. The walk's
+  file made is a name as well: it gets the folder's default entries, but a
+  copy that keeps its source's mode (`mv` from another file system, `cp -a`)
+  has a mask that cuts them, so it is walked like a file moved in. The walk's
   own changes are attribute changes, which the watch does not ask for, so
   they do not wake it. A granted folder with more than 65,536 folders, or
   one the system's limit of watches (`fs.inotify.max_user_watches`) leaves
@@ -443,7 +446,10 @@ Keep nothing there that the machine's other accounts must not read.
   which is a step by hand only then. A granted folder inside one left out
   is watched for itself. One that is missing (made or mounted later, or
   moved away and made again) has no watch and is looked for every 10
-  seconds; once it is there it is watched and walked. The node also walks
+  seconds; once it is there it is watched and walked. A granted folder that
+  is a mount point loses its watches when the drive is unmounted: it is
+  walked, not watched while it is a bare folder, and watched and walked
+  again once something is mounted there. The node also walks
   every grant when it starts and on `folder add` of a folder it has. Each such walk is a pass
   over everything in the granted folder, which takes a while for large
   trees. `status` and the

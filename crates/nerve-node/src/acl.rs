@@ -454,9 +454,9 @@ fn remove(at: &CStr, name: &str) -> std::io::Result<()> {
 
 /// A file or folder opened without following it (`O_PATH`), and what it
 /// was when it was opened.
-struct Opened {
-    file: std::fs::File,
-    m: std::fs::Metadata,
+pub(crate) struct Opened {
+    pub(crate) file: std::fs::File,
+    pub(crate) m: std::fs::Metadata,
 }
 
 /// A folder the walk has opened, and its path.
@@ -476,7 +476,7 @@ struct Todo {
 impl Opened {
     /// A path that leads to this very file, whatever is done to its own
     /// path meanwhile.
-    fn path(&self) -> PathBuf {
+    pub(crate) fn path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
     }
 
@@ -493,7 +493,7 @@ impl Opened {
 }
 
 /// Opens the entry `name` of the folder `dir` without following it.
-fn open_in(dir: libc::c_int, name: &CStr) -> std::io::Result<Opened> {
+pub(crate) fn open_in(dir: libc::c_int, name: &CStr) -> std::io::Result<Opened> {
     // Through libc, not `OpenOptions`: on musl the standard library takes
     // O_PATH out of the flags (crate::service's `chown_entry` says more).
     // SAFETY: a NUL-terminated name; the new descriptor is owned below.
@@ -517,7 +517,7 @@ fn open_in(dir: libc::c_int, name: &CStr) -> std::io::Result<Opened> {
 /// the way. The grants' paths are real ones (crate::exec::folder_sets), so a
 /// link on the way came later, and a command may have put it there. The
 /// last part is opened as it is: a link there is the caller's to see.
-fn open_path(p: &Path) -> std::io::Result<Opened> {
+pub(crate) fn open_path(p: &Path) -> std::io::Result<Opened> {
     let bad = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, why.to_string());
     let mut parts = p.components();
     if parts.next() != Some(Component::RootDir) {

@@ -95,9 +95,10 @@ told another center's.
 ### Keep the folders in sync
 
 The node gives `nerve-run` its folders as access list entries (ACLs). What
-you make in a folder later gets them. What you move into it (`mv` of a
-download or a clone) keeps its own list for a few seconds: the node watches
-the granted folders and gives it the folder's entries by itself.
+you make in a folder later gets them. What you move or copy into it (`mv` of a
+download or a clone, `cp -a`) keeps its own list for a few seconds: the node
+watches the granted folders and gives it the folder's entries by itself,
+also after a drive with a granted folder was unmounted and mounted again.
 
 You need **Sync folders** under **Permissions › Folders** only by hand, for
 a folder too large to watch (the node's log says so):

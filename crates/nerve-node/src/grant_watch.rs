@@ -52,7 +52,8 @@
 //! On Linux a new file in a granted folder gets its ACL entries from the
 //! folder's default entries, and a file with a second name gets none and
 //! keeps its own rights (crate::acl); a file or folder moved in keeps the ACL
-//! it had. So the installed Linux node watches its granted folders for what
+//! it had, and a copy that keeps its source's mode has a mask that cuts the
+//! entries. So the installed Linux node watches its granted folders for what
 //! is moved in ([`linux`]: inotify, a watch on each folder in them) and walks
 //! them on the same timing ([`Pending`]); a folder too big to watch, or one
 //! the system's limit of watches leaves out, is left to the other syncs, and
@@ -523,15 +524,19 @@ impl Starts {
 mod linux {
     //! One inotify instance watches every folder in the granted folders: a
     //! watch per folder, as inotify watches one folder and not what is
-    //! below it. A thread reads its events. A file or folder moved in (and
-    //! a folder made, whose own folders are watched at once and may get
-    //! something moved in before) marks its granted folder changed; a file
-    //! made needs nothing, as it gets its entries from the folder's default
-    //! ones (crate::acl). The node's own changes of the entries are
-    //! attribute changes, which the watch does not ask for, so they do not
-    //! wake it. An overflow of the event queue walks every granted folder,
-    //! and a watched folder moved away or gone has its granted folder
-    //! walked and watched anew at the next follow.
+    //! below it. A thread reads its events. A name made or moved in (a
+    //! folder made is watched at once, as it may get something moved in
+    //! before) marks its granted folder changed: a file made gets the
+    //! folder's default entries, but a copy that keeps the source's mode
+    //! (`mv` across file systems, `cp -a`) gets a mask that cuts them, so
+    //! a walk is due for it as well (crate::acl). The node's own changes of
+    //! the entries are attribute changes, which the watch does not ask for,
+    //! so they do not wake it. An overflow of the event queue walks every
+    //! granted folder, and a watched folder moved away or gone has its
+    //! granted folder walked and watched anew at the next follow, as has
+    //! one whose file system was unmounted. Every watch is added from a
+    //! descriptor opened below the granted folder, so a link put in the way
+    //! leads nowhere.
 
     use std::collections::{HashMap, HashSet};
     use std::ffi::CString;
@@ -603,6 +608,10 @@ mod linux {
         /// Granted folders to watch anew at the next follow: a folder in
         /// them moved away, or events were lost.
         stale: HashSet<PathBuf>,
+        /// Granted folders that were a mount point when last watched: one
+        /// that is a plain folder afterwards had its file system unmounted,
+        /// and is not watched until something is mounted there again.
+        mounted: HashSet<PathBuf>,
     }
 
     /// What an event asks for: the granted folders to walk, and the new
@@ -652,6 +661,24 @@ mod linux {
             wds
         }
 
+        /// Notes whether `root` is a mount point now (`is_mount`), and tells
+        /// whether it is the bare folder of one that was: the file system
+        /// that held the granted folder is gone, so a watch of the folder
+        /// there would see nothing of what is mounted at it later.
+        fn bare_mountpoint(&mut self, root: &Path, is_mount: bool) -> bool {
+            if is_mount {
+                self.mounted.insert(root.to_path_buf());
+                false
+            } else {
+                self.mounted.contains(root)
+            }
+        }
+
+        #[cfg(test)]
+        pub fn bare_mountpoint_for_test(&mut self, root: &str, is_mount: bool) -> bool {
+            self.bare_mountpoint(Path::new(root), is_mount)
+        }
+
         #[cfg(test)]
         pub fn hold_for_test(&mut self, root: &str, wd: i32, dir: &str) {
             self.held(Path::new(root), wd, Path::new(dir));
@@ -671,6 +698,11 @@ mod linux {
             let mut gone = self.renewed(Path::new(root), &before, &made);
             gone.sort();
             gone
+        }
+
+        #[cfg(test)]
+        pub fn is_held_for_test(&self, root: &str) -> bool {
+            self.roots.contains_key(Path::new(root))
         }
 
         #[cfg(test)]
@@ -694,10 +726,22 @@ mod linux {
                 return asked;
             }
             if e.mask & libc::IN_IGNORED != 0 {
+                let mut last = None;
                 if let Some((root, _)) = self.by_wd.remove(&e.wd)
                     && let Some(set) = self.roots.get_mut(&root)
                 {
                     set.remove(&e.wd);
+                    if set.is_empty() {
+                        last = Some(root);
+                    }
+                }
+                if let Some(root) = last {
+                    // The last watch of a granted folder went with no
+                    // move or delete told: its file system was unmounted.
+                    // The folder is not held any more, so the next follow
+                    // looks at it again, and a walk makes that follow come.
+                    self.roots.remove(&root);
+                    asked.walk.push(root.to_path_buf());
                 }
                 return asked;
             }
@@ -711,10 +755,10 @@ mod linux {
                 asked.walk.push(root.to_path_buf());
                 return asked;
             }
-            let dir_made = e.mask & libc::IN_ISDIR != 0;
-            let moved_in = e.mask & libc::IN_MOVED_TO != 0;
-            if moved_in || dir_made {
-                if dir_made && let Some(name) = &e.name {
+            if e.mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
+                if e.mask & libc::IN_ISDIR != 0
+                    && let Some(name) = &e.name
+                {
                     asked.watch.push((root.to_path_buf(), dir.join(name)));
                 }
                 asked.walk.push(root.to_path_buf());
@@ -770,6 +814,15 @@ mod linux {
             }
         }
 
+        /// Watches `dir`, which an event named under the path recorded for
+        /// a watch, as the thread does for a folder made.
+        #[cfg(test)]
+        pub fn watch_for_test(&self, root: &Path, dir: &Path) {
+            if let Some((inner, _)) = &self.running {
+                inner.watch(root, dir);
+            }
+        }
+
         /// Watches `folders` and no other. True when a granted folder is
         /// not watched yet because it is missing or cannot be read (not one
         /// left for being too big): it is tried again at the next follow.
@@ -819,6 +872,7 @@ mod linux {
                 };
                 for root in gone {
                     unwatch(inner, &root);
+                    lock(&inner.state).mounted.remove(&root);
                 }
                 if new.is_empty() {
                     break;
@@ -917,6 +971,7 @@ mod linux {
             };
             let mut made = HashSet::new();
             let r = self.add_tree(root, dir, &mut made);
+            let is_mount = dir == root && is_mount(root);
             let mut st = lock(&self.state);
             if let Err(why) = r {
                 drop(st);
@@ -927,6 +982,15 @@ mod linux {
                         root.display()
                     );
                 }
+                return;
+            }
+            if dir == root && st.bare_mountpoint(root, is_mount) {
+                // What was mounted here is gone: the folder under it is no
+                // place to watch. It is looked for again like a missing one,
+                // and walked once something is mounted there.
+                drop(st);
+                unwatch(self, root);
+                lock(&self.missing).insert(root.to_path_buf());
                 return;
             }
             if dir == root {
@@ -947,22 +1011,34 @@ mod linux {
         }
 
         /// Adds a watch on `dir` and on every folder below it, links not
-        /// followed and other file systems left out, as the ACL walk does.
-        /// What vanished meanwhile, and a folder this account may not read,
-        /// are passed over.
+        /// followed and other file systems left out, as the ACL walk does:
+        /// each folder is opened a part at a time from the granted folder's
+        /// own descriptor, and watched through that descriptor, so a link
+        /// put in the way (or at the place of a folder renamed away, whose
+        /// old name an event still carries) leads nowhere. What vanished
+        /// meanwhile, and a folder this account may not read, are passed
+        /// over.
         fn add_tree(&self, root: &Path, dir: &Path, made: &mut HashSet<i32>) -> Result<(), String> {
-            let Ok(top) = std::fs::symlink_metadata(dir) else {
+            let Ok(top) = crate::acl::open_path(root) else {
                 return Ok(());
             };
-            if !top.is_dir() {
+            if !top.m.is_dir() {
                 return Ok(());
             }
+            let dev = top.m.dev();
             let mut todo = vec![dir.to_path_buf()];
             while let Some(d) = todo.pop() {
-                let Ok(c) = CString::new(d.as_os_str().as_bytes()) else {
+                let Some(open) = open_below(&top, root, &d) else {
                     continue;
                 };
-                let mask = ASKED | libc::IN_ONLYDIR | libc::IN_DONT_FOLLOW | libc::IN_EXCL_UNLINK;
+                if !open.m.is_dir() || open.m.dev() != dev {
+                    continue;
+                }
+                let at = open.path();
+                let Ok(c) = CString::new(at.as_os_str().as_bytes()) else {
+                    continue;
+                };
+                let mask = ASKED | libc::IN_ONLYDIR | libc::IN_EXCL_UNLINK;
                 // SAFETY: an open instance and a NUL-terminated path.
                 let wd = unsafe { libc::inotify_add_watch(self.fd.as_raw_fd(), c.as_ptr(), mask) };
                 if wd < 0 {
@@ -986,7 +1062,7 @@ mod linux {
                 // What is queued counts as well, so the queue stays as
                 // short as the watches may be many.
                 let room = self.most.saturating_sub(made.len() + todo.len());
-                let Some(subs) = subfolders(&d, top.dev(), room) else {
+                let Some(subs) = subfolders(&at, &d, dev, room) else {
                     return Err(format!("it holds more than {} folders", self.most));
                 };
                 todo.extend(subs);
@@ -995,11 +1071,42 @@ mod linux {
         }
     }
 
+    /// The folder `dir`, which lies in the granted folder `root` (opened as
+    /// `top`), opened from `top` a part at a time without following a link.
+    /// None where it is not below `root` or a part of the way is gone or is
+    /// not a folder now.
+    fn open_below(top: &crate::acl::Opened, root: &Path, dir: &Path) -> Option<crate::acl::Opened> {
+        let rel = dir.strip_prefix(root).ok()?;
+        let mut at = crate::acl::open_in(top.file.as_raw_fd(), c".").ok()?;
+        for part in rel.components() {
+            let std::path::Component::Normal(name) = part else {
+                return None;
+            };
+            if !at.m.is_dir() {
+                return None;
+            }
+            let name = CString::new(name.as_bytes()).ok()?;
+            at = crate::acl::open_in(at.file.as_raw_fd(), &name).ok()?;
+        }
+        Some(at)
+    }
+
+    /// Whether `root` is a mount point: its device is not its parent's.
+    fn is_mount(root: &Path) -> bool {
+        let dev = |p: &Path| std::fs::symlink_metadata(p).map(|m| m.dev());
+        match (dev(root), root.parent().map(dev)) {
+            (Ok(a), Some(Ok(b))) => a != b,
+            _ => false,
+        }
+    }
+
     /// The folders directly in `dir` on the device `dev`, links not
     /// followed; none when it cannot be read, and none at all when there
     /// are more than `room`, so a folder with very many is not queued whole.
-    fn subfolders(dir: &Path, dev: u64, room: usize) -> Option<Vec<PathBuf>> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    /// `read` is the path the folder is read through (a descriptor's), and
+    /// `dir` the one its folders are named under.
+    fn subfolders(read: &Path, dir: &Path, dev: u64, room: usize) -> Option<Vec<PathBuf>> {
+        let Ok(entries) = std::fs::read_dir(read) else {
             return Some(Vec::new());
         };
         let mut out = Vec::new();
@@ -1009,7 +1116,7 @@ mod linux {
                 if out.len() >= room {
                     return None;
                 }
-                out.push(e.path());
+                out.push(dir.join(e.file_name()));
             }
         }
         Some(out)
@@ -1017,7 +1124,7 @@ mod linux {
 
     #[cfg(test)]
     pub fn subfolders_for_test(dir: &Path, dev: u64, room: usize) -> Option<Vec<PathBuf>> {
-        subfolders(dir, dev, room)
+        subfolders(dir, dir, dev, room)
     }
 
     /// The thread: reads the events until the watches are dropped, marks
@@ -2171,13 +2278,13 @@ mod tests {
         assert_eq!(events(&buf).len(), 2);
     }
 
-    /// What wakes the Linux watch: a file or folder moved in, a folder made
-    /// (and watched), a watched folder moved away; not a file made, which
-    /// takes the folder's default entries, nor the node's own changes of
-    /// the entries (attributes). An overflow walks every granted folder.
+    /// What wakes the Linux watch: a file or folder made or moved in (a
+    /// folder is watched too), a watched folder moved away; not the node's
+    /// own changes of the entries (attributes). An overflow walks every
+    /// granted folder.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_linux_watch_wakes_for_what_is_moved_in_only() {
+    fn the_linux_watch_wakes_for_names_and_not_for_attributes() {
         use linux::{Asked, Event};
         let ev = |wd: i32, mask: u32, name: &str| Event {
             wd,
@@ -2196,7 +2303,10 @@ mod tests {
             st.react(&ev(2, libc::IN_MOVED_TO, "a.txt")),
             walk("/w/proj")
         );
-        assert_eq!(st.react(&ev(2, libc::IN_CREATE, "b.txt")), Asked::default());
+        // A copy that kept its source's mode (`mv` from another file
+        // system, `cp -a`) is a file made, with a mask that cuts the
+        // folder's default entries.
+        assert_eq!(st.react(&ev(2, libc::IN_CREATE, "b.txt")), walk("/w/proj"));
         for own in [libc::IN_ATTRIB, libc::IN_MODIFY, libc::IN_CLOSE_WRITE] {
             assert_eq!(st.react(&ev(2, own, "a.txt")), Asked::default(), "{own:#x}");
         }
@@ -2215,8 +2325,50 @@ mod tests {
         assert_eq!(all, [PathBuf::from("/w/other"), PathBuf::from("/w/proj")]);
         assert!(st.is_stale_for_test("/w/other"));
         // A watch the kernel took off is forgotten.
-        assert_eq!(st.react(&ev(3, libc::IN_IGNORED, "")), Asked::default());
-        assert_eq!(st.react(&ev(3, libc::IN_MOVED_TO, "y")), Asked::default());
+        assert_eq!(st.react(&ev(1, libc::IN_IGNORED, "")), Asked::default());
+        assert_eq!(st.react(&ev(1, libc::IN_MOVED_TO, "y")), Asked::default());
+        assert_eq!(st.watches_for_test("/w/proj"), [2]);
+    }
+
+    /// A granted folder whose file system is unmounted loses its watches
+    /// with an ignore event each and no move or delete: when the last goes,
+    /// the folder is not held any more and its walk is asked for, so the
+    /// next follow watches it again (and the supervisor is told to look).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_granted_folder_whose_drive_is_unmounted_is_followed_again() {
+        use linux::{Asked, Event};
+        let ev = |wd: i32, mask: u32| Event {
+            wd,
+            mask,
+            name: None,
+        };
+        let mut st = linux::State::default();
+        st.hold_for_test("/m/usb/work", 1, "/m/usb/work");
+        st.hold_for_test("/m/usb/work", 2, "/m/usb/work/sub");
+        assert_eq!(
+            st.react(&ev(1, libc::IN_UNMOUNT | libc::IN_ISDIR)),
+            Asked::default()
+        );
+        assert_eq!(st.react(&ev(1, libc::IN_IGNORED)), Asked::default());
+        assert_eq!(st.watches_for_test("/m/usb/work"), [2]);
+        assert_eq!(
+            st.react(&ev(2, libc::IN_IGNORED)),
+            Asked {
+                walk: vec![PathBuf::from("/m/usb/work")],
+                watch: Vec::new()
+            }
+        );
+        assert!(
+            !st.is_held_for_test("/m/usb/work"),
+            "the folder is looked at again at the next follow"
+        );
+        // What was mounted at the folder and is not any more: the folder
+        // under it is not watched until a mount is there again.
+        assert!(!st.bare_mountpoint_for_test("/m/usb/work", true));
+        assert!(st.bare_mountpoint_for_test("/m/usb/work", false));
+        assert!(!st.bare_mountpoint_for_test("/m/usb/work", true));
+        assert!(!st.bare_mountpoint_for_test("/m/plain", false));
     }
 
     /// Waits up to two seconds for `done`.
@@ -2251,7 +2403,12 @@ mod tests {
         let f = granted.join("deep/er/kept.txt");
         std::fs::write(&f, "k").unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        assert!(quiet(), "a file made wakes nothing");
+        // A file made wakes the walk: a copy that kept a narrow mode (what
+        // `mv` from another file system leaves) has a mask that cuts the
+        // folder's default entries for nerve-run.
+        assert!(soon(|| !quiet()), "a file made wakes the walk");
+        std::thread::sleep(Duration::from_millis(300));
+        lock(&w.pending).folders.clear();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
         let c = std::ffi::CString::new(f.as_os_str().as_encoded_bytes()).unwrap();
@@ -2461,5 +2618,144 @@ mod tests {
         let got = linux::subfolders_for_test(d.path(), dev, 3).unwrap();
         assert_eq!(got.len(), 3, "files are not folders");
         assert!(linux::subfolders_for_test(d.path(), dev, 2).is_none());
+    }
+
+    /// A file made with a narrow mode, as a copy across file systems leaves
+    /// it, makes its granted folder due, also deep inside.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_copied_in_with_a_narrow_mode_makes_the_folder_due() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let granted = root.join("granted");
+        std::fs::create_dir_all(granted.join("deep")).unwrap();
+        let w = Watch::default();
+        w.follow_linux(std::slice::from_ref(&granted), None);
+        let mut f = std::fs::OpenOptions::new();
+        f.write(true).create_new(true).mode(0o600);
+        f.open(granted.join("deep/key")).unwrap();
+        assert!(soon(|| !lock(&w.pending).folders.is_empty()));
+        assert_eq!(
+            w.due(Instant::now() + QUIET + Duration::from_secs(1)),
+            std::slice::from_ref(&granted)
+        );
+    }
+
+    /// A watched folder renamed away with a link to a folder outside put at
+    /// its old name: a folder made in the renamed one is named under the old
+    /// path by an event that comes before the folder is watched at its new
+    /// one, and must not be watched through the link.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_put_at_a_renamed_folders_old_name_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (granted, outside) = (root.join("granted"), root.join("outside"));
+        std::fs::create_dir_all(granted.join("a")).unwrap();
+        std::fs::create_dir_all(outside.join("new")).unwrap();
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let mut w = linux::Watches::default();
+        w.follow(std::slice::from_ref(&granted), None, &pending);
+        std::fs::rename(granted.join("a"), granted.join("b")).unwrap();
+        std::os::unix::fs::symlink(&outside, granted.join("a")).unwrap();
+        w.watch_for_test(&granted, &granted.join("a/new"));
+        std::thread::sleep(Duration::from_millis(300));
+        lock(&pending).folders.clear();
+        std::fs::write(root.join("m"), "x").unwrap();
+        std::fs::rename(root.join("m"), outside.join("new/m")).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            lock(&pending).folders.is_empty(),
+            "a folder outside the grant is watched through a link"
+        );
+        // A real folder below the grant is watched the same way.
+        std::fs::create_dir(granted.join("b/new")).unwrap();
+        w.watch_for_test(&granted, &granted.join("b/new"));
+        std::thread::sleep(Duration::from_millis(300));
+        lock(&pending).folders.clear();
+        std::fs::write(root.join("n"), "x").unwrap();
+        std::fs::rename(root.join("n"), granted.join("b/new/n")).unwrap();
+        assert!(soon(|| !lock(&pending).folders.is_empty()));
+    }
+
+    /// A granted folder that is a mount: unmounted, it is no place to watch
+    /// (what is mounted there later would go unseen), and it is looked for
+    /// until a mount is there again, when it is watched and walked. Needs
+    /// the right to mount (run it with `unshare -rm`); skipped without.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_granted_folder_unmounted_and_mounted_again_is_watched_again() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let granted = root.join("drive");
+        std::fs::create_dir(&granted).unwrap();
+        let c = std::ffi::CString::new(granted.as_os_str().as_encoded_bytes()).unwrap();
+        let mount = || {
+            // SAFETY: NUL-terminated strings; a tmpfs without data.
+            unsafe {
+                libc::mount(
+                    c"tmpfs".as_ptr(),
+                    c.as_ptr(),
+                    c"tmpfs".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            }
+        };
+        if mount() != 0 {
+            // Without the right, the test runs again in a user and mount
+            // namespace of its own, where it has it; where those are not
+            // allowed either, it is skipped.
+            if std::env::var_os("NERVE_TEST_IN_NAMESPACE").is_some() {
+                eprintln!("skipped: no right to mount");
+                return;
+            }
+            let Ok(me) = std::env::current_exe() else {
+                return;
+            };
+            let Ok(out) = std::process::Command::new("unshare")
+                .args(["-rm"])
+                .arg(me)
+                .args(["--exact", "grant_watch::tests::a_granted_folder_unmounted_and_mounted_again_is_watched_again", "--nocapture"])
+                .env("NERVE_TEST_IN_NAMESPACE", "1")
+                .output()
+            else {
+                return;
+            };
+            let said = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            // `unshare` itself refused: no namespaces here.
+            if !out.status.success() && said.contains("unshare failed") {
+                return;
+            }
+            assert!(out.status.success(), "{said}");
+            return;
+        }
+        std::fs::create_dir(granted.join("sub")).unwrap();
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let mut w = linux::Watches::default();
+        let folders = std::slice::from_ref(&granted);
+        assert!(!w.follow(folders, None, &pending));
+        let walked = || lock(&pending).folders.iter().any(|f| f.path == granted);
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::umount2(c.as_ptr(), 0) }, 0);
+        assert!(soon(walked), "an unmount walks");
+        lock(&pending).folders.clear();
+        assert!(w.follow(folders, None, &pending), "it is looked for again");
+        assert!(
+            w.follow(folders, None, &pending),
+            "the bare folder is no place"
+        );
+        assert_eq!(mount(), 0);
+        std::fs::create_dir(granted.join("sub")).unwrap();
+        assert!(!w.follow(folders, None, &pending), "it is watched again");
+        assert!(walked(), "a drive that came walks");
+        lock(&pending).folders.clear();
+        std::fs::write(granted.join("m"), "x").unwrap();
+        std::fs::rename(granted.join("m"), granted.join("sub/m")).unwrap();
+        assert!(soon(walked), "the drive's folders are watched");
+        // SAFETY: a NUL-terminated path.
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
     }
 }
