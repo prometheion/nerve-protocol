@@ -128,7 +128,9 @@ A harness may start `nerve-center` itself, over stdio:
 
 Then the center runs as you, with its state in
 `~/.local/state/nerve-center`. `nerve-center owner-token` shows its owner
-token, without `sudo`. An agent with file or shell tools can read that
+token, without `sudo`. Started by hand at a terminal, the center waits for a
+harness there and takes what you type as MCP: run commands in another
+terminal. An agent with file or shell tools can read that
 token and log in to the web UI. Run the center as the service to keep the
 agent out.
 

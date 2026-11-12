@@ -418,7 +418,7 @@ pub fn is_loopback(addr: &str) -> bool {
 pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<String> {
     (*mcp == McpMode::Stdio && stdin_is_terminal).then(|| {
         format!(
-            "nerve-center: waiting for MCP on stdin, as a harness starts it. {} runs it as a service; `nerve-center --help` lists the commands.",
+            "nerve-center: waiting for MCP on stdin, as a harness starts it: what you type here goes to the center as MCP, so type no commands here. To sign in to its web UI, run `nerve-center owner-token` in another terminal and use the token it prints. {} runs it as a service; `nerve-center --help` lists the commands.",
             crate::service::admin_command("install")
         )
     })
@@ -455,6 +455,13 @@ mod tests {
     fn a_center_at_a_terminal_says_it_waits_for_mcp() {
         let say = terminal_notice(&McpMode::Stdio, true).unwrap();
         assert!(say.contains("waiting for MCP on stdin"), "{say}");
+        // A person at that terminal types a command into the center's MCP
+        // input, and finds no token (#213): it says both.
+        assert!(say.contains("type no commands here"), "{say}");
+        assert!(
+            say.contains("run `nerve-center owner-token` in another terminal"),
+            "{say}"
+        );
         assert!(
             say.contains(&crate::service::admin_command("install")),
             "{say}"
