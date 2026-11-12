@@ -2353,10 +2353,17 @@ mod tests {
     /// A folder's id as the sync's record keeps it (`grants.rs` takes it from
     /// the sandbox's own look at the folder), not as the watcher reads it:
     /// a test that took it from the watcher would compare the watcher with
-    /// itself. std opens a folder with backup semantics on Windows.
+    /// itself. Windows opens a folder only with backup semantics, which a
+    /// plain `File::open` does not ask for.
     #[cfg(windows)]
     fn record_id(p: &Path) -> String {
-        nerve_sandbox::appcontainer::handle_id(&std::fs::File::open(p).unwrap())
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(p)
+            .unwrap();
+        nerve_sandbox::appcontainer::handle_id(&f)
             .unwrap()
             .to_string()
     }

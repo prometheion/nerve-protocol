@@ -2077,6 +2077,91 @@ mod tests {
         assert_eq!(parse_noul(&v).unwrap(), 0.9);
     }
 
+    /// And `ask` gives the read that wait: a checker timeout of 25 s reads
+    /// a model that thinks 16 s, past the transport's usual limit. Paused
+    /// time, with the model in the same runtime, so the 16 s cost nothing.
+    #[tokio::test(start_paused = true)]
+    async fn ask_reads_a_model_that_thinks_past_the_transports_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            let (mut c, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = c.read(&mut buf).await;
+            tokio::time::sleep(think).await;
+            let body = r#"{"answers":{"danger":{"type":"noul","noul":0.9}}}"#;
+            let _ = c
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
+        let cfg = ModelConfig {
+            timeout_ms: 25_000,
+            ..Default::default()
+        };
+        let score = ask(&ep, &cfg, json!({"command": "rm -rf /"}))
+            .await
+            .unwrap();
+        assert_eq!(score, 0.9);
+    }
+
+    /// The center's own server is read past the transport's limit too: a
+    /// call it reads for 16 s, after the caller's 2 s timeout but inside the
+    /// ten timeouts after which it counts as stuck, is read to its answer,
+    /// and the server is not taken to have ended on it. Paused time, as
+    /// above.
+    #[tokio::test(start_paused = true)]
+    async fn the_local_servers_read_waits_past_the_transports_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let think = nerve_transport::http::HEAD_TIMEOUT + Duration::from_secs(1);
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = c.read(&mut buf).await.unwrap_or(0);
+                    let body = if buf[..n].starts_with(b"POST /tokenize ") {
+                        json!({ "tokens": vec![100_000; 100] })
+                    } else {
+                        tokio::time::sleep(think).await;
+                        json!({
+                            "answers": {"danger": {"type": "noul", "noul": 0.9}},
+                            "usage": {"input_tokens": 100, "output_tokens": 0},
+                        })
+                    }
+                    .to_string();
+                    let _ = c
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        let budget = Arc::new(linear(8192, 0.5));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        };
+        let e = ask(&ep, &with_timeout(2000), json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
+        budget.idle().await;
+        assert!(!budget.died_on_call(), "the read gave up before the answer");
+    }
+
     /// The other half: the read holds to the wait it is given, short or long.
     #[tokio::test]
     async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {
