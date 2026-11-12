@@ -117,7 +117,8 @@ On Windows ([Windows](docs/user/windows.md#limits)):
   a command, as that program's account.
 - **Some work leaves the command's job.** What WMI, the task scheduler or a
   service starts for a command runs outside its job and its limits. A
-  `folder` mode command's container keeps it from them
+  `folder` mode command's container keeps the usual tools from them (as far as
+  checked)
   ([what the container does not stop](docs/dev/windows.md#what-the-appcontainer-does-not-stop)).
 - **Sudo commands run outside the container.** They run as the owner, with
   the administrator's rights, and the folders do not hold them.

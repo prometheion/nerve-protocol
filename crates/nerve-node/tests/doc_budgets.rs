@@ -364,7 +364,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         // command's container: a way out of the container is in scope.
         (
             "SECURITY.md",
-            "runs outside its job and its limits. A `folder` mode command's container keeps it from them",
+            "runs outside its job and its limits. A `folder` mode command's container keeps the usual tools from them",
         ),
     ];
     let mut missing = Vec::new();

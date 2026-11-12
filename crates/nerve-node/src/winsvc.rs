@@ -17,6 +17,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use nerve_service::Version;
 use nerve_service::win::service::{Settings, settings_text};
 use nerve_service::win::update::{clean_aside, previous, staged};
 
@@ -406,21 +407,30 @@ fn check_install_folders(layout: &Layout, sys: &dyn WinSystem) -> Result<(), Str
 /// Why an install over a node of 0.0.6 is refused, and the way that works.
 pub const FROM_0_0_6: &str = "this node was installed by Nerve 0.0.6, whose settings this version cannot read: uninstall it with Delete the data (Apps & features), then install again and pair the node with its centers again";
 
-/// Refuses the install before it changes anything over a node of 0.0.6:
-/// its install wrote the account of the commands into `node.toml`
+/// Refuses the install or update before it changes anything over a node of
+/// 0.0.6: its install wrote the account of the commands into `node.toml`
 /// (`machine.user`), which this version refuses, so the service it starts
 /// would not start, and nothing here can sign the file anew without it.
-/// The file's MAC line is a TOML comment, so the text is read as it is.
-fn check_not_from_0_0_6(paths: &NodePaths) -> Result<(), String> {
-    let Ok(text) = std::fs::read_to_string(paths.config_file()) else {
-        return Ok(());
-    };
-    let Ok(doc) = toml::from_str::<toml::Table>(&text) else {
-        return Ok(());
-    };
-    match doc.get("machine").and_then(|m| m.get("user")) {
-        Some(_) => Err(FROM_0_0_6.into()),
-        None => Ok(()),
+/// A 0.0.6 node whose commands never got an account has no such key, so
+/// the installed program's version says it too (0.0.7 and 0.0.8 published
+/// no Windows program). The file's MAC line is a TOML comment, so the text
+/// is read as it is.
+fn check_not_from_0_0_6(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> {
+    let user = std::fs::read_to_string(layout.paths.config_file())
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .is_some_and(|doc| doc.get("machine").and_then(|m| m.get("user")).is_some());
+    let old = layout.bin.is_file()
+        && sys
+            .version_of(&layout.bin)
+            .ok()
+            .and_then(|said| Version::parse_of("nerve-node", &said))
+            .zip(Version::parse_of("nerve-node", "nerve-node 0.1.0"))
+            .is_some_and(|(v, first)| v < first);
+    if user || old {
+        Err(FROM_0_0_6.into())
+    } else {
+        Ok(())
     }
 }
 
@@ -834,7 +844,7 @@ pub fn install(
     // Before anything is written, the audit log too: a folder another
     // account owns is not written in.
     check_install_folders(layout, sys)?;
-    check_not_from_0_0_6(&layout.paths)?;
+    check_not_from_0_0_6(layout, sys)?;
     let mut steps = Steps {
         done: Vec::new(),
         out,
@@ -1311,7 +1321,7 @@ pub async fn update(
     supported(sys, "update")?;
     // The installer opened over 0.0.6 offers Update, not Install, so the
     // update refuses that node the same way, before anything is staged.
-    check_not_from_0_0_6(&layout.paths)?;
+    check_not_from_0_0_6(layout, sys)?;
     if sys.service()?.is_none() || !layout.bin.is_file() {
         return Err(NOT_INSTALLED.into());
     }
@@ -3810,6 +3820,25 @@ pub(crate) mod tests {
         assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
         assert_eq!(audit_events(&l).len(), events);
         assert_eq!(std::fs::read_to_string(l.paths.config_file()).unwrap(), old);
+    }
+
+    /// A 0.0.6 node whose commands never got an account has no
+    /// `machine.user`; the program's version still says it is from 0.0.6.
+    #[tokio::test]
+    async fn an_update_over_a_node_of_0_0_6_without_an_account_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "0.0.6");
+        let new = d.path().join("new.exe");
+        std::fs::write(&new, "nerve-node 1.2.0\n").unwrap();
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls()[calls..].is_empty(), "{:?}", sys.calls());
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 0.0.6\n");
+        assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
     }
 
     #[tokio::test]
