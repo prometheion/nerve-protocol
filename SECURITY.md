@@ -116,8 +116,9 @@ On Windows ([Windows](docs/user/windows.md#limits)):
   COM servers. A program that offers itself to all AppContainers can act for
   a command, as that program's account.
 - **Some work leaves the command's job.** What WMI, the task scheduler or a
-  service starts for a command runs outside its job, its container and its
-  limits.
+  service starts for a command runs outside its job and its limits. A
+  `folder` mode command's container keeps it from them
+  ([what the container does not stop](docs/dev/windows.md#what-the-appcontainer-does-not-stop)).
 - **Sudo commands run outside the container.** They run as the owner, with
   the administrator's rights, and the folders do not hold them.
 - **The network switch needs the Windows Firewall service.** Without it a

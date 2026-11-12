@@ -126,8 +126,8 @@ says where.
 
 **From 0.0.6:** uninstall it with **Delete the data** (Apps & features),
 install this version, and pair the node again. The installer refuses to
-install over 0.0.6, whose settings it cannot read, and the app's **Update**
-of 0.0.6 puts the old program back.
+install or update over 0.0.6, whose settings it cannot read, and the app's
+**Update** of 0.0.6 puts the old program back.
 
 ## What Windows does not have
 

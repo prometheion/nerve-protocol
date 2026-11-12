@@ -360,6 +360,12 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ("SECURITY.md", "an administrator or a Backup Operator"),
         ("SECURITY.md", "The guard has named holes"),
         ("SECURITY.md", "The programs are not signed"),
+        // Work done for a command leaves its job, not a folder mode
+        // command's container: a way out of the container is in scope.
+        (
+            "SECURITY.md",
+            "runs outside its job and its limits. A `folder` mode command's container keeps it from them",
+        ),
     ];
     let mut missing = Vec::new();
     for (name, text) in KEPT {

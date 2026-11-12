@@ -1309,6 +1309,9 @@ pub async fn update(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "update")?;
+    // The installer opened over 0.0.6 offers Update, not Install, so the
+    // update refuses that node the same way, before anything is staged.
+    check_not_from_0_0_6(&layout.paths)?;
     if sys.service()?.is_none() || !layout.bin.is_file() {
         return Err(NOT_INSTALLED.into());
     }
@@ -3783,6 +3786,30 @@ pub(crate) mod tests {
             "nerve-node 1.0.0\n"
         );
         assert_eq!(*sys.program.borrow(), Some(l.bin.clone()));
+    }
+
+    /// The installer opened over a node of 0.0.6 offers Update: the update
+    /// is refused like the install, before it changes anything.
+    #[tokio::test]
+    async fn an_update_over_a_node_of_0_0_6_is_refused_before_it_changes_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "0.0.6");
+        let old = "# mac hmac-sha256 00 (nerve-node refuses this file once it is changed outside nerve-node)\n[machine]\nuser = \"alice\"\n";
+        std::fs::write(l.paths.config_file(), old).unwrap();
+        let events = audit_events(&l).len();
+        let new = d.path().join("new.exe");
+        std::fs::write(&new, "nerve-node 1.2.0\n").unwrap();
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls()[calls..].is_empty(), "{:?}", sys.calls());
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 0.0.6\n");
+        assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
+        assert_eq!(audit_events(&l).len(), events);
+        assert_eq!(std::fs::read_to_string(l.paths.config_file()).unwrap(), old);
     }
 
     #[tokio::test]

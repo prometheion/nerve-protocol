@@ -413,9 +413,11 @@ way.
 A node of 0.0.6 cannot be updated or installed over. Its install wrote the
 account of the commands into `node.toml` (`machine.user`), which this version
 refuses, and the file is signed with a key the installer does not hold. So
-the install refuses before it changes anything when `node.toml` holds that
-key (`winsvc::check_not_from_0_0_6`), and says to uninstall with **Delete the
-data** and pair again. The 0.0.6 app's **Update** finds that the new program
+the install and the update refuse before they change anything when
+`node.toml` holds that key (`winsvc::check_not_from_0_0_6`), and say to
+uninstall with **Delete the data** and pair again. The update needs it too:
+the installer opened over 0.0.6 finds a node and offers **Update**, not
+**Install**. The 0.0.6 app's **Update** finds that the new program
 does not start and puts the old one back. 0.0.6 also named its owners in the
 registry value `Owners`, which this version does not read.
 

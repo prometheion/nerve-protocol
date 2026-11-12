@@ -337,7 +337,7 @@ fn the_notes_say_the_update_order() {
     for needed in [
         "A 0.0.8 node still talks to a 0.1.0 center.",
         "from 0.0.6: uninstall it with **Delete the data**",
-        "The installer refuses to install over 0.0.6",
+        "The installer refuses to install or update over 0.0.6",
         "change only with a migration",
         "spec/README.md#what-stays-stable-from-010",
         "### On Windows",
@@ -349,7 +349,7 @@ fn the_notes_say_the_update_order() {
     }
     let breaks = log.split("\n### Breaks\n").nth(1).expect("Breaks");
     assert!(breaks.contains("`confined`"), "{breaks}");
-    // An install over 0.0.6 is refused (winsvc::FROM_0_0_6), and its
+    // An install or update over 0.0.6 is refused (winsvc::FROM_0_0_6), and its
     // Update cannot take 0.1.0's program.
     assert!(!flat.contains("open the 0.1.0 installer over it"));
     // Said of the Windows guide before it had a page: now false.
