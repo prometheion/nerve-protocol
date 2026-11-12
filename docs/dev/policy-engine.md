@@ -716,10 +716,13 @@ password.
 - On, a `sudo` command runs only if the sudo list names it, in every mode.
 - On Linux the password is checked with `sudo -S -k -v` and kept in memory
   only. A restart turns the switch off.
-- On Windows the password is the one of the account commands run as. The
-  node checks it with a batch logon that must hold the Administrators group,
-  keeps it with DPAPI in the config folder (so a restart keeps the switch
-  on), and starts each sudo command with that logon's full token.
+- On Windows the password is the Windows password of the owner, the account
+  that installed the node. The owner must be an administrator. The node
+  checks the password with a batch logon that holds the Administrators
+  group, keeps it in memory only, as on Linux (a restart of the service or
+  of Windows turns the switch off), and starts each sudo command with that
+  logon's full token. Only the app on the machine turns it on: a center
+  cannot ([windows.md](windows.md#sudo-on-windows)).
 - A center with the settings grant can switch it. The password then travels
   sealed from the owner's browser to the node. The node makes a one-shot offer
   with a fresh X25519 key and signs it with its pairing key. The browser derives
@@ -764,8 +767,11 @@ Every pairing has a mode. It sets how much that center may do on the machine.
 From most to least locked down: `allowlist`, `folder`, `user`. On the node
 [installed as a service](service.md#the-node-as-a-service) on Linux, `folder` and `allowlist` mode
 run commands as `nerve-run`, an account of its own
-([below](sandbox-linux.md#the-account-nerve-run)). A node you run yourself, and
-Windows, run every command as the account that runs the node.
+([below](sandbox-linux.md#the-account-nerve-run)). A node you run yourself
+runs every command as the account that runs the node. On Windows the node is
+always the installed service, and `folder` and `allowlist` mode run commands
+as `nerve-run` in the pairing's AppContainer
+([windows.md](windows.md#the-account-commands-run-as-on-windows)).
 
 [Deny rules](#deny-a-command) and [protected paths](#protected-paths-as-the-owner-sees-them)
 apply in every mode. A call that nothing allows is refused at once. Nothing
