@@ -341,8 +341,9 @@ the CLI ([rules](policy-engine.md#the-guard-against-changing-the-node)).
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
 the keyring), and the keyring `setup` installs for the node's account on a
-Linux without a desktop session for it. On Windows the Credential Manager is
-always there, and the app does both
+Linux without a desktop session for it. On Windows nothing of this stays with
+the terminal: the Credential Manager is always there, a restore keeps the
+backup's own storage, and **Keys** switches it
 ([Windows](windows.md#the-node-as-a-service-on-windows)).
 
 ## Capabilities
@@ -505,12 +506,17 @@ Windows needs no other program for the app itself. What it uses:
 
 - An owner account with a password: Windows logs no program on to an account
   without one, so `user` mode, `allowlist` mode with `--as-owner` and sudo
-  run nothing as an owner without a password, and the app says so.
+  run nothing as an owner without a password, and the app says so. The
+  node also changes the owner's folder grants as the owner: without the
+  password a folder you add gives the commands of `folder` and of `allowlist`
+  mode as `nerve-run` no access, and one you remove or close stops the
+  pairing's commands, until the node can log on as you
+  ([Windows](windows.md)).
 - A state folder on a drive with access lists (NTFS): one on FAT32 or exFAT is
   refused.
 - The Windows Firewall service, which keeps a pairing's AppContainer off the
-  network when its network switch is off; without it the node runs none of
-  that pairing's commands.
+  network when its network switch is off; without it, while the switch is
+  off, the node runs none of that pairing's commands.
 - Windows PowerShell 5.1, the shell of the commands (`machine.shell`).
 
 All of this is in [Windows](windows.md).

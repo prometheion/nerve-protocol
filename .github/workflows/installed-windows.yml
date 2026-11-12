@@ -1,8 +1,8 @@
 # The Windows programs installed and driven on a real machine: GitHub's
 # windows-2025 runner, an elevated administrator on a disposable virtual
 # machine. CI calls it with the debug programs and test programs its `windows`
-# job built (first version, docs/dev/windows.md "Tests on an installed
-# node"); it grows with each part of the Windows node that needs a machine of
+# job built (first version, docs/dev/building.md "Windows: tests on an
+# installed node"); it grows with each part of the Windows node that needs a machine of
 # its own.
 #
 # The job makes an administrator account and a standard account of its own,

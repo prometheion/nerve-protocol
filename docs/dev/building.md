@@ -166,7 +166,8 @@ it built, with the same debug test programs of the same commit. The job:
 - installs over a folder in `C:\ProgramData\Nerve` that the standard account
   made first: the install refuses before it changes anything, and names the
   account and what to do;
-- installs the node again with the standard account as its owner. The install
+- installs the node again with the administrator account as its owner (the sudo
+  test below needs an administrator). The install
   makes `nerve-run`, its profile (by a logon that loads it) and the service
   `nerve-run-profile`, which the job checks. Then it reads what the install
   put on the machine as Windows reads it: the Start menu link, the handler of

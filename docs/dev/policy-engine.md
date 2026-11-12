@@ -705,7 +705,10 @@ how it was checked on Windows 11 Pro 26H2, build 10.0.26300, and what was not:
 - Not checked: the Credential Manager and DPAPI for the user (the test session
   could not use them), the clipboard against a real desktop, ALPC ports and
   COM servers, network shares. With the node's keys in the Credential
-  Manager, `folder` mode runs no command (`keys_kept_from_commands`).
+  Manager, the installed node still runs `folder` commands: they run as
+  `nerve-run`, another account than the one with the keys. `folder` mode runs
+  no command only where that account is not found, or on a node run by hand,
+  whose commands run as its own user (`keys_kept_from_commands`).
 
 ## The sudo switch
 
@@ -719,11 +722,16 @@ password.
 - On Windows the password is the Windows password of the owner, the account
   that installed the node. The owner must be an administrator. The node
   checks the password with a batch logon that holds the Administrators
-  group, keeps it in memory only, as on Linux (a restart of the service or
-  of Windows turns the switch off), and starts each sudo command with that
-  logon's full token. Only the app on the machine turns it on: a center
-  cannot ([windows.md](windows.md#sudo-on-windows)).
-- A center with the settings grant can switch it. The password then travels
+  group, keeps the switch's copy in memory only, as on Linux (a restart of
+  the service or of Windows turns the switch off), and starts each sudo
+  command with that logon's full token. The same password is also kept on
+  disk, sealed with DPAPI in `owner-password.dpapi`, for the commands that
+  run as the owner; turning sudo off does not remove that copy. Only the app
+  on the machine turns it on: a center cannot
+  ([windows.md](windows.md#sudo-on-windows)).
+- A center with the settings grant can switch it off, and on a Linux node turn
+  it on too (`center_may_turn_on`: not where root is the owner, and not on
+  Windows, as above). The password then travels
   sealed from the owner's browser to the node. The node makes a one-shot offer
   with a fresh X25519 key and signs it with its pairing key. The browser derives
   a key with HKDF-SHA256 and seals the password with AES-256-GCM. The center

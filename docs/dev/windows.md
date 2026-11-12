@@ -1096,9 +1096,11 @@ of `nerve-run`, which is no administrator, never get them. So:
   administrator rights back and read the node's keys.
 - Turning it on asks for your Windows password. A wrong password is
   refused and the switch stays as it was.
-- The node holds the password in its memory only, as on Linux: sudo is off
-  after a restart of the service or of Windows. Turning it off does not take
-  you out of Administrators; it reminds you.
+- The sudo switch holds the password in the node's memory only, as on Linux:
+  sudo is off after a restart of the service or of Windows. Turning it off
+  does not take you out of Administrators; it reminds you. The same password
+  stays on disk in `owner-password.dpapi` (step 4 of the install) for the
+  commands that run as you.
 - Only the app on the machine turns it on. A center cannot (Q13): the
   password is your Windows password, maybe your Microsoft account's, which
   should not pass through a web page and the relay. The node refuses

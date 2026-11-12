@@ -240,8 +240,9 @@ the node's key.
 
 ## What is not in a backup
 
-The MAC key (made again), the sudo password (in memory only, on Linux and on
-Windows), the audit log, the log, the control socket
+The MAC key (made again), the sudo password (the switch's copy is in memory
+only, on Linux and on Windows; on Windows the same password is also in
+`owner-password.dpapi`, which a backup does not hold either), the audit log, the log, the control socket
 and token, the Windows record of folder grants (`grants.json`, rebuilt by the
 running node before a command), and the center's log.
 

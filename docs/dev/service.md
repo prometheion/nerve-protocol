@@ -475,9 +475,10 @@ with the node.
 - `install`, `setup`, `update` and `uninstall` are refused from a command the
   node runs for a center, as every other change of the node's settings is.
   An agent cannot install, update or remove the node. On Windows these
-  three do not go over the control pipe, which refuses every request from a
-  command's process; they need an administrator, which a command gets only
-  through an account in Administrators (the UAC warning above).
+  three ask the running node `owner.check` over its control pipe, which
+  refuses a caller in the job of one of its commands (`owner_check`). They
+  need an administrator too, which a command gets only through an account
+  in Administrators (the UAC warning above).
 - Each is written to the [audit log](logging.md#the-audit-log-as-the-owner-reads-it) with the steps it did, and the
   error that stopped it, if any. `uninstall --purge` deletes the log with the
   rest.
