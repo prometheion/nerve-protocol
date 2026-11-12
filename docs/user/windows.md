@@ -47,6 +47,7 @@ where it needs it.
 | The network switch | The Windows Firewall service |
 | The state folder | An NTFS drive |
 | Commands | Windows PowerShell 5.1 |
+| The center's local model | `tar.exe`, part of Windows |
 
 When your Windows password changes, save the new one under **Settings ›
 General › Account for commands**. Until then, commands that run as you fail,
@@ -67,7 +68,7 @@ and a folder you add gives no access.
 | A proxy, a relay | **Settings › Network**, **Relay** | The proxy's login goes into that Credential Manager |
 | Rotate a center's key | **Centers › New key…** | |
 | Back up, restore | **Settings › Backup** | |
-| See what happened | **Audit**, **Log** | Also the Event Viewer: Application, source `nerve-node` |
+| See what happened | **Audit**, **Log** | The log is `C:\ProgramData\Nerve\state\log.jsonl`; the Event Viewer has the starts and stops (Application, `nerve-node`) |
 | Stop everything | **Overview › Panic** | |
 | Update, uninstall | **Settings › App** | Also Apps & features |
 
