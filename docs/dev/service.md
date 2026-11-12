@@ -226,7 +226,8 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
    of every program it starts. The unit hands the node its cgroup (`Delegate=cpu memory
    pids`), so each command runs held to its [limits](sandbox-linux.md#limits-per-command), and keeps
    the node running when one of them is killed for its memory
-   (`OOMPolicy=continue`).
+   (`OOMPolicy=continue`). It raises the limit of open files to 65,536 (`LimitNOFILE=`),
+   as the center's unit does: the walks of a granted folder hold a file per level.
 
 #### Root as the owner
 

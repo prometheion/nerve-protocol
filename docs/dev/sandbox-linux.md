@@ -452,7 +452,12 @@ Keep nothing there that the machine's other accounts must not read.
   again once something is mounted there. A drive mounted over a granted
   folder that is watched already gives no event, so the node compares each
   watched granted folder with what its path is (device and inode) every 10
-  seconds, and walks and watches it anew when it changed. A folder whose
+  seconds, and walks and watches it anew when it changed. That look runs
+  one at a time, never while the last one runs, and does not hold the
+  thread that reads the events while it waits for a path (a share that does
+  not answer). The watch keeps a descriptor open for each level of the
+  folder it walks (a command can make a very deep one), so the installed
+  node's unit says `LimitNOFILE=65536`. A folder whose
   path is 4,096 bytes or longer, and everything below it, is not watched
   (a command can make a chain deeper than any path, and each watch keeps its
   path); the walks reach it all the same. The node also walks

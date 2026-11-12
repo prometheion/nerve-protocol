@@ -244,9 +244,33 @@ pub struct Watch {
     /// A granted folder had a watch at the last follow (Linux).
     #[cfg(target_os = "linux")]
     watching: std::sync::atomic::AtomicBool,
-    /// When the folders were last followed for that (Linux).
+    /// The follow the supervisor starts now and then (Linux).
     #[cfg(target_os = "linux")]
-    refollowed: Mutex<Option<Instant>>,
+    refollow: Arc<Refollow>,
+}
+
+/// The follow the supervisor starts now and then: one at a time, and the
+/// next only [`REFOLLOW`] after the last began or ended.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct Refollow {
+    running: std::sync::atomic::AtomicBool,
+    at: Mutex<Option<Instant>>,
+}
+
+/// A follow started through [`Watch::follow_due`]; the next may start once it
+/// is dropped, and not before [`REFOLLOW`] has passed.
+#[cfg(target_os = "linux")]
+pub struct Following(Arc<Refollow>);
+
+#[cfg(target_os = "linux")]
+impl Drop for Following {
+    fn drop(&mut self) {
+        *lock(&self.0.at) = Some(Instant::now());
+        self.0
+            .running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Watch {
@@ -360,38 +384,48 @@ impl Watch {
 
 #[cfg(target_os = "linux")]
 impl Watch {
-    /// Watches the granted folders `folders` from now on, and no other: a
-    /// folder inside another is watched with it. The folders below each are
-    /// looked at and watched as `owner` (the owner of the installed node,
-    /// whose folders they are; none watches as the node). A folder too big
-    /// to watch, or one the system's limit of watches leaves out, is left
-    /// to the other syncs, and the log says so once (crate::grant_watch).
-    pub fn follow_linux(&self, folders: &[PathBuf], owner: Option<crate::service::Account>) {
-        let unwatched = lock(&self.linux).follow(folders, owner, &self.pending);
+    /// Watches the granted folders `folders` gives from now on, and no other:
+    /// a folder inside another is watched with it. `folders` is asked once
+    /// the watches are held, so of two follows, the last to hold them follows
+    /// the newest record. The folders below each are looked at and watched
+    /// as `owner` (the owner of the installed node, whose folders they are;
+    /// none watches as the node). A folder too big to watch, or one the
+    /// system's limit of watches leaves out, is left to the other syncs, and
+    /// the log says so once (crate::grant_watch).
+    pub fn follow_linux(
+        &self,
+        folders: impl FnOnce() -> Vec<PathBuf>,
+        owner: Option<crate::service::Account>,
+    ) {
+        let mut linux = lock(&self.linux);
+        let folders = folders();
+        let unwatched = linux.follow(&folders, owner, &self.pending);
         self.unwatched
             .store(unwatched, std::sync::atomic::Ordering::SeqCst);
-        self.watching.store(
-            lock(&self.linux).watching(),
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        self.watching
+            .store(linux.watching(), std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Whether the supervisor follows the granted folders again at `now`,
-    /// when none was followed within [`REFOLLOW`]: one was missing at the
-    /// last follow (a folder made later, or a drive mounted later), or one is
-    /// watched, as a drive mounted over a watched folder gives no event and
-    /// only a follow sees it.
-    pub fn follow_due(&self, now: Instant) -> bool {
+    /// The follow to start at `now`, when none runs and none began or ended
+    /// within [`REFOLLOW`]: one is missing at the last follow (a folder made
+    /// later, or a drive mounted later), or one is watched, as a drive mounted
+    /// over a watched folder gives no event and only a follow sees it. A
+    /// follow that cannot get on (a folder on a share that does not answer)
+    /// holds the next back, so they do not pile up.
+    pub fn follow_due(&self, now: Instant) -> Option<Following> {
         use std::sync::atomic::Ordering::SeqCst;
         if !self.unwatched.load(SeqCst) && !self.watching.load(SeqCst) {
-            return false;
+            return None;
         }
-        let mut at = lock(&self.refollowed);
+        let mut at = lock(&self.refollow.at);
         if at.is_some_and(|t| now.saturating_duration_since(t) < REFOLLOW) {
-            return false;
+            return None;
+        }
+        if self.refollow.running.swap(true, SeqCst) {
+            return None;
         }
         *at = Some(now);
-        true
+        Some(Following(self.refollow.clone()))
     }
 }
 
@@ -684,15 +718,19 @@ mod linux {
             wds
         }
 
-        /// The watched granted folders that are another object now,
-        /// according to `now` (what the path is: none where it cannot be
-        /// said), marked stale to be watched anew.
-        fn covered(&mut self, now: impl Fn(&Path) -> Option<(u64, u64)>) -> Vec<PathBuf> {
-            let mut covered: Vec<PathBuf> = self
-                .objects
-                .iter()
-                .filter(|(root, was)| now(root).is_some_and(|is| is != **was))
-                .map(|(root, _)| root.clone())
+        /// The watched granted folders with the object each was watched on.
+        fn objects(&self) -> Vec<(PathBuf, (u64, u64))> {
+            self.objects.iter().map(|(r, o)| (r.clone(), *o)).collect()
+        }
+
+        /// Marks the granted folders of `seen` that are watched still on the
+        /// object they were looked at on stale, to be watched anew; those
+        /// watched anew meanwhile are left.
+        fn mark_covered(&mut self, seen: Vec<(PathBuf, (u64, u64))>) -> Vec<PathBuf> {
+            let mut covered: Vec<PathBuf> = seen
+                .into_iter()
+                .filter(|(root, was)| self.objects.get(root) == Some(was))
+                .map(|(root, _)| root)
                 .collect();
             covered.sort();
             self.stale.extend(covered.iter().cloned());
@@ -704,7 +742,8 @@ mod linux {
             &mut self,
             now: impl Fn(&Path) -> Option<(u64, u64)>,
         ) -> Vec<PathBuf> {
-            self.covered(now)
+            let seen = changed(self.objects(), now);
+            self.mark_covered(seen)
         }
 
         #[cfg(test)]
@@ -1067,12 +1106,36 @@ mod linux {
                 .ok()
                 .map(|m| (m.dev(), m.ino()))
         };
-        let covered = lock(&inner.state).covered(now);
+        let covered = covered_in(&inner.state, now);
         let at = Instant::now();
         let mut pending = lock(&inner.pending);
         for root in covered {
             pending.changed(&root, at);
         }
+    }
+
+    /// The granted folders of `seen` that are another object now, according
+    /// to `now` (what the path is: none where it cannot be said).
+    fn changed(
+        seen: Vec<(PathBuf, (u64, u64))>,
+        now: impl Fn(&Path) -> Option<(u64, u64)>,
+    ) -> Vec<(PathBuf, (u64, u64))> {
+        seen.into_iter()
+            .filter(|(root, was)| now(root).is_some_and(|is| is != *was))
+            .collect()
+    }
+
+    /// The watched granted folders that are another object now, marked
+    /// stale to be watched anew. The paths are looked at without `state`
+    /// held: a path on a share that does not answer waits for as long as the
+    /// share does, and the thread that reads the events needs `state`.
+    pub(super) fn covered_in(
+        state: &Mutex<State>,
+        now: impl Fn(&Path) -> Option<(u64, u64)>,
+    ) -> Vec<PathBuf> {
+        let seen = lock(state).objects();
+        let seen = changed(seen, now);
+        lock(state).mark_covered(seen)
     }
 
     /// Takes every watch of `root` off.
@@ -2582,7 +2645,7 @@ mod tests {
         std::fs::create_dir_all(granted.join("deep/er")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         let w = Watch::default();
-        w.follow_linux(std::slice::from_ref(&granted), None);
+        w.follow_linux(|| vec![granted.clone()], None);
         let quiet = || lock(&w.pending).folders.is_empty();
         // The walk's own changes: the mode and an extended attribute.
         let f = granted.join("deep/er/kept.txt");
@@ -2762,19 +2825,123 @@ mod tests {
         let later = root.join("later");
         let w = Watch::default();
         let t0 = Instant::now();
-        assert!(!w.follow_due(t0), "nothing was followed yet");
-        w.follow_linux(std::slice::from_ref(&later), None);
-        assert!(w.follow_due(t0));
-        assert!(!w.follow_due(t0 + Duration::from_secs(1)));
-        assert!(w.follow_due(t0 + REFOLLOW));
+        assert!(w.follow_due(t0).is_none(), "nothing was followed yet");
+        w.follow_linux(|| vec![later.clone()], None);
+        assert!(w.follow_due(t0).is_some());
+        // The last follow ended just now, which holds the next back too.
+        assert!(w.follow_due(t0 + Duration::from_secs(1)).is_none());
+        assert!(w.follow_due(t0 + REFOLLOW * 2).is_some());
         std::fs::create_dir(&later).unwrap();
-        w.follow_linux(std::slice::from_ref(&later), None);
+        w.follow_linux(|| vec![later.clone()], None);
         assert!(
-            w.follow_due(t0 + REFOLLOW * 5),
+            w.follow_due(t0 + REFOLLOW * 5).is_some(),
             "a watched folder is looked at now and then"
         );
-        w.follow_linux(&[], None);
-        assert!(!w.follow_due(t0 + REFOLLOW * 10), "nothing is watched now");
+        w.follow_linux(Vec::new, None);
+        assert!(
+            w.follow_due(t0 + REFOLLOW * 10).is_none(),
+            "nothing is watched now"
+        );
+    }
+
+    /// The look at the watched folders' paths does not hold `state`: the
+    /// thread that reads the events needs it, and a path on a share that does
+    /// not answer waits for as long as the share does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_path_that_does_not_answer_does_not_hold_the_events() {
+        let mut st = linux::State::default();
+        st.object_for_test("/w/share", (1, 1));
+        st.object_for_test("/w/usb", (1, 2));
+        let state = Mutex::new(st);
+        let free = std::cell::Cell::new(0);
+        let covered = linux::covered_in(&state, |p| {
+            if state.try_lock().is_ok() {
+                free.set(free.get() + 1);
+            }
+            Some(if p.ends_with("usb") { (9, 2) } else { (1, 1) })
+        });
+        assert_eq!(
+            free.get(),
+            2,
+            "the state was held while a path was looked at"
+        );
+        assert_eq!(covered, [PathBuf::from("/w/usb")]);
+        // A folder watched anew meanwhile is not marked for the old object.
+        let covered = linux::covered_in(&state, |p| {
+            if p.ends_with("usb") {
+                lock(&state).object_for_test("/w/usb", (9, 2));
+            }
+            Some((9, 9))
+        });
+        assert_eq!(covered, [PathBuf::from("/w/share")]);
+    }
+
+    /// The supervisor starts a follow when none runs, and the next only
+    /// [`REFOLLOW`] after the last one ended: a follow that cannot get on
+    /// does not bring a thread for each round.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn one_follow_runs_at_a_time() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let w = Watch::default();
+        w.follow_linux(|| vec![root.join("later")], None);
+        let t0 = Instant::now();
+        let first = w.follow_due(t0).expect("a folder is missing");
+        assert!(
+            w.follow_due(t0 + REFOLLOW * 100).is_none(),
+            "a second follow started while the first runs"
+        );
+        drop(first);
+        assert!(
+            w.follow_due(t0 + REFOLLOW).is_none(),
+            "the next follow was due REFOLLOW after the last began, not ended"
+        );
+        assert!(
+            w.follow_due(t0 + REFOLLOW * 100).is_some(),
+            "no follow starts after the last ended"
+        );
+    }
+
+    /// Of two follows that meet at the watches, the one that gets them
+    /// reads the record then: a follow that waited does not put the folders
+    /// of an older record over a newer one's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_follow_that_waits_follows_the_record_as_it_is_then() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let w = Arc::new(Watch::default());
+        let record = Arc::new(Mutex::new(vec![old.clone()]));
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = lock(&w.linux);
+        let t = {
+            let (w, record, asked) = (w.clone(), record.clone(), asked.clone());
+            std::thread::spawn(move || {
+                w.follow_linux(
+                    || {
+                        asked.store(true, std::sync::atomic::Ordering::SeqCst);
+                        lock(&record).clone()
+                    },
+                    None,
+                )
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the record was read before the watches were held"
+        );
+        *lock(&record) = vec![new.clone()];
+        drop(held);
+        t.join().unwrap();
+        let linux = lock(&w.linux);
+        assert!(linux.watched_for_test(&old).is_empty());
+        assert!(!linux.watched_for_test(&new).is_empty());
     }
 
     /// A watch the thread added while a granted folder was walked anew
@@ -2821,7 +2988,7 @@ mod tests {
         let granted = root.join("granted");
         std::fs::create_dir_all(granted.join("deep")).unwrap();
         let w = Watch::default();
-        w.follow_linux(std::slice::from_ref(&granted), None);
+        w.follow_linux(|| vec![granted.clone()], None);
         let mut f = std::fs::OpenOptions::new();
         f.write(true).create_new(true).mode(0o600);
         f.open(granted.join("deep/key")).unwrap();

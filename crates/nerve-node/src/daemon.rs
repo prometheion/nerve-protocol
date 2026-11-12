@@ -1270,8 +1270,12 @@ impl Shared {
         let Some((_, owner)) = self.acl_accounts(cfg) else {
             return;
         };
-        let folders = crate::acl::granted_folders(&crate::acl::record_file(&self.paths));
-        self.grant_watch.follow_linux(&folders, Some(owner));
+        // The record is read once the watches are held, so a follow that
+        // waits does not put an older record's folders over a newer one's.
+        self.grant_watch.follow_linux(
+            || crate::acl::granted_folders(&crate::acl::record_file(&self.paths)),
+            Some(owner),
+        );
     }
 
     /// The locking of [`Shared::sync_acls`]: `sync` makes the report, and
@@ -2813,9 +2817,14 @@ async fn supervise(shared: Arc<Shared>) {
         // A granted folder that was missing when the watches were set (one
         // made or mounted later) is looked for again from time to time.
         #[cfg(target_os = "linux")]
-        if shared.service && shared.grant_watch.follow_due(std::time::Instant::now()) {
+        if shared.service
+            && let Some(following) = shared.grant_watch.follow_due(std::time::Instant::now())
+        {
             let (s, c) = (shared.clone(), cfg.clone());
-            tokio::task::spawn_blocking(move || s.follow_acls(&c));
+            tokio::task::spawn_blocking(move || {
+                s.follow_acls(&c);
+                drop(following);
+            });
         }
         // The level follows the config, whoever changed it and however.
         if let Some(log) = &shared.log {
