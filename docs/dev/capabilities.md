@@ -221,10 +221,12 @@ Such a command runs as the node's command account `nerve-run`, held to the
 folders; an action that needs your own rights, such as restarting a service of
 yours or reading your files, comes from a program you allow here.
 
-Providers work on Linux: a program of yours (or of root) attaches to the
-[installed node](service.md#the-node-as-a-service) on its provider socket (its control socket
-takes none), and to a node you run yourself on its control socket. Windows
-takes no provider yet.
+Providers work on Linux and Windows. On Linux a program of yours (or of root)
+attaches to the [installed node](service.md#the-node-as-a-service) on its
+provider socket (its control socket takes none), and to a node you run
+yourself on its control socket. On Windows a program of yours, or of an
+elevated administrator, attaches to the installed service on its provider
+pipe ([providers on Windows](windows.md#providers-on-windows)).
 
 ### Allow a program
 
@@ -652,7 +654,7 @@ nerve-node cap add logs.tail --effect read \
   fit it is refused before anything runs.
 
 An argument marked `"x-nerve-path": "read"` or `"write"` is a path. The node
-judges it as it judges an `fs` call's path ([providers.md](#paths-it-takes)
+judges it as it judges an `fs` call's path ([paths it takes](#paths-it-takes)
 says how), and the program gets it as the node resolved it. An argument that
 names a path but is not marked is passed as given: no folder, protected path
 or rule on paths holds it beyond what `nerve-run` itself may reach, and in
@@ -690,7 +692,8 @@ A node you run yourself has no `nerve-run`, so it offers none: `cap` shows
 each one as left out, and why.
 
 Each run counts towards `limits.max_running`, runs in a cgroup of its own
-held to `[limits.command]` ([limits.md](sandbox-linux.md#limits-per-command)) and ends at its timeout.
+(on Windows a job object) held to `[limits.command]`
+([limits](sandbox-linux.md#limits-per-command)) and ends at its timeout.
 A cancelled call ends it too. A command that does not end with exit code 0
 fails: the agent gets its exit code and what it printed to stderr, marked as
 content from your machine, as a result is (and, like a result, it marks the

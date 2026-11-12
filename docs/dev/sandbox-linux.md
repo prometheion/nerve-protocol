@@ -40,8 +40,11 @@ access. With
 [Landlock](#the-account-nerve-run), a command of `nerve-run` reads less
 than a file call: the system's folders and its `r` and `x` folders.
 
-A node you run yourself, and Windows, read with your own rights, so there
-`folder` mode reads only in the folders with `r`. A read that names no path
+A node you run yourself reads with your own rights, so there `folder` mode
+reads only in the folders with `r`. On Windows the file calls of a pairing
+act in its AppContainer, so a read outside its folders is what the container
+may read: the Windows folder, Program Files and what is open to every
+AppContainer ([Windows](windows.md#the-account-commands-run-as-on-windows)). A read that names no path
 (a program's action that lists the lamps it knows) runs only where you set it
 `on`: the node cannot see where such a program reads.
 
@@ -281,9 +284,10 @@ tools). A node run by hand is not in it: where the
 system holds user namespaces back, its commands see each other's processes
 and `status` says so.
 
-Windows: the pairings' commands run as one account without a namespace, so
-they see each other's command lines until W2 (#149) adds a container for
-them; `status` does not warn there yet.
+Windows: the pairings' commands run as `nerve-run`, each pairing's in an
+AppContainer of its own, and a container sees only its own processes, so
+`status` has no warning for it
+([Windows](windows.md#the-account-commands-run-as-on-windows)).
 
 ### No network for a center's commands
 
@@ -315,11 +319,14 @@ unix one, and its io_uring calls fail too (a program then makes plain calls).
 It needs no Landlock, so it holds on kernels without Landlock as well. Where
 Landlock has its network rules (ABI 4, Linux 6.7), they shut TCP once more
 under it. Where the node cannot set the filter (another architecture, a
-kernel without seccomp filters), or on Windows, it cannot hold a command to
-it, so while the switch is off it runs none of that center's commands and
-says why (`the owner turned the network off for this center's commands, and
-this machine cannot keep them off it: …`); `network off` warns of
-that there, and the agent is offered no command.
+kernel without seccomp filters), it cannot hold a command to it, so while
+the switch is off it runs none of that center's commands and says why (`the
+owner turned the network off for this center's commands, and this machine
+cannot keep them off it: …`); `network off` warns of that there, and the
+agent is offered no command. On Windows an AppContainer without its network
+capabilities holds the commands, while the Windows Firewall service runs;
+without that service the node refuses them in the same way
+([Windows](windows.md#what-the-appcontainer-does-not-stop)).
 
 The switch holds where the center's commands run as `nerve-run` (on the
 installed Linux node: `folder` mode, and `allowlist` mode without
@@ -721,21 +728,26 @@ limit:
   whatever you reach, protected paths and the node's own folders included. It
   is why `user` mode is for a center you would trust with a shell.
 - A program that an `allowlist` rule lets run is sandboxed only as
-  `nerve-run`, on the installed Linux node with Landlock; as you
-  (`--as-owner`, a node you run yourself, Windows) it is not
+  `nerve-run`: on the installed Linux node with Landlock, on Windows in the
+  pairing's AppContainer. As you (`--as-owner`, a node you run yourself) it
+  is not
   ([rules](policy-engine.md#what-a-wildcard-covers) keeps shell syntax out of a
   wildcard rule, not what a program does).
 - A [sudo](policy-engine.md#sudo-as-the-owner-uses-it) command runs as root without the sandbox, in `folder` mode
   too: a script or interpreter on the sudo list can build a path to the node's
   files at run time. Put no program on the sudo list that you would not trust
-  with them. On the installed Windows node `folder` mode runs only such
-  commands ([Windows](windows.md#what-a-command-can-reach-in-folder-mode-windows)).
+  with them. On Windows a sudo command runs with the owner's administrator
+  token, outside the container
+  ([Windows](windows.md#the-account-commands-run-as-on-windows)).
 
-And in `folder` mode while commands run as you (on a node you run yourself,
-or on Windows), a command can hand work to the programs of yours that run
-commands on request, which are outside the sandbox
+And in `folder` mode while commands run as you (on a node you run yourself),
+a command can hand work to the programs of yours that run commands on
+request, which are outside the sandbox
 ([Linux](#what-a-command-can-reach-in-folder-mode)). As `nerve-run` it
-cannot: they do not take requests from another account.
+cannot: they do not take requests from another account. On Windows, where
+`folder` mode runs as `nerve-run` in a container, only a program that opens
+itself to every AppContainer takes the request
+([Windows](windows.md#what-the-appcontainer-does-not-stop)).
 
 No rule closes these limits.
 
@@ -747,8 +759,8 @@ for. A call may ask for less, or for more up to that most, never beyond it.
 How long a command may run has its own default and most, in
 [how long a command may run](settings-and-config.md#how-long-a-command-may-run).
 
-Linux only for now. On Windows the settings are there, but commands are not
-held to them yet.
+On Windows each command's job object holds it to the same settings
+([Windows](windows.md#limits-per-command)).
 
 ### The limit settings
 

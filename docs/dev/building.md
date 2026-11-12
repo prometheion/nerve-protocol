@@ -50,12 +50,12 @@ by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
 
 | Job | Runs |
 |---|---|
-| `linux` | fmt, that every script of the web UIs parses (`node --check`), clippy and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`) and four ACL tests of uninstall and revoked grants |
+| `linux` | fmt, that every script of the web UIs parses (`node --check`), clippy, a check of the runner's Landlock ABI (`landlock-abi.py`) and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`), six unit tests of uninstall, revoked grants and mounted drives, and the root test of `tests/own_proc.rs`; last the tests of a command's own `/proc` (`tests/own_proc.rs`) with user namespaces opened. After each run `skips.py` fails the job on a skipped test the list does not allow |
 | `musl` | on x86_64 and arm64: the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs; then `nerve-node` and `nerve-center` built as the release builds them, and the real tests' programs |
 | `installed` | those static programs installed on Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04), and on Ubuntu 26.04, Debian 12 and Debian 13, each a container with systemd on an Ubuntu 24.04 runner (`.github/workflows/installed.yml`): `.github/scripts/keyring-end-to-end.sh` runs the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then `.github/scripts/center-service-end-to-end.sh` installs the center as a service, drives it over MCP, updates and uninstalls it. On the x86_64 Ubuntu runners both scripts also open every page of the node's and the center's web UI in headless Chrome. The release runs the same on the binaries it publishes |
 | `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
-| `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths); then the debug programs and the test programs of `windows-installed` (`.github/scripts/windows-test-programs.sh`) |
-| `windows-installed` | the Windows tests marked `#[ignore]` that need a machine of their own, on a windows-2025 runner (`.github/workflows/installed-windows.yml`): the app's install, update and uninstall, the node installed by an administrator of the job's own with sudo, providers, the keys in Credential Manager, the limits, `nerve-run` and the AppContainers, the center as a service; the real Start menu link, `nerve://` handler and Apps & features entry, its quiet uninstall and `--silent`. The release runs the same on the Windows programs it publishes |
+| `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths). No test is skipped by name: the tests marked `#[ignore]` are listed as ignored with their reason, and `skips.py` fails the job on one that returns early. Then the debug programs and the test programs of `windows-installed` (`.github/scripts/windows-test-programs.sh`) |
+| `windows-installed` | the Windows tests marked `#[ignore]` that need a machine of their own, on a windows-2025 runner (`.github/workflows/installed-windows.yml`, [below](#windows-tests-on-an-installed-node)). The release runs the same on the release-profile programs it is about to publish, and its `publish` job waits for it |
 
 A test that fails now and then is shown fixed (or caught) by the `Repeat tests`
 workflow (`.github/workflows/repeat.yml`): it runs chosen tests of one package
@@ -105,7 +105,11 @@ Not run by CI, by hand on a test machine:
 - every test on a kernel without Landlock (a container or LXC guest), and on
   a distribution's own older kernel (CI's runners have GitHub's newer ones);
 - the Windows tests marked `#[ignore]` that `windows-installed` does not
-  name (the UAC broker with another administrator, the WMI gap);
+  name: the UAC broker with another administrator
+  (`nerve-node-desktop/tests/broker_users.rs`), the open WMI gap
+  (`exec::tests::a_cancel_ends_a_process_started_through_wmi`), the slow wait
+  for a recycled shell id (`a_shell_pid_given_to_another_command_reaches_no_other_job`)
+  and the PowerShell diagnostic of `nerve-sandbox`;
 - the action checker's tests with a real model (below).
 
 The action checker's tests that need a real model or download are
@@ -142,6 +146,71 @@ workflow does this with the binaries it releases), name them:
 NERVE_CENTER_BIN=/path/to/nerve-center NERVE_NODE_BIN=/path/to/nerve-node \
   cargo test -p nerve-conformance
 ```
+
+## Windows: tests on an installed node
+
+The tests that need a Windows machine of their own carry
+`#[ignore = "<reason>"]`. CI's `windows-installed` job
+(`.github/workflows/installed-windows.yml`) runs them on a fresh
+`windows-2025` runner, with the debug programs and test programs the
+`windows` job built; the release runs it too, on the release-profile programs
+it built, with the same debug test programs of the same commit. The job:
+
+- checks that the runner is Windows Server 2025
+  (`.github/scripts/windows-runner.ps1`);
+- makes an administrator account and a standard account with random
+  passwords, and their profiles by a logon that loads them, as nobody signs
+  in on a runner;
+- has the app install, start, stop, restart, update and uninstall Nerve
+  (`nerve-node-desktop/tests/real.rs`);
+- installs over a folder in `C:\ProgramData\Nerve` that the standard account
+  made first: the install refuses before it changes anything, and names the
+  account and what to do;
+- installs the node again with the administrator account as its owner (the sudo
+  test below needs an administrator). The install
+  makes `nerve-run`, its profile (by a logon that loads it) and the service
+  `nerve-run-profile`, which the job checks. Then it reads what the install
+  put on the machine as Windows reads it: the Start menu link, the handler of
+  `nerve://` links, the entry in Apps & features;
+- runs, one by one, with `--ignored --exact`: the sudo switch
+  (`nerve-node/tests/win_sudo.rs`), a provider on the provider pipe
+  (`win_provider.rs`), the keys and a proxy's password in the service's
+  Credential Manager through backup and restore (`win_vault.rs`), the limits per
+  command (`win_limits.rs`), and the command account
+  (`win_account.rs`: a command in its folder works and one outside is refused
+  and audited; one pairing reaches neither another's folders, nor its home,
+  nor its processes; a folder without flags inside a `w` folder is closed;
+  `nerve-run` opens neither the node's config and state folders, nor the
+  owner's registry, nor the node's pipes; with the network off a connection
+  and a sudo command are refused), smaller tests of it (a command the folder
+  sync refuses in the audit log, a granted folder that becomes a link to
+  another machine, a capability's value that is one argument), the
+  administrator's batch logon, a folder on a virtual disk mounted in a folder,
+  a backup's folder on a FAT32 virtual disk and a folder reached over the
+  machine's own share. A test name that matches nothing fails the job;
+- stops the service, gives its state folder to the standard account, and
+  expects the service not to start on it, and the manager to start it again
+  once the administrators own the folder;
+- installs the node again for a local owner whose name has a blank and an
+  umlaut, a standard account, and runs the test of that owner's folder and
+  commands;
+- installs the center as a service and runs `win_service.rs`: its `status`,
+  its restart actions (and a restart after its process is killed), its web UI
+  in Chrome (`.github/scripts/web-ui-smoke.mjs`), what the standard account
+  cannot read or take, what the administrator's other account and a pipe the
+  standard account made get from a second center, a second center that
+  attaches to a first, a backup and a restore into the service, `update` (a
+  program that is not the center, another build) and `uninstall --purge`;
+- runs the Apps & features entry's quiet uninstall, which keeps the data, and
+  `--silent`, which installs again without a question;
+- uninstalls with `--purge`, which removes `nerve-run` and `nerve-run-profile`
+  too, and fails on a test that skipped.
+
+After a failure the job prints the node's log, the Event Log entries, the
+folder grants and the permission lists of the test folders. The `windows` job
+also keeps the debug `nerve-node-desktop.exe` and `nerve-center.exe` as the
+artifact `windows-programs` for three days, to try a change on a Windows test
+machine as a person would.
 
 ## Dependencies
 

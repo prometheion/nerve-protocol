@@ -187,9 +187,11 @@ start it first.
   the node's [guard](policy-engine.md#the-guard-against-changing-the-node) catch a
   command that tries it by mistake; they are no boundary.
 
-On Windows every command runs as you, `folder` mode in an AppContainer
-([modes](windows.md#what-a-command-can-reach-in-folder-mode-windows)); an
-account of their own there is planned.
+On Windows `folder` mode, and `allowlist` mode unless you set `--as-owner`
+for the pairing, run commands as `nerve-run`, each pairing's in an
+AppContainer of its own; `user` mode runs them as you
+([the account](windows.md#the-account-commands-run-as-on-windows),
+[modes](windows.md#what-a-command-can-reach-in-folder-mode-windows)).
 
 The node also refuses the owner socket to a process it sees below a command
 it runs, and on Linux to one with `no_new_privs`, which every confined
@@ -248,10 +250,11 @@ so the node checks a value as it checks the command line's.
   commands that run as you);
   the **Shell** that runs each command (`machine.shell`); and how much the
   **Log** says (`log.level`).
-- **Keys**: in files, or in the system keyring where one can hold them. Where
-  it cannot (the installed node on Windows, no keyring
-  answering for the account the node runs as), the app says why and keeps
-  them in files.
+- **Keys**: in files, or in the system keyring where one can hold them: the
+  Credential Manager of the service's account on Windows
+  ([Windows](windows.md#the-node-as-a-service-on-windows)). Where it cannot
+  (no keyring answering for the account the node runs as), the app says why
+  and keeps them in files.
 - **Network**: the **Proxy**. The relay has a page of its own
   ([Relay](#relay)).
 - **Limits**: what one command may use and the most a call may ask for
@@ -338,8 +341,10 @@ the CLI ([rules](policy-engine.md#the-guard-against-changing-the-node)).
 What stays with the terminal on Linux: restoring the keys straight into the
 keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
 the keyring), and the keyring `setup` installs for the node's account on a
-Linux without a desktop session for it. On Windows neither is there: the
-installed node keeps its keys in files ([Windows](windows.md#the-node-as-a-service-on-windows)).
+Linux without a desktop session for it. On Windows nothing of this stays with
+the terminal: the Credential Manager is always there, a restore keeps the
+backup's own storage, and **Keys** switches it
+([Windows](windows.md#the-node-as-a-service-on-windows)).
 
 ## Capabilities
 
@@ -385,9 +390,9 @@ allow`), which **Choose…** picks.
 
 A node run by hand offers no capabilities of `node.toml` (they run as
 `nerve-run`, which only the installed node has), and the page says so. On
-Windows the node offers neither programs nor capabilities of `node.toml`
-yet, so the page shows what is declared and says so, without the forms to
-add more.
+Windows the installed node offers both: programs on the service's provider
+pipe, and capabilities of `node.toml` that run as `nerve-run` in the
+pairing's AppContainer ([Windows](windows.md#providers-on-windows)).
 
 ## Relay
 
@@ -497,7 +502,24 @@ When a part is missing, the app says so:
 | The portal | The button that opens a file or folder dialog says "No file dialog: …" and names the portal packages |
 | `update-desktop-database` | Installing goes on, and its last step warns that the desktop may not know about the `nerve://` handler yet |
 
-Windows needs nothing besides the app.
+Windows needs no other program for the app itself. What it uses:
+
+- An owner account with a password: Windows logs no program on to an account
+  without one, so `user` mode, `allowlist` mode with `--as-owner` and sudo
+  run nothing as an owner without a password, and the app says so. The
+  node also changes the owner's folder grants as the owner: without the
+  password a folder you add gives the commands of `folder` and of `allowlist`
+  mode as `nerve-run` no access, and one you remove or close stops the
+  pairing's commands, until the node can log on as you
+  ([Windows](windows.md)).
+- A state folder on a drive with access lists (NTFS): one on FAT32 or exFAT is
+  refused.
+- The Windows Firewall service, which keeps a pairing's AppContainer off the
+  network when its network switch is off; without it, while the switch is
+  off, the node runs none of that pairing's commands.
+- Windows PowerShell 5.1, the shell of the commands (`machine.shell`).
+
+All of this is in [Windows](windows.md).
 
 ## In a terminal (Linux)
 

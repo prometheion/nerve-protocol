@@ -62,5 +62,6 @@ budget by 20 %, or a table cell over 40 words, fails it.
 | [spec/node-local.md](spec/node-local.md) | The node's config, policy, sudo switch, control socket, audit log |
 | [spec/harness.md](spec/harness.md) | The center as an MCP server |
 | [spec/conformance.md](spec/conformance.md) | What the conformance suite checks and how to run it |
+| [spec/README.md](spec/README.md#what-stays-stable-from-010) | What stays stable from 0.1.0: the wire protocol, the stored formats, `--json` |
 | [schemas/](../../schemas) | JSON Schemas of the descriptor and the pair request |
 | [crates/nerve-conformance](../../crates/nerve-conformance) | The conformance suite |

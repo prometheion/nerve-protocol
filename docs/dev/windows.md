@@ -344,7 +344,7 @@ that only `nerve-run` may open.
 `nerve-run` cannot open the node's config and state folders, your registry
 (`HKEY_USERS\<your SID>`, with your environment variables) or the node's
 pipes: the install checks the first two, and the CI job all of them
-([tests](#tests-on-an-installed-node)).
+([tests](building.md#windows-tests-on-an-installed-node)).
 
 A command gets `nerve-run`'s own environment, not the service's or yours,
 with its home moved into its container's own folder (`AC`, below
@@ -1096,9 +1096,11 @@ of `nerve-run`, which is no administrator, never get them. So:
   administrator rights back and read the node's keys.
 - Turning it on asks for your Windows password. A wrong password is
   refused and the switch stays as it was.
-- The node holds the password in its memory only, as on Linux: sudo is off
-  after a restart of the service or of Windows. Turning it off does not take
-  you out of Administrators; it reminds you.
+- The sudo switch holds the password in the node's memory only, as on Linux:
+  sudo is off after a restart of the service or of Windows. Turning it off
+  does not take you out of Administrators; it reminds you. The same password
+  stays on disk in `owner-password.dpapi` (step 4 of the install) for the
+  commands that run as you.
 - Only the app on the machine turns it on. A center cannot (Q13): the
   password is your Windows password, maybe your Microsoft account's, which
   should not pass through a web page and the relay. The node refuses
@@ -1171,50 +1173,6 @@ in the description. Their text is still in them, under **Details**.
 Every user of the machine can read the Application log, so these entries are
 redacted like the log ([below](logging.md#what-is-never-in-it)). On Linux the journal has the
 service's output (`journalctl -u nerve-node`, `journalctl -u nerve-center`).
-
-## Tests on an installed node
-
-The tests that need a Windows machine of their own carry
-`#[ignore = "<reason>"]`. CI's `windows-installed` job
-(`.github/workflows/installed-windows.yml`) runs them on a fresh
-`windows-2025` runner, with the programs and test programs the `windows`
-job built:
-
-- it checks the runner is Windows Server 2025 (`.github/scripts/windows-runner.ps1`);
-- it makes an administrator account and a standard account with random
-  passwords, and their profiles by a logon that loads them, as nobody signs
-  in on a runner;
-- the app installs, starts, stops, restarts, updates and uninstalls Nerve
-  (`nerve-node-desktop/tests/real.rs`);
-- the node is installed again by that account, its owner; the install makes
-  `nerve-run`, its profile (by a logon that loads it) and
-  `nerve-run-profile`, which the job checks. Then the sudo switch
-  (`nerve-node/tests/win_sudo.rs`), the limits per command
-  (`nerve-node/tests/win_limits.rs`), the command account
-  (`nerve-node/tests/win_account.rs`: a command in its folder works and one
-  outside is refused and audited; one pairing reaches neither another's
-  folders, nor its home, nor its processes; a folder without flags inside a
-  `w` folder is closed; `nerve-run` opens neither the node's config and state
-  folders, nor the owner's registry, nor the node's pipes; with the network
-  off a connection and a sudo command are refused), the account's batch
-  logon, a folder on a virtual disk mounted in a folder, a backup's folder
-  on a FAT32 virtual disk and a folder reached over the machine's own share
-  run on it;
-- the center is installed as a service, its `status`, its restart actions
-  (and a restart after its process is killed), its web UI in Chrome
-  (`.github/scripts/web-ui-smoke.mjs`), what the standard account cannot
-  read or take (the state, the owner's places on a port), what the
-  administrator's other account and a pipe the standard account made get
-  from a second center, a second center that attaches to a first, a backup
-  and a restore into the service (also with the folder spelled another
-  way), `update` (a program that is not the center, another build) and
-  `uninstall --purge` run (`nerve-center/tests/win_service.rs`);
-- the node's uninstall removes `nerve-run` and `nerve-run-profile` too.
-
-A test that skips fails the job. The `windows` job also keeps the debug
-`nerve-node-desktop.exe` and `nerve-center.exe` as the artifact
-`windows-programs` for three days, to try a change on a Windows test
-machine as a person would.
 
 ## Restart the node, then make the change again (Windows)
 

@@ -305,8 +305,8 @@ whatever writes the config (the running node, else the CLI):
    `keys.moving` goes.
 
 A running node holds `<state>/keys.lock` for its life. A CLI that writes
-`node.toml` itself (no daemon answers: on Windows always, on Linux while a
-node starts) moves the keys only while it holds that lock too. When a node
+`node.toml` itself (no daemon answers: on Windows while the service is
+stopped, on Linux while a node starts) moves the keys only while it holds that lock too. When a node
 holds it, step 4 is left to that node's next start, and the running node goes
 on reading its keys where they were. On Linux a move into the keyring is
 refused then: that node goes on with the keys in files, so its `folder` mode
@@ -457,7 +457,6 @@ shell = "/bin/bash"         # for exec.run; the platform shell by default
 allow_root = false
 sudo = "off"                # off | on: the sudo switch (§4); off when missing
 sudo_path = "/usr/bin/sudo" # optional; `sudo` from PATH by default
-user = "alice"              # optional, Windows: the account commands and the sudo switch run as on the installed node (§1)
 secret_storage = "file"     # file | keyring: where the node keeps its keys (§1)
 
 [limits]
@@ -600,10 +599,10 @@ an entry whose program reads that line again as commands (`cmd`, a `.bat` or
 by `settings.cap-add`.
 
 Which ones a node offers, with `provider: "config"`, one capability per
-`cap` (crate::config_cap): on Linux only, those whose `platform` takes it,
-and only on the installed node: they run as `nerve-run`, which a node run by
-hand lacks, so it offers none (its `caps.list` rows say why, §5). Windows
-parses them and offers none. The descriptor cuts them by
+`cap` (crate::config_cap): on Linux and Windows, those whose `platform` takes
+it, and only on the installed node: they run as `nerve-run` (on Windows in
+the pairing's AppContainer), which a node run by hand lacks, so it offers
+none (its `caps.list` rows say why, §5). The descriptor cuts them by
 the effect table like any capability (§3), and only the owner turns one on
 that senses or actuates (§5, `settings.set`); for that every `[[capability]]`
 counts, offered on this node or not, so a center cannot turn on `probe` while
@@ -670,8 +669,9 @@ entries as it checks the owner's, but their `timeout_secs` against no limit:
 the owner may lower `limits.max_timeout_secs` later, and a run is held to it.
 The node:
 
-- answers `unavailable` with the reason where it takes none: Windows (issue
-  #176) and a node run by hand, which has no `nerve-run`;
+- answers `unavailable` with the reason where it takes none: a node run by
+  hand, which has no `nerve-run`, and a system that is neither Linux nor
+  Windows;
 - refuses `forbidden` a change that names an entry of the owner's
   (`cap edit` of one, or `cap rm` of one the center has no entry of: it
   removes its own also where the owner came to declare that name), and an
@@ -933,8 +933,8 @@ token, is not a header value: it is one of the node's own keys, kept where
 `machine.secret_storage` says, as `keys/proxy-login.secret` (0600) or the
 keyring entry `proxy-login:<config folder>` (§1), and it moves with the
 other keys when that setting changes. `connection.login` keeps the user
-name. So the installed node on Windows, whose keys are in files, takes it,
-and so does a Linux node without a keyring whose keys are in files; with
+name. So the installed node on Windows takes it, and so does a Linux node
+without a keyring whose keys are in files; with
 `keyring` and no keyring that answers, `proxy set` refuses with the
 keyring's error and changes nothing, and a node whose keys are there does
 not start, as for any key of the node. `--header` values of an `https://`
@@ -1067,15 +1067,6 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   so relays chain. It never reads what it carries, and no rule, folder or
   mode of this node applies to a tunnel: the relayed node's calls are
   decided by the relayed node, by its own policy.
-
-On Windows a change made with `relay` is in the file and takes effect at
-the next start of the node, as every change but the folder changes there.
-Until then the running node keeps its relay settings in memory, for new
-tunnels as well as open ones: a removed or replaced token still opens
-tunnels, a new token or node is refused (`407`), and `relay off` leaves the
-listener up. Every `relay` command that changes the file says so there
-(and says nothing is "now" in force); where a running node took the
-change, the commands that take something away say what ends now.
 
 ### The web UI
 
@@ -1213,9 +1204,8 @@ grant or not.
   so a later pairing, also of the same center or under the same name, runs
   in another one and finds none of its entries), which reaches the system folders Windows opens to every
   AppContainer and the paths of the same sets as on Linux, each by a grant
-  for the container on the folder with the rights of its flags; the
-  installed Windows service, whose commands run as another account, has no
-  such confinement and refuses them. `allow` rules do not count. On Linux a command
+  for the container on the folder with the rights of its flags (the
+  AppContainer is always there on Windows). `allow` rules do not count. On Linux a command
   reads the system folders and its `r` folders, writes its `w` folders and
   runs programs from the system folders and its `x` folders (Landlock), each
   flag with its own rule. A folder with `w` reads too: its rule carries the read rights as well.
@@ -1246,8 +1236,9 @@ grant or not.
   (user mode, allowlist mode as the owner, every other case of a node run by
   hand) a command is refused with `daemon::NETWORK_AS_OWNER` (installed
   node) or `daemon::NETWORK_AS_OWNER_BY_HAND`, and where the node
-  has no filter (`Shared::network_held`; never on Windows) with
-  `daemon::NETWORK_NOT_HELD`; a sudo command with `daemon::NETWORK_SUDO`.
+  has no filter (`Shared::network_held`: the seccomp filter on Linux; on
+  Windows the Windows Firewall service, which isolates the AppContainer, does not
+  run) with `daemon::NETWORK_NOT_HELD`; a sudo command with `daemon::NETWORK_SUDO`.
   All are audited `forbidden`. A config capability runs as `nerve-run` in
   every mode, so it is refused only where the filter is missing. The
   descriptor's access block carries `no_network` (`held`, `as_owner`,
@@ -1300,7 +1291,11 @@ owner changes them. A limit is opt-in (`until`, or `nerve-node mode user
 
 Reading in folder mode where the node reads as the command account: the
 installed Linux node does a center's file calls as `nerve-run`
-(`account::FsAs`). Inside the center's folders (its own built-in ones among
+(`account::FsAs`), the installed Windows node in the pairing's AppContainer
+(`win_user::FsAs::in_container`; what the container may open is the Windows
+folder, Program Files and what is open to every AppContainer, so a path
+outside the folders is read where the container may open it, and nothing
+that only `nerve-run` may open). Inside the center's folders (its own built-in ones among
 them) their flags decide as for every path, the deepest one first. A path a
 read call reads in no folder of the center may be read where it is open to
 every account on the machine: each folder above it lets others pass (`o+x`)
@@ -1324,9 +1319,9 @@ below it. The node's own folders, protected paths, deny rules and `off` and
 `hidden` still win. Writes and commands keep to the folders, and a write or
 execute call that also reads a path needs `r` for it. Landlock, where
 present, holds a command of `nerve-run` to less (the system's folders and its
-folders); a file call is not run under it. A node run by hand and Windows
-read with the node's own or the owner's rights, so there every path a call
-reads needs a folder with `r`. A call that names no path, a read included,
+folders); a file call is not run under it. A node run by hand reads with the
+node's own or the owner's rights, so there every path a call reads needs a
+folder with `r`. A call that names no path, a read included,
 needs `on` in folder mode on every node: every `fs` action names its path,
 so such a call is a program's (§7), which reads where the node cannot see,
 with the owner's rights.
@@ -1663,8 +1658,8 @@ password is held. The switch works on Linux and Windows.
 
 On Windows there is no `sudo` program. The switch works on the installed
 node only (§1: the service, which may start a process with another
-account's token), and its password is the one of the account the commands
-run as, which must be an administrator. `sudo on` checks it with a logon of
+account's token), and its password is the Windows password of the owner,
+who must be an administrator. `sudo on` checks it with a logon of
 that account as a batch job (`LogonUserW`, `LOGON32_LOGON_BATCH`), which UAC
 does not filter: the logon must succeed and its token must hold the
 Administrators group enabled; else the switch stays as it was. The node then
@@ -1814,6 +1809,9 @@ answered, which takes long on a large folder. Methods:
 | `config.read`, `config.write` (`if_version`, `user`, `panic`), `config.accept`, `reload` | | as on the socket |
 | `sudo.on` (`password`), `sudo.off`, `sudo.status` | | as on the socket; the service checks the password with a batch logon and keeps it (§4) |
 | `owner.check` | | as on the socket; the CLI asks it over the pipe as it asks the socket on Linux |
+| `owner.password` | `password` | stores the owner's Windows password, where the stored one is missing or no longer works, after a logon with it succeeds; the folder grants are brought in line with it at once; `{owner, grants}` (the report below). `status` says whether one is stored: `owner_password` |
+| `vault.get`, `vault.set`, `vault.delete` | `account` (an entry of this node's), `value` for `set` | the service's own Credential Manager: `{value}`, `{}`, `{deleted}`; an entry that is not this node's is refused (§1, where the keys are) |
+| `vault.stage` | | copies every entry of this node's into `keys/vault.pending`, for an install that gives `nerve` a new password; `{staged}` |
 | `folder.grants` | `every` | the folder grants brought in line with the config; with `every` (`folder sync`) each one walked again into every folder below it; the folder-grant report, as on the socket |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
