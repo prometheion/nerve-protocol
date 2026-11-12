@@ -1633,8 +1633,8 @@ pub(crate) mod vault {
     }
 }
 
-/// The system keyring: Keychain on macOS, Credential Manager on Windows, the
-/// Secret Service elsewhere.
+/// The system keyring: Credential Manager on Windows, the Secret Service on
+/// Linux.
 #[cfg(not(test))]
 pub(crate) mod store {
     use super::SERVICE;

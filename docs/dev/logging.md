@@ -14,7 +14,7 @@ built.
 | `Log` | The level (changeable at any time), a window of the latest 2000 entries, and the file. It also holds the secrets the program knows (`set_secret`) |
 | `Entry` | One line: `ts`, `level`, `node`, `node_id`, `msg` |
 | `redact` | Takes secrets out of text ([below](#redaction)) |
-| `scrub` | A line as the log keeps it: control characters to spaces, `redact`, cut to 1000 characters. The node's Windows Event Log entries go through it too |
+| `scrub` | A line as the log keeps it: control characters and U+2028/U+2029 to spaces, `redact`, cut to 1000 characters. The node's Windows Event Log entries go through it too |
 | `LogLayer` | A `tracing` layer that hands every event to a `Log` |
 | `install`, `global` | Make the process's `Log` once and set the layer as the global subscriber |
 | `emit` | `tracing` at a level only known at run time |
@@ -162,7 +162,7 @@ The secrets the program holds are replaced by `[redacted]` first, as written:
 the center registers the harness token from its flag, the node the sudo
 password while the switch is on. One shorter than 8 characters is replaced only
 as a whole word (`hide`), so a password like `in` or `1234` does not cut words
-in other places. Then control characters become spaces, so a tab or a line
+in other places. Then control characters and U+2028/U+2029 become spaces, so a tab or a line
 break between a name and its value is a gap like any other, `redact` runs, and
 the message is cut to 1000 characters.
 

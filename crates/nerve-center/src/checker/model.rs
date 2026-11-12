@@ -661,13 +661,21 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
             endpoint,
             "/v1/systemone",
             &body,
-            timeout + Duration::from_secs(5),
+            answer_wait(timeout),
             MAX_BODY,
         ),
     )
     .await
     .map_err(|_| ModelError::Unreachable(format!("timed out after {} ms", cfg.timeout_ms)))??;
     parse_noul(&value)
+}
+
+/// How long the read of a model's answer waits when the caller's own limit
+/// is `limit`: a little past it, so it is always the caller's limit that
+/// ends the call, and not the transport's 15 s head timeout, which cuts
+/// off a model that thinks longer (a 4B model, or a 2B one on a small CPU).
+fn answer_wait(limit: Duration) -> Duration {
+    limit + Duration::from_secs(5)
 }
 
 /// A call the local server took and has not answered after this many
@@ -832,7 +840,7 @@ async fn read_alone(
             &endpoint,
             "/v1/systemone",
             &body,
-            stuck + Duration::from_secs(5),
+            answer_wait(stuck),
             MAX_BODY,
         ),
     )
@@ -2026,8 +2034,18 @@ mod tests {
     /// the transport's usual 15 s head timeout: a model that thinks longer
     /// (a 4B model, or a 2B one on a small VM CPU) is still read when the
     /// checker's own timeout allows it. Found on the Windows test VM, where
-    /// every call was cut at 15 s. Shown here the other way round, with a
-    /// wait shorter than the transport's, so the test takes a second.
+    /// every call was cut at 15 s. Shown here in two halves so the test takes
+    /// a second: `ask` gives the read a wait past the checker's timeout (a
+    /// checker timeout of 25 s waits longer than the transport's 15 s), and
+    /// the read holds to the wait it is given, short or long.
+    #[test]
+    fn a_slow_model_is_given_the_checkers_timeout_to_answer() {
+        let wait = answer_wait(Duration::from_millis(25_000));
+        assert!(wait > nerve_transport::http::HEAD_TIMEOUT, "{wait:?}");
+        assert!(wait > Duration::from_millis(25_000), "{wait:?}");
+    }
+
+    /// The other half: the read holds to the wait it is given, short or long.
     #[tokio::test]
     async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {
         use std::io::{Read, Write};
