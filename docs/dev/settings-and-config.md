@@ -811,9 +811,10 @@ rules say.
 ## CLI output (`--json`)
 
 A program that drives `nerve-node`, such as a script, adds `--json` and reads
-one JSON value from stdout. Fields are only ever added: one is renamed or
-removed only with a change of the format, which the changelog names under
-"Breaks". A script ignores the fields it does not know.
+one JSON value from stdout. Fields are only ever added: a renamed or removed
+field is a "Breaks" line in the changelog ([what stays
+stable](spec/README.md#what-stays-stable-from-010)). A script ignores the
+fields it does not know.
 
 - The read commands print their data: `status`, `center`, `mode`, `network`
   (`{"networks": [{"center", "no_network"}]}`), `folder`,
