@@ -10,6 +10,8 @@
 # runner), then runs:
 # - the desktop app's own install, control, update and uninstall
 #   (crates/nerve-node-desktop/tests/real.rs);
+# - an install over a folder in C:\ProgramData\Nerve that the standard
+#   account made first, which the install refuses before it changes anything;
 # - with the node installed again by that account, its owner: the sudo
 #   switch end to end, refused from a center and off after a restart of the
 #   service (crates/nerve-node/tests/win_sudo.rs), a provider on the provider
@@ -27,7 +29,10 @@
 #   (crates/nerve-node/tests/win_account.rs), and in smaller tests of
 #   it, a command the folder sync refuses in the audit log and a granted
 #   folder that becomes a link to another machine (also where the node
-#   cannot log on as the owner). The install makes
+#   cannot log on as the owner), a capability of node.toml and one a center
+#   added with values that cmd or PowerShell would run, and with the node installed again by a
+#   standard account named with a blank and an umlaut, that owner's folder
+#   and commands. The install makes
 #   nerve-run and its profile itself, by a logon that loads it, as nobody
 #   signs in on a runner;
 # - the administrator's batch logon (nerve-node's
@@ -153,12 +158,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # A renamed test matches nothing, and the run then ends well.
           if ($said -notmatch 'test result: ok\. 1 passed') { throw 'the install test did not run' }
+      # Any standard account may make a folder in ProgramData and stays its
+      # owner, so it could open again what the node writes there: the install
+      # refuses such a folder before it changes anything, and says what to do
+      # (security-1). The app's install above deleted the node's folders.
+      - name: The install refuses a folder another account made
+        run: |
+          $data = 'C:\ProgramData\Nerve'
+          if (Test-Path $data) { throw "$data is there before the test" }
+          $secure = ConvertTo-SecureString $env:NERVE_WIN_STD_PASSWORD -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential(".\$env:NERVE_WIN_STD_ACCOUNT", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'mkdir', "$data\config" `
+            -Credential $cred -WorkingDirectory "$env:SystemRoot" -Wait
+          $owner = (Get-Acl "$data\config").Owner
+          if ($owner -notlike "*\$env:NERVE_WIN_STD_ACCOUNT") { throw "the folder is $owner's" }
+          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $said
+          if ($code -eq 0) { throw 'the install took the folder' }
+          if ($said -notmatch 'another account \(S-1-5-21-[0-9-]+\) owns it.*delete it, then install again') {
+            throw 'the install did not say whose the folder is and what to do'
+          }
+          if (Get-LocalUser nerve -ErrorAction SilentlyContinue) { throw 'the refused install made the user nerve' }
+          if (Get-Service nerve-node -ErrorAction SilentlyContinue) { throw 'the refused install registered the service' }
+          Remove-Item -LiteralPath $data -Recurse -Force
+          # The refused install's exit code is what was wanted: the runner
+          # would end the step with it.
+          exit 0
       # As the app's install runs for that account's owner: the broker names
-      # the owner by SID, and the password goes on stdin.
+      # the owner by SID (an argument, as the broker gives it), and the
+      # password goes on stdin.
       - name: The node installed by the account, nerve-run for commands
         run: |
-          $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
-          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe install 2>&1 |
+          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/install.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($said in "run commands as $env:NERVE_WIN_SUDO_ACCOUNT", 'made the user nerve-run',
@@ -208,6 +240,7 @@ jobs:
             @('win_account.exe', 'a_command_the_folder_sync_refuses_is_in_the_audit_log'),
             @('win_account.exe', 'a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync'),
             @('win_account.exe', 'a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_the_owner'),
+            @('win_account.exe', 'a_capability_s_value_is_one_argument_on_windows'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
             @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
             @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),
@@ -227,6 +260,56 @@ jobs:
             }
           }
           if ($failed) { throw "$failed of the installed tests failed" }
+      # A node from before the install's check, or a folder changed after it,
+      # may be another account's: the service does not start on it (security-1)
+      # and starts again once the administrators own the folder.
+      - name: The service does not start on a folder another account owns
+        run: |
+          $state = 'C:\ProgramData\Nerve\state'
+          $std = "$env:COMPUTERNAME\$env:NERVE_WIN_STD_ACCOUNT"
+          Stop-Service nerve-node
+          icacls $state /setowner $std | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'cannot give the state folder to the standard account' }
+          try {
+            Start-Service nerve-node -ErrorAction Stop
+            $started = $true
+          } catch { $started = $false }
+          Start-Sleep -Seconds 5
+          $status = (Get-Service nerve-node).Status
+          icacls $state /setowner '*S-1-5-32-544' | Out-Null
+          if ($started -or $status -eq 'Running') { throw "the service started on a folder of $std" }
+          Start-Service nerve-node -ErrorAction Stop
+          if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the service does not start on the administrators'' folder' }
+      # A local account named as a Windows set up offline names it, with a
+      # blank and an umlaut, installs the node again and owns it: its folder
+      # is granted and user mode runs as it (windows-1). A standard account:
+      # an owner need not be an administrator.
+      - name: An owner with a blank and an umlaut in its name
+        run: |
+          $name = "Nerve M$([char]0x00FC)ller"
+          $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+          $pw = [Convert]::ToBase64String($bytes) + 'a1!'
+          "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -PasswordNeverExpires | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential(".\$name", $secure)
+          Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
+            -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
+          $sid = (Get-LocalUser $name).SID.Value
+          $pw | & dist/nerve-node-desktop.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The name comes back in the console's code page: its ASCII start.
+          if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install-umlaut.log" -Pattern 'run commands as Nerve M')) {
+            throw 'the install stored no password of the owner'
+          }
+          $env:NERVE_WIN_UMLAUT_ACCOUNT = $name
+          $env:NERVE_WIN_UMLAUT_SID = $sid
+          $test = 'an_owner_with_a_blank_and_an_umlaut_in_the_name_runs_commands_as_itself'
+          $said = & dist/tests/win_account.exe --ignored --exact --nocapture --test-threads=1 $test 2>&1 |
+            Tee-Object -Append "$env:RUNNER_TEMP/installed.log" | Out-String
+          Write-Host $said
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($said -notmatch 'test result: ok\. 1 passed') { throw "no test ran for $test" }
       # What the node and the runner say when an installed test failed: what
       # passes on a test machine may meet another Windows here.
       - name: The node's log and the test folders, after a failure

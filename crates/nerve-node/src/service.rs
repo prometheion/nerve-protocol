@@ -185,18 +185,21 @@ impl Layout {
         let program = edition.program;
         let package = package.filter(|_| program == crate::edition::DESKTOP_PROGRAM);
         let release = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into();
-        if cfg!(windows) {
-            let var = |k: &str, or: &str| {
-                std::env::var_os(k)
-                    .filter(|v| !v.is_empty())
-                    .map_or_else(|| PathBuf::from(or), PathBuf::from)
-            };
-            let data = var("ProgramData", "C:\\ProgramData").join("Nerve");
-            return Layout {
+        #[cfg(windows)]
+        {
+            // The folders Windows keeps, not what the variables say: an
+            // elevated process (the app's broker, an administrator's
+            // terminal) takes `ProgramData` from the account's own
+            // variables, which its unelevated programs may set, and the
+            // install would then make the node's folders and its service's
+            // command line there, as the center was fixed for (round 6,
+            // security 1).
+            use nerve_service::win::folders::{program_data, program_files};
+            let _ = package;
+            let data = program_data().join("Nerve");
+            Layout {
                 unit: PathBuf::new(),
-                bin: var("ProgramFiles", "C:\\Program Files")
-                    .join("Nerve")
-                    .join(format!("{program}.exe")),
+                bin: program_files().join("Nerve").join(format!("{program}.exe")),
                 paths: NodePaths::new(data.join("config"), data.join("state")),
                 home: data,
                 run_home: PathBuf::new(),
@@ -204,26 +207,29 @@ impl Layout {
                 release,
                 edition,
                 package: None,
-            };
+            }
         }
-        let bin_dir = if package.is_some() {
-            "/usr/bin"
-        } else {
-            "/usr/local/bin"
-        };
-        Layout {
-            unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
-            bin: PathBuf::from(bin_dir).join(program),
-            home: "/var/lib/nerve".into(),
-            run_home: crate::account::RUN_HOME.into(),
-            run_temp: ["/tmp", "/var/tmp", "/dev/shm"]
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
-            paths: NodePaths::new("/etc/nerve", "/var/lib/nerve/state"),
-            release,
-            edition,
-            package,
+        #[cfg(not(windows))]
+        {
+            let bin_dir = if package.is_some() {
+                "/usr/bin"
+            } else {
+                "/usr/local/bin"
+            };
+            Layout {
+                unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
+                bin: PathBuf::from(bin_dir).join(program),
+                home: "/var/lib/nerve".into(),
+                run_home: crate::account::RUN_HOME.into(),
+                run_temp: ["/tmp", "/var/tmp", "/dev/shm"]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
+                paths: NodePaths::new("/etc/nerve", "/var/lib/nerve/state"),
+                release,
+                edition,
+                package,
+            }
         }
     }
 
@@ -5496,5 +5502,52 @@ pub(crate) mod tests {
             .unwrap();
         let a = crate::folder_change::FolderChange::new_rights(rights).unwrap();
         assert!(a.read && a.write && a.execute, "{a:?}");
+    }
+
+    /// The installed node's folders and program as this process finds
+    /// them, for [`the_installed_folders_are_not_the_variables`].
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "run by the_installed_folders_are_not_the_variables, in a process of its own"]
+    fn print_the_installed_folders() {
+        let l = Layout::system();
+        println!("layout: {:?}", (&l.bin, &l.home, &l.paths));
+    }
+
+    /// The installed node's folders are in the `ProgramData` and its program
+    /// in the `Program Files` Windows keeps, whatever the variables of the
+    /// process say: an elevated process (the app's broker) takes them from
+    /// the account's own, which its unelevated programs may set (windows-2).
+    /// The variables are set for a process of its own.
+    #[cfg(windows)]
+    #[test]
+    fn the_installed_folders_are_not_the_variables() {
+        use nerve_service::win::folders::{program_data, program_files};
+        let l = Layout::system();
+        assert!(l.home.starts_with(program_data()), "{:?}", l.home);
+        assert!(l.bin.starts_with(program_files()), "{:?}", l.bin);
+        let decoy = tempfile::tempdir().unwrap();
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([
+            "--exact",
+            "service::tests::print_the_installed_folders",
+            "--ignored",
+            "--nocapture",
+        ]);
+        for k in [
+            "ProgramData",
+            "ProgramFiles",
+            "ALLUSERSPROFILE",
+            "SystemDrive",
+        ] {
+            c.env(k, decoy.path());
+        }
+        let o = c.output().unwrap();
+        let said = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{said}");
+        assert!(
+            said.contains(&format!("layout: {:?}", (&l.bin, &l.home, &l.paths))),
+            "{said}"
+        );
     }
 }

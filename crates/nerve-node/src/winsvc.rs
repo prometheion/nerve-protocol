@@ -7,7 +7,7 @@
 //! ([`crate::account::RUN_USER`]), which `install` makes with a random
 //! password stored with DPAPI ([`RUN_SECRET_FILE`]); those that run as the
 //! owner, the account that ran `install`, with the owner's password, asked
-//! once and stored the same way ([`SECRET_FILE`]) ([`crate::win_user`]).
+//! once and stored the same way ([`OWNER_SECRET_FILE`]) ([`crate::win_user`]).
 //!
 //! What these commands do to the machine beyond the node's files (accounts,
 //! the service control manager, DPAPI, a logon) goes through [`WinSystem`],
@@ -33,8 +33,11 @@ pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Ne
 /// runs when the owner's password is saved.
 pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save your password under Settings › General › Account for commands, which installs the node again";
 /// The file in the config folder that holds the owner's password, for the
-/// commands that run as the owner, encrypted with DPAPI.
-pub const SECRET_FILE: &str = "command-account.dpapi";
+/// commands that run as the owner, encrypted with DPAPI ([`Secret`]).
+pub const OWNER_SECRET_FILE: &str = "owner-password.dpapi";
+/// The name the owner's password file had before 0.1.0: an install deletes
+/// it, which would otherwise keep the password sealed there for good.
+const OLD_OWNER_SECRET_FILE: &str = "command-account.dpapi";
 /// The file in the config folder that holds the password of the command
 /// account [`crate::account::RUN_USER`], encrypted with DPAPI.
 pub const RUN_SECRET_FILE: &str = "run-account.dpapi";
@@ -96,10 +99,23 @@ pub trait WinSystem {
     /// Removes the account, its rights and its profile; what Windows
     /// keeps of the profile until it restarts, said.
     fn remove_account(&self, name: &str) -> Result<Option<String>, String>;
-    /// Makes `dir` when it is missing and lets only `owner`, SYSTEM and the
-    /// administrators open it (only the latter two for `None`); what is
-    /// below inherits that. A link in place of the folder is refused.
-    fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String>;
+    /// Makes `dir` when it is missing, with the DACL `sddl` (and the owner
+    /// it names) from its first moment, or gives the folder there that
+    /// DACL; one another account owns is refused, as is a link in its place
+    /// (nerve_service::win::dacl::private_folder).
+    fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String>;
+    /// Refuses `dir` unless it is a folder, no link, that SYSTEM or the
+    /// administrators own (nerve_service::win::dacl::admins_folder).
+    fn admins_own(&self, dir: &Path) -> Result<(), String>;
+    /// Refuses `dir` when something below it (links not followed) is owned
+    /// by an account that is none of SYSTEM, the administrators, this
+    /// process, `node_sid` (nerve's) and the accounts deleted since: a
+    /// standard account put it there before the folder was closed, and its
+    /// owner may open it again (nerve_service::win::dacl::foreign_below).
+    fn nothing_foreign_below(&self, dir: &Path, node_sid: &str) -> Result<(), String>;
+    /// The SID of this machine's own accounts (`S-1-5-21-…`), which each
+    /// local account's SID begins with.
+    fn machine_sid(&self) -> Result<String, String>;
     /// The service: `None` when it is not registered, else whether it runs.
     fn service(&self) -> Result<Option<bool>, String>;
     /// The service's state for `status`; `None` when it is not
@@ -257,6 +273,73 @@ fn stop_after_stage(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> 
     })
 }
 
+/// The DACL of the node's folders in SDDL: full control for the account
+/// with the SID `account` (nerve's; none where uninstall keeps the data),
+/// SYSTEM and the administrators, inherited below and nothing from above.
+/// The administrators own them, so a folder there already that another
+/// account owns is refused, not taken: its owner could change its DACL
+/// again and read what the node writes there, the owner's password among
+/// it (security-1), as the center's folders are made.
+pub fn folder_dacl(account: Option<&str>) -> String {
+    use nerve_service::win::dacl::{dacl_text, owned_by_admins};
+    owned_by_admins(&dacl_text(account))
+}
+
+/// The SID of the local account with the number `rid` on the machine whose
+/// accounts' SIDs begin with `machine`.
+pub fn local_sid(machine: &str, rid: u32) -> String {
+    format!("{machine}-{rid}")
+}
+
+/// The folders the installed node checks before it starts on `paths`: its
+/// config and state folders and the folders they are in, which SYSTEM or the
+/// administrators must own, as `install` left them. One put in their place
+/// since (another account's, or a link) is refused, not read.
+pub fn own_folders(paths: &NodePaths) -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for dir in [&paths.config_dir, &paths.state_dir] {
+        for d in dir.parent().into_iter().chain(Some(dir.as_path())) {
+            if !d.as_os_str().is_empty() && !all.iter().any(|a: &PathBuf| a == d) {
+                all.push(d.to_path_buf());
+            }
+        }
+    }
+    all
+}
+
+/// Runs `check` on each of [`own_folders`]; the first refusal.
+pub fn check_folders(
+    paths: &NodePaths,
+    check: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    own_folders(paths).iter().try_for_each(|d| check(d))
+}
+
+/// Refuses the install before it changes anything where one of the node's
+/// folders is there already and another account than SYSTEM or the
+/// administrators owns it (one a standard account made in `ProgramData`
+/// first), or the folder they go in is not SYSTEM's or the administrators'.
+fn check_install_folders(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> {
+    if let Some(up) = layout.home.parent() {
+        sys.admins_own(up).map_err(|e| {
+            format!(
+                "{e}; the node's folders go only in a folder of SYSTEM's or the administrators'"
+            )
+        })?;
+    }
+    for dir in [
+        &layout.home,
+        &layout.paths.config_dir,
+        &layout.paths.state_dir,
+    ] {
+        if dir.symlink_metadata().is_ok() {
+            sys.admins_own(dir)
+                .map_err(|e| format!("{e}; delete it, then install again"))?;
+        }
+    }
+    Ok(())
+}
+
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
 /// the administrators, read for the interactive and service users), and to
 /// the owner the right to start, stop and ask it, nothing more.
@@ -277,6 +360,12 @@ fn put_owner(sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
         steps.did("no owner besides the administrators");
         return Ok(());
     };
+    // The node's own accounts own nothing of it: not the owner's place.
+    if name.eq_ignore_ascii_case(USER) || name.eq_ignore_ascii_case(RUN_USER) {
+        return Err(format!(
+            "{name} is an account of the node itself and cannot own it; install as yourself"
+        ));
+    }
     let before = sys.owner()?;
     sys.put_owner(&sid)?;
     match before {
@@ -357,20 +446,129 @@ fn remove_grants(
     }
 }
 
-/// The plain text [`SECRET_FILE`] holds: the account's name and password.
-pub fn secret(name: &str, password: &str) -> Vec<u8> {
-    let mut b = name.as_bytes().to_vec();
-    b.push(0);
-    b.extend_from_slice(password.as_bytes());
-    b
+/// The format of what a password file ([`OWNER_SECRET_FILE`],
+/// [`RUN_SECRET_FILE`]) holds inside DPAPI's seal. One of another format is
+/// refused, not guessed at: a later version that changes it says so.
+pub const SECRET_FORMAT: u64 = 1;
+
+/// What a password file holds inside DPAPI's seal: the account by its SID,
+/// which is what the node acts as, its name when it was stored, and its
+/// password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Secret {
+    pub sid: String,
+    pub name: String,
+    pub password: String,
 }
 
-/// The name and password in what [`secret`] made.
-pub fn parse_secret(b: &[u8]) -> Option<(String, String)> {
-    let at = b.iter().position(|&c| c == 0)?;
-    let name = std::str::from_utf8(&b[..at]).ok()?;
-    let password = std::str::from_utf8(&b[at + 1..]).ok()?;
-    (!name.is_empty()).then(|| (name.to_string(), password.to_string()))
+impl Secret {
+    /// The plain text to seal: JSON with [`SECRET_FORMAT`].
+    pub fn text(&self) -> Vec<u8> {
+        serde_json::json!({
+            "format": SECRET_FORMAT,
+            "sid": self.sid,
+            "name": self.name,
+            "password": self.password,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// What [`Secret::text`] made; why not, for anything else.
+    pub fn read(b: &[u8]) -> Result<Secret, String> {
+        let v: serde_json::Value =
+            serde_json::from_slice(b).map_err(|_| "it is not a password file of this version")?;
+        match v["format"].as_u64() {
+            Some(SECRET_FORMAT) => {}
+            Some(f) => {
+                return Err(format!(
+                    "it is of format {f}, which this version does not know"
+                ));
+            }
+            None => return Err("it is not a password file of this version".into()),
+        }
+        let field = |k: &str| v[k].as_str().map(str::to_string);
+        match (field("sid"), field("name"), field("password")) {
+            (Some(sid), Some(name), Some(password)) if !sid.is_empty() && !name.is_empty() => {
+                Ok(Secret {
+                    sid,
+                    name,
+                    password,
+                })
+            }
+            _ => Err("it lacks the account or its password".into()),
+        }
+    }
+}
+
+/// The number of the local account whose SID is `sid` on the machine whose
+/// accounts' SIDs begin with `machine`; `None` for an account of another
+/// machine, a domain or Microsoft Entra ID.
+pub fn local_rid(sid: &str, machine: &str) -> Option<u32> {
+    sid.strip_prefix(machine)?.strip_prefix('-')?.parse().ok()
+}
+
+/// The owner an install names: the app's user when its broker named one,
+/// else the account that runs the install. The app's user stays the owner
+/// when no name is found for its SID (the SID stands in for the name), so
+/// that [`local_rid`] still refuses a domain or Entra account; the elevating
+/// administrator never takes its place.
+pub fn app_or_own_owner(
+    app: Option<String>,
+    name_of: impl Fn(&str) -> Option<String>,
+    own: impl FnOnce() -> Option<(String, String)>,
+) -> Option<(String, String)> {
+    match app {
+        Some(sid) => {
+            let name = name_of(&sid).unwrap_or_else(|| sid.clone());
+            Some((sid, name))
+        }
+        None => own(),
+    }
+}
+
+/// Why the account `name` cannot own the node: it is no local account of
+/// this machine (Q1: refused in 0.1.0, by its SID).
+pub fn not_local(name: &str) -> String {
+    format!(
+        "{name} is not a local account of this machine (an account of a domain or of Microsoft Entra ID, or the system's own), and for now the node's owner must be one: install Nerve as a local account"
+    )
+}
+
+/// The local account `found` under the owner's name `name`, as the owner
+/// whose SID is `sid`, on the machine whose accounts' SIDs begin with
+/// `machine`. An owner of a domain or of Microsoft Entra ID is refused by
+/// its SID, and an account that only has the owner's name is not the owner.
+pub fn owner_by_sid(
+    sid: &str,
+    name: &str,
+    machine: &str,
+    found: Option<Account>,
+) -> Result<Option<Account>, String> {
+    let rid = local_rid(sid, machine).ok_or_else(|| not_local(name))?;
+    match found {
+        Some(a) if a.uid != rid => Err(format!(
+            "the local account {} is not the owner, whose SID is {sid}; install Nerve again as yourself",
+            a.name
+        )),
+        found => Ok(found),
+    }
+}
+
+pub use crate::account::BLANK_PASSWORD;
+
+/// The password of a line `line` that `read` bytes of stdin gave. No bytes
+/// is the end of the input (a silent install has none), not a blank
+/// password.
+pub fn password_of_line(read: usize, line: &str) -> Result<String, String> {
+    let password = line.trim_end_matches(['\n', '\r']);
+    if read == 0 {
+        Err("no password given: the input ended".into())
+    } else if password.is_empty() {
+        Err(BLANK_PASSWORD.into())
+    } else {
+        Ok(password.into())
+    }
 }
 
 /// A stored password that did not work, remembered with the file it came
@@ -439,17 +637,20 @@ pub const NO_OWNER_PASSWORD: &str = "this node has no owner, whose password the 
 /// The owner's password the app gives the running node where the stored
 /// one is missing or no longer works (`owner.password` on its control
 /// pipe): checked as `install` checks it, a logon of the owner that must
-/// not open the node's folders, then stored with DPAPI in [`SECRET_FILE`],
+/// not open the node's folders, then stored with DPAPI in [`OWNER_SECRET_FILE`],
 /// in place of the old one. The owner's name.
 pub fn save_owner_password(
     paths: &NodePaths,
     sys: &dyn WinSystem,
     password: &str,
 ) -> Result<String, String> {
-    let (_, name) = sys.owner()?.ok_or(NO_OWNER_PASSWORD)?;
-    let a = usable_account(sys, &name)?;
-    if password.is_empty() || password.contains(['\n', '\r']) {
-        return Err("the password is empty or has a line break".into());
+    let (sid, name) = sys.owner()?.ok_or(NO_OWNER_PASSWORD)?;
+    let a = usable_owner(sys, &sid, &name)?;
+    if password.is_empty() {
+        return Err(BLANK_PASSWORD.into());
+    }
+    if password.contains(['\n', '\r']) {
+        return Err("the password has a line break".into());
     }
     if let Some(at) = sys.check_logon(&a.name, password, &paths.own())? {
         return Err(format!(
@@ -458,8 +659,14 @@ pub fn save_owner_password(
             at.display()
         ));
     }
-    let file = paths.config_dir.join(SECRET_FILE);
-    write_file(&file, &sys.protect(&secret(&a.name, password))?, 0o600)?;
+    let file = paths.config_dir.join(OWNER_SECRET_FILE);
+    let secret = Secret {
+        sid,
+        name: a.name.clone(),
+        password: password.into(),
+    };
+    write_file(&file, &sys.protect(&secret.text())?, 0o600)?;
+    let _ = std::fs::remove_file(paths.config_dir.join(OLD_OWNER_SECRET_FILE));
     Ok(a.name)
 }
 
@@ -478,7 +685,7 @@ pub fn sudo_attempt<T>(
     password: &str,
     logon: impl FnOnce() -> Result<T, (String, bool)>,
 ) -> Result<T, String> {
-    let key = nerve_transport::keys::sha256_hex(&secret(name, password));
+    let key = nerve_transport::keys::sha256_hex(format!("{name}\0{password}").as_bytes());
     stale.attempt(key.as_bytes(), || {
         logon().map_err(|(why, wrong)| {
             if wrong {
@@ -537,23 +744,32 @@ pub(crate) fn needs_admin(what: &str) -> String {
 }
 
 /// `install`: the node's account, the folders, the command account, the
-/// owner's password, the program, the services, in that order. `invoker` is
-/// the account that ran install, the owner. Running it again puts back what
-/// is missing and restarts the service.
+/// owner's password, the program, the services, in that order. The account
+/// that installs ([`WinSystem::owner_sid`]) is the owner. Running it again
+/// puts back what is missing and restarts the service.
 pub fn install(
     layout: &Layout,
     sys: &dyn WinSystem,
     exe: &Path,
-    invoker: &str,
     forget_secrets: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // An owner of a domain or of Microsoft Entra ID is refused by its SID
+    // before anything changes (Q1).
+    if let Some((sid, name)) = sys.owner_sid()
+        && local_rid(&sid, &sys.machine_sid()?).is_none()
+    {
+        return Err(not_local(&name));
+    }
+    // Before anything is written, the audit log too: a folder another
+    // account owns is not written in.
+    check_install_folders(layout, sys)?;
     let mut steps = Steps {
         done: Vec::new(),
         out,
     };
-    let r = install_steps(layout, sys, exe, invoker, forget_secrets, &mut steps);
+    let r = install_steps(layout, sys, exe, forget_secrets, &mut steps);
     audit(&layout.paths, "install", &steps.done, &r, steps.out);
     r?;
     let _ = writeln!(
@@ -567,7 +783,6 @@ fn install_steps(
     layout: &Layout,
     sys: &dyn WinSystem,
     exe: &Path,
-    invoker: &str,
     forget_secrets: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
@@ -609,12 +824,25 @@ fn install_steps(
             ));
         }
     }
+    // The folder above first: what is made in it after is made in a folder
+    // only the administrators and nerve may write.
+    let node = sys
+        .account(USER)?
+        .ok_or_else(|| format!("Windows made no user {USER}"))?;
+    let dacl = folder_dacl(Some(&local_sid(&sys.machine_sid()?, node.uid)));
     for dir in [
         &layout.home,
         &layout.paths.config_dir,
         &layout.paths.state_dir,
     ] {
-        sys.secure(dir, Some(USER))?;
+        sys.secure(dir, &dacl)?;
+    }
+    // The folders are closed now, so nothing new comes in: what a standard
+    // account put in a folder made by hand before is found here. The check
+    // above looks at the folders' own owners, not at what is in them.
+    let node_sid = local_sid(&sys.machine_sid()?, node.uid);
+    for dir in [&layout.paths.config_dir, &layout.paths.state_dir] {
+        sys.nothing_foreign_below(dir, &node_sid)?;
     }
     steps.did(format!(
         "{} and {} are open to {USER} and the administrators only",
@@ -622,7 +850,8 @@ fn install_steps(
         layout.paths.state_dir.display()
     ));
     let run_password = run_account(layout, sys, steps)?;
-    owner_account(layout, sys, invoker, steps);
+    owner_account(layout, sys, steps);
+    forget_old_owner_password(&layout.paths, steps);
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -706,8 +935,16 @@ fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
             ));
         }
     }
+    let run = sys
+        .account(RUN_USER)?
+        .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
+    let secret = Secret {
+        sid: local_sid(&sys.machine_sid()?, run.uid),
+        name: RUN_USER.into(),
+        password: password.clone(),
+    };
     let file = layout.paths.config_dir.join(RUN_SECRET_FILE);
-    write_file(&file, &sys.protect(&secret(RUN_USER, &password))?, 0o600)?;
+    write_file(&file, &sys.protect(&secret.text())?, 0o600)?;
     let profile = sys.make_profile(RUN_USER, &password)?;
     steps.did(format!(
         "{RUN_USER}'s password is stored with DPAPI, and its profile is at {}",
@@ -727,21 +964,25 @@ fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
 
 /// The owner's password at install, for the commands that run as the owner
 /// (user mode, allowlist mode as the owner, sudo): the account that ran
-/// `install`, `invoker`. A stored password that still logs it on is kept;
-/// else it is asked for. What fails here is said, and those commands then
-/// do not run until install runs again.
-fn owner_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mut Steps) {
+/// `install`, by its SID ([`WinSystem::owner_sid`]). A stored password of
+/// that SID that still logs it on is kept; else it is asked for. What fails
+/// here is said, and those commands then do not run until install runs
+/// again.
+fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
     let p = &layout.paths;
     let r = (|| {
-        let a = usable_account(sys, invoker)?;
+        let (sid, name) = sys
+            .owner_sid()
+            .ok_or("this account has no SID the node can name")?;
+        let a = usable_owner(sys, &sid, &name)?;
         let own = p.own();
-        let file = p.config_dir.join(SECRET_FILE);
+        let file = p.config_dir.join(OWNER_SECRET_FILE);
         let stored = std::fs::read(&file)
             .ok()
             .and_then(|b| sys.unprotect(&b).ok())
-            .and_then(|b| parse_secret(&b))
-            .filter(|(n, _)| n.eq_ignore_ascii_case(&a.name))
-            .map(|(_, pw)| pw);
+            .and_then(|b| Secret::read(&b).ok())
+            .filter(|s| s.sid == sid)
+            .map(|s| s.password);
         let (reach, asked) = match stored.map(|pw| sys.check_logon(&a.name, &pw, &own)) {
             Some(Ok(reach)) => (reach, None),
             _ => {
@@ -761,7 +1002,12 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mu
             ));
         }
         if let Some(pw) = &asked {
-            write_file(&file, &sys.protect(&secret(&a.name, pw))?, 0o600)?;
+            let secret = Secret {
+                sid: sid.clone(),
+                name: a.name.clone(),
+                password: pw.clone(),
+            };
+            write_file(&file, &sys.protect(&secret.text())?, 0o600)?;
         }
         let groups = sys.admin_groups(&a);
         if !groups.is_empty() {
@@ -787,14 +1033,30 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, invoker: &str, steps: &mu
     }
 }
 
-/// `name` as the owner whose commands run as it, or why not: it must be a
-/// local account of this machine and none of the node's own.
-fn usable_account(sys: &dyn WinSystem, name: &str) -> Result<Account, String> {
-    if !nerve_policy::config::valid_account_name(name) {
+/// Deletes the owner's password under its old name ([`OLD_OWNER_SECRET_FILE`])
+/// where an install over an earlier node finds it.
+fn forget_old_owner_password(paths: &NodePaths, steps: &mut Steps) {
+    let file = paths.config_dir.join(OLD_OWNER_SECRET_FILE);
+    if std::fs::remove_file(&file).is_ok() {
+        steps.did(format!(
+            "deleted {}, the old file of your password",
+            file.display()
+        ));
+    }
+}
+
+/// The owner with the SID `sid`, named `name`, as the account whose
+/// commands run as it, or why not: it must be a local account of this
+/// machine, found by its name with that SID, and none of the node's own.
+fn usable_owner(sys: &dyn WinSystem, sid: &str, name: &str) -> Result<Account, String> {
+    let machine = sys.machine_sid()?;
+    // By its SID first: a domain's account may have a local one's name.
+    local_rid(sid, &machine).ok_or_else(|| not_local(name))?;
+    if !nerve_policy::config::valid_windows_account_name(name) {
         return Err(format!("{name:?} is not an account name"));
     }
-    let a = sys
-        .account(name)?
+    let found = sys.account(name)?;
+    let a = owner_by_sid(sid, name, &machine, found)?
         .ok_or_else(|| format!("there is no local account {name}"))?;
     if a.name.eq_ignore_ascii_case(USER) || a.comment == USER_MARK {
         return Err(format!(
@@ -857,6 +1119,23 @@ fn uninstall_steps(
     forget_secrets: bool,
     steps: &mut Steps,
 ) -> Result<(), String> {
+    // Kept data is closed to the administrators again at the end, which
+    // refuses a folder another account owns: say so before the service and
+    // the accounts are gone, not after. An uninstall that deletes the data
+    // does not look at the owners.
+    if !purge {
+        for dir in [
+            &layout.paths.config_dir,
+            &layout.home,
+            &layout.paths.state_dir,
+        ] {
+            if dir.symlink_metadata().is_ok() {
+                sys.admins_own(dir).map_err(|e| {
+                    format!("{e}; nothing is uninstalled; delete it, or uninstall with --purge")
+                })?;
+            }
+        }
+    }
     // The Credential Manager of nerve goes with the account: kept data keeps
     // its entries aside, sealed, for a later install's service to take.
     if !purge {
@@ -907,7 +1186,7 @@ fn uninstall_steps(
         }
     } else if folders.iter().any(|d| d.exists()) {
         for dir in folders.iter().filter(|d| d.exists()) {
-            sys.secure(dir, None)?;
+            sys.secure(dir, &folder_dacl(None))?;
         }
         steps.did(format!(
             "kept {} with the stored password, and {} (only administrators can open them now; an uninstall that deletes the data deletes them)",
@@ -1134,6 +1413,21 @@ pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
 
     #[test]
+    fn the_apps_user_is_the_owner_even_when_its_sid_has_no_name() {
+        let own = || Some(("S-1-5-21-1-2-3-500".to_string(), "Admin".to_string()));
+        let none = |_: &str| None;
+        let found = app_or_own_owner(Some("S-1-12-1-9".into()), none, own);
+        assert_eq!(found, Some(("S-1-12-1-9".into(), "S-1-12-1-9".into())));
+        let named = |_: &str| Some("Eve".to_string());
+        let found = app_or_own_owner(Some("S-1-5-21-1-2-3-1001".into()), named, own);
+        assert_eq!(found, Some(("S-1-5-21-1-2-3-1001".into(), "Eve".into())));
+        assert_eq!(
+            app_or_own_owner(None, none, own),
+            Some(("S-1-5-21-1-2-3-500".into(), "Admin".into()))
+        );
+    }
+
+    #[test]
     fn a_stale_sudo_password_is_tried_once_until_sudo_is_turned_on_again() {
         let mut stale = StalePassword::default();
         let tries = Cell::new(0);
@@ -1209,7 +1503,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
-        let file = l.paths.config_dir.join(SECRET_FILE);
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
         let blob = std::fs::read(&file).unwrap();
         let mut stale = StalePassword::default();
         assert_eq!(owner_password_state(None, &stale), "missing");
@@ -1229,14 +1523,18 @@ pub(crate) mod tests {
         let e = save_owner_password(&l.paths, &sys, "alice's").unwrap_err();
         assert!(e.contains("password of alice is wrong"), "{e}");
         assert_eq!(std::fs::read(&file).unwrap(), blob);
-        for bad in ["", "new\n", "a\rb"] {
+        for bad in ["new\n", "a\rb"] {
             let e = save_owner_password(&l.paths, &sys, bad).unwrap_err();
             assert!(e.contains("line break"), "{e}");
         }
+        assert_eq!(
+            save_owner_password(&l.paths, &sys, "").unwrap_err(),
+            BLANK_PASSWORD
+        );
         // The new one is stored, and the state is stored again.
         assert_eq!(save_owner_password(&l.paths, &sys, "new").unwrap(), "alice");
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("alice".into(), "new".into()))
         );
         let fresh = std::fs::read(&file).unwrap();
@@ -1292,8 +1590,12 @@ pub(crate) mod tests {
         program: RefCell<Option<PathBuf>>,
         /// What the program said each time the service started it.
         started: RefCell<Vec<String>>,
-        /// The folders and whom they were opened to.
-        secured: RefCell<Vec<(PathBuf, Option<String>)>>,
+        /// The folders and the DACLs they got.
+        secured: RefCell<Vec<(PathBuf, String)>>,
+        /// The folders another account owns: refused.
+        pub(crate) foreign: RefCell<Vec<PathBuf>>,
+        /// The folders with something below them that another account owns.
+        pub(crate) planted: RefCell<Vec<PathBuf>>,
         /// Granted folders on drives that are not connected.
         away: RefCell<Vec<PathBuf>>,
         /// The message file of the Event Log source, while it is registered.
@@ -1338,6 +1640,8 @@ pub(crate) mod tests {
                 program: RefCell::new(None),
                 started: RefCell::new(Vec::new()),
                 secured: RefCell::new(Vec::new()),
+                foreign: RefCell::new(Vec::new()),
+                planted: RefCell::new(Vec::new()),
                 away: RefCell::new(Vec::new()),
                 event_source: RefCell::new(None),
                 removed: RefCell::new(Vec::new()),
@@ -1463,12 +1767,40 @@ pub(crate) mod tests {
             self.accounts.borrow_mut().retain(|a| a.name != name);
             Ok(None)
         }
-        fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String> {
+        fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
+            // As private_folder: one there already only where SYSTEM or the
+            // administrators own it.
+            if dir.exists() {
+                self.admins_own(dir)?;
+            }
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             self.secured
                 .borrow_mut()
-                .push((dir.to_path_buf(), owner.map(str::to_string)));
+                .push((dir.to_path_buf(), sddl.to_string()));
             Ok(())
+        }
+        /// The folders of [`Fake::foreign`] are another account's; the
+        /// others the administrators'.
+        fn admins_own(&self, dir: &Path) -> Result<(), String> {
+            if self.foreign.borrow().iter().any(|f| f == dir) {
+                return Err(format!(
+                    "{}: another account (S-1-5-21-1-2-3-1002) owns it",
+                    dir.display()
+                ));
+            }
+            Ok(())
+        }
+        fn nothing_foreign_below(&self, dir: &Path, _: &str) -> Result<(), String> {
+            if self.planted.borrow().iter().any(|f| f == dir) {
+                return Err(format!(
+                    "{}/keys: another account (S-1-5-21-1-2-3-1002) owns it, and could open it again; delete it, then install again",
+                    dir.display()
+                ));
+            }
+            Ok(())
+        }
+        fn machine_sid(&self) -> Result<String, String> {
+            Ok("S-1-5-21-1-2-3".into())
         }
         fn service(&self) -> Result<Option<bool>, String> {
             Ok(self.service.get())
@@ -1721,7 +2053,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, format!("nerve-node {version}\n")).unwrap();
         sys.types("alice's");
-        install(&l, sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        install(&l, sys, &exe, false, &mut Vec::new()).unwrap();
         l
     }
 
@@ -1736,8 +2068,13 @@ pub(crate) mod tests {
 
     /// The name and password `file` in the config folder holds.
     fn stored(sys: &Fake, l: &Layout, file: &str) -> Option<(String, String)> {
+        stored_secret(sys, l, file).map(|s| (s.name, s.password))
+    }
+
+    /// What `file` in the config folder holds, with the account's SID.
+    fn stored_secret(sys: &Fake, l: &Layout, file: &str) -> Option<Secret> {
         let blob = std::fs::read(l.paths.config_dir.join(file)).ok()?;
-        parse_secret(&sys.unprotect(&blob).ok()?)
+        Secret::read(&sys.unprotect(&blob).ok()?).ok()
     }
 
     /// The node's Event Log entries come from a source of the service's
@@ -1747,15 +2084,46 @@ pub(crate) mod tests {
         assert_eq!(crate::eventlog::SOURCE, SERVICE_NAME);
     }
 
+    /// A password file holds the account's SID, its name and its
+    /// password, with its format; one of another format, or of none, is
+    /// refused with why (arch-8).
     #[test]
-    fn the_secret_holds_name_and_password() {
-        let s = secret("alice", "a\0b c");
+    fn the_secret_holds_the_account_and_its_format() {
+        let s = Secret {
+            sid: "S-1-5-21-1-2-3-1005".into(),
+            name: "Max Müller".into(),
+            password: "a\0b \"c\"".into(),
+        };
+        let text = s.text();
         assert_eq!(
-            parse_secret(&s),
-            Some(("alice".to_string(), "a\0b c".to_string()))
+            serde_json::from_slice::<serde_json::Value>(&text).unwrap()["format"],
+            SECRET_FORMAT
         );
-        assert_eq!(parse_secret(b"no separator"), None);
-        assert_eq!(parse_secret(b"\0pw"), None);
+        assert_eq!(Secret::read(&text), Ok(s));
+        let e = Secret::read(br#"{"format": 2, "sid": "S-1", "name": "a", "password": "p"}"#)
+            .unwrap_err();
+        assert!(
+            e.contains("format 2, which this version does not know"),
+            "{e}"
+        );
+        for bad in [
+            &b"alice\0pw"[..],
+            br#"{"sid": "S-1", "name": "a", "password": "p"}"#,
+            br#"{"format": 1, "name": "a", "password": "p"}"#,
+            br#"{"format": 1, "sid": "S-1", "name": "", "password": "p"}"#,
+        ] {
+            assert!(
+                Secret::read(bad).is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // The owner's password is named as the owner's, not as the
+        // command account's.
+        assert_eq!(
+            (OWNER_SECRET_FILE, RUN_SECRET_FILE),
+            ("owner-password.dpapi", "run-account.dpapi")
+        );
         let p = new_password();
         assert!(p.len() >= 32 && p.starts_with("Nn1-"), "{p}");
         assert_ne!(p, new_password());
@@ -1773,7 +2141,7 @@ pub(crate) mod tests {
         sys.calls.borrow_mut().clear();
         let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
         let calls = sys.calls();
         let staged = calls.iter().position(|c| c.starts_with("stage vault"));
         let stopped = calls.iter().position(|c| c == "stop");
@@ -1787,7 +2155,7 @@ pub(crate) mod tests {
         *sys.vault_fails.borrow_mut() = true;
         sys.calls.borrow_mut().clear();
         sys.types("alice's");
-        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
         assert!(
             !sys.calls().iter().any(|c| c == "stop"),
@@ -1797,7 +2165,7 @@ pub(crate) mod tests {
         // With the keys in files it goes on.
         std::fs::write(l.paths.config_file(), "").unwrap();
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
     }
 
     /// A stopped service is started to put its entries aside where it may
@@ -1821,7 +2189,7 @@ pub(crate) mod tests {
         sys.stop().unwrap();
         sys.calls.borrow_mut().clear();
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
         let calls = sys.calls();
         assert!(
             !calls.iter().any(|c| c.starts_with("stage vault")),
@@ -1835,14 +2203,14 @@ pub(crate) mod tests {
             sys.stop().unwrap();
             sys.calls.borrow_mut().clear();
             sys.types("alice's");
-            install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+            install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
             assert!(started_then_staged(&sys), "{config}: {:?}", sys.calls());
             // A service that does not start: nerve keeps its password.
             sys.stop().unwrap();
             sys.starts.set(false);
             sys.calls.borrow_mut().clear();
             sys.types("alice's");
-            let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
             assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
             assert!(
                 !sys.calls().iter().any(|c| c.starts_with("reset")),
@@ -1856,7 +2224,7 @@ pub(crate) mod tests {
         sys.service.set(Some(true));
         *sys.vault_fails.borrow_mut() = true;
         sys.types("alice's");
-        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("would be lost"), "{e}");
         *sys.vault_fails.borrow_mut() = false;
         // An uninstall that keeps the data does not start a node the owner
@@ -1906,12 +2274,12 @@ pub(crate) mod tests {
         };
         // Nothing put aside: refused, and the way past is named.
         broken(&sys);
-        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains(crate::service::SECRETS_KEPT), "{e}");
         // The flag goes on and says what goes.
         broken(&sys);
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", true, &mut out).unwrap();
+        install(&l, &sys, &exe, true, &mut out).unwrap();
         let said = String::from_utf8_lossy(&out);
         assert!(said.contains("are lost"), "{said}");
         // What an earlier run put aside in full waits for the next start.
@@ -1919,7 +2287,7 @@ pub(crate) mod tests {
         assert!(crate::secrets::vault::staged_all(&l.paths));
         broken(&sys);
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let said = String::from_utf8_lossy(&out);
         assert!(said.contains("put aside already"), "{said}");
         assert!(
@@ -1955,7 +2323,7 @@ pub(crate) mod tests {
         sys.service.set(Some(true));
         sys.stop_fails.set(true);
         sys.types("alice's");
-        let e = install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("did not stop"), "{e}");
         assert!(sys.calls().iter().any(|c| c.starts_with("stage vault")));
         assert!(!crate::secrets::vault::staged_all(&l.paths));
@@ -1967,7 +2335,7 @@ pub(crate) mod tests {
         // A stop that works keeps the stage for the new service.
         sys.stop_fails.set(false);
         sys.types("alice's");
-        install(&l, &sys, &exe, "alice", false, &mut Vec::new()).unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
         assert!(sys.calls().iter().any(|c| c == "stop"));
         assert!(crate::secrets::vault::staged_all(&l.paths));
     }
@@ -1982,7 +2350,7 @@ pub(crate) mod tests {
         std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("made the user nerve,"), "{out}");
         assert!(out.contains("Password of alice"), "{out}");
@@ -2051,21 +2419,34 @@ pub(crate) mod tests {
             out.contains("registered the source nerve-node in the Windows Event Log"),
             "{out}"
         );
-        // The folders are nerve's; the program is in place.
+        // The folders are nerve's (its SID), the administrators own them,
+        // and the folder above is made first; the program is in place.
         let secured = sys.secured.borrow().clone();
+        let nerve = format!(
+            "O:BAD:P(A;OICI;FA;;;S-1-5-21-1-2-3-{})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+            sys.account(USER).unwrap().unwrap().uid
+        );
         assert_eq!(
             secured,
-            [&l.home, &l.paths.config_dir, &l.paths.state_dir]
-                .map(|d| (d.clone(), Some(USER.to_string())))
+            [&l.home, &l.paths.config_dir, &l.paths.state_dir].map(|d| (d.clone(), nerve.clone()))
         );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 1.0.0\n");
         // The password is stored, not in clear.
-        let file = l.paths.config_dir.join(SECRET_FILE);
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
         let blob = std::fs::read(&file).unwrap();
         assert!(!blob.windows(7).any(|w| w == b"alice's"));
         assert_eq!(
-            parse_secret(&sys.unprotect(&blob).unwrap()),
-            Some(("alice".into(), "alice's".into()))
+            Secret::read(&sys.unprotect(&blob).unwrap()),
+            Ok(Secret {
+                sid: "S-1-5-21-1-2-3-1001".into(),
+                name: "alice".into(),
+                password: "alice's".into(),
+            })
+        );
+        // nerve-run's is stored by its SID too.
+        assert_eq!(
+            stored_secret(&sys, &l, RUN_SECRET_FILE).unwrap().sid,
+            format!("S-1-5-21-1-2-3-{}", run.uid)
         );
         let a = audit_events(&l);
         assert_eq!(a.len(), 1);
@@ -2080,7 +2461,7 @@ pub(crate) mod tests {
         let aside = l.bin.with_file_name("nerve-node.x1y2.del");
         std::fs::write(&aside, "old").unwrap();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         assert!(!aside.exists());
         // The old program is removed, or moved aside where the Event Log
         // holds it, before the new one takes its place: written over, a
@@ -2112,7 +2493,7 @@ pub(crate) mod tests {
             .push(("bob".into(), "bob's".into()));
         sys.types("bob's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "bob", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("bob is the owner of the node now, in place of alice"),
@@ -2123,7 +2504,7 @@ pub(crate) mod tests {
             Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()))
         );
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("bob".into(), "bob's".into()))
         );
     }
@@ -2139,13 +2520,15 @@ pub(crate) mod tests {
         sys.types("new");
         let exe = l.bin.clone();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("Password of alice"), "{out}");
         assert!(out.contains("the program is at"), "{out}");
-        let blob = std::fs::read(l.paths.config_dir.join(SECRET_FILE)).unwrap();
+        let blob = std::fs::read(l.paths.config_dir.join(OWNER_SECRET_FILE)).unwrap();
         assert_eq!(
-            parse_secret(&sys.unprotect(&blob).unwrap()).unwrap().1,
+            Secret::read(&sys.unprotect(&blob).unwrap())
+                .unwrap()
+                .password,
             "new"
         );
         // Each of these leaves the node without an account, and install
@@ -2158,32 +2541,43 @@ pub(crate) mod tests {
         sys.passwords
             .borrow_mut()
             .push(("carol".into(), "carol's".into()));
-        for (who, typed, why) in [
-            ("bob", "wrong", "the password of bob is wrong"),
-            ("ghost", "", "there is no local account ghost"),
-            ("nerve", "", "node's own user"),
-            ("nerve-run", "", "the commands' own user"),
-            ("carol", "carol's", "carol could open"),
-            ("a:b", "", "not an account name"),
+        // The installing account by its SID: an account that only has its
+        // name (alice's, for the SID of an account deleted since) is not it.
+        for (rid, who, typed, why) in [
+            (1002, "bob", "wrong", "the password of bob is wrong"),
+            (1999, "ghost", "", "there is no local account ghost"),
+            (1003, "carol", "carol's", "carol could open"),
+            (1998, "a:b", "", "not an account name"),
+            (
+                1099,
+                "alice",
+                "",
+                "the local account alice is not the owner",
+            ),
         ] {
-            let l = layout(&d.path().join(who.replace(':', "_")));
+            let l = layout(&d.path().join(format!("{rid}")));
+            *sys.installer.borrow_mut() = Some((format!("S-1-5-21-1-2-3-{rid}"), who.into()));
             if !typed.is_empty() {
                 sys.types(typed);
             }
             let mut out = Vec::new();
-            install(&l, &sys, &exe, who, false, &mut out).unwrap();
+            install(&l, &sys, &exe, false, &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("no commands as you"), "{who}: {out}");
             assert!(out.contains(why), "{who}: {out}");
-            assert!(!l.paths.config_dir.join(SECRET_FILE).exists(), "{who}");
+            assert!(
+                !l.paths.config_dir.join(OWNER_SECRET_FILE).exists(),
+                "{who}"
+            );
             // The command account is there all the same.
             assert!(l.paths.config_dir.join(RUN_SECRET_FILE).exists(), "{who}");
         }
         // An administrator is taken, with a warning.
         let l = layout(&d.path().join("admin"));
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()));
         sys.types("bob's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "bob", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("Warning: bob is in the group Administrators")
@@ -2191,9 +2585,209 @@ pub(crate) mod tests {
             "{out}"
         );
         assert_eq!(
-            stored(&sys, &l, SECRET_FILE),
+            stored(&sys, &l, OWNER_SECRET_FILE),
             Some(("bob".into(), "bob's".into()))
         );
+    }
+
+    /// An owner named as Windows names a local account set up offline, with
+    /// a blank and an umlaut, is taken as any other: its password is
+    /// stored, by its SID, and saved again from the app (windows-1).
+    #[test]
+    fn an_owner_with_a_blank_and_an_umlaut_in_the_name_is_taken() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        sys.accounts
+            .borrow_mut()
+            .push(account("Max Müller", 1005, ""));
+        sys.passwords
+            .borrow_mut()
+            .push(("Max Müller".into(), "max's".into()));
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1005".into(), "Max Müller".into()));
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        sys.types("max's");
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("run commands as Max Müller"), "{out}");
+        assert!(!out.contains("no commands as you"), "{out}");
+        assert_eq!(
+            stored_secret(&sys, &l, OWNER_SECRET_FILE),
+            Some(Secret {
+                sid: "S-1-5-21-1-2-3-1005".into(),
+                name: "Max Müller".into(),
+                password: "max's".into(),
+            })
+        );
+        assert_eq!(
+            save_owner_password(&l.paths, &sys, "max's").unwrap(),
+            "Max Müller"
+        );
+        // A blank one says why it cannot be used.
+        assert_eq!(
+            save_owner_password(&l.paths, &sys, "").unwrap_err(),
+            BLANK_PASSWORD
+        );
+    }
+
+    /// An owner of a domain or of Microsoft Entra ID is refused by its SID,
+    /// also where a local account has its name: the install changes
+    /// nothing, and the app's password is not stored for the local account
+    /// (windows-3, Q1).
+    #[test]
+    fn an_owner_of_a_domain_is_refused_by_its_sid() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for sid in [
+            "S-1-5-21-9-8-7-1001",
+            "S-1-12-1-1-2-3-4",
+            "S-1-5-21-1-2-30-1001",
+        ] {
+            *sys.installer.borrow_mut() = Some((sid.into(), "alice".into()));
+            sys.types("alice's");
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert_eq!(e, not_local("alice"), "{sid}");
+            assert!(sys.calls().is_empty(), "{sid}: {:?}", sys.calls());
+            assert!(!l.paths.config_dir.exists(), "{sid}");
+            sys.typed.borrow_mut().clear();
+        }
+        // A node whose owner is one (installed before) takes no password
+        // for the local alice.
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1001".into(), "alice".into()));
+        let l = installed(d.path(), &sys, "1.0.0");
+        let file = l.paths.config_dir.join(OWNER_SECRET_FILE);
+        std::fs::remove_file(&file).unwrap();
+        sys.put_owner("S-1-5-21-9-8-7-1001").unwrap();
+        let e = save_owner_password(&l.paths, &sys, "alice's").unwrap_err();
+        assert_eq!(e, not_local("alice"));
+        assert!(!file.exists());
+        // The SID decides before the name: a name of another directory need
+        // not be one this machine takes.
+        assert_eq!(
+            usable_owner(&sys, "S-1-12-1-1-2-3-4", "max.mustermann@corp.example").unwrap_err(),
+            not_local("max.mustermann@corp.example")
+        );
+    }
+
+    /// The system's own account owns no node, and the refusal does not call
+    /// it an account of a domain: an install run as SYSTEM (a deployment
+    /// tool's) learns what is wrong.
+    #[test]
+    fn the_system_is_refused_as_an_owner_without_naming_a_domain() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        *sys.installer.borrow_mut() = Some(("S-1-5-18".into(), "SYSTEM".into()));
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert!(
+            e.starts_with("SYSTEM is not a local account of this machine"),
+            "{e}"
+        );
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+    }
+
+    /// The node's own accounts are not taken as its owner, whoever names them.
+    #[test]
+    fn the_node_s_own_accounts_do_not_own_it() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for name in [USER, RUN_USER] {
+            *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), name.into()));
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert!(e.contains("cannot own it"), "{name}: {e}");
+            assert_eq!(sys.owner().unwrap(), None, "{name}");
+        }
+    }
+
+    /// A silent install has no input: that is no blank password, and the
+    /// owner is not told to give the account one.
+    #[test]
+    fn the_end_of_the_input_is_no_blank_password() {
+        assert_eq!(
+            password_of_line(0, ""),
+            Err("no password given: the input ended".into())
+        );
+        assert_eq!(password_of_line(1, "\n"), Err(BLANK_PASSWORD.into()));
+        assert_eq!(password_of_line(2, "\r\n"), Err(BLANK_PASSWORD.into()));
+        assert_eq!(password_of_line(5, "pw 1\r\n"), Ok("pw 1".into()));
+    }
+
+    /// The owner's password under its old name is deleted by the install and
+    /// by saving a new one, not kept sealed for good.
+    #[test]
+    fn the_old_file_of_the_owner_s_password_is_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let old = l.paths.config_dir.join(OLD_OWNER_SECRET_FILE);
+        std::fs::write(&old, "sealed").unwrap();
+        let mut steps = Steps {
+            done: Vec::new(),
+            out: &mut Vec::new(),
+        };
+        forget_old_owner_password(&l.paths, &mut steps);
+        assert!(!old.exists());
+        assert!(
+            steps.done.iter().any(|d| d.contains(OLD_OWNER_SECRET_FILE)),
+            "{:?}",
+            steps.done
+        );
+        // The install goes through it too.
+        std::fs::write(&old, "sealed").unwrap();
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        sys.types("alice's");
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+        assert!(!old.exists());
+        std::fs::write(&old, "sealed").unwrap();
+        save_owner_password(&l.paths, &sys, "alice's").unwrap();
+        assert!(!old.exists());
+    }
+
+    /// The SID decides who is local: this machine's and one number more.
+    #[test]
+    fn a_local_sid_is_the_machine_s_and_a_number() {
+        let m = "S-1-5-21-1-2-3";
+        assert_eq!(local_rid("S-1-5-21-1-2-3-1001", m), Some(1001));
+        assert_eq!(local_rid(&local_sid(m, 500), m), Some(500));
+        for other in [
+            "S-1-5-21-1-2-30-1001",
+            "S-1-5-21-9-8-7-1001",
+            "S-1-12-1-1-2-3-4",
+            "S-1-5-21-1-2-3",
+            "S-1-5-21-1-2-3-1001-5",
+            "S-1-5-21-1-2-3-x",
+        ] {
+            assert_eq!(local_rid(other, m), None, "{other}");
+        }
+        let alice = account("alice", 1001, "");
+        assert_eq!(
+            owner_by_sid("S-1-5-21-1-2-3-1001", "alice", m, Some(alice.clone())),
+            Ok(Some(alice.clone()))
+        );
+        assert!(
+            owner_by_sid("S-1-5-21-1-2-3-1099", "alice", m, Some(alice.clone()))
+                .unwrap_err()
+                .contains("is not the owner")
+        );
+        assert_eq!(
+            owner_by_sid("S-1-5-21-9-8-7-1001", "alice", m, Some(alice)),
+            Err(not_local("alice"))
+        );
+        assert_eq!(owner_by_sid("S-1-5-21-1-2-3-7", "x", m, None), Ok(None));
     }
 
     /// The command account is the install's own: one of that name it did
@@ -2227,7 +2821,7 @@ pub(crate) mod tests {
         ] {
             let l = layout(&d.path().join(why.len().to_string()));
             sys.types("alice's");
-            let e = install(&l, sys, &exe, "alice", false, &mut Vec::new()).unwrap_err();
+            let e = install(&l, sys, &exe, false, &mut Vec::new()).unwrap_err();
             assert!(e.contains(why), "{e}");
             assert!(!sys.calls().iter().any(|c| c.starts_with("put ")), "{e}");
             assert_eq!(sys.profile_service.get(), None, "{e}");
@@ -2240,6 +2834,119 @@ pub(crate) mod tests {
         );
     }
 
+    /// A folder of the node's that another account made before the install
+    /// (any standard account may make one in `ProgramData`, and keeps it
+    /// as its owner) is refused before anything changes, the audit log
+    /// included, with what to do; so is a folder above them that is not
+    /// SYSTEM's or the administrators' (security-1, windows-2). Uninstall's
+    /// kept folders are refused the same way.
+    #[test]
+    fn install_refuses_folders_another_account_owns() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for dir in [&l.home, &l.paths.config_dir, &l.paths.state_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+            *sys.foreign.borrow_mut() = vec![dir.clone()];
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert!(
+                e.starts_with(&format!("{}: another account", dir.display())),
+                "{e}"
+            );
+            assert!(e.ends_with("; delete it, then install again"), "{e}");
+            assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+            assert!(audit_events(&l).is_empty());
+        }
+        let above = l.home.parent().unwrap().to_path_buf();
+        *sys.foreign.borrow_mut() = vec![above.clone()];
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert!(
+            e.starts_with(&format!("{}: another account", above.display())),
+            "{e}"
+        );
+        assert!(e.ends_with("SYSTEM's or the administrators'"), "{e}");
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        // The administrators' folders are taken.
+        sys.foreign.borrow_mut().clear();
+        sys.types("alice's");
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+        // A kept folder that another account owns now is not given the
+        // administrators' DACL as if it were theirs.
+        *sys.foreign.borrow_mut() = vec![l.paths.state_dir.clone()];
+        let before = sys.calls();
+        let e = uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("another account"), "{e}");
+        // Nothing was stopped or removed first.
+        assert_eq!(sys.calls(), before);
+        assert!(sys.account(USER).unwrap().is_some());
+        assert!(sys.service.get().is_some());
+        assert!(l.bin.exists());
+    }
+
+    /// A folder made by hand before the install, with something in it that
+    /// another account owns, is refused after it was closed to everyone
+    /// else (the owner of the folder alone is not enough).
+    #[test]
+    fn install_refuses_what_another_account_put_in_the_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        for dir in [&l.paths.config_dir, &l.paths.state_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+            *sys.planted.borrow_mut() = vec![dir.clone()];
+            let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+            assert!(e.contains("another account"), "{e}");
+            assert!(e.ends_with("delete it, then install again"), "{e}");
+            // The service is not registered over it.
+            assert_eq!(sys.service.get(), None);
+        }
+        sys.planted.borrow_mut().clear();
+        sys.types("alice's");
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+    }
+
+    /// The folders the service checks at its start: config and state and
+    /// the folder they are in, once each.
+    #[test]
+    fn the_service_checks_its_folders_and_the_one_above() {
+        let l = layout(Path::new("/x"));
+        assert_eq!(
+            own_folders(&l.paths),
+            [&l.home, &l.paths.config_dir, &l.paths.state_dir].map(|d| d.clone())
+        );
+        let apart = NodePaths::new("/a/config", "/b/state");
+        assert_eq!(
+            own_folders(&apart),
+            ["/a", "/a/config", "/b", "/b/state"].map(PathBuf::from)
+        );
+        // Each is checked, and the first refusal ends the check.
+        let seen = RefCell::new(Vec::new());
+        check_folders(&l.paths, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen.borrow().len(), 3);
+        seen.borrow_mut().clear();
+        let e = check_folders(&l.paths, |d| {
+            seen.borrow_mut().push(d.to_path_buf());
+            if *d == l.paths.config_dir {
+                Err("no".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e, "no");
+        assert_eq!(*seen.borrow(), [l.home.clone(), l.paths.config_dir.clone()]);
+    }
+
     #[test]
     fn install_refuses_a_user_it_did_not_make_and_needs_an_administrator() {
         let d = tempfile::tempdir().unwrap();
@@ -2248,7 +2955,7 @@ pub(crate) mod tests {
             .borrow_mut()
             .push(account("nerve", 1010, "someone"));
         let l = layout(d.path());
-        let e = install(&l, &sys, Path::new("x"), "alice", false, &mut Vec::new()).unwrap_err();
+        let e = install(&l, &sys, Path::new("x"), false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("did not make it"), "{e}");
         assert!(!l.bin.exists());
         assert!(sys.calls().is_empty());
@@ -2259,14 +2966,7 @@ pub(crate) mod tests {
         for (what, e) in [
             (
                 "install",
-                install(
-                    &l,
-                    &not_admin,
-                    Path::new("x"),
-                    "alice",
-                    false,
-                    &mut Vec::new(),
-                ),
+                install(&l, &not_admin, Path::new("x"), false, &mut Vec::new()),
             ),
             (
                 "uninstall",
@@ -2321,10 +3021,13 @@ pub(crate) mod tests {
             std::fs::read_to_string(l.paths.config_file()).unwrap(),
             "version = 3\n"
         );
-        assert!(l.paths.config_dir.join(SECRET_FILE).exists());
+        assert!(l.paths.config_dir.join(OWNER_SECRET_FILE).exists());
         assert_eq!(
             sys.secured.borrow().clone(),
-            [&l.paths.config_dir, &l.home, &l.paths.state_dir].map(|d| (d.clone(), None))
+            [&l.paths.config_dir, &l.home, &l.paths.state_dir].map(|d| (
+                d.clone(),
+                "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
+            ))
         );
         let events: Vec<_> = audit_events(&l)
             .iter()
@@ -2634,7 +3337,7 @@ pub(crate) mod tests {
             &l.home,
             &l.paths.config_dir,
             &l.paths.state_dir,
-            &l.paths.config_dir.join(SECRET_FILE),
+            &l.paths.config_dir.join(OWNER_SECRET_FILE),
         ] {
             assert!(!p.exists(), "{p:?}");
         }
@@ -2681,7 +3384,7 @@ pub(crate) mod tests {
             l.paths.config_file(),
             l.paths.key_file("lab"),
             l.paths.config_key(),
-            l.paths.config_dir.join(SECRET_FILE),
+            l.paths.config_dir.join(OWNER_SECRET_FILE),
             l.paths.audit_log(),
         ]
         .into_iter()
@@ -2877,7 +3580,7 @@ pub(crate) mod tests {
         std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("put the Start menu entry in place"), "{out}");
         assert!(link.exists());
@@ -2935,7 +3638,7 @@ pub(crate) mod tests {
         let exe = d.path().join("Downloads/nerve-node-desktop.exe");
         std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
         let mut out = Vec::new();
-        install(&l, &sys, &exe, "alice", false, &mut out).unwrap();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(!out.contains("installed alone"), "{out}");
         assert!(!out.contains("CLI edition"), "{out}");

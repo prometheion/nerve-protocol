@@ -30,7 +30,12 @@
 //! - a command the node's folder sync refuses is in the audit log;
 //! - a granted folder that is a link to another machine is not followed
 //!   by a call of its pairing, nor left changed by the folder sync, also
-//!   while the node cannot log on as the owner.
+//!   while the node cannot log on as the owner;
+//! - a capability of node.toml and one a center added get each value of a
+//!   call as one whole argument, and run nothing more;
+//! - an owner with a blank and an umlaut in its name gets its folder
+//!   granted and its commands of user mode run as itself (installed again
+//!   by that account, `NERVE_WIN_UMLAUT_ACCOUNT` and `NERVE_WIN_UMLAUT_SID`).
 //!
 //! It needs a Windows test machine: Nerve installed as a service by the
 //! account in `NERVE_WIN_SUDO_ACCOUNT` (password in `NERVE_WIN_SUDO_PASSWORD`),
@@ -253,9 +258,11 @@ fn run_password(config: &Path) -> String {
         LocalFree(plain.pbData.cast());
         v
     };
-    let at = bytes.iter().position(|&b| b == 0).unwrap();
-    assert_eq!(&bytes[..at], b"nerve-run");
-    String::from_utf8(bytes[at + 1..].to_vec()).unwrap()
+    // JSON with its format, nerve-run's SID, its name and its password.
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["format"], 1);
+    assert_eq!(v["name"], "nerve-run");
+    v["password"].as_str().unwrap().to_string()
 }
 
 /// A logon of `name` with `password`, as `kind` (LOGON32_LOGON_*).
@@ -1475,8 +1482,8 @@ async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_
     let (g, sub) = (base.join("g"), base.join("g").join(format!("sub{id}")));
     std::fs::create_dir_all(&sub).unwrap();
 
-    let stored = paths.config_dir.join("command-account.dpapi");
-    let away = paths.config_dir.join("command-account.dpapi.away");
+    let stored = paths.config_dir.join("owner-password.dpapi");
+    let away = paths.config_dir.join("owner-password.dpapi.away");
     std::fs::rename(&stored, &away).expect("the owner's stored password");
     let _undo = NoOwner(stored, away);
     assert!(NoOwner::restart(), "Restart-Service nerve-node");
@@ -1513,5 +1520,187 @@ async fn a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_
 
     forget(&paths).await;
     let _ = Command::new("cmd").args(["/c", "rmdir"]).arg(&sub).status();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An owner whose local account is named as a Windows set up offline names
+/// it, with a blank and an umlaut (the job makes `Nerve Müller` and installs
+/// the node again as it): a folder in its profile is granted to a pairing in
+/// folder mode, which the node does as the owner, and a command of user mode
+/// runs as the owner, by its SID (windows-1). The node had refused such a
+/// name, so neither worked.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service by NERVE_WIN_UMLAUT_ACCOUNT on a Windows test machine"]
+async fn an_owner_with_a_blank_and_an_umlaut_in_the_name_runs_commands_as_itself() {
+    let paths = Layout::of(&APP).paths.clone();
+    let owner = env("NERVE_WIN_UMLAUT_ACCOUNT");
+    let owner_sid = env("NERVE_WIN_UMLAUT_SID");
+    assert!(owner.contains(' ') && !owner.is_ascii(), "{owner}");
+    let mine = owner_profile(&owner_sid).join("nerve-umlaut");
+    let _ = std::fs::remove_dir_all(&mine);
+    std::fs::create_dir_all(&mine).unwrap();
+    // The test runs as an administrator, so the folder is the administrators'
+    // and the owner (a standard account) could not change its list: the
+    // owner's own folder is the owner's, as one it made would be.
+    let granted = Command::new("icacls")
+        .arg(&mine)
+        .args(["/grant", &format!("*{owner_sid}:(OI)(CI)F")])
+        .output()
+        .unwrap();
+    assert!(granted.status.success(), "{granted:?}");
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&mine, "rwx")]).await;
+    let r = run_in(
+        &mut conn,
+        &mine,
+        "Set-Content -Path ok.txt -Value ok; Get-Content ok.txt",
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "a command in the owner's folder: {e:?}\n{}",
+            shown(&mine, &paths)
+        )
+    });
+    assert!(out(&r).contains("ok"), "{r}");
+    assert!(mine.join("ok.txt").is_file());
+
+    // User mode runs the command as the owner, whose SID it says (its name
+    // would come back in the console's code page).
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(D).expect("paired").policy.mode = nerve_policy::Mode::User;
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    let r = run_home(
+        &mut conn,
+        "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("a command as the owner: {e:?}"));
+    assert_eq!(r["exit_code"], 0, "{r}");
+    assert!(out(&r).contains(&owner_sid), "{r}");
+
+    forget(&paths).await;
+    let _ = std::fs::remove_dir_all(&mine);
+}
+
+/// A capability of node.toml and one a center added run on Windows, in the
+/// pairing's container, with each value of a call as one whole argument of
+/// their program: through PowerShell's `-File`, quotes, `&` and `;` in a
+/// value reach the script as they are and run nothing (node-2, inv-3). A
+/// template that `cmd` would read again is refused when the center adds it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service on a Windows test machine"]
+async fn a_capability_s_value_is_one_argument_on_windows() {
+    let paths = Layout::of(&APP).paths.clone();
+    let owner_sid = env("NERVE_TEST_SID");
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive + "\\nerve-p1-caps");
+    let _ = std::fs::remove_dir_all(&base);
+    owners_folder(&base, &owner_sid);
+    // How many arguments came, and the first: one line the test compares.
+    // The script uses no cmdlet: in the container PowerShell may not load
+    // its modules by itself, and a -File script has no start that does.
+    let script = base.join("echo.ps1");
+    std::fs::write(
+        &script,
+        "[Console]::Out.WriteLine(('{0}|{1}' -f $args.Count, $args[0]))\r\n",
+    )
+    .unwrap();
+    let powershell = std::path::Path::new(&std::env::var("SystemRoot").unwrap())
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let command = [
+        powershell.display().to_string(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        // A machine may allow no scripts by default (a Windows client does).
+        "-ExecutionPolicy".into(),
+        "Bypass".into(),
+        "-File".into(),
+        script.display().to_string(),
+        "{text}".into(),
+    ];
+    let params = json!({"type": "object", "properties": {"text": {"type": "string"}},
+                        "required": ["text"], "additionalProperties": false});
+    let toml = format!(
+        "[[capability]]\nname = \"p1o.echo\"\neffect = \"read\"\nplatform = \"windows\"\ncommand = {}\nparams = '{}'\n",
+        serde_json::to_string(&command).unwrap(),
+        params
+    );
+    let owners = nerve_policy::NodeConfig::parse(&toml).expect("the owner's capability");
+    // The node takes the owner's capability before the link comes.
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.capabilities = owners.capabilities.clone();
+        Ok(())
+    })
+    .await
+    .expect("the owner's capability");
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&base, "r")]).await;
+    nerve_node::cli::edit(&paths, |cfg| {
+        let e = cfg.center_mut(D).expect("paired");
+        e.settings = nerve_policy::config::SettingsGrant::Write;
+        // An action that names no path needs its `on` in folder mode. The
+        // center's own capability gets its `on` after it added it: the node
+        // refuses an addition under a rule set before.
+        e.policy
+            .caps
+            .insert("p1o".into(), nerve_policy::config::CapSetting::On);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+
+    // The center adds one of its own; one through cmd is refused.
+    let mut own = json!({"name": "p1c.echo", "effect": "read", "platform": "windows",
+                         "command": command, "params": params});
+    let added = call(&mut conn, "settings", "cap-add", json!({"capability": own})).await;
+    added.unwrap_or_else(|e| panic!("the center's capability: {e:?}"));
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.center_mut(D)
+            .expect("paired")
+            .policy
+            .caps
+            .insert("p1c".into(), nerve_policy::config::CapSetting::On);
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
+    own["name"] = json!("p1c.cmd");
+    own["command"] = json!(["cmd.exe", "/c", "echo", "{text}"]);
+    let e = call(&mut conn, "settings", "cap-add", json!({"capability": own}))
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.contains("-File script.ps1 {text}"),
+        "{}",
+        e.message
+    );
+
+    for value in [
+        r#"a" & whoami & rem ""#,
+        "hi; whoami",
+        "x&whoami",
+        "$(whoami)",
+        r#"say "it" | whoami"#,
+        r"C:\path with\blank\",
+    ] {
+        for (cap, action) in [("p1o", "echo"), ("p1c", "echo")] {
+            let r = call(&mut conn, cap, action, json!({"text": value}))
+                .await
+                .unwrap_or_else(|e| panic!("{cap}.{action} with {value:?}: {e:?}"));
+            let said = r.as_str().map_or_else(|| out(&r), str::to_string);
+            assert_eq!(said.trim_end(), format!("1|{value}"), "{cap}.{action}: {r}");
+            assert!(!said.to_lowercase().contains("nerve-run"), "{r}");
+        }
+    }
+
+    forget(&paths).await;
+    nerve_node::cli::edit(&paths, |cfg| {
+        cfg.capabilities.clear();
+        Ok(())
+    })
+    .await
+    .expect("the owner's edit");
     let _ = std::fs::remove_dir_all(&base);
 }

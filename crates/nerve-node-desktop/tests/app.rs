@@ -1247,6 +1247,14 @@ fn the_app_drives_the_cli_end_to_end() {
     assert!(perm.get_owner_password_open());
     assert_eq!(perm.get_owner_password_then(), "setup");
     assert_eq!(store.get_setup_step(), 1);
+    // A blank password is not passed over without a word: Windows takes
+    // none (inv-1).
+    perm.invoke_owner_password_save();
+    assert_eq!(
+        perm.get_owner_password_error(),
+        nerve_node::account::BLANK_PASSWORD
+    );
+    assert!(perm.get_owner_password_open());
     assert_ne!(
         config(&paths).center("studio-center").unwrap().policy.mode,
         nerve_policy::Mode::User,

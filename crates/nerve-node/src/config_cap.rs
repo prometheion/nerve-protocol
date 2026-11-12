@@ -6,8 +6,11 @@
 //! The installed Linux node runs each one as `nerve-run`, held to the
 //! folders like that account's commands. A node run by hand has no
 //! `nerve-run`, so it offers none; an action with the owner's rights comes
-//! from a program the owner allows (crate::provider). Windows reads them and
-//! offers none yet.
+//! from a program the owner allows (crate::provider). The installed Windows
+//! node runs each one as `nerve-run` in the pairing's container; a program
+//! that would read a value again as commands there (`cmd`, PowerShell
+//! without `-File`) is refused when the capability is added
+//! (nerve_policy's `windows_reread`).
 //!
 //! A center with the settings grant `write` adds capabilities of the same
 //! shape to its own entry (`settings.cap-add`, `cap-edit`, `cap-rm`): they
@@ -1271,6 +1274,15 @@ command = ["sensors", "-l"]
         ] {
             assert!(from_sent(&bad, 60).is_err(), "{bad}");
         }
+        // A template Windows would read again as commands (node-2, Q9).
+        let reread = from_sent(
+            &json!({"name": "a.b", "effect": "read", "platform": "windows",
+                    "command": ["cmd", "/c", "echo", "{text}"],
+                    "params": {"type": "object", "properties": {"text": {"type": "string"}},
+                               "required": ["text"], "additionalProperties": false}}),
+            60,
+        );
+        assert!(reread.unwrap_err().contains("on Windows"));
         let full = from_sent(
             &json!({"name": "a.b", "effect": "read", "command": ["id"], "result": "text",
                     "platform": "linux", "timeout_secs": 60, "summary": "Who."}),

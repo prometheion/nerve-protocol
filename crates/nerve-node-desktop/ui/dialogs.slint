@@ -682,8 +682,10 @@ export component OwnerPasswordDialog inherits Dialog {
     close => {
         Perm.owner-password-open = false;
     }
+    // An empty password is saved too, so the app says why Windows takes
+    // none (src/app/perm.rs).
     enter => {
-        if (Perm.owner-password != "" && !Perm.owner-password-busy) {
+        if (!Perm.owner-password-busy) {
             Perm.owner-password-save();
         }
     }
@@ -714,7 +716,6 @@ export component OwnerPasswordDialog inherits Dialog {
         Button {
             text: "Save";
             kind: ButtonKind.primary;
-            enabled: Perm.owner-password != "";
             busy: Perm.owner-password-busy;
             clicked => {
                 Perm.owner-password-save();

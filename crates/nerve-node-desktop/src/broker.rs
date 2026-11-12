@@ -70,23 +70,23 @@ fn output_of(v: &Value) -> Output {
 /// The broker's side: answers the requests on `input` with `exe`, the
 /// program itself, until `input` ends; then ends what still runs. With the
 /// SID of the app's user (Windows), its commands take that user as the one
-/// who asked ([`nerve_node::cli::DESKTOP_USER_SID`]).
+/// who asked ([`nerve_node::cli::DESKTOP_USER_SID_ARG`]), as an argument:
+/// a variable would be one the account's unelevated programs may set.
 pub fn serve(
     input: impl Read,
     output: Box<dyn Write + Send>,
     exe: PathBuf,
     app_user_sid: Option<&str>,
 ) {
-    let env: Arc<Vec<(String, String)>> = Arc::new(
+    let named: Arc<Vec<String>> = Arc::new(
         app_user_sid
             .map(|sid| {
-                (
-                    nerve_node::cli::DESKTOP_USER_SID.to_string(),
-                    sid.to_string(),
-                )
+                vec![
+                    nerve_node::cli::DESKTOP_USER_SID_ARG.to_string(),
+                    sid.into(),
+                ]
             })
-            .into_iter()
-            .collect(),
+            .unwrap_or_default(),
     );
     let out: Out = Arc::new(Mutex::new(output));
     if !send(&out, &json!({ "hello": HELLO })) {
@@ -108,7 +108,7 @@ pub fn serve(
                 .remove(&id);
             continue;
         }
-        let args: Vec<String> = req["args"]
+        let mut args: Vec<String> = req["args"]
             .as_array()
             .into_iter()
             .flatten()
@@ -124,14 +124,29 @@ pub fn serve(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
+        // The app's user is the broker's to name. clap refuses the option
+        // given twice before the subcommand only; after it, the later one
+        // wins, so a request must not carry it at all.
+        let option = nerve_node::cli::DESKTOP_USER_SID_ARG;
+        if args
+            .iter()
+            .any(|a| a == option || a.strip_prefix(option).is_some_and(|r| r.starts_with('=')))
+        {
+            let refused = Output {
+                stderr: b"the broker names the app's user itself".to_vec(),
+                ..Output::default()
+            };
+            send(&out, &json!({ "id": id, "done": done(&refused) }));
+            continue;
+        }
+        args.splice(0..0, named.iter().cloned());
         let input = req["input"].as_str().map(str::to_string);
-        let (out, exe, env) = (out.clone(), exe.clone(), env.clone());
+        let (out, exe) = (out.clone(), exe.clone());
         if req["follow"] == true {
             let (o1, o2) = (out.clone(), out.clone());
             let follow = follow_process(
                 &exe,
                 &args,
-                &env,
                 Box::new(move |line| {
                     send(&o1, &json!({ "id": id, "line": line }));
                 }),
@@ -157,7 +172,7 @@ pub fn serve(
             continue;
         }
         std::thread::spawn(move || {
-            let o = run_process(&exe, &args, &env, input.as_deref()).unwrap_or_else(|e| Output {
+            let o = run_process(&exe, &args, input.as_deref()).unwrap_or_else(|e| Output {
                 stderr: e.into_bytes(),
                 ..Output::default()
             });
@@ -460,6 +475,15 @@ fn shut_out_the_user() -> Result<(), String> {
 /// The broker's start: `__desktop-broker`, on Windows with the pipe's name,
 /// the app's process id and the SID of the app's user. The exit code.
 pub fn main(args: &[String]) -> i32 {
+    // The commands it runs elevated take the proxy and the trusted
+    // certificates from the machine, not from the variables of the app's
+    // account, which UAC gave this process and its unelevated programs may
+    // set (windows-2); they inherit what this sets.
+    #[cfg(windows)]
+    // SAFETY: called first in `main`, before this process starts a thread.
+    unsafe {
+        nerve_node::folders::take_machine_environment()
+    };
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(_) => return 1,
@@ -864,6 +888,64 @@ mod tests {
         );
     }
 
+    /// A request cannot name the app's user, before or after the
+    /// subcommand: the broker does, and the later of two options wins.
+    #[test]
+    fn a_request_cannot_name_the_apps_user() {
+        let (req_r, mut req_w) = pipe();
+        let (ans_r, ans_w) = pipe();
+        // Nothing must run at all.
+        let t = std::thread::spawn(move || {
+            serve(
+                req_r,
+                Box::new(ans_w),
+                PathBuf::from("/nonexistent/program"),
+                Some("S-1-5-21-1-2-3-1001"),
+            )
+        });
+        for (id, args) in [
+            (
+                1,
+                json!([
+                    "--json",
+                    "install",
+                    "--desktop-user-sid",
+                    "S-1-5-21-1-2-3-1003"
+                ]),
+            ),
+            (
+                2,
+                json!([
+                    "--json",
+                    "install",
+                    "--desktop-user-sid=S-1-5-21-1-2-3-1003"
+                ]),
+            ),
+            (
+                3,
+                json!(["--desktop-user-sid", "S-1-5-21-1-2-3-1003", "status"]),
+            ),
+        ] {
+            writeln!(req_w, "{}", json!({"id": id, "args": args})).unwrap();
+        }
+        drop(req_w);
+        let lines: Vec<Value> = BufReader::new(ans_r)
+            .lines()
+            .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+            .collect();
+        t.join().unwrap();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        for l in &lines[1..] {
+            assert!(
+                l["done"]["stderr"]
+                    .as_str()
+                    .unwrap()
+                    .contains("names the app's user itself"),
+                "{l}"
+            );
+        }
+    }
+
     /// The broker's commands, run once or followed, take the app's user as
     /// the one who asked when the broker was given that user's SID (the
     /// broker on Windows, which may run as another account), and only
@@ -880,9 +962,10 @@ mod tests {
             .spawn()
             .unwrap();
         let mut input = sh.stdin.take().unwrap();
-        let var = nerve_node::cli::DESKTOP_USER_SID;
+        // The command says its arguments and whether the variable the app's
+        // user used to come in is set: it must not be.
         input
-            .write_all(format!("#!/bin/sh\necho \"${{{var}-none}}\"\n").as_bytes())
+            .write_all(b"#!/bin/sh\necho \"$* ${NERVE_DESKTOP_USER_SID-unset}\"\n")
             .unwrap();
         drop(input);
         assert!(sh.wait().unwrap().success());
@@ -909,8 +992,11 @@ mod tests {
             t.join().unwrap();
             said
         };
-        assert_eq!(got(Some("S-1-5-21-1-2-3-1001")), ["S-1-5-21-1-2-3-1001"; 2]);
-        assert_eq!(got(None), ["none"; 2]);
+        assert_eq!(
+            got(Some("S-1-5-21-1-2-3-1001")),
+            ["--desktop-user-sid S-1-5-21-1-2-3-1001 --json x unset"; 2]
+        );
+        assert_eq!(got(None), ["--json x unset"; 2]);
     }
 
     /// pkexec runs, and what it says when it does not start the broker

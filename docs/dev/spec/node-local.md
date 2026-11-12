@@ -8,7 +8,7 @@ same way and so the owner knows what each setting does.
 
 | What | Default | Override |
 |---|---|---|
-| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows, on the installed node, also `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
+| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows, on the installed node, also `owner-password.dpapi` and `run-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_NODE_CONFIG_DIR` |
 | control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_NODE_STATE_DIR` |
 
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
@@ -592,7 +592,12 @@ string as it is, a number or boolean as JSON text); an argument left out or
 null drops its element. A value that starts with `-` in an element before the
 first literal `--` is refused `invalid_args`, as the program would read it as
 an option. No shell reads the argv: the node starts the program itself
-(through the shim where it confines it), never through sudo or as root.
+(through the shim where it confines it), never through sudo or as root. On
+Windows the argv becomes one command line quoted by the C runtime's rules;
+an entry whose program reads that line again as commands (`cmd`, a `.bat` or
+`.cmd` file, PowerShell without `-File` and a fixed script before the first
+`{field}`) is refused when a `{field}` goes into it, by its owner's config as
+by `settings.cap-add`.
 
 Which ones a node offers, with `provider: "config"`, one capability per
 `cap` (crate::config_cap): on Linux only, those whose `platform` takes it,

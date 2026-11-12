@@ -494,12 +494,12 @@ mod win {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    /// The shortcut in the Start menu of all users.
+    /// The shortcut in the Start menu of all users: in the `ProgramData`
+    /// Windows keeps, not the one the variable of an elevated process
+    /// names, which the account's unelevated programs may set (windows-2).
     fn shortcut() -> PathBuf {
-        let data = std::env::var_os("ProgramData")
-            .filter(|v| !v.is_empty())
-            .map_or_else(|| PathBuf::from("C:\\ProgramData"), PathBuf::from);
-        data.join("Microsoft\\Windows\\Start Menu\\Programs\\Nerve.lnk")
+        nerve_node::folders::program_data()
+            .join("Microsoft\\Windows\\Start Menu\\Programs\\Nerve.lnk")
     }
 
     fn classes() -> String {

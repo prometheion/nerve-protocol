@@ -253,6 +253,102 @@ fn program_named(program: &str, platform: Platform) -> bool {
     }
 }
 
+/// Why `command` would run a value of its placeholders as a command on
+/// Windows, where each program reads its own command line: `cmd` and a
+/// batch file (which Windows runs through `cmd`) read it again as commands,
+/// and so does PowerShell what follows `-Command` (its default in Windows
+/// PowerShell) or `-EncodedCommand`. PowerShell with `-File` and a fixed
+/// script before the first placeholder gets each value as one argument of
+/// the script. `None` where no value goes to such a program (node-2, Q9).
+fn windows_reread(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let first = command
+        .iter()
+        .skip(1)
+        .position(|e| placeholder(e).is_some())?
+        + 1;
+    let file = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+    let field = placeholder(&command[first]).unwrap_or_default();
+    let safe = format!(
+        "put the command in a script and run it with `powershell -NoProfile -File script.ps1 {{{field}}}`, which gets each value as one argument"
+    );
+    if stem == "cmd" || file.ends_with(".bat") || file.ends_with(".cmd") {
+        return Some(format!(
+            "on Windows {program} reads its command line again as commands, so a value with `&` would run more than this capability; {safe}"
+        ));
+    }
+    if stem != "powershell" && stem != "pwsh" {
+        return None;
+    }
+    // PowerShell's options take `-` or `/` and may be shortened. Only pwsh
+    // knows `--`; Windows PowerShell 5.1 takes such a word as the command.
+    let option = |e: &str| {
+        let name = e
+            .strip_prefix("--")
+            .filter(|_| stem == "pwsh")
+            .or_else(|| e.strip_prefix(['-', '/']))?
+            .to_ascii_lowercase();
+        (!name.is_empty()).then_some(name)
+    };
+    // Only PowerShell's own options may come before `-File`. The first word
+    // that is neither an option nor the value of one that takes a value
+    // starts the command, whose text is everything after it, `-File`
+    // included (`Get-ChildItem -File -Path {path}`).
+    let mut at = 1;
+    while at < first {
+        let Some(n) = option(&command[at]) else { break };
+        if "commandwithargs".starts_with(&n)
+            || n == "cwa"
+            || n == "e"
+            || n == "ec"
+            || n.len() > 1 && "encodedcommand".starts_with(&n)
+        {
+            break;
+        }
+        if n == "f" || n == "file" {
+            // The script is fixed: the value is one of its arguments.
+            if at + 1 < first {
+                return None;
+            }
+            break;
+        }
+        // Windows PowerShell 5.1 takes an option from its shortest form on
+        // (`-nop`, not `-n`), and it does not know pwsh's `-SettingsFile`
+        // at all: a form it does not know starts the command, with `-File`
+        // and its value as the command's text. So each option is taken from
+        // its minimum form only, and only those that both programs have.
+        // `-NoExit` is left out: it would keep PowerShell waiting.
+        let from = |min: &str, full: &str| n.len() >= min.len() && full.starts_with(&n);
+        let takes = from("ex", "executionpolicy")
+            || from("w", "windowstyle")
+            || from("v", "version")
+            || from("inp", "inputformat")
+            || from("o", "outputformat")
+            || from("config", "configurationname")
+            || from("wo", "workingdirectory")
+            || ["ep", "if", "of", "wd"].contains(&n.as_str());
+        let alone = from("nop", "noprofile")
+            || from("nol", "nologo")
+            || from("noni", "noninteractive")
+            || from("st", "sta")
+            || from("mta", "mta");
+        match (takes, alone) {
+            (true, false) => at += 2,
+            (false, true) => at += 1,
+            // Not an option of PowerShell's, or a short form of two.
+            _ => break,
+        }
+    }
+    Some(format!(
+        "on Windows {program} without -File and a script before {{{field}}} reads its arguments as a script, so a value with `;` would run more than this capability; {safe}"
+    ))
+}
+
 impl ConfigCapability {
     /// The capability and the action of `name`.
     pub fn split(&self) -> (&str, &str) {
@@ -409,13 +505,20 @@ impl ConfigCapability {
                 "the argument {unused} of params is in no element; name it as {{{unused}}}"
             ));
         }
+        if self.platform.takes("windows")
+            && let Some(why) = windows_reread(&self.command)
+        {
+            return Err(why);
+        }
         Ok(())
     }
 
     /// The program and its arguments for a call with `args`, which fit
     /// `params` already: each placeholder becomes the argument's value as
     /// one element (a string as it is, a number or boolean as JSON writes
-    /// it), never read by a shell; one left out (or null) is left out. A
+    /// it), never read by a shell (on Windows quoted for the C runtime's
+    /// rules; a program that reads its line again is refused, see
+    /// `windows_reread`); one left out (or null) is left out. A
     /// value that starts with `-` before the first `--` element is refused:
     /// the program would read it as an option.
     pub fn argv(&self, args: &Map<String, Value>) -> Result<Vec<String>, String> {
@@ -1003,6 +1106,179 @@ mod tests {
         );
         assert!(line.is_ascii(), "{line}");
         assert_eq!(crate::config::form::command_words(&line).unwrap(), words);
+    }
+
+    /// On Windows a template whose program reads a value again as commands
+    /// is refused, naming the safe form: cmd, a batch file, and PowerShell
+    /// without `-File` and a fixed script before the value (`-Command`, its
+    /// default, `-EncodedCommand`, `-CommandWithArgs`). A Linux one, or one
+    /// with no value in it, is not (node-2, Q9).
+    #[test]
+    fn a_windows_template_that_reads_a_value_again_is_refused() {
+        let text = json!({"type": "object", "properties": {"text": {"type": "string"}},
+                          "required": ["text"], "additionalProperties": false});
+        let check = |command: &[&str], platform: Platform| {
+            let mut c = cap(command, text.clone());
+            c.platform = platform;
+            c.validate(60)
+        };
+        for command in [
+            &["cmd", "/c", "echo", "{text}"][..],
+            &["C:\\Windows\\System32\\CMD.EXE", "/c", "echo", "{text}"],
+            &["C:\\tools\\run.bat", "{text}"],
+            &["run.CMD", "--", "{text}"],
+            &[
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Write-Output",
+                "{text}",
+            ],
+            &["powershell", "-NoProfile", "Write-Output", "{text}"],
+            &["pwsh", "-c", "Write-Output", "{text}"],
+            &["pwsh.exe", "/Command", "Write-Output", "{text}"],
+            &[
+                "powershell",
+                "-EncodedCommand",
+                "VwByAGkAdABlAA==",
+                "{text}",
+            ],
+            &[
+                "pwsh",
+                "-CommandWithArgs",
+                "Write-Output $args[0]",
+                "{text}",
+            ],
+            &["powershell", "-Command", "x", "-File", "s.ps1", "{text}"],
+            // The script itself would be the value.
+            &["powershell", "-File", "{text}"],
+            // A word before -File starts the command, and -File is then the
+            // text of that command, or a cmdlet's own switch.
+            &["powershell", "x", "-File", "s.ps1", "{text}"],
+            &[
+                "powershell",
+                "-NoProfile",
+                "Get-ChildItem",
+                "-File",
+                "-Path",
+                "{text}",
+            ],
+            &[
+                "powershell",
+                "-NoProfile",
+                "Get-ChildItem",
+                "-File",
+                "-Recurse",
+                "{text}",
+            ],
+            &[
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "x",
+                "-f",
+                "s.ps1",
+                "{text}",
+            ],
+            // A value-less option does not take the next word as its value.
+            &["powershell", "-NoProfile", "x", "-File", "s.ps1", "{text}"],
+            // Not an option of PowerShell's.
+            &["powershell", "-Foo", "-File", "s.ps1", "{text}"],
+            // Forms Windows PowerShell 5.1 does not know as options, which
+            // start the command, `-File` and its value included: a prefix
+            // shorter than the minimum form, an option of pwsh only, and
+            // one that keeps PowerShell waiting.
+            &["powershell", "--NoProfile", "-File", "s.ps1", "{text}"],
+            &["powershell", "--File", "s.ps1", "{text}"],
+            &["powershell", "-n", "-File", "s.ps1", "{text}"],
+            &["powershell", "-no", "-File", "s.ps1", "{text}"],
+            &["powershell", "-non", "-File", "s.ps1", "{text}"],
+            &["powershell", "-m", "-File", "s.ps1", "{text}"],
+            &["powershell", "-mt", "-File", "s.ps1", "{text}"],
+            &["powershell", "-con", "x", "-File", "s.ps1", "{text}"],
+            &["powershell", "-conf", "x", "-File", "s.ps1", "{text}"],
+            &[
+                "powershell",
+                "-SettingsFile",
+                "x",
+                "-File",
+                "s.ps1",
+                "{text}",
+            ],
+            &["pwsh", "-sett", "x", "-File", "s.ps1", "{text}"],
+            &["powershell", "-NoExit", "-File", "s.ps1", "{text}"],
+        ] {
+            for platform in [Platform::Windows, Platform::Any] {
+                let e = check(command, platform).unwrap_err();
+                assert!(e.contains("on Windows"), "{command:?}: {e}");
+                assert!(
+                    e.ends_with("run it with `powershell -NoProfile -File script.ps1 {text}`, which gets each value as one argument"),
+                    "{command:?}: {e}"
+                );
+            }
+            assert!(check(command, Platform::Linux).is_ok(), "{command:?}");
+        }
+        for command in [
+            &[
+                "powershell.exe",
+                "-NoProfile",
+                "-File",
+                "C:\\tools\\echo.ps1",
+                "{text}",
+            ][..],
+            &[
+                "pwsh",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-f",
+                "echo.ps1",
+                "--",
+                "{text}",
+            ],
+            &[
+                "powershell",
+                "-NoLogo",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ep",
+                "Bypass",
+                "-File",
+                "echo.ps1",
+                "{text}",
+            ],
+            // The minimum forms 5.1 knows.
+            &[
+                "powershell",
+                "-nop",
+                "-nol",
+                "-noni",
+                "-st",
+                "-ex",
+                "Bypass",
+                "-w",
+                "Hidden",
+                "-config",
+                "x",
+                "-File",
+                "echo.ps1",
+                "{text}",
+            ],
+            &["C:\\tools\\echo.exe", "{text}"],
+            &["cmdkey", "/list", "{text}"],
+        ] {
+            assert!(check(command, Platform::Windows).is_ok(), "{command:?}");
+        }
+        // A center's capability is checked the same way, as it is added and
+        // as the config is loaded.
+        let mut centers = cap(&["cmd", "/c", "echo", "{text}"], text.clone());
+        centers.platform = Platform::Windows;
+        let e = validate_center(&[centers]).unwrap_err();
+        assert!(e.contains("on Windows"), "{e}");
+        // Without a value nothing is read again.
+        let mut fixed = cap(&["cmd", "/c", "ver"], Value::Null);
+        fixed.platform = Platform::Windows;
+        assert!(fixed.validate(60).is_ok());
     }
 
     #[test]

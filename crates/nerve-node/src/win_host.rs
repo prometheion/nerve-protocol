@@ -123,6 +123,20 @@ pub fn firewall_runs() -> bool {
         .is_some_and(|st| st.dwCurrentState == SERVICE_RUNNING)
 }
 
+/// One of the folders the service checks at its start
+/// (crate::winsvc::own_folders): there, and SYSTEM's or the administrators'.
+pub fn check_own_folder(dir: &Path) -> Result<(), String> {
+    if dir.symlink_metadata().is_err() {
+        return Err(format!(
+            "{}: it is not there; {}",
+            dir.display(),
+            crate::winsvc::INSTALL_AGAIN
+        ));
+    }
+    nerve_service::win::dacl::admins_folder(dir)
+        .map_err(|e| format!("{e}; delete it, then install Nerve again with its installer"))
+}
+
 /// The node's service with every right; an error when it is not there.
 fn the_service() -> Result<Scm, String> {
     the_service_for(SERVICE_ALL_ACCESS)
@@ -459,8 +473,37 @@ impl WinSystem for WinHost {
         }))
     }
 
-    fn secure(&self, dir: &Path, owner: Option<&str>) -> Result<(), String> {
-        nerve_service::win::dacl::secure(dir, owner)
+    fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
+        nerve_service::win::dacl::private_folder(dir, sddl)
+    }
+
+    fn admins_own(&self, dir: &Path) -> Result<(), String> {
+        nerve_service::win::dacl::admins_folder(dir)
+    }
+
+    fn nothing_foreign_below(&self, dir: &Path, node_sid: &str) -> Result<(), String> {
+        // The node's own account, and the accounts deleted since (the node
+        // made them, and a kept folder still names them), may own what is
+        // below; a live account of someone else may not.
+        let allowed = |owner: &[u8]| {
+            nerve_service::win::sid::sid_text(owner).is_ok_and(|text| {
+                text == node_sid || matches!(win_user::lookup_sid(&text), Ok(None))
+            })
+        };
+        match nerve_service::win::dacl::foreign_below(dir, allowed)? {
+            None => Ok(()),
+            Some((path, owner)) => {
+                let who = nerve_service::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
+                Err(format!(
+                    "{}: another account ({who}) owns it, and could open it again; delete it, then install again",
+                    path.display()
+                ))
+            }
+        }
+    }
+
+    fn machine_sid(&self) -> Result<String, String> {
+        win_user::machine_sid()
     }
 
     fn service(&self) -> Result<Option<bool>, String> {
@@ -555,16 +598,14 @@ impl WinSystem for WinHost {
     }
 
     fn owner_sid(&self) -> Option<(String, String)> {
-        // The app's broker names its user; the name says the SID is one.
-        if let Ok(sid) = std::env::var(crate::cli::DESKTOP_USER_SID)
-            && let Ok(name) = win_user::name_of_sid(&sid)
-        {
-            return Some((sid, name));
-        }
-        let sid = win_user::own_sid().ok()?;
-        let sid = sid_text(&sid).ok()?;
-        let name = win_user::current_user().ok()?;
-        Some((sid, name))
+        crate::winsvc::app_or_own_owner(
+            crate::cli::desktop_user(),
+            |sid| win_user::name_of_sid(sid).ok(),
+            || {
+                let sid = sid_text(&win_user::own_sid().ok()?).ok()?;
+                Some((sid, win_user::current_user().ok()?))
+            },
+        )
     }
 
     fn owner(&self) -> Result<Option<(String, String)>, String> {
@@ -699,13 +740,10 @@ impl WinSystem for WinHost {
             // A console without echo does not end the line.
             let _ = writeln!(out);
         }
-        r.map_err(|e| e.to_string())?;
-        let password = line.trim_end_matches(['\n', '\r']).to_string();
+        let read = r.map_err(|e| e.to_string())?;
+        let password = crate::winsvc::password_of_line(read, &line);
         line.clear();
-        if password.is_empty() {
-            return Err("no password given".into());
-        }
-        Ok(password)
+        password
     }
 
     fn check_logon(
@@ -1006,7 +1044,10 @@ mod tests {
 
     /// The folder gets the DACL, what is in it inherits it, and a junction
     /// below it is not followed: the folder it leads to keeps its own. A
-    /// junction in place of the folder is refused. Needs an administrator.
+    /// junction in place of the folder is refused, and the administrators
+    /// own the folder. Needs an elevated administrator; the folder is given
+    /// to the administrators first, since the built-in Administrator (CI)
+    /// owns what it makes itself, which `secure` refuses.
     #[test]
     fn secure_sets_the_dacl_and_follows_no_junction() {
         let d = tempfile::tempdir().unwrap();
@@ -1019,13 +1060,32 @@ mod tests {
         junction(&top.join("j"), &outside);
         let before = icacls(&outside.join("f"));
         let me = win_user::current_user().unwrap();
-        WinHost.secure(&top, Some(&me)).unwrap();
+        let sid = sid_text(&win_user::own_sid().unwrap()).unwrap();
+        let given = std::process::Command::new("icacls")
+            .arg(&top)
+            .args(["/setowner", "*S-1-5-32-544"])
+            .output()
+            .unwrap();
+        assert!(given.status.success(), "{given:?}");
+        WinHost
+            .secure(&top, &crate::winsvc::folder_dacl(Some(&sid)))
+            .unwrap();
         let acl = icacls(&top.join("sub/f"));
         assert!(acl.contains(&format!("\\{me}:(I)(F)")), "{acl}");
-        assert_eq!(acl.lines().filter(|l| l.contains(":(")).count(), 3, "{acl}");
+        // The DACL's three entries are what the file inherits. An entry of
+        // its own that the file got where it was made stays (CI's built-in
+        // Administrator gets one from the runner's temp folder).
+        assert_eq!(
+            acl.lines().filter(|l| l.contains(":(I)")).count(),
+            3,
+            "{acl}"
+        );
         assert_eq!(icacls(&outside.join("f")), before);
+        WinHost.admins_own(&top).unwrap();
         junction(&d.path().join("link"), &outside);
-        let e = WinHost.secure(&d.path().join("link"), None).unwrap_err();
+        let e = WinHost
+            .secure(&d.path().join("link"), &crate::winsvc::folder_dacl(None))
+            .unwrap_err();
         assert!(e.contains("is a link"), "{e}");
         assert_eq!(icacls(&outside.join("f")), before);
     }
@@ -1034,7 +1094,12 @@ mod tests {
     /// text.
     #[test]
     fn dpapi_round_trip() {
-        let plain = crate::winsvc::secret("alice", "not a real password");
+        let plain = crate::winsvc::Secret {
+            sid: "S-1-5-21-1-2-3-1001".into(),
+            name: "alice".into(),
+            password: "not a real password".into(),
+        }
+        .text();
         let sealed = win_user::protect(&plain).unwrap();
         assert!(!sealed.windows(4).any(|w| w == b"real"));
         assert_eq!(win_user::unprotect(&sealed).unwrap(), plain);
@@ -1153,5 +1218,15 @@ mod tests {
         assert_eq!(a.uid, win_user::own_uid());
         assert!(a.home.is_dir(), "{:?}", a.home);
         assert_eq!(win_user::lookup("no-such-account-x").unwrap(), None);
+    }
+
+    /// A local account's SID is the machine's and its number: this
+    /// account's (a local one, as on the test machines and the runner).
+    #[test]
+    fn a_local_account_s_sid_is_the_machine_s() {
+        let machine = WinHost.machine_sid().unwrap();
+        assert!(machine.starts_with("S-1-5-21-"), "{machine}");
+        let own = sid_text(&win_user::own_sid().unwrap()).unwrap();
+        assert_eq!(crate::winsvc::local_sid(&machine, win_user::own_uid()), own);
     }
 }

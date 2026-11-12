@@ -283,6 +283,14 @@ pub const NO_COMMANDS_AS_YOU: &str = "no commands as you";
 pub const NO_ACCOUNT_INSTALL: &str =
     "enter your password under Settings › General › Account for commands in the app";
 
+/// Why the owner's Windows password cannot be blank: Windows lets no
+/// program log on to an account without one (inv-1). The app says it too,
+/// for a password left empty.
+pub const BLANK_PASSWORD: &str = "Windows lets no program log on to an account without a password, so the node cannot run commands as you: give your Windows account a password (Settings › Accounts › Sign-in options › Password), then enter it here";
+
+/// What to do about an owner without a password ([`BLANK_PASSWORD`]).
+pub const BLANK_PASSWORD_FIX: &str = "give the account a password (Settings › Accounts › Sign-in options › Password), then save it under Settings › General › Account for commands";
+
 /// The mode of `home` when other accounts may list or enter it (`o+r` or
 /// `o+x`): `nerve-run` is another account, and reads there what anyone may.
 #[cfg(unix)]

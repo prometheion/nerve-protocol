@@ -545,6 +545,49 @@ pub fn admins_folder(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The first thing below `dir` (links are not followed) whose owner is none
+/// of SYSTEM, the administrators and this process's own account, and that
+/// `allowed` does not take either; with its owner. What a folder made by
+/// hand in `ProgramData` carries, when a standard account put something in
+/// it first: that account owns it, and may open it again whatever the
+/// folder's list says now.
+#[cfg(windows)]
+pub fn foreign_below(
+    dir: &Path,
+    allowed: impl Fn(&[u8]) -> bool,
+) -> Result<Option<(std::path::PathBuf, Vec<u8>)>, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+    };
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let at = |e: String| format!("{}: {e}", d.display());
+        for entry in std::fs::read_dir(&d).map_err(|e| at(e.to_string()))? {
+            let entry = entry.map_err(|e| at(e.to_string()))?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|e| at(e.to_string()))?;
+            // The item itself, not what a link there points to.
+            let f = std::fs::OpenOptions::new()
+                .access_mode(READ_CONTROL)
+                .share_mode(SHARE_ALL)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(owner) =
+                foreign_owner(&f, true).map_err(|e| format!("{}: {e}", path.display()))?
+                && !allowed(&owner)
+            {
+                return Ok(Some((path, owner)));
+            }
+            if kind.is_dir() {
+                todo.push(path);
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Opens the folder `dir` itself, not what a link there points to, for
 /// `access`; `None` when nothing is there. A link or a file is refused.
 #[cfg(windows)]
@@ -881,6 +924,68 @@ mod tests {
         );
         assert!(owner.contains("Administrators"), "{owner}");
         assert!(admins_folder(&d.path().join("none")).is_err());
+    }
+
+    /// The walk below a folder finds what another account owns, takes what
+    /// `allowed` takes, and does not follow a junction out of the folder
+    /// (round 3, security 1). Setting an owner needs an administrator.
+    #[cfg(windows)]
+    #[test]
+    fn the_walk_below_a_folder_finds_what_another_account_owns() {
+        use crate::win::sid::is_admin;
+        if !is_admin() {
+            eprintln!("note: not an administrator, so no owner can be set; nothing checked");
+            return;
+        }
+        let run = |program: &str, args: &[&str]| {
+            let o = std::process::Command::new(program)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{program} {args:?}: {o:?}");
+        };
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("top");
+        let sub = top.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("ours"), b"x").unwrap();
+        // Owned by this account or the administrators: nothing foreign.
+        assert_eq!(foreign_below(&top, |_| false).unwrap(), None);
+
+        // A junction to a folder with a foreign file is not followed.
+        let outside = d.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let theirs = outside.join("theirs");
+        std::fs::write(&theirs, b"x").unwrap();
+        run(
+            "icacls",
+            &[&theirs.display().to_string(), "/setowner", "*S-1-5-32-545"],
+        );
+        run(
+            "cmd",
+            &[
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                &top.join("link").display().to_string(),
+                &outside.display().to_string(),
+            ],
+        );
+        assert_eq!(foreign_below(&top, |_| false).unwrap(), None);
+
+        // A file another account owns, deep below, is found with its owner,
+        // unless `allowed` takes that owner.
+        let planted = sub.join("planted");
+        std::fs::write(&planted, b"x").unwrap();
+        run(
+            "icacls",
+            &[&planted.display().to_string(), "/setowner", "*S-1-5-32-545"],
+        );
+        let (path, owner) = foreign_below(&top, |_| false).unwrap().unwrap();
+        assert_eq!(path, planted);
+        assert_eq!(crate::win::sid::sid_text(&owner).unwrap(), "S-1-5-32-545");
+        assert_eq!(foreign_below(&top, |_| true).unwrap(), None);
     }
 
     /// The folder that is held gets the private list through the held

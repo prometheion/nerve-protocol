@@ -3,7 +3,7 @@
 //! (with SYSTEM and the administrators) may open the node's config, keys and
 //! state; every command runs as the owner instead, the account that ran
 //! `install`, logged on with the password `install` stored with DPAPI in the
-//! config folder ([`crate::winsvc::SECRET_FILE`]). To start a process with that
+//! config folder ([`crate::winsvc::OWNER_SECRET_FILE`]). To start a process with that
 //! account's token the service keeps two privileges,
 //! SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege; the command
 //! gets none of them, since it gets the account's own token.
@@ -20,9 +20,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_LOGON_FAILURE, ERROR_LOGON_TYPE_NOT_GRANTED, ERROR_NOT_ALL_ASSIGNED,
-    ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE, LUID, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ACCOUNT_RESTRICTION, ERROR_LOGON_FAILURE, ERROR_LOGON_TYPE_NOT_GRANTED,
+    ERROR_NOT_ALL_ASSIGNED, ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LUID, LocalFree, SetHandleInformation,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::NetManagement::{
     LG_INCLUDE_INDIRECT, LOCALGROUP_USERS_INFO_0, NERR_UserNotFound, NetApiBufferFree,
@@ -293,6 +294,64 @@ pub(crate) fn own_sid() -> io::Result<Vec<u8>> {
     }
 }
 
+/// The SID of this machine's own accounts (`S-1-5-21-…`), as its security
+/// policy names it: every local account's SID is it and the account's
+/// number, an account of a domain or of Microsoft Entra ID has another.
+pub fn machine_sid() -> Result<String, String> {
+    use windows_sys::Win32::Foundation::STATUS_SUCCESS;
+    use windows_sys::Win32::Security::Authentication::Identity::{
+        LSA_HANDLE, LSA_OBJECT_ATTRIBUTES, LsaClose, LsaFreeMemory, LsaNtStatusToWinError,
+        LsaOpenPolicy, LsaQueryInformationPolicy, POLICY_ACCOUNT_DOMAIN_INFO,
+        POLICY_VIEW_LOCAL_INFORMATION, PolicyAccountDomainInformation,
+    };
+    static SID: OnceLock<String> = OnceLock::new();
+    if let Some(s) = SID.get() {
+        return Ok(s.clone());
+    }
+    let said = |st| {
+        // SAFETY: plain conversion.
+        let code = unsafe { LsaNtStatusToWinError(st) };
+        format!(
+            "cannot read the SID of this machine: {}",
+            io::Error::from_raw_os_error(code as i32)
+        )
+    };
+    // SAFETY: zeroed object attributes are what LsaOpenPolicy takes.
+    let attrs: LSA_OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
+    let mut policy: LSA_HANDLE = 0;
+    // SAFETY: this machine's policy, a place for the handle; every account
+    // may read this part of it.
+    let st = unsafe {
+        LsaOpenPolicy(
+            std::ptr::null(),
+            &attrs,
+            POLICY_VIEW_LOCAL_INFORMATION as u32,
+            &mut policy,
+        )
+    };
+    if st != STATUS_SUCCESS {
+        return Err(said(st));
+    }
+    let mut buf: *mut std::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: an open policy and a place for the buffer, which LSA
+    // allocates; its SID is copied before it is freed, and the policy is
+    // closed once.
+    let sid = unsafe {
+        let st = LsaQueryInformationPolicy(policy, PolicyAccountDomainInformation, &mut buf);
+        LsaClose(policy);
+        if st != STATUS_SUCCESS {
+            return Err(said(st));
+        }
+        let sid = (*buf.cast::<POLICY_ACCOUNT_DOMAIN_INFO>()).DomainSid;
+        let bytes =
+            std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize).to_vec();
+        LsaFreeMemory(buf);
+        bytes
+    };
+    let text = crate::win_host::sid_text(&sid)?;
+    Ok(SID.get_or_init(|| text).clone())
+}
+
 /// The name of the account this process runs as.
 pub fn current_user() -> Result<String, String> {
     let mut buf = vec![0u16; 257];
@@ -306,9 +365,10 @@ pub fn current_user() -> Result<String, String> {
 }
 
 /// Looks `name` up among the local accounts of this machine. `uid` is the
-/// last part of its SID, `home` its profile folder.
+/// last part of its SID, `home` its profile folder. A name is taken as
+/// Windows names accounts: with blanks and letters beyond ASCII.
 pub fn lookup(name: &str) -> Result<Option<Account>, String> {
-    if !nerve_policy::config::valid_account_name(name) {
+    if !nerve_policy::config::valid_windows_account_name(name) {
         return Err(format!("{name:?} is not an account name"));
     }
     let mut buf: *mut u8 = std::ptr::null_mut();
@@ -331,8 +391,10 @@ pub fn lookup(name: &str) -> Result<Option<Account>, String> {
         let uid = rid(info.usri23_user_sid);
         let found = from_wide(info.usri23_name);
         let home = profile_dir(info.usri23_user_sid).unwrap_or_else(|| {
-            let drive = std::env::var_os("SystemDrive").unwrap_or_else(|| "C:".into());
-            PathBuf::from(format!("{}\\Users", drive.to_string_lossy())).join(&found)
+            // The Windows folder's drive, not the variable's.
+            let windows = nerve_service::win::folders::windows_dir();
+            let drive = nerve_service::win::folders::drive_of(&windows.to_string_lossy());
+            PathBuf::from(format!("{drive}\\Users")).join(&found)
         });
         Account {
             name: found,
@@ -346,6 +408,31 @@ pub fn lookup(name: &str) -> Result<Option<Account>, String> {
     // SAFETY: the buffer NetUserGetInfo allocated, freed once.
     unsafe { NetApiBufferFree(buf.cast()) };
     Ok(Some(a))
+}
+
+/// The local account whose SID is `sid`, found by its name and taken only
+/// where it has that SID (crate::winsvc::owner_by_sid): the owner the
+/// service's key names is that SID, not whichever account has its name. An
+/// owner of a domain or of Microsoft Entra ID is refused by its SID.
+pub fn lookup_sid(sid: &str) -> Result<Option<Account>, String> {
+    let machine = machine_sid()?;
+    if crate::winsvc::local_rid(sid, &machine).is_none() {
+        let name = name_of_sid(sid).unwrap_or_else(|_| sid.to_string());
+        return Err(crate::winsvc::not_local(&name));
+    }
+    let Ok(name) = name_of_sid(sid) else {
+        return Ok(None);
+    };
+    crate::winsvc::owner_by_sid(sid, &name, &machine, lookup(&name)?)
+}
+
+/// The owner of the installed node, by the SID the service's key names
+/// ([`lookup_sid`]); `None` where it names none.
+pub fn service_owner() -> Result<Option<Account>, String> {
+    match crate::win_host::owner()? {
+        Some(sid) => lookup_sid(&sid),
+        None => Ok(None),
+    }
 }
 
 /// The profile folder of the account with `sid`, where Windows keeps it;
@@ -575,6 +662,12 @@ fn logon_as(name: &str, password: &str, kind: LOGON32_LOGON) -> Result<Token, (S
                         "the password of {name} is wrong, or {name} cannot log on with a password"
                     )
                 }
+                // Windows lets no program log on to an account without a
+                // password, and none to one a policy restricts.
+                Some(ERROR_ACCOUNT_RESTRICTION) => format!(
+                    "Windows does not let {name} log on here: an account without a password cannot, nor one a policy restricts; {}",
+                    crate::account::BLANK_PASSWORD_FIX
+                ),
                 // Administrators may log on as a batch job unless a policy
                 // took it from them.
                 Some(ERROR_LOGON_TYPE_NOT_GRANTED) if kind == LOGON32_LOGON_BATCH => format!(
@@ -921,7 +1014,7 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     let again = crate::account::NO_ACCOUNT_INSTALL;
     let file = SECRET
         .get()
-        .map(|d| d.join(crate::winsvc::SECRET_FILE))
+        .map(|d| d.join(crate::winsvc::OWNER_SECRET_FILE))
         .ok_or_else(|| format!("no password of {} is stored; {again}", account.name))?;
     let blob = match std::fs::read(&file) {
         Ok(b) => b,
@@ -939,19 +1032,22 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
             account.name
         )
     })?;
-    let (name, password) = crate::winsvc::parse_secret(&plain)
-        .ok_or_else(|| format!("the stored password cannot be read; {again}"))?;
-    if !name.eq_ignore_ascii_case(&account.name) {
+    let stored = crate::winsvc::Secret::read(&plain)
+        .map_err(|e| format!("the stored password cannot be read: {e}; {again}"))?;
+    // The account by its SID, not by a name another account may have
+    // since.
+    let sid = crate::winsvc::local_sid(&machine_sid()?, account.uid);
+    if stored.sid != sid {
         return Err(format!(
-            "the stored password is {name}'s, not {}'s; {again}",
-            account.name
+            "the stored password is {}'s, not {}'s; {again}",
+            stored.name, account.name
         ));
     }
     // A password that failed stays failed until the owner saves another:
     // Windows locks the account after a few wrong ones, and every sync of
     // the folders' entries logs the owner on.
     let t = nerve_transport::sync::lock(&STALE)
-        .attempt(&blob, || logon_counted(&name, &password))
+        .attempt(&blob, || logon_counted(&account.name, &stored.password))
         .map_err(|e| format!("{e}; {again}"))?;
     let t = Arc::new(t);
     *cached = Some((account.name.clone(), Instant::now(), t.clone()));
@@ -964,7 +1060,7 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
 pub fn owner_password_state() -> &'static str {
     let blob = SECRET
         .get()
-        .and_then(|d| std::fs::read(d.join(crate::winsvc::SECRET_FILE)).ok());
+        .and_then(|d| std::fs::read(d.join(crate::winsvc::OWNER_SECRET_FILE)).ok());
     crate::winsvc::owner_password_state(blob.as_deref(), &nerve_transport::sync::lock(&STALE))
 }
 
@@ -983,10 +1079,11 @@ pub fn run_logon() -> Result<Token, String> {
     let blob = std::fs::read(&file).map_err(|e| format!("{}: {e}; {again}", file.display()))?;
     let plain = unprotect(&blob)
         .map_err(|e| format!("the stored password of {name} cannot be decrypted ({e}); {again}"))?;
-    let (stored, password) = crate::winsvc::parse_secret(&plain)
-        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+    let stored = crate::winsvc::Secret::read(&plain)
+        .ok()
+        .filter(|s| s.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| format!("the stored password of {name} cannot be read; {again}"))?;
-    batch_logon(&stored, &password).map_err(|e| format!("{e}; {again}"))
+    batch_logon(&stored.name, &stored.password).map_err(|e| format!("{e}; {again}"))
 }
 
 #[repr(C)]
@@ -1543,7 +1640,7 @@ mod tests {
     use super::*;
 
     /// The account of a SID as text, which the desktop app's broker hands
-    /// to the commands (crate::cli::DESKTOP_USER_SID): this process's own.
+    /// to the commands (`--desktop-user-sid`): this process's own.
     #[test]
     fn a_sid_names_its_account() {
         let sid = own_sid().unwrap();
