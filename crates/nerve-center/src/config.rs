@@ -107,6 +107,10 @@ pub fn refuse_old_names(
     ))
 }
 
+// The doc comments are the help: the first paragraph is an option's or a
+// command's line on the pages of `--help`, the rest what `help <command>`
+// adds to it, so it does not say the line again. The variables are named
+// once under the options ([`VARIABLES`]), not after each.
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "nerve-center",
@@ -122,73 +126,102 @@ pub struct Args {
     help: Option<bool>,
     /// The state folder (identity, paired machines, statistics)
     ///
-    /// The state folder (identity, paired nodes, statistics); the installed center's for `owner-token`, `status`, `backup` and `restore` where it is installed.
+    /// Where the center is installed, `owner-token`, `status`, `backup` and `restore` take the installed center's.
     #[arg(
         long,
         env = "NERVE_CENTER_STATE_DIR",
+        hide_env = true,
+        value_name = "FOLDER",
         global = true,
         help_heading = "Advanced"
     )]
     pub state_dir: Option<PathBuf>,
-    /// The center name shown to nodes and in the web UI.
-    #[arg(long, env = "NERVE_CENTER_NAME", global = true)]
+    /// The center name shown to nodes and in the web UI
+    ///
+    /// It replaces the name set in the web UI each time the center starts.
+    #[arg(long, env = "NERVE_CENTER_NAME", hide_env = true, global = true)]
     pub name: Option<String>,
-    /// Where nodes reach the center.
+    /// Where nodes reach the center
     #[arg(
         long,
         env = "NERVE_CENTER_LISTEN",
+        hide_env = true,
+        value_name = "ADDRESS",
         default_value = "0.0.0.0:7443",
         global = true
     )]
     pub listen: String,
-    /// The URL in pairing links; `{port}` in it is the listening port
-    #[arg(long, env = "NERVE_CENTER_PUBLIC_URL", global = true)]
+    /// The URL in pairing links; {port} in it is the node port
+    ///
+    /// Set it when nodes reach the center under another name than its host name, such as a DNS name or a forwarded port. Without it: https://<host name>:<node port>.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_PUBLIC_URL",
+        hide_env = true,
+        value_name = "URL",
+        global = true
+    )]
     pub public_url: Option<String>,
     /// Serve nodes over plain HTTP, on a loopback --listen only
     ///
-    /// Serve nodes over plain HTTP; only on a loopback `--listen`, for tests and nodes on the same machine.
-    #[arg(long, env = "NERVE_CENTER_PLAIN_LOOPBACK", help_heading = "Advanced")]
+    /// For tests, and nodes on the same machine.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_PLAIN_LOOPBACK",
+        hide_env = true,
+        help_heading = "Advanced"
+    )]
     pub plain_loopback: bool,
-    /// The web UI address, or `off`; it asks for the owner token
+    /// The web UI address, or off
     ///
-    /// The web UI address, or `off`. It always asks for the owner token (`nerve-center owner-token`).
+    /// It always asks for the owner token, which `nerve-center owner-token` shows. Beyond loopback it uses TLS with the center's self-signed certificate.
     #[arg(
         long,
         env = "NERVE_CENTER_UI",
+        hide_env = true,
+        value_name = "ADDRESS",
         default_value = "127.0.0.1:7480",
         global = true
     )]
     pub ui: String,
     /// How harnesses reach the center: stdio, off, http or an address
     ///
-    /// How harnesses reach the center: `stdio`, `off`, `http` (127.0.0.1:7481) or an address and port for HTTP MCP.
+    /// `http` is HTTP MCP at 127.0.0.1:7481, an address and port puts it there; beyond loopback it uses TLS. The installed service runs with `http`.
     #[arg(
         long,
         env = "NERVE_CENTER_MCP",
-        value_name = "stdio|off|ADDRESS",
+        hide_env = true,
+        value_name = "MODE",
         default_value = "stdio",
         global = true
     )]
     pub mcp: McpMode,
     /// A harness token for the HTTP MCP endpoint (not a web UI login)
     ///
-    /// A harness token: a bearer token of the HTTP MCP endpoint, besides the tokens made in the web UI. It does not log in to the web UI.
+    /// A bearer token, besides those made in the web UI. Given as the flag it is in the process list; the variable is not.
     #[arg(
         long,
         env = "NERVE_CENTER_HARNESS_TOKEN",
-        hide_env_values = true,
+        hide_env = true,
+        value_name = "TOKEN",
         help_heading = "Advanced"
     )]
     pub harness_token: Option<String>,
-    /// How long `execute` waits before a call becomes a job (20s)
+    /// How long `execute` waits before a call becomes a job
     ///
-    /// How long `execute` waits for a call's result: a call still running then becomes a job, whose id `execute` answers at once (`20`, `20s` or `500ms`; 10 ms to 600 s). Keep it below your harness's own timeout for a tool call.
-    #[arg(long, env = "NERVE_CENTER_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait, help_heading = "Advanced")]
+    /// The job's id is the answer then, at once. `20`, `20s` or `500ms`, from 10 ms to 600 s; keep it below your harness's own timeout for a tool call.
+    #[arg(long, env = "NERVE_CENTER_CALL_WAIT", hide_env = true, value_name = "TIME", default_value = "20s", value_parser = crate::jobs::parse_wait, help_heading = "Advanced")]
     pub call_wait: std::time::Duration,
     /// The log level for this run (error, warn, info, debug)
     ///
-    /// The log level (error, warn, info, debug). Without it the level set in the web UI holds, info at first; with it this level holds for this run.
-    #[arg(long, env = "NERVE_CENTER_LOG", help_heading = "Advanced")]
+    /// Without it the level set in the web UI holds, info at first.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_LOG",
+        hide_env = true,
+        value_name = "LEVEL",
+        help_heading = "Advanced"
+    )]
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -200,13 +233,13 @@ pub struct Args {
 pub enum Cmd {
     /// Run the center as a service (as root or an administrator)
     ///
-    /// Install the center as a service that starts with the machine and runs under an account of its own, with MCP over HTTP (Linux with systemd, as root; Windows, in an administrator's terminal). --name, --public-url, --listen, --ui and --mcp go into its settings.
+    /// It starts with the machine and runs under an account of its own, with MCP over HTTP: on Linux with systemd, as root; on Windows, in an administrator's terminal. --name, --public-url, --listen, --ui and --mcp go into its settings file, where `set` changes them later.
     Install,
     /// Show or change the installed center's settings, and restart it
     ///
-    /// Without a setting, show the installed center's settings that `set` changes and where they are kept. With one, write its new value into the service's settings file and restart the service when it runs: `name`, `public-url`, `listen` (the node port), `ui` (an address and a port, or `off`) or `mcp` (`http`, `off`, or an address and a port). As root on Linux; on Windows, in an administrator's terminal.
+    /// Alone, it shows the settings and the file they are kept in. With a setting and a value, it writes the value into that file and restarts the service when it runs: name, public-url, listen (the node port), ui (an address and a port, or off) or mcp (http, off, or an address and a port). As root on Linux; on Windows, in an administrator's terminal.
     Set {
-        /// The setting: name, public-url, listen, ui or mcp
+        /// The setting to change
         #[arg(value_parser = set_names(), requires = "value")]
         setting: Option<String>,
         /// Its new value, like 0.0.0.0:7480 for ui
@@ -214,21 +247,21 @@ pub enum Cmd {
     },
     /// Show whether the center runs, its URLs and its machines
     ///
-    /// Show whether the center runs, its URLs, where its owner token is, and its machines; the installed center's where it is installed.
+    /// Also where its owner token is. Where the center is installed, it is the installed one's.
     Status,
     /// Show the token that logs in to the web UI
     ///
-    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or for the installed center as root (on Windows, in an administrator's terminal).
+    /// It says where the token is kept; with --new it makes a new one first. Run it as the center's user, or for the installed center as root (on Windows, in an administrator's terminal).
     OwnerToken {
         /// Make a new token in place of the old one, which stops at once
         ///
-        /// Make a new token in place of the old one: the old one stops at once, also on a running center.
+        /// A running center takes the new one at once too.
         #[arg(long)]
         new: bool,
     },
     /// Update to the latest release; the state and the settings stay
     ///
-    /// Replace the installed program with the latest release and restart the service; the state and the settings stay.
+    /// It checks the download against the release's SHA256SUMS, restarts the service, and puts the old program back when the new one does not start.
     Update {
         /// Take the new program from this file instead of downloading the latest release.
         #[arg(long, value_name = "FILE")]
@@ -236,17 +269,17 @@ pub enum Cmd {
     },
     /// Remove the service and the program; state and settings stay
     ///
-    /// Stop and remove the service, its user and the program; the state and settings folders stay.
+    /// The service's account goes with it.
     Uninstall {
         /// Delete the state and settings folders too
         ///
-        /// Delete the state and settings folders too: the center's key, its pairings and its log.
+        /// That is the center's key, its pairings and its log.
         #[arg(long)]
         purge: bool,
     },
     /// Save the center's identity and pairings to a passphrase-protected file
     ///
-    /// Write the center's identity and state (its certificate and key, the paired nodes, the harness tokens' hashes and the statistics) to a file that a passphrase protects, to keep or to move the center to another machine.
+    /// The file holds its certificate and key, the paired nodes, the harness tokens' hashes and the statistics: to keep, or to move the center to another machine.
     Backup {
         /// The file to write. It is private to you (mode 0600).
         file: PathBuf,
@@ -259,7 +292,7 @@ pub enum Cmd {
     },
     /// Restore a backup (the center must not run)
     ///
-    /// Put the identity and state of a backup in place of this center's. No center may run on the state folder.
+    /// The backup's identity and state take this center's place. A running installed service is stopped for it and started again after.
     Restore {
         /// The backup file.
         file: PathBuf,
@@ -272,12 +305,12 @@ pub enum Cmd {
     },
     /// Run as the Windows service (the service control manager starts it so)
     ///
-    /// Run the center as the Windows service `install` registered, with the settings of its `center.env`. Only the service control manager starts it so.
+    /// With the settings of the `center.env` that `install` wrote.
     #[command(hide = true)]
     Service,
     /// Print the files of the service this program installs, as JSON (for `update`)
     ///
-    /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
+    /// The files besides the program itself: `update` runs the new program so, to put them in place with it.
     #[command(hide = true)]
     ServiceFiles,
 }
@@ -322,6 +355,131 @@ pub fn set_variable(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(flag, _)| flag.trim_start_matches('-') == name)
         .map(|(_, var)| *var)
+}
+
+/// The command line as `main` parses it: [`Args`], whose `--help` and
+/// `help` print the top page of [`top_help`], and each command's own page
+/// with [`VARIABLES`] under its options.
+pub fn command() -> clap::Command {
+    use clap::CommandFactory;
+    let cmd = Args::command();
+    let top = top_help(&cmd);
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    names
+        .iter()
+        .fold(cmd, |cmd, name| {
+            cmd.mut_subcommand(name, |c| c.after_help(VARIABLES))
+        })
+        .help_template(TOP_TEMPLATE)
+        .after_help(top)
+}
+
+/// The top page of `--help` and `help`: the about line, the usage, and
+/// what [`top_help`] lists.
+const TOP_TEMPLATE: &str = "{about-with-newline}\n{usage-heading} {usage}{after-help}";
+
+/// The line under the options: each has a variable of the same name, as
+/// the installed service's settings file sets them, and clap's `[env: …]`
+/// after each would say it ten times.
+pub const VARIABLES: &str = "Each option can also be set as NERVE_CENTER_<NAME> (--public-url as NERVE_CENTER_PUBLIC_URL), as the installed service's settings file does.";
+
+/// What the center does without a command, the line of `Run` on the top
+/// page.
+const RUN_LINE: &str =
+    "Run the center for a harness, with MCP on stdin; --mcp http runs it on its own";
+
+/// Where each command stands on the top page, by what the owner wants to
+/// do. A command missing here fails a test until it is placed.
+const COMMAND_GROUPS: &[(&str, &[&str])] = &[
+    ("The service", &["install", "set", "update", "uninstall"]),
+    (
+        "The owner's commands",
+        &["status", "owner-token", "backup", "restore"],
+    ),
+];
+
+/// The commands in their groups and the options under Settings and
+/// Advanced, one line each with the default where there is one, read from
+/// the definition of `cmd`; then [`VARIABLES`] and how to read more.
+fn top_help(cmd: &clap::Command) -> String {
+    let program = cmd.get_name();
+    let mut groups = vec![("Run", vec![(program.to_string(), RUN_LINE.to_string())])];
+    for (heading, names) in COMMAND_GROUPS {
+        let lines = names
+            .iter()
+            .filter_map(|n| cmd.find_subcommand(n))
+            .map(|c| {
+                let about = c.get_about().map(ToString::to_string);
+                (c.get_name().to_string(), about.unwrap_or_default())
+            })
+            .collect();
+        groups.push((heading, lines));
+    }
+    let options: Vec<(String, String, bool)> = top_options(cmd)
+        .map(|a| {
+            let advanced = a.get_help_heading() == Some("Advanced");
+            (option_name(a), option_line(a), advanced)
+        })
+        .collect();
+    let options = [("Settings", false), ("Advanced", true)].map(|(heading, advanced)| {
+        let lines = options
+            .iter()
+            .filter(|(.., a)| *a == advanced)
+            .map(|(n, l, _)| (n.clone(), l.clone()))
+            .collect();
+        (heading, lines)
+    });
+    let mut out = String::new();
+    for list in [&groups[..], &options[..]] {
+        let width = list
+            .iter()
+            .flat_map(|(_, lines)| lines.iter().map(|(n, _): &(String, String)| n.len()))
+            .max()
+            .unwrap_or(0);
+        for (heading, lines) in list {
+            out.push_str(&format!("{heading}:\n"));
+            for (name, line) in lines {
+                out.push_str(&format!("  {name:width$}  {line}\n"));
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str(VARIABLES);
+    out.push_str(&format!(
+        "\n`{program} help <command>` says all of one command; `{program} --version` prints the version."
+    ));
+    out
+}
+
+/// The options of the top page: all but `--help` and `--version`, which
+/// its last line names.
+fn top_options(cmd: &clap::Command) -> impl Iterator<Item = &clap::Arg> {
+    cmd.get_arguments()
+        .filter(|a| !a.is_hide_set() && a.get_long().is_some_and(|l| l != "help" && l != "version"))
+}
+
+/// An option as it is written: `--ui <ADDRESS>`, `--plain-loopback`.
+fn option_name(a: &clap::Arg) -> String {
+    let long = a.get_long().unwrap_or_default();
+    match a.get_value_names().and_then(|v| v.first()) {
+        Some(value) if a.get_action().takes_values() => format!("--{long} <{value}>"),
+        _ if a.get_action().takes_values() => {
+            format!("--{long} <{}>", a.get_id().as_str().to_uppercase())
+        }
+        _ => format!("--{long}"),
+    }
+}
+
+/// An option's line: its help and, where it has one, its default.
+fn option_line(a: &clap::Arg) -> String {
+    let line = a.get_help().map(ToString::to_string).unwrap_or_default();
+    match a.get_default_values().first() {
+        Some(d) if a.get_action().takes_values() => format!("{line} ({})", d.to_string_lossy()),
+        _ => line,
+    }
 }
 
 /// The center's settings given with a command, as the owner wrote them: a
@@ -622,10 +780,10 @@ mod tests {
 
     #[test]
     fn every_command_has_its_own_help_flag() {
-        use clap::CommandFactory;
-        for c in Args::command().get_subcommands() {
+        for c in command().get_subcommands() {
             for flag in ["--help", "-h"] {
-                let e = Args::try_parse_from(["nerve-center", c.get_name(), flag])
+                let e = command()
+                    .try_get_matches_from(["nerve-center", c.get_name(), flag])
                     .expect_err("help is no run");
                 assert_eq!(
                     e.kind(),
@@ -635,6 +793,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `--help`, `-h` and `help` print one page (#229): every command in
+    /// its group and every option under Settings or Advanced, one line
+    /// each with its default; the variables once, under the options, not
+    /// `[env: …]` after each.
+    #[test]
+    fn the_top_help_is_one_line_per_command_and_option() {
+        let page = |args: &[&str]| {
+            let e = command()
+                .try_get_matches_from(std::iter::once("nerve-center").chain(args.iter().copied()))
+                .expect_err("help is no run");
+            e.render().to_string()
+        };
+        let top = page(&["--help"]);
+        assert_eq!(page(&["-h"]), top);
+        assert_eq!(page(&["help"]), top);
+        assert!(
+            !top.contains("[env:") && !top.contains("[default:"),
+            "{top}"
+        );
+        assert!(top.contains(&format!("\n{VARIABLES}\n")), "{top}");
+        for heading in [
+            "Run",
+            "The service",
+            "The owner's commands",
+            "Settings",
+            "Advanced",
+        ] {
+            assert!(top.contains(&format!("\n{heading}:\n")), "{heading}: {top}");
+        }
+        let line_of = |name: &str| {
+            let lines: Vec<&str> = top
+                .lines()
+                .filter(|l| l.split_whitespace().next() == Some(name))
+                .collect();
+            assert_eq!(lines.len(), 1, "{name}: {top}");
+            lines[0].to_string()
+        };
+        // Every command a person runs is placed in a group, once.
+        let cmd = command();
+        for c in cmd
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        {
+            let line = line_of(c.get_name());
+            assert!(
+                line.ends_with(&c.get_about().unwrap().to_string()),
+                "{line}"
+            );
+        }
+        assert!(line_of("set").contains("Show or change the installed center's settings"));
+        assert!(!top.contains("service-files"), "{top}");
+        // Every option, with its default where it has one.
+        for a in top_options(&cmd) {
+            assert!(
+                top.contains(&format!("  {}  ", option_name(a))),
+                "{}",
+                option_name(a)
+            );
+        }
+        assert!(
+            line_of("--ui").ends_with("  The web UI address, or off (127.0.0.1:7480)"),
+            "{top}"
+        );
+        assert!(line_of("--call-wait").ends_with("(20s)"), "{top}");
+        // The line under the options holds: each option has the variable
+        // NERVE_CENTER_<NAME>, its name in capitals with `_` for `-`.
+        for a in top_options(&cmd) {
+            let long = a.get_long().unwrap();
+            let want = format!("NERVE_CENTER_{}", long.to_uppercase().replace('-', "_"));
+            let env = a.get_env().map(|e| e.to_string_lossy().into_owned());
+            assert_eq!(env, Some(want), "--{long}");
+        }
+        assert!(
+            line_of("--plain-loopback").ends_with("loopback --listen only"),
+            "{top}"
+        );
+        // A command's own page has the whole text and the variables' line.
+        let set = page(&["help", "set"]);
+        assert!(set.contains("Alone, it shows the settings"), "{set}");
+        assert!(set.contains(VARIABLES) && !set.contains("[env:"), "{set}");
+        assert!(page(&["set", "--help"]).contains("Usage: nerve-center set"));
+    }
+
+    /// A long help adds to its line and does not say it again (#229): the
+    /// text after the line does not start with the line's first words.
+    #[test]
+    fn no_long_help_says_its_line_again() {
+        let first_words = |t: &str| {
+            t.split_whitespace()
+                .take(2)
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let mut said_again = Vec::new();
+        let mut check = |what: String, line: Option<String>, long: Option<String>| {
+            let (Some(line), Some(long)) = (line, long) else {
+                return;
+            };
+            let rest = long.strip_prefix(&line).unwrap_or(&long).trim();
+            if !rest.is_empty() && first_words(rest) == first_words(&line) {
+                said_again.push(format!("{what}: {rest}"));
+            }
+        };
+        let cmd = command();
+        for c in std::iter::once(&cmd).chain(cmd.get_subcommands()) {
+            check(
+                c.get_name().to_string(),
+                c.get_about().map(|a| a.to_string()),
+                c.get_long_about().map(|a| a.to_string()),
+            );
+            for a in c.get_arguments() {
+                check(
+                    format!("{} {}", c.get_name(), a.get_id()),
+                    a.get_help().map(|h| h.to_string()),
+                    a.get_long_help().map(|h| h.to_string()),
+                );
+            }
+        }
+        assert!(said_again.is_empty(), "{said_again:#?}");
     }
 
     /// One line first (plan 4.1): every command's `about` and every flag's

@@ -3,7 +3,7 @@
 //! carries MCP. `install`, `set`, `update` and `uninstall` (as root on
 //! Linux) say their steps on stdout instead, as `owner-token` says the token.
 
-use clap::{CommandFactory, FromArgMatches};
+use clap::FromArgMatches;
 
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
@@ -21,7 +21,7 @@ fn main() -> std::process::ExitCode {
     {
         return refuse(&layout, is_service, &e.to_string());
     }
-    let matches = match nerve_center::config::Args::command().try_get_matches() {
+    let matches = match nerve_center::config::command().try_get_matches() {
         Ok(m) => m,
         // `--help` and `--version` end here too, with their text.
         Err(e) if !is_service => e.exit(),
