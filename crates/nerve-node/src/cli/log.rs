@@ -180,15 +180,12 @@ pub(super) async fn audit(
             new.drain(..new.len().saturating_sub(n));
         }
         first = false;
+        let mut gone = false;
         for v in new {
             match (json, follow) {
-                (false, _) => {
-                    let _ = writeln!(out, "{}", audit_line(&v));
-                }
+                (false, _) => gone |= writeln!(out, "{}", audit_line(&v)).is_err(),
                 (true, false) => entries.push(v),
-                (true, true) => {
-                    let _ = writeln!(out, "{v}");
-                }
+                (true, true) => gone |= writeln!(out, "{v}").is_err(),
             }
         }
         shown.saw(&lines);
@@ -198,7 +195,10 @@ pub(super) async fn audit(
             }
             return Ok(());
         }
-        let _ = out.flush();
+        // The reader is gone (`| head -1`): nobody wants more.
+        if gone || out.flush().is_err() {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -286,24 +286,27 @@ pub(super) async fn log_cmd(
         lines.drain(..lines.len().saturating_sub(n));
     }
     let show = |out: &mut dyn Write, v: &Value| {
-        let _ = if json {
+        if json {
             writeln!(out, "{v}")
         } else {
             writeln!(out, "{}", log_line(v))
-        };
+        }
     };
     if json && !follow {
         let _ = writeln!(out, "{}", json!({ "entries": lines }));
         return Ok(());
     }
     for v in &lines {
-        show(out, v);
+        let _ = show(out, v);
     }
     if !follow {
         return Ok(());
     }
     loop {
-        let _ = out.flush();
+        // The reader is gone (`| head -1`): nobody wants more.
+        if out.flush().is_err() {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         let now = read(&file)?;
         if now.len() < at || !now.starts_with(&first) {
@@ -326,7 +329,9 @@ pub(super) async fn log_cmd(
         };
         let done: Vec<u8> = rest.drain(..=end).collect();
         for v in parse(&done) {
-            show(out, &v);
+            if show(out, &v).is_err() {
+                return Ok(());
+            }
         }
     }
 }
@@ -753,6 +758,49 @@ mod tests {
             ],
             "{text}"
         );
+    }
+
+    /// An output that fails after its first line.
+    struct Gone(usize);
+
+    impl Write for Gone {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.0 -= 1;
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `log --follow` ends once its output is gone (`| head -1`), not at
+    /// the end of time (round 4, correctness 1).
+    #[tokio::test]
+    async fn log_follow_ends_when_its_output_is_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let file = paths.log_file();
+        let line = |m: &str| logged(1, "info", m);
+        std::fs::write(&file, line("first")).unwrap();
+        let mut out = Gone(1);
+        let follow = log_cmd(&paths, true, None, false, true, &mut out);
+        let writer = async {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            std::io::Write::write_all(&mut f, line("second").as_bytes()).unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        };
+        tokio::select! {
+            r = follow => assert_eq!(r, Ok(())),
+            () = writer => panic!("the follow did not end"),
+        }
     }
 
     /// A line half written when `log --follow` starts is shown once it is

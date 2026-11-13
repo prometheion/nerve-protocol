@@ -24,9 +24,14 @@ impl Style {
     /// Bold and colour.
     pub const COLOR: Style = Style { color: true };
 
-    /// The style of stdout: colour only where it is a terminal.
+    /// The style of stdout: colour only where it is a terminal, or where the
+    /// owner's program told the node that its own output takes colour
+    /// ([`COLOR_ENV`]): a command the node runs for it writes to a pipe.
     pub fn stdout() -> Style {
         use std::io::IsTerminal;
+        if told_color(std::env::var(COLOR_ENV).ok().as_deref()) {
+            return Style::COLOR;
+        }
         Style::of(std::io::stdout().is_terminal() && terminal_colors(true))
     }
 
@@ -77,6 +82,16 @@ impl Style {
         };
         format!("\x1b[{code}m{text}\x1b[0m")
     }
+}
+
+/// Set to `1` by the node for a command it runs for an owner whose own
+/// output takes colour (a terminal that allows it), so the page looks the
+/// same as the one the owner gets from `sudo`.
+pub const COLOR_ENV: &str = "NERVE_OWNER_COLOR";
+
+/// Whether [`COLOR_ENV`] has the value `1`.
+fn told_color(told: Option<&str>) -> bool {
+    told == Some("1")
 }
 
 /// Whether the console takes colour codes. On Windows they are turned on
@@ -506,8 +521,12 @@ impl<'a> Said<'a> {
         let kept = std::mem::take(&mut self.page);
         let page = match page {
             Some(mut p) => {
+                // The same warning twice, once from a line and once from the
+                // page, differs only in its first letter.
                 for w in kept.warnings {
-                    p.warn(w);
+                    if !p.warnings.iter().any(|x| same_but_capital(x, &w)) {
+                        p.warn(w);
+                    }
                 }
                 for n in kept.notes {
                     p.note(n);
@@ -533,6 +552,17 @@ impl<'a> Said<'a> {
         self.out.write_all(text.as_bytes())?;
         self.out.flush()
     }
+}
+
+/// Whether `a` and `b` are one text, apart from the case of the first letter.
+fn same_but_capital(a: &str, b: &str) -> bool {
+    let lower = |t: &str| {
+        let mut c = t.chars();
+        c.next()
+            .map(|f| f.to_lowercase().chain(c).collect::<String>())
+            .unwrap_or_default()
+    };
+    lower(a) == lower(b)
 }
 
 impl Write for Said<'_> {
@@ -740,6 +770,30 @@ Next  nerve-node unlock
             String::from_utf8(out).unwrap(),
             "installed\n\nWarning  No Landlock here\n\nAnother warning\n\nWarning  The home is open\n\nA folder? ~/x\n\nNote  Kept for the end\n"
         );
+    }
+
+    /// A command the node runs for its owner has no terminal of its own; it
+    /// paints when it was told so (round 4, correctness 3).
+    #[test]
+    fn colour_is_told_by_the_variable_only_with_one() {
+        assert!(told_color(Some("1")));
+        for no in [None, Some(""), Some("0"), Some("yes")] {
+            assert!(!told_color(no), "{no:?}");
+        }
+    }
+
+    /// A warning a line said and the closing page says again in its own
+    /// words (first letter apart) is shown once (round 4, correctness 2).
+    #[test]
+    fn a_warning_the_page_repeats_is_shown_once() {
+        let mut out = Vec::new();
+        let mut said = Said::new(&mut out, Style::PLAIN);
+        writeln!(said, "Warning: this kernel is old").unwrap();
+        let mut page = Page::new("Nerve", "0.1.0");
+        page.warn("this kernel is old");
+        said.finish(Some(page)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("kernel is old").count(), 1, "{text}");
     }
 
     /// A line does nothing to the terminal: what a center sent in the error

@@ -621,8 +621,11 @@ command first becomes the folder's owner, as `owner-token` does, so it
 follows no link put there. The pipe lets in the center's account, SYSTEM
 and the administrators; an administrator other than the center's account
 may make the owner's requests only, not attach a harness. The command
-checks that the pipe belongs to the center's account (or the installed
-service's) before it sends anything. `log` reads `log.jsonl` (and
+checks that the pipe belongs to SYSTEM, the administrators or the
+center's account before it sends anything: for the installed center that
+is the service's account, not the caller's own (an administrator's
+unelevated programs run as it, and one could make the pipe while the
+service is stopped); for a center run by hand it is the caller's. `log` reads `log.jsonl` (and
 `log.jsonl.1`) in the state folder, so it works with the center stopped.
 
 ### Update

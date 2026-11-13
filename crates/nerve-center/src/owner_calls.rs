@@ -81,7 +81,7 @@ pub async fn call(
     if crate::attach::runs(state) == Some(false) {
         return Err(not_running());
     }
-    let stream = open(state)
+    let stream = open(state, installed)
         .await
         .map_err(|e| match crate::attach::runs(state) {
             Some(true) => e,
@@ -125,18 +125,31 @@ fn only_the_owner(what: &str) -> String {
 
 /// The connection to the center in `state`: its attach socket.
 #[cfg(unix)]
-async fn open(state: &Path) -> Result<tokio::net::UnixStream, String> {
+async fn open(state: &Path, _installed: bool) -> Result<tokio::net::UnixStream, String> {
     let path = crate::attach::socket_path(state);
     tokio::net::UnixStream::connect(&path)
         .await
         .map_err(|e| format!("the center does not answer on {}: {e}", path.display()))
 }
 
+/// Whether a pipe that neither SYSTEM nor the administrators own, but the
+/// account `who`, may answer: the installed center's is the service's (an
+/// administrator's own account is shared by their unelevated programs, and
+/// a program could make the pipe while the service is stopped); one run by
+/// hand in a folder of its own runs as the caller (`own`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn foreign_pipe_may_answer(who: &str, own: &str, service: &str, installed: bool) -> bool {
+    who == if installed { service } else { own }
+}
+
 /// The connection to the center in `state`: its attach pipe, once it proved
-/// to be the center's (this account's, or the installed service's), as one
-/// another account made first learns nothing.
+/// to be the center's (the installed service's, or for one run by hand this
+/// account's), as one another account made first learns nothing.
 #[cfg(windows)]
-async fn open(state: &Path) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
+async fn open(
+    state: &Path,
+    installed: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
     use nerve_service::win::pipe::{PIPE_BUSY, foreign_owner, open_identified};
     use nerve_service::win::process::user_of;
     use nerve_service::win::sid::sid_text;
@@ -153,12 +166,14 @@ async fn open(state: &Path) -> Result<tokio::net::windows::named_pipe::NamedPipe
             Err(e) => return Err(format!("the center does not answer on {name}: {e}")),
         }
     };
-    let own = user_of(None).map_err(|e| e.to_string())?;
-    let foreign = foreign_owner(client.as_raw_handle(), Some(&own))
+    let foreign = foreign_owner(client.as_raw_handle(), None)
         .map_err(|e| format!("cannot check the pipe {name}: {e}"))?;
     if let Some(owner) = foreign {
         let who = sid_text(&owner).unwrap_or_else(|e| e);
-        if who != crate::winsvc::account_sid() {
+        let own = user_of(None)
+            .map_err(|e| e.to_string())
+            .and_then(|u| sid_text(&u))?;
+        if !foreign_pipe_may_answer(&who, &own, &crate::winsvc::account_sid(), installed) {
             return Err(format!(
                 "the pipe {name} belongs to {who}, not to the center, so nothing was sent to it"
             ));
@@ -529,9 +544,14 @@ pub async fn log(
         };
         let done: Vec<u8> = rest.drain(..=end).collect();
         for l in log_lines(&done, problems) {
-            let _ = writeln!(out, "{l}");
+            // The reader is gone (`| head -1`): nobody wants more.
+            if writeln!(out, "{l}").is_err() {
+                return Ok(());
+            }
         }
-        let _ = out.flush();
+        if out.flush().is_err() {
+            return Ok(());
+        }
     }
 }
 
@@ -559,6 +579,23 @@ fn log_lines(bytes: &[u8], problems: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The installed center's pipe is the service's, never the caller's own
+    /// account (an administrator's unelevated programs run as it); a center
+    /// run by hand answers as the caller (round 4, security 1).
+    #[test]
+    fn the_installed_centers_pipe_is_not_the_callers_own() {
+        let (own, service) = ("S-1-5-21-1-2-3-1001", "S-1-5-80-9");
+        assert!(!super::foreign_pipe_may_answer(own, own, service, true));
+        assert!(super::foreign_pipe_may_answer(service, own, service, true));
+        assert!(super::foreign_pipe_may_answer(own, own, service, false));
+        assert!(!super::foreign_pipe_may_answer(
+            "S-1-5-21-1-2-3-1002",
+            own,
+            service,
+            false
+        ));
+    }
+
     use super::*;
 
     /// The commands of the installed center.
@@ -863,6 +900,47 @@ mod tests {
             "{}",
             seen.text()
         );
+    }
+
+    /// An output that fails after its first line.
+    struct Gone(usize);
+
+    impl Write for Gone {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.0 -= 1;
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `log --follow` ends once its output is gone (`| head -1`), not at
+    /// the end of time (round 4, correctness 1).
+    #[tokio::test]
+    async fn log_follow_ends_when_its_output_is_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let file = nerve_transport::log::file_in(d.path());
+        let line = |m: &str| format!("{}\n", json!({"ts": 1000, "level": "info", "msg": m}));
+        std::fs::write(&file, line("first")).unwrap();
+        let mut out = Gone(1);
+        let follow = log(d.path(), true, None, false, &mut out);
+        let writer = async {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            std::io::Write::write_all(&mut f, line("second").as_bytes()).unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        };
+        tokio::select! {
+            r = follow => assert_eq!(r, Ok(())),
+            () = writer => panic!("the follow did not end"),
+        }
     }
 
     /// The log is read from plain files only: a link in the center's

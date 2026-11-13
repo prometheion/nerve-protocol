@@ -748,12 +748,28 @@ pub fn request_line(
     streamed: bool,
     terminal: bool,
 ) -> String {
+    let color = nerve_service::out::Style::stdout().has_color();
+    request_line_with(args, cwd, streamed, terminal, color)
+}
+
+/// [`request_line`], with `color` saying that this process's output takes
+/// colour ([`nerve_service::out::COLOR_ENV`]).
+fn request_line_with(
+    args: &[String],
+    cwd: Option<String>,
+    streamed: bool,
+    terminal: bool,
+    color: bool,
+) -> String {
     let mut params = json!({"args": args, "cwd": cwd});
     if streamed {
         params["file"] = json!(STREAMED);
     }
     if terminal {
         params["terminal"] = json!(true);
+    }
+    if color {
+        params["color"] = json!(true);
     }
     let request = json!({"method": "cli", "params": params});
     format!("{request}\n")
@@ -1434,6 +1450,7 @@ async fn run_for(
         args,
         cwd: params["cwd"].as_str().map(PathBuf::from),
         terminal: params["terminal"] == true,
+        color: params["color"] == true,
         web,
         epoch: params["locks"].as_u64().filter(|_| web),
         handed,
@@ -1593,6 +1610,8 @@ struct Job {
     cwd: Option<PathBuf>,
     /// The caller's input is a terminal's ([`TERMINAL_ENV`]).
     terminal: bool,
+    /// The caller's output takes colour ([`nerve_service::out::COLOR_ENV`]).
+    color: bool,
     /// The owner asked in the web UI ([`VIA_ENV`]).
     web: bool,
     /// How many times the node was locked when the web UI's request began
@@ -1616,6 +1635,7 @@ async fn command(job: Job) {
         args,
         cwd,
         terminal,
+        color,
         web,
         epoch,
         handed,
@@ -1653,19 +1673,7 @@ async fn command(job: Job) {
         (_, Some(at)) => Some(at.display().to_string()),
         _ => None,
     };
-    let mut env: Vec<(&str, String)> = Vec::new();
-    if let Some(v) = file_env {
-        env.push((crate::caller_file::OWNER_FILE_ENV, v));
-    }
-    if terminal {
-        env.push((TERMINAL_ENV, "1".into()));
-    }
-    if web {
-        env.push((VIA_ENV, "web".into()));
-    }
-    if let Some(n) = epoch {
-        env.push((EPOCH_ENV, n.to_string()));
-    }
+    let env = child_env(file_env, terminal, color, web, epoch);
     #[cfg(unix)]
     let fd = match handed {
         Handed::File(f) => Some(f),
@@ -1755,6 +1763,33 @@ async fn take_streamed(
     nerve_transport::files::write_private(at, &bytes).map_err(|e| format!("{}: {e}", at.display()))
 }
 
+/// What the node tells the command it runs for an owner, besides the owner.
+fn child_env(
+    file_env: Option<String>,
+    terminal: bool,
+    color: bool,
+    web: bool,
+    epoch: Option<u64>,
+) -> Vec<(&'static str, String)> {
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if let Some(v) = file_env {
+        env.push((crate::caller_file::OWNER_FILE_ENV, v));
+    }
+    if terminal {
+        env.push((TERMINAL_ENV, "1".into()));
+    }
+    if color {
+        env.push((nerve_service::out::COLOR_ENV, "1".into()));
+    }
+    if web {
+        env.push((VIA_ENV, "web".into()));
+    }
+    if let Some(n) = epoch {
+        env.push((EPOCH_ENV, n.to_string()));
+    }
+    env
+}
+
 /// Starts the program for `who`: its output and input piped, ended when
 /// dropped. The caller's folder is its working folder when the node may
 /// enter it, else the root. A handed file is its descriptor
@@ -1786,6 +1821,7 @@ fn spawn<F: HandedFd>(
             .env_remove(crate::paths::STATE_DIR_VAR)
             .env_remove(crate::caller_file::OWNER_FILE_ENV)
             .env_remove(TERMINAL_ENV)
+            .env_remove(nerve_service::out::COLOR_ENV)
             .env_remove(VIA_ENV)
             .env_remove(EPOCH_ENV)
             .env_remove(crate::daemon::NOTIFY_ENV)
@@ -2851,6 +2887,25 @@ mod tests {
         assert!(v["params"].get("terminal").is_none(), "{v}");
         let v: Value = serde_json::from_str(&request_line(&[], None, false, true)).unwrap();
         assert_eq!(v["params"]["terminal"], true);
+    }
+
+    /// The owner's program tells the node that its output takes colour, and
+    /// the node tells the command (round 4, correctness 3).
+    #[test]
+    fn colour_goes_from_the_owner_through_the_node_to_the_command() {
+        let v: Value =
+            serde_json::from_str(&request_line_with(&[], None, false, false, true)).unwrap();
+        assert_eq!(v["params"]["color"], true);
+        let v: Value =
+            serde_json::from_str(&request_line_with(&[], None, false, false, false)).unwrap();
+        assert!(v["params"].get("color").is_none(), "{v}");
+        let has = |color| {
+            child_env(None, false, color, false, None)
+                .iter()
+                .any(|(k, v)| *k == nerve_service::out::COLOR_ENV && v == "1")
+        };
+        assert!(has(true));
+        assert!(!has(false));
     }
 
     /// The owner of the unit is let in, and root; anyone else is not.
