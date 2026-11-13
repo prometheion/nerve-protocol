@@ -293,6 +293,9 @@ async fn setup_steps(
 /// to run.
 #[cfg(unix)]
 pub(super) fn setup_after_install(layout: &Layout, invoker: &str, out: &mut dyn Write) {
+    // The install's warnings (no Landlock, a home open to other accounts)
+    // inform the answers setup asks for: they come first.
+    let _ = out.flush();
     let _ = writeln!(
         out,
         "Now pair a first center and give it a folder; Enter skips a question."
@@ -455,6 +458,25 @@ mod tests {
         assert!(!String::from_utf8_lossy(&out).contains("Install it now?"));
         assert!(k.installed.borrow().is_empty());
         assert_eq!(load(&paths).machine.secret_storage, SecretStorage::File);
+    }
+
+    /// What `install` warned of is on the screen before setup, a program of
+    /// its own, asks its questions (round 3, security 1).
+    #[cfg(unix)]
+    #[test]
+    fn the_installs_warnings_come_before_setups_questions() {
+        let mut bytes = Vec::new();
+        let mut said = nerve_service::out::Said::new(&mut bytes, nerve_service::out::Style::PLAIN);
+        writeln!(said, "Warning: Landlock is not here").unwrap();
+        setup_after_install(&Layout::system(), "no-such-account-nerve", &mut said);
+        said.finish(None).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (warning, question) = (
+            text.find("Landlock is not here").expect(&text),
+            text.find("Now pair a first center").expect(&text),
+        );
+        assert!(warning < question, "{text}");
+        assert_eq!(text.matches("Landlock is not here").count(), 1, "{text}");
     }
 
     /// Setup chooses no account: it has no flags, and asks for none.

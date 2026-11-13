@@ -131,12 +131,13 @@ fn main() -> std::process::ExitCode {
             // A restore into the running service stops it first and starts
             // it again after (as root, before this one becomes the
             // folder's owner).
-            Cmd::Restore { .. } => {
-                nerve_center::service::with_service_stopped(&layout, &state, &mut out, &|out| {
-                    nerve_center::backup::run(&state, cmd, &settle, out)
-                })
-            }
-            _ => nerve_center::backup::run(&state, cmd, &settle, &mut out),
+            Cmd::Restore { .. } => nerve_center::service::with_service_stopped(
+                &layout,
+                &state,
+                &mut out,
+                &|out, restarts| nerve_center::backup::run(&state, cmd, &settle, restarts, out),
+            ),
+            _ => nerve_center::backup::run(&state, cmd, &settle, false, &mut out),
         };
         let _ = out.finish(None);
         let code = match done {

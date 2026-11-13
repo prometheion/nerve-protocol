@@ -372,6 +372,7 @@ fn new_token_page(
         },
     );
     let header = format!("Authorization: Bearer {token}");
+    let mut shown_once = String::new();
     match mcp["url"].as_str() {
         Some(url) if mcp["mode"] == "http" => {
             p.row("URL", url).row("Header", header.clone());
@@ -384,6 +385,8 @@ fn new_token_page(
                     "Beyond loopback the endpoint uses TLS with the center's own certificate: let the harness trust it by its pin {f}."
                 ));
             }
+            // Only where the page shows that line.
+            shown_once.push_str(" The Claude Code line puts it in your shell's history.");
         }
         // `set` changes the installed center's settings, not another's.
         _ if installed => {
@@ -393,7 +396,9 @@ fn new_token_page(
             p.note("MCP over HTTP is off in this center: start it with --mcp http.");
         }
     }
-    p.note("It is shown only now; the center keeps its hash. The Claude Code line puts it in your shell's history.");
+    p.note(format!(
+        "It is shown only now; the center keeps its hash.{shown_once}"
+    ));
     p
 }
 
@@ -506,10 +511,13 @@ pub async fn log(
         let now = read(&file)?;
         if now.len() < at || !now.starts_with(&first) {
             // Moved aside: what the old file got after the last look, then
-            // the new file from its start.
+            // the new file from its start. Its head is the new file's now,
+            // not the old one's: a stale one would show the move again at
+            // every look.
             let moved = read(Path::new(&older))?;
             rest.extend_from_slice(moved.get(at..).unwrap_or_default());
             at = 0;
+            first.clear();
         }
         if first.len() < 64 {
             first = head(&now);
@@ -650,6 +658,7 @@ mod tests {
         let made = json!({"id": "t1", "token": "nrv_abc"});
         let mcp = json!({"mode": "http", "url": "http://127.0.0.1:7481/mcp"});
         let page = new_token_page(&made, "", &mcp, true, &admin).render(Style::PLAIN);
+        assert!(page.contains("The Claude Code line puts it"), "{page}");
         for want in [
             "  Token       nrv_abc\n",
             "  Label       harness\n",
@@ -670,6 +679,10 @@ mod tests {
         let page = new_token_page(&made, "ci", &off, false, &by_hand).render(Style::PLAIN);
         assert!(!page.contains("set mcp http"), "{page}");
         assert!(page.contains("--mcp http"), "{page}");
+        // The shell history is named only where the page shows the line
+        // that puts the token in it (round 3, correctness 3).
+        assert!(!page.contains("Claude Code line"), "{page}");
+        assert!(!page.contains("shell's history"), "{page}");
     }
 
     /// `nodes disable|enable|rm` send the web UI's requests for the
@@ -795,7 +808,8 @@ mod tests {
 
     /// `log --follow` shows what the old file got just before the center
     /// moved it aside, then the new file (round 2 of #213's second pass,
-    /// correctness 3).
+    /// correctness 3), once each: lines longer than the 64 bytes that tell
+    /// the files apart, and a look after the move (round 3, correctness 1).
     #[tokio::test]
     async fn log_follow_shows_what_the_old_file_got_before_it_was_moved() {
         let d = tempfile::tempdir().unwrap();
@@ -817,16 +831,18 @@ mod tests {
                 .unwrap();
             f.write_all(text.as_bytes()).unwrap();
         };
-        append(line(1, "first"));
+        let long = |what: &str| format!("{what}-{}", "x".repeat(70));
+        append(line(1, &long("first")));
         let seen = Seen::default();
         let mut out = seen.clone();
         let follow = log(d.path(), true, None, false, &mut out);
         let writer = async {
             seen.until("first").await;
-            append(line(2, "before-the-move"));
+            append(line(2, &long("before-the-move")));
             std::fs::rename(&file, &older).unwrap();
-            append(line(3, "after-the-move"));
+            append(line(3, &long("after-the-move")));
             seen.until("after-the-move").await;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         };
         tokio::select! {
             r = follow => panic!("follow ended: {r:?}"),
@@ -837,7 +853,16 @@ mod tests {
             .lines()
             .map(|l| l.rsplit("  ").next().unwrap().to_string())
             .collect();
-        assert_eq!(msgs, ["first", "before-the-move", "after-the-move"]);
+        assert_eq!(
+            msgs,
+            [
+                long("first"),
+                long("before-the-move"),
+                long("after-the-move")
+            ],
+            "{}",
+            seen.text()
+        );
     }
 
     /// The log is read from plain files only: a link in the center's

@@ -328,14 +328,19 @@ pub fn settle_user(state: &Path) -> Result<bool, String> {
     Ok(nerve_transport::net::euid() != before)
 }
 
+/// What the restore's child is told: its parent starts the service again.
+const RESTORE_RESTARTS: &str = "NERVE_CENTER_RESTORE_RESTARTS";
+
 /// Runs `f` (a restore) with the installed service stopped, where `state`
 /// is its folder and it runs, and starts it again after, whether `f` did
 /// its work or not. Elsewhere `f` alone, which refuses a running center.
+/// `f` is told whether the service starts again after it, so that its page
+/// does not say to start it.
 pub fn with_service_stopped(
     layout: &Layout,
     state: &Path,
     out: &mut dyn Write,
-    f: &dyn Fn(&mut dyn Write) -> Result<(), String>,
+    f: &dyn Fn(&mut dyn Write, bool) -> Result<(), String>,
 ) -> Result<(), String> {
     // An administrator stops and starts the Windows service around the
     // restore, which writes the folder as an administrator: what it writes
@@ -346,7 +351,7 @@ pub fn with_service_stopped(
         let sys = crate::win_host::WinHost;
         let ours = layout.is_state(state) && sys.is_admin() && sys.service()? == Some(true);
         if ours {
-            return crate::winsvc::stopped_for(&sys, out, f);
+            return crate::winsvc::stopped_for(&sys, out, &|out| f(out, true));
         }
     }
     let ours = cfg!(target_os = "linux")
@@ -355,7 +360,9 @@ pub fn with_service_stopped(
         && nerve_transport::net::euid() == 0
         && crate::attach::runs(state) == Some(true);
     if !ours {
-        return f(out);
+        // The child of the branch below finds no center running: its parent
+        // starts the service again.
+        return f(out, std::env::var_os(RESTORE_RESTARTS).is_some());
     }
     // The restore becomes the folder's owner for its work, for good: it
     // runs in a child, so that this process, root still, starts the service
@@ -365,6 +372,7 @@ pub fn with_service_stopped(
             .and_then(|exe| {
                 std::process::Command::new(exe)
                     .args(std::env::args_os().skip(1))
+                    .env(RESTORE_RESTARTS, "1")
                     .status()
             })
             .map_err(|e| format!("the restore did not start: {e}"))

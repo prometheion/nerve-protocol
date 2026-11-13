@@ -388,17 +388,62 @@ pub fn time(ms: u64) -> String {
 }
 
 /// The line a failed command ends with on stderr: the program's name, red
-/// on a terminal, and why.
+/// on a terminal, and why, as one line that does nothing to the terminal
+/// ([`one_line`]): a refusal may carry what a center sent.
 pub fn error(program: &str, why: &str, style: Style) -> String {
-    format!("{} {why}", style.paint(&format!("{program}:"), Tone::Bad))
+    format!(
+        "{} {}",
+        style.paint(&format!("{program}:"), Tone::Bad),
+        one_line(why)
+    )
+}
+
+/// The sequences [`Style::paint`] writes.
+const PAINTS: [&str; 5] = [
+    "\x1b[1;32m",
+    "\x1b[1;33m",
+    "\x1b[1;31m",
+    "\x1b[1m",
+    "\x1b[0m",
+];
+
+/// `line` as [`Said`] writes it: without control characters (a tab stays)
+/// but, where `style` has colour, the sequences the program painted itself
+/// (a page written through it). A center's text in a line then cannot move
+/// the cursor or set the window's title.
+fn tidy(line: &str, style: Style) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        let paint = PAINTS
+            .iter()
+            .find(|p| style.has_color() && rest.starts_with(**p));
+        match (paint, c) {
+            (Some(p), _) => {
+                out.push_str(p);
+                rest = &rest[p.len()..];
+            }
+            (None, '\t') => {
+                out.push(c);
+                rest = &rest[1..];
+            }
+            (None, _) => {
+                out.push_str(&one_line(&c.to_string()));
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    out
 }
 
 /// The lines a change says as it makes them, written on as they come; its
 /// warnings (`Warning: …`), notes (`note: …`) and next steps (`Next: …`)
 /// are kept for the end ([`Said::finish`]), set apart. A prompt that waits
-/// for an answer on the same line is written when it is flushed. The lines
-/// themselves stay as they are: `--json` gives them to programs, and the
-/// desktop app reads them.
+/// for an answer on the same line is written when it is flushed, and the
+/// warnings kept so far before it: the questions after them are answered
+/// by what they say. The lines themselves stay as they are, but for control
+/// characters ([`tidy`]): `--json` gives them to programs, and the desktop
+/// app reads them.
 pub struct Said<'a> {
     out: &'a mut dyn Write,
     style: Style,
@@ -432,9 +477,23 @@ impl<'a> Said<'a> {
         } else if let Some(n) = kept(&["Next: ", "next: "]) {
             self.page.next("", n);
         } else {
-            writeln!(self.out, "{line}")?;
+            writeln!(self.out, "{}", tidy(line, self.style))?;
         }
         Ok(())
+    }
+
+    /// Writes the warnings kept so far, set apart; the notes and next steps
+    /// stay for the end.
+    fn show_warnings(&mut self) -> std::io::Result<()> {
+        if self.page.warnings.is_empty() {
+            return Ok(());
+        }
+        let page = Page {
+            warnings: std::mem::take(&mut self.page.warnings),
+            ..Page::default()
+        };
+        let text = page.render(self.style);
+        write!(self.out, "\n{}\n", text.trim_start_matches('\n'))
     }
 
     /// Writes what was kept, set apart; with `page`, that page after the
@@ -442,7 +501,7 @@ impl<'a> Said<'a> {
     pub fn finish(mut self, page: Option<Page>) -> std::io::Result<()> {
         if !self.line.is_empty() {
             let rest = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
-            self.out.write_all(rest.as_bytes())?;
+            self.out.write_all(tidy(&rest, self.style).as_bytes())?;
         }
         let kept = std::mem::take(&mut self.page);
         let page = match page {
@@ -488,11 +547,15 @@ impl Write for Said<'_> {
         Ok(buf.len())
     }
 
-    /// A prompt waits on its line: it is written now.
+    /// A prompt waits on its line: it is written now, after the warnings
+    /// kept so far. A command that starts another program with questions
+    /// of its own flushes before it.
     fn flush(&mut self) -> std::io::Result<()> {
+        self.show_warnings()?;
         if !self.line.is_empty() {
             let rest = std::mem::take(&mut self.line);
-            self.out.write_all(&rest)?;
+            let rest = tidy(&String::from_utf8_lossy(&rest), self.style);
+            self.out.write_all(rest.as_bytes())?;
         }
         self.out.flush()
     }
@@ -617,9 +680,10 @@ Next  nerve-node unlock
         assert_eq!(time(951_782_400_000), "2000-02-29 00:00:00");
     }
 
-    /// A change's lines are written as they come, a prompt when flushed;
-    /// its warnings, notes and next steps come set apart at the end, also
-    /// after a page.
+    /// A change's lines are written as they come, a prompt when flushed,
+    /// with the warnings kept so far before it; its notes and next steps
+    /// (and the warnings after the last question) come set apart at the
+    /// end, also after a page.
     #[test]
     fn a_change_says_its_lines_and_keeps_the_rest_for_the_end() {
         let mut out = Vec::new();
@@ -633,7 +697,7 @@ Next  nerve-node unlock
         said.finish(None).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "made the user nerve\nOwner? [y/N] y\n\nWarning  Polkit is not installed\n\nNext  `nerve-node center add -` pairs it\n"
+            "made the user nerve\n\nWarning  Polkit is not installed\n\nOwner? [y/N] y\n\nNext  `nerve-node center add -` pairs it\n"
         );
         let mut out = Vec::new();
         let mut said = Said::new(&mut out, Style::PLAIN);
@@ -652,5 +716,69 @@ Next  nerve-node unlock
         writeln!(said, "sudo: off").unwrap();
         said.finish(None).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "sudo: off\n");
+    }
+
+    /// What a warning says is read before the questions it informs: a
+    /// prompt writes the warnings kept so far first, and so does a flush
+    /// before another program asks its own (round 3, security 1).
+    #[test]
+    fn a_warning_comes_before_the_question_it_informs() {
+        let mut out = Vec::new();
+        let mut said = Said::new(&mut out, Style::PLAIN);
+        writeln!(said, "installed").unwrap();
+        writeln!(said, "Warning: no Landlock here").unwrap();
+        writeln!(said, "Note: kept for the end").unwrap();
+        // A program with questions of its own starts after this flush.
+        said.flush().unwrap();
+        writeln!(said, "Another warning").unwrap();
+        writeln!(said, "Warning: the home is open").unwrap();
+        write!(said, "A folder? ").unwrap();
+        said.flush().unwrap();
+        writeln!(said, "~/x").unwrap();
+        said.finish(None).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "installed\n\nWarning  No Landlock here\n\nAnother warning\n\nWarning  The home is open\n\nA folder? ~/x\n\nNote  Kept for the end\n"
+        );
+    }
+
+    /// A line does nothing to the terminal: what a center sent in the error
+    /// line or in a line a change says has its control characters blanked.
+    /// The colour the program painted stays (round 3, security 2).
+    #[test]
+    fn an_error_and_a_said_line_hold_no_control_character() {
+        let hostile = "a\u{1b}[2Jb\nc\u{1b}]0;title\u{7}d";
+        let line = error("p", hostile, Style::COLOR);
+        assert_eq!(line, "\u{1b}[1;31mp:\u{1b}[0m a [2Jb c ]0;title d");
+        assert!(!line.contains('\n'));
+        for style in [Style::PLAIN, Style::COLOR] {
+            let mut out = Vec::new();
+            let mut said = Said::new(&mut out, style);
+            // A line break in what a center sent is the end of a line of
+            // its own here; the escapes are what must not reach the
+            // terminal.
+            let hostile = hostile.replace('\n', "");
+            writeln!(said, "paired with {hostile}").unwrap();
+            write!(said, "ask {hostile}").unwrap();
+            said.finish(None).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(
+                text, "paired with a [2Jbc ]0;title d\nask a [2Jbc ]0;title d",
+                "{style:?}"
+            );
+        }
+        // A page written through it keeps its colour, and a tab stays.
+        let mut page = Page::new("Nerve node", "0.1.0").state("running", Tone::Good);
+        page.row("Name", "lab");
+        let mut out = Vec::new();
+        let mut said = Said::new(&mut out, Style::COLOR);
+        said.write_all(page.render(Style::COLOR).as_bytes())
+            .unwrap();
+        writeln!(said, "a\tb").unwrap();
+        said.finish(None).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            page.render(Style::COLOR) + "a\tb\n"
+        );
     }
 }

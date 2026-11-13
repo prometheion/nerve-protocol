@@ -308,10 +308,13 @@ pub(super) async fn log_cmd(
         let now = read(&file)?;
         if now.len() < at || !now.starts_with(&first) {
             // Moved aside: what the old file got after the last look, then
-            // the new file from its start.
+            // the new file from its start. Its head is the new file's now,
+            // not the old one's: a stale one would show the move again at
+            // every look.
             let moved = read(Path::new(&old))?;
             rest.extend_from_slice(moved.get(at..).unwrap_or_default());
             at = 0;
+            first.clear();
         }
         if first.len() < 64 {
             first = head(&now);
@@ -696,7 +699,9 @@ mod tests {
     }
 
     /// `log --follow` goes on with the new file once the old one is moved
-    /// aside, the lines written to the old one before that included.
+    /// aside, the lines written to the old one before that included, each
+    /// once: the lines are longer than the 64 bytes that tell the files
+    /// apart (round 3 of #213's second pass, correctness 1).
     #[tokio::test]
     async fn log_follow_goes_on_after_the_file_is_moved_aside() {
         let d = tempfile::tempdir().unwrap();
@@ -712,15 +717,16 @@ mod tests {
                 .unwrap();
             f.write_all(line.as_bytes()).unwrap();
         };
-        append(logged(1, "info", "first"));
+        let long = |what: &str| format!("{what}-{}", "x".repeat(70));
+        append(logged(1, "info", &long("first")));
         let seen = Seen::default();
         let mut out = seen.clone();
         let follow = log_cmd(&paths, true, Some(5), false, true, &mut out);
         let writer = async {
             seen.until("first").await;
-            append(logged(2, "info", "before-the-move"));
+            append(logged(2, "info", &long("before-the-move")));
             std::fs::rename(&file, paths.state_dir.join("log.jsonl.1")).unwrap();
-            append(logged(3, "info", "after-the-move"));
+            append(logged(3, "info", &long("after-the-move")));
             seen.until("after-the-move").await;
             tokio::time::sleep(Duration::from_millis(1200)).await;
         };
@@ -740,7 +746,11 @@ mod tests {
             .collect();
         assert_eq!(
             msgs,
-            ["first", "before-the-move", "after-the-move"],
+            [
+                long("first"),
+                long("before-the-move"),
+                long("after-the-move")
+            ],
             "{text}"
         );
     }
