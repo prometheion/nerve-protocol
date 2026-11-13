@@ -1256,8 +1256,10 @@ export component TextField {
     in-out property <string> text;
     in property <string> placeholder;
     in property <bool> mono;
-    // A password or passphrase: shown as dots.
+    // A password or passphrase: shown as dots, with a button that shows
+    // what was typed and hides it again.
     in property <bool> password;
+    property <bool> plain;
     in property <bool> invalid;
     in property <bool> enabled: true;
     in property <string> label;
@@ -1279,7 +1281,7 @@ export component TextField {
     // as a line edit of the desktop does.
     view := Rectangle {
         x: 12px;
-        width: parent.width - 24px;
+        width: parent.width - 24px - (root.password ? 28px : 0px);
         clip: true;
         Text {
             width: 100%;
@@ -1331,7 +1333,7 @@ export component TextField {
                 text <=> root.text;
                 enabled: root.enabled;
                 single-line: true;
-                input-type: root.password ? InputType.password : InputType.text;
+                input-type: root.password && !root.plain ? InputType.password : InputType.text;
                 color: Theme.text;
                 font-size: Type.body;
                 font-family: root.mono ? Type.mono : "";
@@ -1352,6 +1354,37 @@ export component TextField {
                 edited => {
                     root.edited(self.text);
                 }
+            }
+        }
+    }
+    // A field emptied (a dialog cleared it) hides what is typed next.
+    changed text => {
+        if root.text == "" {
+            root.plain = false;
+        }
+    }
+    if root.password: Rectangle {
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        width: 28px;
+        height: 28px;
+        border-radius: Radius.sm;
+        background: eye.has-hover ? Theme.surface-alt : transparent;
+        accessible-role: button;
+        accessible-label: root.plain ? "Hide the password" : "Show the password";
+        accessible-action-default => {
+            root.plain = !root.plain;
+        }
+        Image {
+            width: 16px;
+            height: 16px;
+            source: root.plain ? @image-url("icons/eye-off.svg") : @image-url("icons/eye.svg");
+            colorize: Theme.text-muted;
+        }
+        eye := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.plain = !root.plain;
             }
         }
     }

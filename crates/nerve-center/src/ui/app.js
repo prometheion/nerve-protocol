@@ -1028,7 +1028,7 @@ function modelCard(cfg, meta) {
   srcPicker.set(SOURCES, source);
   const endpointUrl = el("input", { class: "input mono", value: m.endpoint_url, "data-focus": "model:endpoint_url", placeholder: "https://host:9931" });
   const endpointModel = el("input", { class: "input mono", value: m.endpoint_model, "data-focus": "model:endpoint_model", placeholder: "jev-latest (optional)" });
-  const token = el("input", { class: "input", type: "password", "data-focus": "model:token", placeholder: meta.has_token ? "a token is set — type to replace" : "optional bearer token", autocomplete: "off" });
+  const [token, tokenBox] = secret({ "data-focus": "model:token", placeholder: meta.has_token ? "a token is set — type to replace" : "optional bearer token" });
   const threshold = el("input", { class: "input num", type: "number", min: "0", max: "1", step: "0.01", value: m.threshold, "data-focus": "model:threshold" });
   const timeout = el("input", { class: "input num", type: "number", min: "100", value: m.timeout_ms, "data-focus": "model:timeout" });
   let scope = m.scope;
@@ -1062,7 +1062,7 @@ function modelCard(cfg, meta) {
   const field = (label, input) => el("label", { class: "field grow" }, el("span", { class: "label" }, label), input);
   const epDiv = el("div", {},
     el("div", { class: "form-row" }, field("Endpoint URL", endpointUrl), field("Model name", endpointModel)),
-    el("div", { class: "form-row" }, field("Bearer token (kept secret, never shown back)", token),
+    el("div", { class: "form-row" }, field("Bearer token (kept secret, never shown back)", tokenBox),
       meta.has_token ? el("span", { class: "push" }, btn("Clear token", "ghost", act(async () => { await api("POST", "/api/checker/token", { token: null }); await loadChecker(); }), "trash", "model:clear-token")) : null));
   const localDiv = el("div", {}, ...localInstall(meta));
   const showSource = () => { epDiv.hidden = source !== "endpoint"; localDiv.hidden = source !== "local"; };
@@ -1731,7 +1731,7 @@ function sudoSwitch(n) {
       el("span", { class: "meta" }, "Turn it on in the Nerve app on that machine, Permissions, Sudo."), off) };
   }
   const what = "sudo password";
-  const pw = el("input", { type: "password", class: "input", autocomplete: "off", placeholder: what, "aria-label": `Sudo password of ${n.name}` });
+  const [pw, pwBox] = secret({ placeholder: what, "aria-label": `Sudo password of ${n.name}` });
   const on = btn("Turn sudo on", "", act(async () => {
     const password = pw.value;
     pw.value = "";
@@ -1742,7 +1742,7 @@ function sudoSwitch(n) {
     show(r.sudo);
     notify(`Sudo is on for ${n.name}: sudo commands on the sudo allow list run. Only the machine's owner adds to that list, on the machine.`);
   }));
-  return { show, row: el("div", { class: "actions" }, label, pw, on, off) };
+  return { show, row: el("div", { class: "actions" }, label, pwBox, on, off) };
 }
 
 // A machine's own settings are fetched when its card is opened, so the page

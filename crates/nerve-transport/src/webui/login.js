@@ -9,6 +9,21 @@
   var input = form.querySelector(".login-input");
   var error = document.getElementById("login-error");
   var label = button.textContent;
+  // The token can be shown, to check what was pasted, and hidden again.
+  var reveal = form.querySelector(".reveal");
+  if (reveal) {
+    reveal.addEventListener("click", function () {
+      var shown = input.type === "password";
+      input.type = shown ? "text" : "password";
+      var say = shown ? "Hide" : "Show";
+      reveal.setAttribute("aria-label", say);
+      reveal.title = say;
+      reveal.setAttribute("aria-pressed", String(shown));
+      reveal.querySelector(".reveal-show").hidden = shown;
+      reveal.querySelector(".reveal-hide").hidden = !shown;
+      input.focus();
+    });
+  }
   function show(text) {
     error.textContent = text;
     error.hidden = !text;
