@@ -303,11 +303,44 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
-    /// Run as the Windows service (the service control manager starts it so)
+    /// Start, stop or restart the installed center
     ///
-    /// With the settings of the `center.env` that `install` wrote.
-    #[command(hide = true)]
-    Service,
+    /// As root on Linux; on Windows, in an administrator's terminal. `status` shows whether it runs. Bare, `service` is how Windows starts the installed center, with the settings of the `center.env` that `install` wrote.
+    Service {
+        #[command(subcommand)]
+        cmd: Option<ServiceCmd>,
+    },
+    /// Make a link that pairs a new machine
+    ///
+    /// The link pairs one machine until it runs out, as the web UI's Pair a machine card makes one: on Linux paste it into `nerve-node center add -`, on Windows open it. It asks the running center.
+    Pair,
+    /// Show the paired machines, or turn one off, on, or remove it
+    ///
+    /// As the web UI's Overview shows and changes them. A machine that is off keeps its pairing, and the agent cannot use it until it is on again. It asks the running center.
+    #[command(args_conflicts_with_subcommands = true)]
+    Nodes {
+        #[command(subcommand)]
+        cmd: Option<NodesCmd>,
+    },
+    /// Make, list or remove the harness tokens of the HTTP MCP endpoint
+    ///
+    /// A new token is shown once, as the web UI's Connect a harness card shows it; the center keeps only its hash. It asks the running center.
+    #[command(subcommand)]
+    Token(TokenCmd),
+    /// Show the center's log: its starts, its machines, and what went wrong
+    ///
+    /// The log file in its state folder, the older one first.
+    Log {
+        /// Keep running and print new lines as they arrive.
+        #[arg(long)]
+        follow: bool,
+        /// Show only the newest N lines (with --follow, then the new ones).
+        #[arg(long, value_name = "N")]
+        last: Option<usize>,
+        /// Show only errors and warnings (with --last, the newest N of them).
+        #[arg(long)]
+        problems: bool,
+    },
     /// Print the files of the service this program installs, as JSON (for `update`)
     ///
     /// The files besides the program itself: `update` runs the new program so, to put them in place with it.
@@ -315,16 +348,74 @@ pub enum Cmd {
     ServiceFiles,
 }
 
+/// What `service` does to the installed center.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum ServiceCmd {
+    /// Start the installed center.
+    Start,
+    /// Stop it: the machines lose their link, and harnesses their tools.
+    Stop,
+    /// Stop it and start it again.
+    Restart,
+}
+
+/// What `nodes` changes of a paired machine, by its name.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum NodesCmd {
+    /// Turn a machine off: its link ends and the agent cannot use it.
+    Disable {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+    },
+    /// Turn a machine on again.
+    Enable {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+    },
+    /// Remove a machine: the pairing ends, and it pairs again with a new link.
+    Rm {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+    },
+}
+
+/// What `token` does with the harness tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum TokenCmd {
+    /// Make a harness token; it is shown once.
+    New {
+        /// A label to tell it apart, like the harness's name (`harness` if left out).
+        label: Option<String>,
+    },
+    /// List the harness tokens by their labels.
+    List,
+    /// Remove a harness token: a harness that uses it is refused at once.
+    Rm {
+        /// The token's label, as `token list` shows it, or its id.
+        label: String,
+    },
+}
+
 impl Cmd {
-    /// install, set, update and uninstall: they work on the installed
-    /// service, as root, not on `--state-dir`. `install` takes the settings
-    /// it writes into the service's file ([`INSTALL_SETTINGS`]), and `set`
-    /// changes one of them there.
+    /// install, set, update, uninstall and service start|stop|restart: they
+    /// work on the installed service, as root, not on `--state-dir`.
+    /// `install` takes the settings it writes into the service's file
+    /// ([`INSTALL_SETTINGS`]), and `set` changes one of them there.
     pub fn is_service(&self) -> bool {
         matches!(
             self,
-            Cmd::Install | Cmd::Set { .. } | Cmd::Update { .. } | Cmd::Uninstall { .. }
+            Cmd::Install
+                | Cmd::Set { .. }
+                | Cmd::Update { .. }
+                | Cmd::Uninstall { .. }
+                | Cmd::Service { cmd: Some(_) }
         )
+    }
+
+    /// Whether this is how Windows starts the installed center: `service`
+    /// alone.
+    pub fn runs_the_service(&self) -> bool {
+        matches!(self, Cmd::Service { cmd: None })
     }
 }
 
@@ -394,10 +485,22 @@ const RUN_LINE: &str =
 /// Where each command stands on the top page, by what the owner wants to
 /// do. A command missing here fails a test until it is placed.
 const COMMAND_GROUPS: &[(&str, &[&str])] = &[
-    ("The service", &["install", "set", "update", "uninstall"]),
+    (
+        "The service",
+        &["install", "set", "service", "update", "uninstall"],
+    ),
     (
         "The owner's commands",
-        &["status", "owner-token", "backup", "restore"],
+        &[
+            "status",
+            "pair",
+            "nodes",
+            "token",
+            "log",
+            "owner-token",
+            "backup",
+            "restore",
+        ],
     ),
 ];
 
@@ -1139,7 +1242,7 @@ mod tests {
         assert!(Args::try_parse_from(["nerve-center", "--log", "loud"]).is_err());
         // The owner's subcommands only: anything else positional is refused.
         assert!(a.cmd.is_none());
-        assert!(Args::try_parse_from(["nerve-center", "pair"]).is_err());
+        assert!(Args::try_parse_from(["nerve-center", "serve"]).is_err());
         let cmd = |args: &[&str]| {
             Args::try_parse_from(std::iter::once("nerve-center").chain(args.iter().copied()))
                 .unwrap()
@@ -1169,6 +1272,47 @@ mod tests {
             Some(Cmd::OwnerToken { new: true })
         );
         assert!(!cmd(&["owner-token"]).unwrap().is_service());
+        // `service start|stop|restart` is the service's, as root; bare,
+        // it is how Windows starts the installed center (#213).
+        assert_eq!(
+            cmd(&["service", "restart"]),
+            Some(Cmd::Service {
+                cmd: Some(ServiceCmd::Restart)
+            })
+        );
+        assert!(cmd(&["service", "stop"]).unwrap().is_service());
+        assert!(cmd(&["service"]).unwrap().runs_the_service());
+        assert!(!cmd(&["service"]).unwrap().is_service());
+        // The owner's commands that ask the running center are no service
+        // commands: they go to the state folder.
+        for (args, want) in [
+            (&["pair"][..], Cmd::Pair),
+            (&["nodes"], Cmd::Nodes { cmd: None }),
+            (
+                &["nodes", "disable", "lab"],
+                Cmd::Nodes {
+                    cmd: Some(NodesCmd::Disable { name: "lab".into() }),
+                },
+            ),
+            (&["token", "new"], Cmd::Token(TokenCmd::New { label: None })),
+            (
+                &["token", "rm", "ci"],
+                Cmd::Token(TokenCmd::Rm { label: "ci".into() }),
+            ),
+            (
+                &["log", "--last", "5", "--problems"],
+                Cmd::Log {
+                    follow: false,
+                    last: Some(5),
+                    problems: true,
+                },
+            ),
+        ] {
+            let c = cmd(args).unwrap();
+            assert!(!c.is_service() && !c.runs_the_service(), "{args:?}");
+            assert_eq!(c, want);
+        }
+        assert!(Args::try_parse_from(["nerve-center", "token"]).is_err());
         // `set` alone lists, `set <name> <value>` changes one; a name
         // without a value, or a name that is no setting of it, is refused.
         assert_eq!(

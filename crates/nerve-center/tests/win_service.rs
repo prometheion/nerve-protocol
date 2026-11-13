@@ -352,7 +352,7 @@ fn the_center_runs_as_a_windows_service() {
         assert!(ok, "{said}");
         assert!(said.contains(" · running as a service\n"), "{said}");
         assert!(
-            said.contains("Owner token:  nerve-center owner-token\n"),
+            said.contains("Owner token:     nerve-center owner-token\n"),
             "{said}"
         );
         assert!(

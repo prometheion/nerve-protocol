@@ -599,12 +599,13 @@ pub fn run(
         | Cmd::Uninstall { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
-        | Cmd::Service
+        | Cmd::Service { .. }
+        | Cmd::Pair
+        | Cmd::Nodes { .. }
+        | Cmd::Token(_)
+        | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
-            return Err(
-                "install, set, update, uninstall, owner-token, status and service-files are not backup commands"
-                    .into(),
-            );
+            return Err("only backup and restore are backup commands".into());
         }
     }
     Ok(())

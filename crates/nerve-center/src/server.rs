@@ -135,19 +135,34 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
                 "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI (Settings, Harness tokens) or set with NERVE_CENTER_HARNESS_TOKEN",
             );
         }
-        tasks.push(tokio::spawn(HttpMcp::new(&center, token).serve(server)));
+        tasks.push(tokio::spawn(
+            HttpMcp::new(&center, token.clone()).serve(server),
+        ));
     }
 
+    // The owner's commands in the terminal ask the web UI's handlers, also
+    // where the web UI is off (crate::attach).
+    let owner_ui = page
+        .clone()
+        .unwrap_or_else(|| Ui::new(&center, token.as_deref(), true));
     #[cfg(unix)]
     {
         let listener = crate::attach::bind(&args.state_dir())?;
-        tasks.push(tokio::spawn(crate::attach::serve(center.clone(), listener)));
+        tasks.push(tokio::spawn(crate::attach::serve(
+            center.clone(),
+            owner_ui,
+            listener,
+        )));
     }
     // A pipe's name is open to every account, which could take it first:
     // then the center runs, and a second one cannot attach.
     #[cfg(windows)]
     match crate::attach::bind(&args.state_dir()) {
-        Ok(listener) => tasks.push(tokio::spawn(crate::attach::serve(center.clone(), listener))),
+        Ok(listener) => tasks.push(tokio::spawn(crate::attach::serve(
+            center.clone(),
+            owner_ui,
+            listener,
+        ))),
         Err(e) => center.log().record(
             Level::Warn,
             None,

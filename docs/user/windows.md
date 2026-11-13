@@ -113,9 +113,10 @@ the node port. `nerve-center set` shows its settings, in
 `settings\center.env` there; `nerve-center set ui 0.0.0.0:7480` changes one
 and restarts the service. A new `listen` port takes the firewall rule along.
 The rule lets in the node port only: for the web UI or MCP beyond loopback,
-`set` prints the `New-NetFirewallRule` line for their port. These,
-`nerve-center status` and `nerve-center owner-token` work in an
-administrator's terminal.
+`set` prints the `New-NetFirewallRule` line for their port. These and the
+center's other commands work in an administrator's terminal: `status`,
+`service start|stop|restart`, `pair`, `nodes`, `token`, `log` and
+`owner-token` ([in the terminal](center.md#in-the-terminal)).
 [Run the center](center.md) says what comes next.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.

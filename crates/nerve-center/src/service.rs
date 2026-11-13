@@ -580,15 +580,22 @@ fn status_page_of(
             },
         },
     );
+    let mut none_paired = false;
     p.row(
         "Machines",
         match read_store(state) {
-            Ok(Some(s)) if s.nodes.is_empty() => "none paired yet".into(),
+            Ok(Some(s)) if s.nodes.is_empty() => {
+                none_paired = true;
+                "none paired yet".into()
+            }
             Ok(Some(s)) => {
                 let names: Vec<&str> = s.nodes.values().map(|n| n.name.as_str()).collect();
                 format!("{}: {}", names.len(), names.join(", "))
             }
-            Ok(None) => "none paired yet".into(),
+            Ok(None) => {
+                none_paired = true;
+                "none paired yet".into()
+            }
             // Root's `status` names them where the account's cannot.
             Err(_) if unreadable => "only an administrator sees them".into(),
             Err(e) => format!("not shown ({e})"),
@@ -610,21 +617,26 @@ fn status_page_of(
     if service.as_ref().is_some_and(|s| !s.active) {
         p.next("Start it", admin("service start"));
     }
-    // The command that finds this center's token from where it is run.
+    // The commands for this center from where they are run.
     let installed_dir = match installed {
         true => Some(state),
         false => layout.installed().then_some(layout.state.as_path()),
     };
-    p.next(
-        "Owner token",
-        crate::ui::token_command_of(
+    let command = |what: &str| {
+        crate::ui::command_of(
+            what,
             state,
             installed_dir,
             &crate::config::default_state_dir(),
             true,
             layout.windows(),
-        ),
-    );
+        )
+    };
+    // A machine is paired with the running center.
+    if none_paired && (runs == Some(true) || service.as_ref().is_some_and(|s| s.active)) {
+        p.next("Pair a machine", command("pair"));
+    }
+    p.next("Owner token", command("owner-token"));
     if installed && layout.windows() {
         p.note("Run these commands in an administrator's terminal.");
     }
@@ -710,15 +722,21 @@ fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
         Cmd::Set { .. } => "set",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
-        // `main` gives these to crate::backup and crate::owner.
+        Cmd::Service { cmd: Some(_) } => "service",
+        // `main` gives these to crate::backup, crate::owner and
+        // crate::owner_calls.
         Cmd::Backup { .. }
         | Cmd::Restore { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
-        | Cmd::Service
+        | Cmd::Service { cmd: None }
+        | Cmd::Pair
+        | Cmd::Nodes { .. }
+        | Cmd::Token(_)
+        | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             return Err(
-                "backup, restore, owner-token, status, service and service-files are not service commands"
+                "backup, restore, owner-token, status, pair, nodes, token, log and service-files are not service commands"
                     .into(),
             );
         }
@@ -798,15 +816,72 @@ async fn execute_on(
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
+        Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         Cmd::Backup { .. }
         | Cmd::Restore { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
-        | Cmd::Service
+        | Cmd::Service { cmd: None }
+        | Cmd::Pair
+        | Cmd::Nodes { .. }
+        | Cmd::Token(_)
+        | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             unreachable!("refused above")
         }
     }
+}
+
+/// `service start|stop|restart`: systemd does it, a start waits until the
+/// center answers, and the page `status` shows ends it.
+pub fn service(
+    layout: &Layout,
+    sys: &dyn System,
+    c: crate::config::ServiceCmd,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    use crate::config::ServiceCmd;
+    supported(sys, "service")?;
+    if !layout.installed() {
+        return Err(NOT_INSTALLED.into());
+    }
+    let (verb, done) = match c {
+        ServiceCmd::Start => ("start", "started the center"),
+        ServiceCmd::Stop => ("stop", "stopped the center"),
+        ServiceCmd::Restart => ("restart", "restarted the center"),
+    };
+    sys.systemctl(&[verb, UNIT_NAME])?;
+    let runs = c != ServiceCmd::Stop;
+    if runs {
+        sys.wait_running(&layout.state)?;
+    }
+    did(out, done);
+    let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
+    let page = service_page(layout, &file, runs);
+    let _ = write!(out, "\n{}", page.render(Style::stdout()));
+    Ok(())
+}
+
+/// The page `service` ends with: the installed center as `status` shows
+/// it, running or stopped (`runs`), from the settings `file`.
+pub(crate) fn service_page(layout: &Layout, file: &str, runs: bool) -> Page {
+    status_page_of(
+        layout,
+        &layout.state,
+        true,
+        Some(file),
+        "",
+        &crate::config::McpMode::Off,
+        Some(runs),
+        Some(ServiceState {
+            active: runs,
+            state: match runs {
+                true => "running".into(),
+                false => "stopped".into(),
+            },
+            boot: None,
+        }),
+    )
 }
 
 /// `install`: the user, the state folder, the settings, the program, the
@@ -1631,6 +1706,68 @@ mod tests {
         l
     }
 
+    /// `service start|stop|restart` asks systemd, a start waits until the
+    /// center answers, and the page `status` shows ends it (#213).
+    #[test]
+    fn the_service_command_starts_stops_and_restarts_the_center() {
+        use crate::config::ServiceCmd;
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        for (c, verb, said, head) in [
+            (
+                ServiceCmd::Stop,
+                "stop",
+                "stopped the center",
+                " · stopped\n",
+            ),
+            (
+                ServiceCmd::Start,
+                "start",
+                "started the center",
+                " · running as a service\n",
+            ),
+            (
+                ServiceCmd::Restart,
+                "restart",
+                "restarted the center",
+                " · running as a service\n",
+            ),
+        ] {
+            sys.calls.borrow_mut().clear();
+            let mut out = Vec::new();
+            service(&l, &sys, c, &mut out).unwrap();
+            assert_eq!(sys.calls(), [format!("systemctl {verb} {UNIT_NAME}")]);
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.starts_with(&format!("{said}\n\nNerve center ")),
+                "{out}"
+            );
+            assert!(out.contains(head), "{out}");
+            assert_eq!(
+                has_next(&out, "Start it: sudo nerve-center service start"),
+                c == ServiceCmd::Stop,
+                "{out}"
+            );
+        }
+        // A start that does not come up is an error.
+        sys.next_start.set(Some(false));
+        assert!(service(&l, &sys, ServiceCmd::Start, &mut Vec::new()).is_err());
+        let e = service(
+            &layout(&d.path().join("none")),
+            &Fake::new(),
+            ServiceCmd::Start,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(e, NOT_INSTALLED);
+        assert!(
+            service(&l, &NotRoot, ServiceCmd::Stop, &mut Vec::new())
+                .unwrap_err()
+                .contains("sudo nerve-center service")
+        );
+    }
+
     fn mode(p: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
@@ -1676,7 +1813,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("Owner token:  sudo nerve-center owner-token\n"),
+            has_next(&out, "Owner token: sudo nerve-center owner-token"),
             "{out}"
         );
         // The user, made once with the state folder as its home.
@@ -2302,6 +2439,14 @@ Next  Change one:  sudo nerve-center set <name> <value>
         assert!(e.ends_with("update changed nothing"), "{e}");
     }
 
+    /// Whether the page `text` names the next step `step` ("What: command"),
+    /// the blanks that align it aside.
+    fn has_next(text: &str, step: &str) -> bool {
+        text.lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .any(|l| l == step || l == format!("Next {step}"))
+    }
+
     /// [`status_page_of`] as plain text, with what `runs` and the service
     /// say of this machine left out: an installed one runs as a service.
     fn status_text(
@@ -2476,7 +2621,12 @@ Next  Change one:  sudo nerve-center set <name> <value>
         assert!(on.contains("/mcp\n"), "{on}");
         assert!(!on.contains("Owner token   "), "{on}");
         assert!(
-            on.contains("Owner token:  sudo nerve-center owner-token"),
+            has_next(&on, "Owner token: sudo nerve-center owner-token"),
+            "{on}"
+        );
+        // A running center with no machine says how to pair one.
+        assert!(
+            has_next(&on, "Pair a machine: sudo nerve-center pair"),
             "{on}"
         );
     }
@@ -2510,10 +2660,13 @@ Next  Change one:  sudo nerve-center set <name> <value>
             "  Harnesses   the one that starts it (stdio)\n",
             "  Machines    1: web-1\n",
             &format!("  Folder      {}\n", state.display()),
-            "Owner token:  nerve-center owner-token --state-dir ",
         ] {
             assert!(text.contains(want), "{want}: {text}");
         }
+        assert!(
+            text.contains("Owner token:  nerve-center owner-token --state-dir "),
+            "{text}"
+        );
         // What this command is given is all that is known of a center a
         // harness starts, and its token is found with its folder (round 4,
         // correctness 2).
@@ -2528,13 +2681,19 @@ Next  Change one:  sudo nerve-center set <name> <value>
         for want in [
             "  Web UI      http://127.0.0.1:7490\n",
             "  Harnesses   http://127.0.0.1:7491/mcp\n",
-            &format!(
-                "Owner token:  nerve-center owner-token --state-dir {}\n",
-                state.display()
-            ),
         ] {
             assert!(text.contains(want), "{want}: {text}");
         }
+        assert!(
+            has_next(
+                &text,
+                &format!(
+                    "Owner token: nerve-center owner-token --state-dir {}",
+                    state.display()
+                )
+            ),
+            "{text}"
+        );
         assert!(!text.contains("7480"), "{text}");
         let text = status_text(&l, &state, false, None, "off", &McpMode::Off);
         assert!(text.contains("  Web UI      off\n"), "{text}");
@@ -2561,7 +2720,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
         );
         assert!(text.contains(" · running as a service\n"), "{text}");
         assert!(
-            text.contains("Owner token:  sudo nerve-center owner-token\n"),
+            has_next(&text, "Owner token: sudo nerve-center owner-token"),
             "{text}"
         );
         // A stopped service says how to start it.
@@ -2586,7 +2745,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             "{stopped}"
         );
         assert!(
-            stopped.contains("Start it:     sudo nerve-center service start\n"),
+            has_next(&stopped, "Start it: sudo nerve-center service start"),
             "{stopped}"
         );
     }
@@ -2715,7 +2874,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             "{out}"
         );
         assert!(
-            out.contains("Owner token:  sudo nerve-center owner-token\n"),
+            has_next(&out, "Owner token: sudo nerve-center owner-token"),
             "{out}"
         );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.2.0\n");

@@ -35,6 +35,11 @@ and every limit is in
   the first.
 - `nerve-center set` shows the service's settings and changes one, such as
   `set ui 0.0.0.0:7480`, then restarts it; `install` takes them as flags.
+- The center's owner commands in the terminal, also with the web UI off:
+  `service start|stop|restart`, `pair`, `nodes` (`disable`, `enable`,
+  `rm`), `token new|list|rm` and `log`. They ask the running center through
+  its own socket or pipe, which only root, an administrator and the center's
+  account may use.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
   fails closed by default.

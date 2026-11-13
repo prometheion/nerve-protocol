@@ -39,11 +39,20 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 |---|---|
 | `install` | Runs the center as a service (as root) |
 | `set [<name> <value>]` | Shows or changes the service's settings, and restarts it |
+| `service start\|stop\|restart` | Starts, stops or restarts the service |
 | `status` | Whether it runs, its addresses and its machines |
+| `pair` | Makes a link that pairs a new machine |
+| `nodes [disable\|enable\|rm <name>]` | Shows the machines, or turns one off, on, or removes it |
+| `token new\|list\|rm` | Makes, lists or removes harness tokens |
+| `log [--last N] [--problems] [--follow]` | Shows the center's log |
 | `owner-token [--new]` | Shows the token that logs in to the web UI |
 | `update`, `uninstall [--purge]` | Updates or removes the service |
 | `backup <file>`, `restore <file>` | Saves or restores its identity and pairings |
 | `nerve-center` alone | Runs the center; MCP on stdin, for a harness |
+
+`pair`, `nodes` and `token` ask the running center, also with its web UI
+off; run them as root for the installed center (on Windows in an
+administrator's terminal).
 
 Its main settings are `--name`, `--public-url`, `--listen`, `--ui` and
 `--mcp`, each also a `NERVE_CENTER_*` variable ([center](center.md)).

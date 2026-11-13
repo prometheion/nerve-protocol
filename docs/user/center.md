@@ -8,9 +8,29 @@ sudo ./nerve-center-x86_64-linux install --name lab
 nerve-center status
 ```
 
-`status` says whether it runs, its addresses and its machines, and ends
-with its log command, `journalctl -u nerve-center`. On Windows, run these in
-an administrator's terminal ([Windows](windows.md#the-center-as-a-service)).
+`status` says whether it runs, its addresses and its machines, and what to
+do next. `sudo nerve-center service start|stop|restart` starts and stops
+it. On Windows, run these in an administrator's terminal
+([Windows](windows.md#the-center-as-a-service)).
+
+## In the terminal
+
+What the web UI does for machines and harnesses, the terminal does too,
+also with the web UI off:
+
+```sh
+sudo nerve-center pair                  # a link that pairs a new machine
+sudo nerve-center nodes                 # the paired machines
+sudo nerve-center nodes disable lab     # off: the agent cannot use it
+sudo nerve-center nodes rm lab          # unpaired
+sudo nerve-center token new laptop      # a harness token, shown once
+sudo nerve-center token list
+sudo nerve-center token rm laptop
+sudo nerve-center log --problems
+```
+
+They ask the running center through its own socket, which only root and
+the center's account may use (on Windows, an administrator's terminal).
 
 ## Log in to the web UI
 
@@ -143,6 +163,9 @@ terminal. An agent with file or shell tools can read that
 token and log in to the web UI. Run the center as the service to keep the
 agent out.
 
+The commands of [In the terminal](#in-the-terminal) work on it without
+`sudo`.
+
 Several harnesses on one machine share one such center: a second
 `nerve-center` attaches to the first. A harness cannot start its own center
 while the service runs, as the port is taken. To move a center you ran
@@ -151,7 +174,9 @@ yourself into the service, with its pairings, see [backup](backup.md#move).
 ## Its log
 
 ```sh
-journalctl -u nerve-center
+sudo nerve-center log                   # its log file, the older one first
+sudo nerve-center log --problems --last 50
+journalctl -u nerve-center              # what the service printed
 ```
 
 The web UI's **Log** page shows the same log, with links, pairings,

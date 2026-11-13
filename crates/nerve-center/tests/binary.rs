@@ -772,3 +772,56 @@ mod running {
         assert!(wait(&mut c, Duration::from_secs(10)), "it still runs");
     }
 }
+
+/// The owner's commands in the terminal ask the running center over its
+/// attach socket or pipe, with the web UI off (#213): `pair` makes a link,
+/// `nodes` lists the machines, `token` makes, lists and removes harness
+/// tokens; a center that does not run is said plainly.
+#[test]
+fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let stopped = owner(&["pair"], Some(&state));
+    assert!(!stopped.status.success());
+    let err = String::from_utf8_lossy(&stopped.stderr);
+    assert!(err.contains("no center runs in "), "{err}");
+
+    let mut center = spawn(&state);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    let said = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert!(
+            o.status.success(),
+            "{args:?}: {text}{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        text
+    };
+    let pair = said(&["pair"]);
+    assert!(pair.contains(" · pairing link\n"), "{pair}");
+    assert!(pair.contains("\n  Link        nerve://"), "{pair}");
+    assert!(pair.contains("nerve-node center add -"), "{pair}");
+    let nodes = said(&["nodes"]);
+    assert!(nodes.contains(" · no machine paired\n"), "{nodes}");
+    let made = said(&["token", "new", "ci"]);
+    let token = made
+        .lines()
+        .find_map(|l| l.strip_prefix("  Token       "))
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_string();
+    assert!(token.starts_with("nrv_"), "{made}");
+    let list = said(&["token", "list"]);
+    assert!(list.contains(" · 1 harness token\n"), "{list}");
+    assert!(list.contains("\n  ci   made "), "{list}");
+    assert!(!list.contains(&token), "{list}");
+    let rm = said(&["token", "rm", "ci"]);
+    assert!(rm.starts_with("removed the harness token ci\n"), "{rm}");
+    assert!(rm.contains(" · no harness token\n"), "{rm}");
+    let gone = owner(&["nodes", "rm", "nope"], Some(&state));
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("no machine named nope"));
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+}

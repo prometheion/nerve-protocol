@@ -10,6 +10,16 @@
 //! the account of the process at the other end; the attaching one first
 //! checks that the pipe's owner is its own account, as another account
 //! could have made a pipe of that name first.
+//!
+//! The owner's commands in the terminal (`pair`, `nodes`, `token`) come the
+//! same way, as one request after [`OWNER_HELLO`] (crate::owner_calls). Of
+//! the two ways to the running center a command could take, this one adds
+//! nothing another account can reach: it works with the web UI off, and it
+//! needs no owner token read from the folder and sent to a TCP port that
+//! every account of the machine may connect to. Root and the center's own
+//! account may use it on Linux; on Windows its account, SYSTEM, and an
+//! administrator in an elevated terminal, whom the pipe's access list lets
+//! in and who may only make these requests, not attach a harness.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -19,6 +29,10 @@ pub const RUN_DIR: &str = "run";
 pub const SOCKET: &str = "harness.sock";
 /// The first line an attaching process sends.
 pub const HELLO: &str = "{\"role\":\"harness\"}";
+/// The first line an owner's command sends, then its request.
+pub const OWNER_HELLO: &str = "{\"role\":\"owner\"}";
+/// The longest request line of an owner's command.
+const OWNER_REQUEST: u64 = 64 * 1024;
 
 pub fn socket_path(state: &Path) -> PathBuf {
     state.join(RUN_DIR).join(SOCKET)
@@ -101,22 +115,70 @@ pub fn runs(state: &Path) -> Option<bool> {
     }
 }
 
-/// Serves one attached harness on `stream`, once it said [`HELLO`].
+/// Serves one attached harness on `stream`, once it said [`HELLO`], or one
+/// owner's request after [`OWNER_HELLO`]. `harness` says whether the peer
+/// may attach a harness, as only the center's own account may; an
+/// administrator on Windows may make an owner's request only.
 #[cfg(any(unix, windows))]
-async fn attached<S>(center: crate::center::Center, stream: S)
-where
+async fn attached<S>(
+    center: crate::center::Center,
+    ui: std::sync::Arc<crate::ui::Ui>,
+    stream: S,
+    harness: bool,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
-    use tokio::io::AsyncBufReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let (r, w) = tokio::io::split(stream);
     let mut r = tokio::io::BufReader::new(r);
     let mut first = String::new();
-    let read =
-        tokio::time::timeout(std::time::Duration::from_secs(5), r.read_line(&mut first)).await;
-    if !matches!(read, Ok(Ok(_))) || first.trim() != HELLO {
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        (&mut r).take(OWNER_REQUEST).read_line(&mut first),
+    )
+    .await;
+    if !matches!(read, Ok(Ok(_))) {
         return;
     }
-    crate::mcp::serve_lines(center, r, w, "attached").await;
+    match first.trim() {
+        HELLO if harness => crate::mcp::serve_lines(center, r, w, "attached").await,
+        OWNER_HELLO => owner_request(&ui, r, w).await,
+        _ => {}
+    }
+}
+
+/// Answers one owner's request: a line `{"method", "path", "body"}`, as
+/// the web UI would send it, answered by its handler
+/// ([`crate::ui::Ui::owner_call`]) with a line `{"ok": …}` or
+/// `{"error": …}`.
+#[cfg(any(unix, windows))]
+async fn owner_request<R, W>(ui: &crate::ui::Ui, r: R, mut w: W)
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        r.take(OWNER_REQUEST).read_line(&mut line),
+    )
+    .await;
+    if !matches!(read, Ok(Ok(n)) if n > 0) {
+        return;
+    }
+    let answer = match serde_json::from_str::<serde_json::Value>(&line) {
+        Ok(req) => {
+            let s = |k: &str| req[k].as_str().unwrap_or_default().to_string();
+            match ui.owner_call(&s("method"), &s("path"), &req["body"]).await {
+                Ok(v) => serde_json::json!({ "ok": v }),
+                Err((_, e)) => serde_json::json!({ "error": e["error"] }),
+            }
+        }
+        Err(e) => serde_json::json!({ "error": format!("not a request: {e}") }),
+    };
+    let _ = w.write_all(format!("{answer}\n").as_bytes()).await;
+    let _ = w.shutdown().await;
 }
 
 /// Relays this process's stdio over `stream` to the owner until either side
@@ -178,8 +240,9 @@ mod unix {
         Ok(l)
     }
 
-    /// Serves attached harnesses until the task is dropped.
-    pub async fn serve(center: Center, listener: UnixListener) {
+    /// Serves attached harnesses and the owner's requests until the task
+    /// is dropped.
+    pub async fn serve(center: Center, ui: std::sync::Arc<crate::ui::Ui>, listener: UnixListener) {
         let me = nerve_transport::net::euid();
         let mut failing = false;
         loop {
@@ -191,7 +254,7 @@ mod unix {
                 tracing::warn!(?uid, "refused a harness from another user");
                 continue;
             }
-            tokio::spawn(super::attached(center.clone(), stream));
+            tokio::spawn(super::attached(center.clone(), ui.clone(), stream, true));
         }
     }
 
@@ -287,10 +350,10 @@ mod windows {
         }
     }
 
-    /// Serves attached harnesses until the task is dropped. A new instance
-    /// waits before one that a client took is served, so the pipe is never
-    /// without one.
-    pub async fn serve(center: Center, l: Listener) {
+    /// Serves attached harnesses and the owner's requests until the task
+    /// is dropped. A new instance waits before one that a client took is
+    /// served, so the pipe is never without one.
+    pub async fn serve(center: Center, ui: std::sync::Arc<crate::ui::Ui>, l: Listener) {
         let Listener {
             name,
             sd,
@@ -318,12 +381,15 @@ mod windows {
                 continue;
             }
             let account = client_pid(&conn).and_then(|pid| user_of(Some(pid)).ok());
-            if !account.as_ref().is_some_and(|a| may_attach(a, &own)) {
-                let who = account.and_then(|a| sid_text(&a).ok());
-                tracing::warn!(?who, "refused a harness from another account");
+            let Some(account) = account else {
+                tracing::warn!("refused a connection whose account is not known");
                 continue;
-            }
-            tokio::spawn(super::attached(center.clone(), conn));
+            };
+            // Any other account the pipe's access list let in is an
+            // administrator in an elevated terminal: the owner's requests
+            // only, no harness.
+            let harness = may_attach(&account, &own);
+            tokio::spawn(super::attached(center.clone(), ui.clone(), conn, harness));
         }
     }
 

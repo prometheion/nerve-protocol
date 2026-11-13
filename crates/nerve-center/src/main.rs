@@ -9,7 +9,10 @@ use nerve_service::out::{Said, Style};
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
     let layout = nerve_center::service::Layout::system();
-    let is_service = cfg!(windows) && std::env::args_os().nth(1).is_some_and(|a| a == "service");
+    // `service` alone; `service start` is the owner's.
+    let is_service = cfg!(windows)
+        && std::env::args_os().nth(1).is_some_and(|a| a == "service")
+        && std::env::args_os().len() == 2;
     // The Windows service reads its settings from its own file, as systemd
     // gives the Linux one its own: before anything reads the environment.
     #[cfg(windows)]
@@ -33,7 +36,7 @@ fn main() -> std::process::ExitCode {
         Err(e) if !is_service => e.exit(),
         Err(e) => return refuse(&layout, is_service, &e.to_string()),
     };
-    if args.cmd == Some(Cmd::Service) {
+    if args.cmd.as_ref().is_some_and(Cmd::runs_the_service) {
         #[cfg(windows)]
         return nerve_center::win_host::serve(args);
         #[cfg(not(windows))]
@@ -109,6 +112,25 @@ fn main() -> std::process::ExitCode {
             Cmd::Status => {
                 nerve_center::service::status(&layout, &state, &args.ui, &args.mcp, &mut out)
             }
+            // The running center answers these over its attach socket or
+            // pipe, as the folder's owner asks it.
+            Cmd::Pair | Cmd::Nodes { .. } | Cmd::Token(_) => {
+                let installed = layout.installed() && layout.is_state(&state);
+                settle(&state).and_then(|_| {
+                    owner_runtime()?.block_on(nerve_center::owner_calls::run(
+                        &state, cmd, installed, &mut out,
+                    ))
+                })
+            }
+            Cmd::Log {
+                follow,
+                last,
+                problems,
+            } => settle(&state).and_then(|_| {
+                owner_runtime()?.block_on(nerve_center::owner_calls::log(
+                    &state, *follow, *last, *problems, &mut out,
+                ))
+            }),
             // A restore into the running service stops it first and starts
             // it again after (as root, before this one becomes the
             // folder's owner).
@@ -228,6 +250,14 @@ fn install_by_double_click() -> std::process::ExitCode {
             code
         }
     }
+}
+
+/// The runtime of an owner's command that asks the running center.
+fn owner_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("cannot start the runtime: {e}"))
 }
 
 /// Says why a command failed, in the style of both programs; its exit

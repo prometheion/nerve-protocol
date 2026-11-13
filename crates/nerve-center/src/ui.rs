@@ -129,34 +129,47 @@ pub(crate) fn token_command_of(
     local: bool,
     windows: bool,
 ) -> String {
+    command_of("owner-token", state, installed, default, local, windows)
+}
+
+/// The owner's command `what` for the center in `state`, as
+/// [`token_command_of`] names `owner-token`.
+pub(crate) fn command_of(
+    what: &str,
+    state: &std::path::Path,
+    installed: Option<&std::path::Path>,
+    default: &std::path::Path,
+    local: bool,
+    windows: bool,
+) -> String {
     if installed == Some(state) {
         return match windows {
-            true => "nerve-center owner-token".into(),
-            false => "sudo nerve-center owner-token".into(),
+            true => format!("nerve-center {what}"),
+            false => format!("sudo nerve-center {what}"),
         };
     }
     if installed.is_none() && state == default {
-        return "nerve-center owner-token".into();
+        return format!("nerve-center {what}");
     }
     if !local {
-        return "nerve-center owner-token --state-dir <this center's folder>".into();
+        return format!("nerve-center {what} --state-dir <this center's folder>");
     }
     let dir = state.display().to_string();
     let plain = dir
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-~:\\".contains(c));
     match (plain, windows) {
-        (true, _) => format!("nerve-center owner-token --state-dir {dir}"),
+        (true, _) => format!("nerve-center {what} --state-dir {dir}"),
         // A Windows path holds no double quote.
         (false, true) if !dir.contains(['$', '`', '%']) => {
-            format!("nerve-center owner-token --state-dir \"{dir}\"")
+            format!("nerve-center {what} --state-dir \"{dir}\"")
         }
         // PowerShell expands `$` and the backtick inside double quotes and
         // cmd expands `%name%`, and no quoting suits both: the folder is
         // not named, so the copied command never names another one.
-        (false, true) => "nerve-center owner-token --state-dir <this center's folder>".into(),
+        (false, true) => format!("nerve-center {what} --state-dir <this center's folder>"),
         (false, false) => format!(
-            "nerve-center owner-token --state-dir '{}'",
+            "nerve-center {what} --state-dir '{}'",
             dir.replace('\'', "'\\''")
         ),
     }
@@ -172,6 +185,18 @@ fn html_text(text: &str) -> String {
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
+
+/// The requests of the web UI the owner's commands in the terminal make
+/// ([`Ui::owner_call`]).
+pub const OWNER_CALLS: &[(&str, &str)] = &[
+    ("GET", "/api/overview"),
+    ("POST", "/api/pair"),
+    ("POST", "/api/nodes/disable"),
+    ("POST", "/api/nodes/remove"),
+    ("GET", "/api/tokens"),
+    ("POST", "/api/tokens/create"),
+    ("POST", "/api/tokens/delete"),
+];
 /// How many log entries a view gets unless it asks for another number, and
 /// the most it may ask for.
 const LOG_PAGE: usize = 500;
@@ -207,6 +232,33 @@ impl Ui {
             wrong: webui::WrongSecrets::default(),
             mcp: std::sync::OnceLock::new(),
         })
+    }
+
+    /// One request of the owner's commands in the terminal (`pair`,
+    /// `nodes`, `token`), which come over the attach socket or pipe
+    /// (crate::attach): the web UI's own handlers answer them ([`Ui::api`]),
+    /// so they take the same checks and limits and leave the same log
+    /// lines. Only these requests; nothing else of the web UI.
+    pub async fn owner_call(
+        &self,
+        method: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, (u16, Value)> {
+        if !OWNER_CALLS.contains(&(method, path)) {
+            return Err((
+                404,
+                json!({"error": format!("{method} {path} is none of the owner's commands")}),
+            ));
+        }
+        let req = Request {
+            method: method.into(),
+            path: path.into(),
+            query: String::new(),
+            headers: Default::default(),
+            body: Vec::new(),
+        };
+        self.api(&req, body).await
     }
 
     /// Says how this center serves MCP: `mode` stdio, http or off, and for

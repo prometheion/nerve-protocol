@@ -592,6 +592,29 @@ see other processes or change kernel settings, the clock or the host name.
 A `NERVE_CENTER_LISTEN` on a port below 1024 fails; use a higher port, or forward
 one to it.
 
+### The owner's commands
+
+`sudo nerve-center service start|stop|restart` runs `systemctl` on the unit
+(on Windows the service control manager); a start waits until the center
+answers. `pair`, `nodes`, `token` and `log` work as they do for a center a
+harness started ([in the terminal](../user/center.md#in-the-terminal)).
+
+`pair`, `nodes` and `token` ask the running center over its attach socket,
+`run/harness.sock` in the state folder (on Windows its attach pipe), with
+the line `{"role":"owner"}` and then one request as the web UI would send
+it. The center answers it with the web UI's own handler, so the checks,
+limits and log lines are the same; only those requests are taken. This
+way was chosen over the owner token and the web UI's port: it works with
+the web UI off, and it adds no way in for another account. The socket is
+mode 0600 in a 0700 folder and takes root and the center's account; root's
+command first becomes the folder's owner, as `owner-token` does, so it
+follows no link put there. The pipe lets in the center's account, SYSTEM
+and the administrators; an administrator other than the center's account
+may make the owner's requests only, not attach a harness. The command
+checks that the pipe belongs to the center's account (or the installed
+service's) before it sends anything. `log` reads `log.jsonl` (and
+`log.jsonl.1`) in the state folder, so it works with the center stopped.
+
 ### Update
 
 ```sh
@@ -620,10 +643,9 @@ when) run `sudo nerve-center install` once, or `update` again.
 The state folder and the settings are not touched. `update` refuses a file
 that is not `nerve-center` and a program older than the installed one. If the
 new program does not start, the old one is put back with the old unit and
-started again. Its
-last line says where the owner token is: a center installed before there
-was one makes it at this start, and its web UI no longer takes the harness
-token (`sudo cat /var/lib/nerve-center/owner-token`).
+started again. It ends
+with the page `status` shows, of the new program, with the command that
+shows the owner token.
 
 ### Uninstall
 

@@ -258,7 +258,8 @@ pub async fn execute(
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
-        _ => Err("only install, set, update and uninstall are service commands".into()),
+        Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
+        _ => Err("only install, set, service, update and uninstall are service commands".into()),
     }
 }
 
@@ -592,6 +593,45 @@ fn start(sys: &dyn WinSystem, layout: &Layout) -> Result<(), String> {
     })
 }
 
+/// `service start|stop|restart` on Windows, as on Linux
+/// ([`crate::service::service`]): the service control manager does it.
+pub fn service(
+    layout: &Layout,
+    sys: &dyn WinSystem,
+    c: crate::config::ServiceCmd,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    use crate::config::ServiceCmd;
+    supported(sys, "service")?;
+    let Some(running) = sys.service()? else {
+        return Err(NOT_INSTALLED.into());
+    };
+    let done = match c {
+        ServiceCmd::Start => "started the center",
+        ServiceCmd::Stop => "stopped the center",
+        ServiceCmd::Restart => "restarted the center",
+    };
+    if running && c != ServiceCmd::Start {
+        sys.stop()?;
+    }
+    let runs = c != ServiceCmd::Stop;
+    if runs {
+        if !running || c == ServiceCmd::Restart {
+            start(sys, layout)?;
+        }
+        sys.wait_running(layout)?;
+    }
+    let _ = writeln!(out, "{done}");
+    let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
+    let page = crate::service::service_page(layout, &file, runs);
+    let _ = write!(
+        out,
+        "\n{}",
+        page.render(nerve_service::out::Style::stdout())
+    );
+    Ok(())
+}
+
 /// Runs `restore` with the installed service stopped, and starts it again
 /// after whether the restore did its work or not; the restore's answer. A
 /// service that does not stop runs no restore.
@@ -826,6 +866,66 @@ mod tests {
         let l = layout(root);
         install(&l, sys, &download(root, version), &[], &mut Vec::new()).unwrap();
         l
+    }
+
+    /// `service start|stop|restart` asks the service control manager, as
+    /// on Linux: a stopped service is started, a running one stopped
+    /// first for a restart; the page `status` shows ends it (#213).
+    #[test]
+    fn the_service_command_starts_stops_and_restarts_the_center() {
+        use crate::config::ServiceCmd;
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        for (c, calls, said, head) in [
+            (
+                ServiceCmd::Stop,
+                &["stop"][..],
+                "stopped the center",
+                " · stopped\n",
+            ),
+            (
+                ServiceCmd::Start,
+                &["start"],
+                "started the center",
+                " · running as a service\n",
+            ),
+            (
+                ServiceCmd::Start,
+                &[],
+                "started the center",
+                " · running as a service\n",
+            ),
+            (
+                ServiceCmd::Restart,
+                &["stop", "start"],
+                "restarted the center",
+                " · running as a service\n",
+            ),
+        ] {
+            sys.calls.borrow_mut().clear();
+            let mut out = Vec::new();
+            service(&l, &sys, c, &mut out).unwrap();
+            assert_eq!(sys.calls(), calls, "{c:?}");
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.starts_with(&format!("{said}\n\nNerve center ")),
+                "{out}"
+            );
+            assert!(out.contains(head), "{out}");
+        }
+        let none = Fake::new();
+        let e = service(
+            &layout(&d.path().join("none")),
+            &none,
+            ServiceCmd::Start,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(e, NOT_INSTALLED);
+        let mut not_admin = Fake::new();
+        not_admin.admin = false;
+        assert!(service(&l, &not_admin, ServiceCmd::Stop, &mut Vec::new()).is_err());
     }
 
     /// The install makes the folders with their own DACLs, the owner token,
