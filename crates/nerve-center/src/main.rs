@@ -1,7 +1,7 @@
 //! `nerve-center`: started by a harness from its MCP configuration. Logs go to
 //! stderr and to the log file in the state folder, never to stdout, which
-//! carries MCP. `install`, `update` and `uninstall` (as root on Linux) say
-//! their steps on stdout instead, as `owner-token` says the token.
+//! carries MCP. `install`, `set`, `update` and `uninstall` (as root on
+//! Linux) say their steps on stdout instead, as `owner-token` says the token.
 
 use clap::{CommandFactory, FromArgMatches};
 
@@ -161,6 +161,8 @@ fn main() -> std::process::ExitCode {
                 let value = match *flag {
                     "--name" => args.name.clone(),
                     "--public-url" => args.public_url.clone(),
+                    "--ui" => Some(args.ui.clone()),
+                    "--mcp" => Some(args.mcp.setting()),
                     _ => Some(args.listen.clone()),
                 };
                 value.map(|v| (*var, v))

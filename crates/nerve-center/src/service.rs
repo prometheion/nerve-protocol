@@ -1,7 +1,7 @@
 //! The center as a service (docs/dev/service.md, "The center as a service"):
-//! `install`, `update` and `uninstall`, on Linux with systemd, as the node
-//! has them: what both do the same way, `update` among it, is
-//! [`nerve_service`]'s. On Windows the service control manager runs it
+//! `install`, `set`, `update` and `uninstall`, on Linux with systemd, as the
+//! node has them (`set` is the center's own): what both do the same way,
+//! `update` among it, is [`nerve_service`]'s. On Windows the service control manager runs it
 //! ([`crate::winsvc`]). The service runs `nerve-center` with
 //! MCP over HTTP under a user of its own, `nerve-center`, which owns the
 //! center's state folder and nothing else. Its settings are the
@@ -212,16 +212,23 @@ WantedBy=multi-user.target
             Some((_, value)) => format!("{var}={value}"),
             None => format!("#{var}={default}"),
         };
-        let restart = match self.windows() {
-            true => "`Restart-Service nerve-center` in an administrator's PowerShell".to_string(),
-            false => format!("`sudo systemctl restart {UNIT_NAME}`"),
+        let (set, restart) = match self.windows() {
+            true => (
+                "`nerve-center set <name> <value>` in an administrator's terminal",
+                "`Restart-Service nerve-center` in an administrator's PowerShell".to_string(),
+            ),
+            false => (
+                "`sudo nerve-center set <name> <value>`",
+                format!("`sudo systemctl restart {UNIT_NAME}`"),
+            ),
         };
         format!(
-            "# The settings of the installed center, read by the service at its start:
-# {restart} after a change.
-# `nerve-center install` wrote this file and keeps it; `install --name`,
-# `--public-url` and `--listen` set those here. Each variable is a flag of
-# `nerve-center --help`.
+            "# The settings of the installed center, read by the service at its start.
+# {set} changes name, public-url,
+# listen, ui or mcp here and restarts the service; after a change by hand,
+# {restart}.
+# `nerve-center install` wrote this file and keeps it, and takes those five as
+# flags. Each variable is a flag of `nerve-center --help`.
 #
 # The harness token: harnesses send it to the HTTP MCP endpoint. It does not
 # log in to the web UI, which asks for the owner token in
@@ -230,13 +237,15 @@ NERVE_CENTER_HARNESS_TOKEN={token}
 {}
 {}
 {}
-#NERVE_CENTER_UI=127.0.0.1:7480
-#NERVE_CENTER_MCP=127.0.0.1:7481
+{}
+{}
 #NERVE_CENTER_LOG=info
 ",
             line("NERVE_CENTER_NAME", "nerve-center"),
             line("NERVE_CENTER_LISTEN", "0.0.0.0:7443"),
             line("NERVE_CENTER_PUBLIC_URL", "https://<host name>:7443"),
+            line("NERVE_CENTER_UI", "127.0.0.1:7480"),
+            line("NERVE_CENTER_MCP", "127.0.0.1:7481"),
             owner = crate::owner::path(&self.state).display(),
         )
     }
@@ -605,10 +614,10 @@ pub fn service_files_text(layout: &Layout) -> String {
     nerve_service::files_text(&[("unit", Some(layout.unit_text()))])
 }
 
-/// Runs `install`, `update` or `uninstall` on this machine. As the node's
-/// own, none of them may be run by a command the installed node runs for a
-/// center ([`nerve_service::owner_check`]): an agent cannot replace or
-/// remove its center either.
+/// Runs `install`, `set`, `update` or `uninstall` on this machine. As the
+/// node's own, none of them may be run by a command the installed node runs
+/// for a center ([`nerve_service::owner_check`]): an agent cannot replace,
+/// reconfigure or remove its center either.
 /// `given` are the center's settings the owner gave with the command
 /// ([`crate::config::settings_given`]): none of them reaches the service,
 /// whose settings are in its settings file, so they are refused.
@@ -643,6 +652,7 @@ pub async fn execute(
 fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
     Ok(match cmd {
         Cmd::Install => "install",
+        Cmd::Set { .. } => "set",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
         // `main` gives these to crate::backup and crate::owner.
@@ -675,9 +685,22 @@ fn refuse_given(what: &str, given: &[String], layout: &Layout) -> Result<(), Str
     let refused: Vec<&String> = given.iter().filter(|g| !takes(g)).collect();
     if !refused.is_empty() {
         let names: Vec<&str> = refused.iter().map(|g| g.as_str()).collect();
+        // `set` takes its setting by name; a variable of this terminal
+        // would reach nothing either.
+        if what == "set" {
+            let clear = match refused.iter().any(|g| !g.starts_with("--")) {
+                true => "; clear the variable in this terminal",
+                false => "",
+            };
+            return Err(format!(
+                "set takes a setting by its name, as {}, not {}{clear}",
+                set_command(layout, "ui 0.0.0.0:7480"),
+                names.join(", "),
+            ));
+        }
         let takes = match what {
             "install" => {
-                "takes only --name, --public-url and --listen of the center's settings, which it writes into its settings file"
+                "takes only --name, --public-url, --listen, --ui and --mcp of the center's settings, which it writes into its settings file"
             }
             _ => "takes none of the center's settings",
         };
@@ -713,6 +736,10 @@ async fn execute_on(
         Cmd::Install => {
             let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;
             install_with(layout, sys, &exe, set, out)
+        }
+        // `set` here names the settings `install` writes.
+        Cmd::Set { setting, value } => {
+            self::set(layout, sys, setting.as_deref(), value.as_deref(), out)
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
@@ -817,33 +844,49 @@ pub fn install_with(
 /// The three lines `install` ends with: the web UI, the owner token that
 /// logs in to it, and where harnesses connect; from the settings `file`.
 pub(crate) fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
-    let ui = setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
-    let mcp = match setting_in(file, "NERVE_CENTER_MCP").as_deref() {
-        None | Some("http") => crate::config::MCP_HTTP.to_string(),
-        Some(a) => a.to_string(),
-    };
-    let web = crate::config::address_url;
-    // The same `off` cases as `status` shows.
-    let ui_line = match ui.eq_ignore_ascii_case("off") {
-        true => "off".to_string(),
-        false => web(&ui),
-    };
-    let mcp_line = match mcp.eq_ignore_ascii_case("off") {
-        true => "none (MCP is off)".to_string(),
-        false => format!(
-            "{}/mcp, with a harness token: the web UI's Connect a harness card makes one",
-            web(&mcp)
-        ),
-    };
     [
-        format!("Web UI:      {ui_line}"),
+        ui_line(file),
         format!(
             "Owner token: {owner_token} (logs in to the web UI; kept in {}, {} shows it again)",
             kept.display(),
             admin_command("owner-token")
         ),
-        format!("Harnesses:   {mcp_line}"),
+        mcp_line(file),
     ]
+}
+
+/// The web UI's address the settings `file` give the service.
+fn ui_address(file: &str) -> String {
+    setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into())
+}
+
+/// The HTTP MCP address the settings `file` give the service, which runs
+/// with `http` where they set none; `off` where it is off.
+fn mcp_address(file: &str) -> String {
+    match setting_in(file, "NERVE_CENTER_MCP").as_deref() {
+        None | Some("http") => crate::config::MCP_HTTP.to_string(),
+        Some(a) => a.to_string(),
+    }
+}
+
+/// The "Web UI:" line of `install` and `set`, with the same `off` case as
+/// `status` shows.
+fn ui_line(file: &str) -> String {
+    match ui_address(file) {
+        a if a.eq_ignore_ascii_case("off") => "Web UI:      off".into(),
+        a => format!("Web UI:      {}", crate::config::address_url(&a)),
+    }
+}
+
+/// The "Harnesses:" line of `install` and `set`.
+fn mcp_line(file: &str) -> String {
+    match mcp_address(file) {
+        a if a.eq_ignore_ascii_case("off") => "Harnesses:   none (MCP is off)".into(),
+        a => format!(
+            "Harnesses:   {}/mcp, with a harness token: the web UI's Connect a harness card makes one",
+            crate::config::address_url(&a)
+        ),
+    }
 }
 
 /// `nerve-center <what>` as an administrator runs it: with `sudo` on
@@ -867,10 +910,12 @@ pub(crate) fn setting_in(file: &str, var: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Refuses a setting `install` would write into the file that is not one:
-/// a line break would put another variable there, and systemd reads a
-/// backslash (a trailing one joins the next line), quotes and `$` in an
-/// `EnvironmentFile=` as more than the characters they are.
+/// Refuses a setting `install` or `set` would write into the file that is
+/// not one: a line break would put another variable there, and systemd
+/// reads a backslash (a trailing one joins the next line), quotes and `$` in
+/// an `EnvironmentFile=` as more than the characters they are. An address
+/// without its port, as `0.0.0.0`, is refused with one that has it: the
+/// center would not start on it.
 pub(crate) fn check_setting(var: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.contains(['\n', '\r', '\0']) {
         return Err(format!("{var}: one line, not empty"));
@@ -882,17 +927,36 @@ pub(crate) fn check_setting(var: &str, value: &str) -> Result<(), String> {
     }
     match var {
         "NERVE_CENTER_LISTEN" if value.parse::<std::net::SocketAddr>().is_err() => Err(format!(
-            "--listen {value:?}: an address and a port, like 0.0.0.0:7443"
+            "listen {value:?}: an address and a port, like 0.0.0.0:7443"
         )),
         "NERVE_CENTER_PUBLIC_URL"
             if !(value.starts_with("https://") || value.starts_with("http://")) =>
         {
             Err(format!(
-                "--public-url {value:?}: the URL nodes reach the center at, like https://center.example:7443"
+                "public-url {value:?}: the URL nodes reach the center at, like https://center.example:7443"
             ))
         }
+        "NERVE_CENTER_UI" if !(value.eq_ignore_ascii_case("off") || has_port(value)) => {
+            Err(format!(
+                "ui {value:?}: an address and a port, like 0.0.0.0:7480 (every address) or 127.0.0.1:7480, or off"
+            ))
+        }
+        // The service has no stdin, so `stdio` is no mode of it.
+        "NERVE_CENTER_MCP" if !matches!(value, "http" | "off") && !has_port(value) => Err(format!(
+            "mcp {value:?}: http ({}), off, or an address and a port, like 0.0.0.0:7481",
+            crate::config::MCP_HTTP
+        )),
         _ => Ok(()),
     }
+}
+
+/// Whether `a` is an address and a port the center can listen on, as
+/// `--ui` and `--mcp` take them: `0.0.0.0:7480`, `[::1]:7480` or
+/// `localhost:7480`.
+fn has_port(a: &str) -> bool {
+    a.parse::<std::net::SocketAddr>().is_ok()
+        || a.strip_prefix("localhost:")
+            .is_some_and(|p| p.parse::<u16>().is_ok())
 }
 
 /// `text` with `set` in place: the lines of those variables, set or as
@@ -957,10 +1021,13 @@ pub(crate) fn settings_file(
         let text =
             std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         write_file(&file, with_settings(&text, set).as_bytes(), 0o600)?;
-        let names: Vec<&str> = set.iter().map(|(v, _)| *v).collect();
+        let lines: Vec<String> = set
+            .iter()
+            .map(|(v, value)| format!("{v}={value}"))
+            .collect();
         did(
             out,
-            format!("set {} in {}", names.join(", "), file.display()),
+            format!("set {} in {}", lines.join(", "), file.display()),
         );
         return Ok(());
     }
@@ -974,6 +1041,245 @@ pub(crate) fn settings_file(
         ),
     );
     Ok(())
+}
+
+/// Why `set` and `update` do nothing here.
+const NOT_INSTALLED: &str =
+    "the center is not installed as a service here; `sudo nerve-center install` installs it";
+
+/// `set`: without a setting, the settings it changes and their values
+/// ([`settings_lines`]). With one, its `value` checked and written into the
+/// settings file in place of the old line, the other lines kept, and the
+/// running service restarted until the center answers, as the owner would
+/// edit the file and restart it by hand. A center that runs is one that
+/// holds the lock of the service's state folder, as for the restore
+/// ([`with_service_stopped`]); one that does not takes the setting at its
+/// next start.
+pub fn set(
+    layout: &Layout,
+    sys: &dyn System,
+    setting: Option<&str>,
+    value: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    supported(sys, "set")?;
+    if !layout.installed() {
+        return Err(NOT_INSTALLED.into());
+    }
+    let path = layout.settings();
+    let kept = crate::winsvc::settings_text(std::fs::read_to_string(&path), &path)?;
+    let Some((name, value)) = setting.zip(value) else {
+        for line in settings_lines(&kept, &path, layout) {
+            did(out, line);
+        }
+        return Ok(());
+    };
+    let Some(var) = set_checked(name, value, &kept, layout)? else {
+        return said_already(name, value, &kept, layout, out);
+    };
+    settings(layout, sys, &[(var, value.to_string())], out)?;
+    if crate::attach::runs(&layout.state) == Some(true) {
+        sys.systemctl(&["restart", UNIT_NAME])
+            .and_then(|()| sys.wait_running(&layout.state))
+            .map_err(|e| not_running_with(&e, name, value, &kept, layout))?;
+        did(
+            out,
+            format!("restarted {UNIT_NAME}: the center runs with it"),
+        );
+    } else {
+        did(
+            out,
+            format!(
+                "{UNIT_NAME} does not run; it takes this at its next start (`sudo systemctl start {UNIT_NAME}`)"
+            ),
+        );
+    }
+    let file = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in set_lines(var, &file, layout) {
+        did(out, line);
+    }
+    Ok(())
+}
+
+/// The variable of the setting `name` that `set` gives `value`, checked
+/// before anything changes as `install` checks its own: the value
+/// ([`check_setting`]), and the settings file `kept`, whose old variable
+/// names would keep the center from starting. `None` when the file sets
+/// that value already: nothing is written, and nothing restarts.
+pub(crate) fn set_checked(
+    name: &str,
+    value: &str,
+    kept: &str,
+    layout: &Layout,
+) -> Result<Option<&'static str>, String> {
+    let var = crate::config::set_variable(name)
+        .ok_or_else(|| format!("{name:?}: set changes name, public-url, listen, ui and mcp"))?;
+    check_setting(var, value)?;
+    crate::config::refuse_old_names(|k| setting_in(kept, k), &layout.settings())
+        .map_err(|e| format!("{e}; set changed nothing"))?;
+    Ok((setting_in(kept, var).as_deref() != Some(value)).then_some(var))
+}
+
+/// What `set` says when the settings file `kept` has `name` at `value`
+/// already.
+pub(crate) fn said_already(
+    name: &str,
+    value: &str,
+    kept: &str,
+    layout: &Layout,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    did(
+        out,
+        format!(
+            "{name} is {value} in {} already; nothing changed",
+            layout.settings().display()
+        ),
+    );
+    if let Some(var) = crate::config::set_variable(name) {
+        for line in set_lines(var, kept, layout) {
+            did(out, line);
+        }
+    }
+    Ok(())
+}
+
+/// The error of a restart after `set` gave `name` the `value` (the center
+/// did not start, or does not answer), with how to put back what the
+/// settings file `kept` had before: the value stays in the file.
+pub(crate) fn not_running_with(
+    e: &str,
+    name: &str,
+    value: &str,
+    kept: &str,
+    layout: &Layout,
+) -> String {
+    let var = crate::config::set_variable(name).unwrap_or_default();
+    let back = match setting_in(kept, var).or_else(|| default_of(var, kept)) {
+        Some(before) => format!(
+            "; {} puts back the value before",
+            set_command(layout, &format!("{name} {before}"))
+        ),
+        None => String::new(),
+    };
+    format!(
+        "{e}. {name} is {value} in {} now{back}",
+        layout.settings().display()
+    )
+}
+
+/// What the installed center does where its settings `file` sets no
+/// `var`: the defaults its service runs with. `None` for the name, which
+/// is then the one set in the web UI.
+fn default_of(var: &str, file: &str) -> Option<String> {
+    match var {
+        "NERVE_CENTER_PUBLIC_URL" => Some(format!(
+            "https://{}:{}",
+            crate::center::host_name(),
+            crate::winsvc::node_port(file)
+        )),
+        "NERVE_CENTER_LISTEN" => Some("0.0.0.0:7443".into()),
+        "NERVE_CENTER_UI" => Some("127.0.0.1:7480".into()),
+        "NERVE_CENTER_MCP" => Some("http".into()),
+        _ => None,
+    }
+}
+
+/// What `set` without a setting says: each setting it changes, as the
+/// settings `file` at `path` sets it or else with its default, and how to
+/// change one.
+pub(crate) fn settings_lines(file: &str, path: &Path, layout: &Layout) -> Vec<String> {
+    let mut lines = vec![format!(
+        "The installed center's settings, in {}:",
+        path.display()
+    )];
+    for (flag, var) in crate::config::INSTALL_SETTINGS {
+        let name = flag.trim_start_matches('-');
+        let (value, default) = match setting_in(file, var) {
+            Some(v) => (v, ""),
+            None => (
+                default_of(var, file).unwrap_or_else(|| "as set in the web UI".into()),
+                " (default)",
+            ),
+        };
+        let value = match value.as_str() {
+            "http" => format!("http, at {}", crate::config::MCP_HTTP),
+            _ => value,
+        };
+        lines.push(format!("  {name:<10}  {value}{default}"));
+    }
+    lines.push(format!(
+        "{} changes one and restarts the service.",
+        set_command(layout, "<name> <value>")
+    ));
+    lines
+}
+
+/// `nerve-center set <what>` as an administrator runs it where `layout` is
+/// installed: [`admin_command`] for the layout, which the tests give a
+/// Windows one on Linux too.
+fn set_command(layout: &Layout, what: &str) -> String {
+    match layout.windows() {
+        true => format!("`nerve-center set {what}` in an administrator's terminal"),
+        false => format!("`sudo nerve-center set {what}`"),
+    }
+}
+
+/// What `set` says once the settings `file` give `var` its new value:
+/// where the center is reached now and what that takes. Beyond loopback
+/// the web UI and MCP use TLS; on Windows the firewall rule `install` made
+/// covers the node port only, so the line says how to let another port in.
+pub(crate) fn set_lines(var: &str, file: &str, layout: &Layout) -> Vec<String> {
+    let at = |var: &str| {
+        setting_in(file, var)
+            .or_else(|| default_of(var, file))
+            .unwrap_or_default()
+    };
+    let (line, address, what, rule, trust) = match var {
+        "NERVE_CENTER_UI" => (
+            ui_line(file),
+            ui_address(file),
+            "the web UI",
+            "web UI",
+            "your browser asks you to trust it",
+        ),
+        "NERVE_CENTER_MCP" => (
+            mcp_line(file),
+            mcp_address(file),
+            "the HTTP MCP endpoint",
+            "MCP",
+            "let the harness trust it (the Connect a harness card shows its fingerprint)",
+        ),
+        "NERVE_CENTER_NAME" => {
+            return vec![format!(
+                "Name:        {} (it replaces the name set in the web UI at each start)",
+                at(var)
+            )];
+        }
+        _ => {
+            return vec![format!(
+                "Nodes:       {}, and new pairing links name {}",
+                at("NERVE_CENTER_LISTEN"),
+                at("NERVE_CENTER_PUBLIC_URL")
+            )];
+        }
+    };
+    let mut lines = vec![line];
+    if address.eq_ignore_ascii_case("off") || crate::config::is_loopback(&address) {
+        return lines;
+    }
+    lines.push(format!(
+        "Beyond loopback {what} uses TLS with the center's self-signed certificate: {trust}."
+    ));
+    if layout.windows() {
+        let port = address.rsplit_once(':').map_or("", |(_, p)| p);
+        lines.push(format!(
+            "The Windows Firewall rule \"{}\" lets in the node port only: `New-NetFirewallRule -DisplayName 'Nerve center {rule}' -Direction Inbound -Protocol TCP -LocalPort {port} -Program '{}' -Action Allow` in an administrator's PowerShell lets other machines reach port {port}.",
+            crate::winsvc::FIREWALL_RULE,
+            layout.bin.display()
+        ));
+    }
+    lines
 }
 
 /// `uninstall`: stops and removes the service, then the folders (deleted
@@ -1068,10 +1374,7 @@ pub async fn update(
 ) -> Result<(), String> {
     supported(sys, "update")?;
     if !layout.installed() || !layout.bin.is_file() {
-        return Err(
-            "the center is not installed as a service here; `sudo nerve-center install` installs it"
-                .into(),
-        );
+        return Err(NOT_INSTALLED.into());
     }
     // The new program does not start while the settings file names an old
     // variable: said before anything changes.
@@ -1474,6 +1777,20 @@ mod tests {
         let mut results = Vec::new();
         for (what, cmd) in [
             ("install", Cmd::Install),
+            (
+                "set",
+                Cmd::Set {
+                    setting: Some("ui".into()),
+                    value: Some("0.0.0.0:7480".into()),
+                },
+            ),
+            (
+                "set",
+                Cmd::Set {
+                    setting: None,
+                    value: None,
+                },
+            ),
             ("update", Cmd::Update { from: None }),
             ("uninstall", Cmd::Uninstall { purge: false }),
         ] {
@@ -1505,7 +1822,7 @@ mod tests {
         // `install` takes --public-url, which it writes; not --state-dir.
         assert!(
             e.starts_with(
-                "install takes only --name, --public-url and --listen of the center's settings, which it writes into its settings file, not --state-dir"
+                "install takes only --name, --public-url, --listen, --ui and --mcp of the center's settings, which it writes into its settings file, not --state-dir"
             ),
             "{e}"
         );
@@ -1525,6 +1842,27 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.starts_with("uninstall takes none"), "{e}");
+        // `set` takes a setting by its name: a flag is refused with the
+        // command that sets it.
+        let set = Cmd::Set {
+            setting: None,
+            value: None,
+        };
+        let e = execute_on(
+            set,
+            &["--ui".to_string()],
+            &[],
+            &l,
+            &NotRoot,
+            &node,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "set takes a setting by its name, as `sudo nerve-center set ui 0.0.0.0:7480`, not --ui"
+        );
     }
 
     /// `install --name --public-url --listen` writes them into the settings
@@ -1616,6 +1954,234 @@ mod tests {
         );
         assert!(e.ends_with("; install changed nothing"), "{e}");
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    /// `install --ui --mcp` writes the web UI's and MCP's addresses into
+    /// a new settings file too, and ends with them; `stdio`, which the
+    /// service has no input for, is refused.
+    #[test]
+    fn install_takes_the_web_ui_and_mcp_addresses() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("nerve-center-x86_64-linux");
+        std::fs::write(&exe, "nerve-center 1.0.0\n").unwrap();
+        let set = [
+            ("NERVE_CENTER_UI", "127.0.0.1:7490".to_string()),
+            ("NERVE_CENTER_MCP", "127.0.0.1:7491".to_string()),
+        ];
+        let mut out = Vec::new();
+        install_with(&l, &sys, &exe, &set, &mut out).unwrap();
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        assert!(
+            file.contains("\nNERVE_CENTER_UI=127.0.0.1:7490\n"),
+            "{file}"
+        );
+        assert!(
+            file.contains("\nNERVE_CENTER_MCP=127.0.0.1:7491\n"),
+            "{file}"
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("Web UI:      http://127.0.0.1:7490\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Harnesses:   http://127.0.0.1:7491/mcp"),
+            "{out}"
+        );
+        for (var, bad) in [
+            ("NERVE_CENTER_MCP", "stdio"),
+            ("NERVE_CENTER_UI", "0.0.0.0"),
+        ] {
+            let e = install_with(&l, &sys, &exe, &[(var, bad.to_string())], &mut Vec::new())
+                .unwrap_err();
+            assert!(e.contains(bad), "{e}");
+        }
+        // What `install --mcp` gives is written as the owner meant it.
+        let a = |m: &str| m.parse::<McpMode>().unwrap().setting();
+        assert_eq!(a("off"), "off");
+        assert_eq!(a("0.0.0.0:7481"), "0.0.0.0:7481");
+        assert_eq!(a("http"), crate::config::MCP_HTTP);
+    }
+
+    /// `set` writes the setting in place of its line in the settings file
+    /// and keeps the others, the harness token among them; the running
+    /// service restarts and the center answers before it says where the
+    /// web UI is now. The same value again changes nothing; a service that
+    /// does not run is not started.
+    #[test]
+    fn set_writes_the_setting_in_place_and_restarts_the_running_service() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let before = std::fs::read_to_string(l.settings()).unwrap();
+        sys.calls.borrow_mut().clear();
+        let lock = crate::attach::try_lock(&l.state).unwrap().unwrap();
+        let mut out = Vec::new();
+        set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut out).unwrap();
+        let after = std::fs::read_to_string(l.settings()).unwrap();
+        let changed: Vec<(&str, &str)> = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(b, a)| b != a)
+            .collect();
+        assert_eq!(
+            changed,
+            [(
+                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                "NERVE_CENTER_UI=0.0.0.0:7480"
+            )]
+        );
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(
+            sys.calls(),
+            [format!("systemctl restart {UNIT_NAME}")],
+            "restarted, and nothing else"
+        );
+        let out = String::from_utf8(out).unwrap();
+        let host = crate::center::host_name();
+        for want in [
+            &format!(
+                "set NERVE_CENTER_UI=0.0.0.0:7480 in {}\n",
+                l.settings().display()
+            ),
+            &format!("restarted {UNIT_NAME}: the center runs with it\n"),
+            &format!("Web UI:      https://{host}:7480\n"),
+            "uses TLS with the center's self-signed certificate",
+        ] {
+            assert!(out.contains(want), "{want}: {out}");
+        }
+        assert!(!out.contains("Firewall"), "{out}");
+        // The same value again: nothing written, nothing restarted.
+        let mut out = Vec::new();
+        set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("ui is 0.0.0.0:7480 in"), "{out}");
+        assert!(out.contains("already; nothing changed"), "{out}");
+        assert_eq!(sys.calls().len(), 1);
+        // A center that answers no more after the restart: the error says
+        // what the file holds now and how to put back the value before.
+        sys.next_start.set(Some(false));
+        let e = set(
+            &l,
+            &sys,
+            Some("ui"),
+            Some("127.0.0.1:7490"),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(e.contains("ui is 127.0.0.1:7490 in"), "{e}");
+        assert!(
+            e.ends_with("`sudo nerve-center set ui 0.0.0.0:7480` puts back the value before"),
+            "{e}"
+        );
+        // A service that does not run takes it at its next start.
+        drop(lock);
+        sys.calls.borrow_mut().clear();
+        let mut out = Vec::new();
+        set(&l, &sys, Some("mcp"), Some("off"), &mut out).unwrap();
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("does not run; it takes this at its next start"),
+            "{out}"
+        );
+        assert!(out.contains("Harnesses:   none (MCP is off)"), "{out}");
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_MCP").as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_HARNESS_TOKEN"),
+            setting_in(&before, "NERVE_CENTER_HARNESS_TOKEN")
+        );
+        assert_eq!(file.matches("NERVE_CENTER_UI=").count(), 1, "{file}");
+    }
+
+    /// A value the center would not start on, or one that would put
+    /// another line into the file, is refused before anything changes: an
+    /// address without its port with an example that has one.
+    #[test]
+    fn set_refuses_a_bad_value_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let before = std::fs::read_to_string(l.settings()).unwrap();
+        sys.calls.borrow_mut().clear();
+        let _lock = crate::attach::try_lock(&l.state).unwrap().unwrap();
+        for (name, bad, says) in [
+            ("ui", "0.0.0.0", "like 0.0.0.0:7480"),
+            ("ui", "on", "or off"),
+            ("mcp", "stdio", "http (127.0.0.1:7481), off"),
+            ("mcp", "0.0.0.0", "like 0.0.0.0:7481"),
+            ("listen", "7443", "like 0.0.0.0:7443"),
+            ("public-url", "lab.example", "like https://"),
+            ("name", "a\nNERVE_CENTER_UI=0.0.0.0:80", "one line"),
+            ("name", "lab\\", "no backslash"),
+            (
+                "port",
+                "7443",
+                "set changes name, public-url, listen, ui and mcp",
+            ),
+        ] {
+            let mut out = Vec::new();
+            let e = set(&l, &sys, Some(name), Some(bad), &mut out).unwrap_err();
+            assert!(e.contains(says), "{name} {bad:?}: {e}");
+            assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        }
+        assert_eq!(std::fs::read_to_string(l.settings()).unwrap(), before);
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        // Where nothing is installed, it says so and how to install.
+        let e = set(
+            &layout(&d.path().join("none")),
+            &sys,
+            Some("ui"),
+            Some("0.0.0.0:7480"),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(e, NOT_INSTALLED);
+        assert!(!d.path().join("none").exists());
+    }
+
+    /// `set` alone lists the settings it changes: what the file sets, the
+    /// defaults where it sets none, the file, and how to change one.
+    #[test]
+    fn set_without_a_setting_lists_the_settings() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("nerve-center-x86_64-linux");
+        std::fs::write(&exe, "nerve-center 1.0.0\n").unwrap();
+        let set_at_install = [
+            ("NERVE_CENTER_NAME", "lab".to_string()),
+            ("NERVE_CENTER_LISTEN", "0.0.0.0:9443".to_string()),
+        ];
+        install_with(&l, &sys, &exe, &set_at_install, &mut Vec::new()).unwrap();
+        let before = std::fs::read_to_string(l.settings()).unwrap();
+        sys.calls.borrow_mut().clear();
+        let mut out = Vec::new();
+        set(&l, &sys, None, None, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let host = crate::center::host_name();
+        assert_eq!(
+            out,
+            format!(
+                "The installed center's settings, in {}:
+  name        lab
+  public-url  https://{host}:9443 (default)
+  listen      0.0.0.0:9443
+  ui          127.0.0.1:7480 (default)
+  mcp         http, at 127.0.0.1:7481 (default)
+`sudo nerve-center set <name> <value>` changes one and restarts the service.
+",
+                l.settings().display()
+            )
+        );
+        assert!(sys.calls().is_empty());
+        assert_eq!(std::fs::read_to_string(l.settings()).unwrap(), before);
     }
 
     /// `update` changes nothing while the settings file names an old

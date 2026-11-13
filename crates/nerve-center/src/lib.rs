@@ -6,8 +6,8 @@
 //! set by flags or `NERVE_*` variables in the harness's MCP entry, or in the
 //! web UI. Its only subcommands are the
 //! owner's: `backup` and `restore` ([`backup`]), `owner-token` ([`owner`]),
-//! and `install`, `update` and `uninstall`, which run it as a service on
-//! Linux ([`service`]) and Windows ([`winsvc`]).
+//! and `install`, `set`, `update` and `uninstall`, which run it as a
+//! service on Linux ([`service`]) and Windows ([`winsvc`]).
 //
 // Harnesses get Nerve through MCP only: this MCP server is the whole
 // integration surface. Native plugins are a backlog item.

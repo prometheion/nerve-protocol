@@ -592,6 +592,7 @@ pub fn run(
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.
         Cmd::Install
+        | Cmd::Set { .. }
         | Cmd::Update { .. }
         | Cmd::Uninstall { .. }
         | Cmd::OwnerToken { .. }
@@ -599,7 +600,7 @@ pub fn run(
         | Cmd::Service
         | Cmd::ServiceFiles => {
             return Err(
-                "install, update, uninstall, owner-token, status and service-files are not backup commands"
+                "install, set, update, uninstall, owner-token, status and service-files are not backup commands"
                     .into(),
             );
         }

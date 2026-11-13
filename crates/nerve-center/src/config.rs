@@ -2,8 +2,8 @@
 //! its MCP entry, so every setting is a flag or a variable there. The only
 //! subcommands are the owner's: `backup` and `restore`, which run by hand on a
 //! center that is not running (`restore`) or may be (`backup`),
-//! `owner-token` ([`crate::owner`]), and the service's `install`, `update`
-//! and `uninstall`, run as root on Linux ([`crate::service`]).
+//! `owner-token` ([`crate::owner`]), and the service's `install`, `set`,
+//! `update` and `uninstall`, run as root on Linux ([`crate::service`]).
 
 use std::path::PathBuf;
 
@@ -23,6 +23,18 @@ pub enum McpMode {
 
 /// The HTTP MCP address of `--mcp http`.
 pub const MCP_HTTP: &str = "127.0.0.1:7481";
+
+impl McpMode {
+    /// The mode as the service's settings file writes it, for `install
+    /// --mcp`: `stdio`, `off` or the HTTP MCP address.
+    pub fn setting(&self) -> String {
+        match self {
+            McpMode::Stdio => "stdio".into(),
+            McpMode::Off => "off".into(),
+            McpMode::Http(a) => a.clone(),
+        }
+    }
+}
 
 impl std::str::FromStr for McpMode {
     type Err = String;
@@ -188,8 +200,18 @@ pub struct Args {
 pub enum Cmd {
     /// Run the center as a service (as root or an administrator)
     ///
-    /// Install the center as a service that starts with the machine and runs under an account of its own, with MCP over HTTP (Linux with systemd, as root; Windows, in an administrator's terminal). --name, --public-url and --listen go into its settings.
+    /// Install the center as a service that starts with the machine and runs under an account of its own, with MCP over HTTP (Linux with systemd, as root; Windows, in an administrator's terminal). --name, --public-url, --listen, --ui and --mcp go into its settings.
     Install,
+    /// Show or change the installed center's settings, and restart it
+    ///
+    /// Without a setting, show the installed center's settings that `set` changes and where they are kept. With one, write its new value into the service's settings file and restart the service when it runs: `name`, `public-url`, `listen` (the node port), `ui` (an address and a port, or `off`) or `mcp` (`http`, `off`, or an address and a port). As root on Linux; on Windows, in an administrator's terminal.
+    Set {
+        /// The setting: name, public-url, listen, ui or mcp
+        #[arg(value_parser = set_names(), requires = "value")]
+        setting: Option<String>,
+        /// Its new value, like 0.0.0.0:7480 for ui
+        value: Option<String>,
+    },
     /// Show whether the center runs, its URLs and its machines
     ///
     /// Show whether the center runs, its URLs, where its owner token is, and its machines; the installed center's where it is installed.
@@ -261,24 +283,46 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    /// install, update and uninstall: they work on the installed service,
-    /// as root, not on `--state-dir`. `install` takes the settings it
-    /// writes into the service's file ([`INSTALL_SETTINGS`]).
+    /// install, set, update and uninstall: they work on the installed
+    /// service, as root, not on `--state-dir`. `install` takes the settings
+    /// it writes into the service's file ([`INSTALL_SETTINGS`]), and `set`
+    /// changes one of them there.
     pub fn is_service(&self) -> bool {
         matches!(
             self,
-            Cmd::Install | Cmd::Update { .. } | Cmd::Uninstall { .. }
+            Cmd::Install | Cmd::Set { .. } | Cmd::Update { .. } | Cmd::Uninstall { .. }
         )
     }
 }
 
 /// The settings `install` takes and writes into the service's settings
-/// file, by flag and variable.
+/// file, by flag and variable. `set` changes the same ones, by the flag's
+/// name without its dashes ([`set_names`]).
 pub const INSTALL_SETTINGS: &[(&str, &str)] = &[
     ("--name", "NERVE_CENTER_NAME"),
     ("--public-url", "NERVE_CENTER_PUBLIC_URL"),
     ("--listen", "NERVE_CENTER_LISTEN"),
+    ("--ui", "NERVE_CENTER_UI"),
+    ("--mcp", "NERVE_CENTER_MCP"),
 ];
+
+/// The names `set` takes, as [`INSTALL_SETTINGS`] has them: `name`,
+/// `public-url`, `listen`, `ui` and `mcp`.
+fn set_names() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        INSTALL_SETTINGS
+            .iter()
+            .map(|(flag, _)| flag.trim_start_matches('-')),
+    )
+}
+
+/// The variable of the setting `set` takes by `name` ([`INSTALL_SETTINGS`]).
+pub fn set_variable(name: &str) -> Option<&'static str> {
+    INSTALL_SETTINGS
+        .iter()
+        .find(|(flag, _)| flag.trim_start_matches('-') == name)
+        .map(|(_, var)| *var)
+}
 
 /// The center's settings given with a command, as the owner wrote them: a
 /// flag (`--public-url`) or a variable (`NERVE_CENTER_PUBLIC_URL`). Defaults are
@@ -329,8 +373,8 @@ pub fn refuse_state_variable(given: &[String], elevated: bool) -> Result<(), Str
     Ok(())
 }
 
-/// An administrator's `install` takes `--name`, `--public-url` and `--listen`
-/// from the flags only: the variables of the account, which its other
+/// An administrator's `install` takes `--name`, `--public-url`, `--listen`,
+/// `--ui` and `--mcp` from the flags only: the variables of the account, which its other
 /// programs may set, would go into the settings file the service trusts and
 /// into the firewall rule (round 9, security 1). `given` is
 /// [`settings_given`]; `elevated` as for [`refuse_state_variable`].
@@ -753,6 +797,14 @@ mod tests {
             given(&["--listen", "0.0.0.0:9443", "--ui", "off", "update"]),
             ["--listen", "--ui"]
         );
+        // `install --ui --mcp` (#229): the web UI and MCP beyond loopback
+        // from the first install.
+        assert_eq!(
+            given(&["install", "--ui", "0.0.0.0:7480", "--mcp", "0.0.0.0:7481"]),
+            ["--ui", "--mcp"]
+        );
+        // `set` takes its setting by name, not as a flag.
+        assert!(given(&["set", "ui", "0.0.0.0:7480"]).is_empty());
     }
 
     #[test]
@@ -838,6 +890,30 @@ mod tests {
             Some(Cmd::OwnerToken { new: true })
         );
         assert!(!cmd(&["owner-token"]).unwrap().is_service());
+        // `set` alone lists, `set <name> <value>` changes one; a name
+        // without a value, or a name that is no setting of it, is refused.
+        assert_eq!(
+            cmd(&["set"]),
+            Some(Cmd::Set {
+                setting: None,
+                value: None
+            })
+        );
+        assert_eq!(
+            cmd(&["set", "ui", "0.0.0.0:7480"]),
+            Some(Cmd::Set {
+                setting: Some("ui".into()),
+                value: Some("0.0.0.0:7480".into())
+            })
+        );
+        assert!(cmd(&["set"]).unwrap().is_service());
+        assert!(Args::try_parse_from(["nerve-center", "set", "ui"]).is_err());
+        assert!(Args::try_parse_from(["nerve-center", "set", "harness-token", "x"]).is_err());
+        for (flag, var) in INSTALL_SETTINGS {
+            let name = flag.trim_start_matches('-');
+            assert_eq!(set_variable(name), Some(*var));
+            assert!(cmd(&["set", name, "x"]).is_some(), "{name}");
+        }
         assert!(
             is_loopback("127.0.0.1:7480") && is_loopback("[::1]:1") && !is_loopback("0.0.0.0:7480")
         );

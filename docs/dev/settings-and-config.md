@@ -970,6 +970,37 @@ host name, such as a DNS name or a forwarded port. The start line in the log
 names the public URL, the address the center listens on for nodes, the HTTP
 MCP URL and the web UI: with ports 0 this is where a script reads them.
 
+### The service's settings
+
+The installed center takes these as variables from its settings file,
+`/etc/nerve-center/center.env` (on Windows
+`C:\ProgramData\nerve-center\settings\center.env`), which is root's (the
+administrators'): the center cannot change how it is started. `install`
+writes it once, with a new harness token and the settings it was given
+(`--name`, `--public-url`, `--listen`, `--ui`, `--mcp`), and keeps it after.
+`nerve-center set` changes those five there, by name:
+
+- `set` alone lists them as the file sets them, else with their default
+  (`mcp` is `http` for the service).
+- `set <name> <value>` checks the value as `install` does: an address needs
+  its port (`0.0.0.0` is refused, `0.0.0.0:7480` taken), `ui` also takes
+  `off`, `mcp` takes `http`, `off` or an address but not `stdio`, and no
+  value may hold a line break, a backslash, a quote or `$`. It writes
+  `NERVE_CENTER_<NAME>=<value>` in place of that variable's line, also of
+  the comment that names its default, and keeps every other line. Then it
+  restarts the service when it runs and waits until the center answers.
+  The same value again changes nothing.
+- When the center does not start again, the value stays in the file and
+  the error names the `set` that puts back the one before.
+- On Windows a new `listen` moves the firewall rule `Nerve center` to its
+  port. The rule covers the node port only: for `ui` or `mcp` beyond
+  loopback, `set` prints the `New-NetFirewallRule` line for their port.
+
+Like `install`, `set` runs as root (on Windows in an administrator's
+terminal), and a command a node runs for a center cannot run it. The other
+variables are changed in the file by hand, then the service is restarted
+(`sudo systemctl restart nerve-center`, `Restart-Service nerve-center`).
+
 ### TLS
 
 Nodes connect over TLS. The center makes a self-signed certificate on its

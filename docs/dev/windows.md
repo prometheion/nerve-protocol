@@ -468,7 +468,7 @@ The install does this, and says each step:
    checks the `state` and `settings` folders again at each start.
 2. Makes the owner token in the state folder (one made before is kept) and
    writes `settings\center.env` with a new harness token; `--name`,
-   `--public-url` and `--listen` go into it.
+   `--public-url`, `--listen`, `--ui` and `--mcp` go into it.
 3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
@@ -484,16 +484,20 @@ The install does this, and says each step:
    It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
    the node port (`--listen`, 7443 by default) of that program, and nothing
-   else. The web UI and MCP stay on loopback.
+   else. The web UI and MCP stay on loopback; beyond it their ports need a
+   rule of their own, whose `New-NetFirewallRule` line `set` prints.
 6. Starts the service and waits until the center runs, then says the web
    UI's address, the owner token and where harnesses connect.
 
 The service reads its settings only from `center.env`, the same
 `NERVE_CENTER_*` lines as on Linux; MCP is over HTTP unless the file says
 otherwise, and a file that is missing means the defaults. A center that
-cannot start because the file cannot be read says why in its log. Change them as an administrator, then
-`Restart-Service nerve-center`. After a change of `--listen` run
-`nerve-center install --listen …` again, so the firewall rule follows.
+cannot start because the file cannot be read says why in its log.
+`nerve-center set <name> <value>` in an administrator's terminal changes
+`name`, `public-url`, `listen`, `ui` or `mcp` there and restarts the
+service when it runs; a new `listen` moves the firewall rule to its port
+([how](settings-and-config.md#the-services-settings)). Change the others as
+an administrator, then `Restart-Service nerve-center`.
 
 `nerve-center status` in an administrator's terminal says whether the
 center runs, the service's state, where it is reached, where its owner

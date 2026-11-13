@@ -72,11 +72,20 @@ host name, such as a DNS name or a forwarded port.
 `NERVE_CENTER_HARNESS_TOKEN` adds a fixed harness token, for a harness a
 script sets up; `--harness-token` does too, but shows it in the process
 list. `nerve-center --help`
-lists every setting. For the service they live in
-`/etc/nerve-center/center.env`; change them there, then
-`sudo systemctl restart nerve-center`. On Windows the file is
-`C:\ProgramData\nerve-center\settings\center.env`, and
-`Restart-Service nerve-center` restarts it.
+lists every setting.
+
+The service keeps its settings in `/etc/nerve-center/center.env` (on
+Windows `C:\ProgramData\nerve-center\settings\center.env`). `set` changes
+`name`, `public-url`, `listen`, `ui` or `mcp` there and restarts the
+service; `install` takes them as flags (`--ui 0.0.0.0:7480`):
+
+```sh
+sudo nerve-center set                   # shows them
+sudo nerve-center set ui 0.0.0.0:7480   # the web UI for other machines
+```
+
+Change the others in that file, then `sudo systemctl restart nerve-center`.
+On Windows, run `set` in an administrator's terminal.
 
 ### Which setting wins
 
@@ -95,8 +104,8 @@ The center on a server, the harness on your laptop:
   ssh -L 7480:127.0.0.1:7480 -L 7481:127.0.0.1:7481 you@center-host
   ```
 
-- **Beyond loopback**: set `NERVE_CENTER_MCP=0.0.0.0:7481` (and
-  `NERVE_CENTER_UI` for the web UI). They then use TLS with the center's
+- **Beyond loopback**: `sudo nerve-center set mcp 0.0.0.0:7481` (and
+  `set ui 0.0.0.0:7480` for the web UI). They then use TLS with the center's
   self-signed certificate. The Connect a harness card shows its fingerprint:
   let the harness and the browser trust that certificate, and compare the
   fingerprint before you log in

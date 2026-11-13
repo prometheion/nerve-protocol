@@ -109,9 +109,13 @@ It puts itself in `C:\Program Files\Nerve` as `nerve-center.exe`, on the
 machine's `Path`, so a harness and every terminal opened after it find
 `nerve-center`. It runs as the service `nerve-center`, keeps its state in
 `C:\ProgramData\nerve-center`, and adds the firewall rule `Nerve center` for
-the node port. Its settings are in `settings\center.env` there: change them
-as an administrator, then `Restart-Service nerve-center`. `nerve-center
-status` and `nerve-center owner-token` work in an administrator's terminal.
+the node port. `nerve-center set` shows its settings, in
+`settings\center.env` there; `nerve-center set ui 0.0.0.0:7480` changes one
+and restarts the service. A new `listen` port takes the firewall rule along.
+The rule lets in the node port only: for the web UI or MCP beyond loopback,
+`set` prints the `New-NetFirewallRule` line for their port. These,
+`nerve-center status` and `nerve-center owner-token` work in an
+administrator's terminal.
 [Run the center](center.md) says what comes next.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.

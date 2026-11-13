@@ -33,6 +33,8 @@ and every limit is in
 - Runs as a service (systemd on Linux, the service `nerve-center` on
   Windows), or started by a harness over stdio; a second center attaches to
   the first.
+- `nerve-center set` shows the service's settings and changes one, such as
+  `set ui 0.0.0.0:7480`, then restarts it; `install` takes them as flags.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
   fails closed by default.

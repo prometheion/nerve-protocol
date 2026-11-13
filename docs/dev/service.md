@@ -565,9 +565,13 @@ Stop the center you ran yourself for good: the service has its key now.
 ### Settings of the service
 
 The settings are the variables of the [table above](settings-and-config.md#the-centers-settings), in
-`/etc/nerve-center/center.env`. Change them there and restart the service:
+`/etc/nerve-center/center.env`. `set` changes `name`, `public-url`,
+`listen`, `ui` and `mcp` there and restarts the service when it runs
+([how](settings-and-config.md#the-services-settings)); change the others
+there by hand and restart the service:
 
 ```sh
+sudo nerve-center set ui 0.0.0.0:7480
 sudo nano /etc/nerve-center/center.env
 sudo systemctl restart nerve-center
 ```

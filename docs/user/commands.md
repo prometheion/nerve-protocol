@@ -38,6 +38,7 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 | Command | Does |
 |---|---|
 | `install` | Runs the center as a service (as root) |
+| `set [<name> <value>]` | Shows or changes the service's settings, and restarts it |
 | `status` | Whether it runs, its addresses and its machines |
 | `owner-token [--new]` | Shows the token that logs in to the web UI |
 | `update`, `uninstall [--purge]` | Updates or removes the service |

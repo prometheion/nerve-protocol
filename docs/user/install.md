@@ -139,8 +139,9 @@ Owner token: nrv_owner_… (logs in to the web UI; …)
 Harnesses:   http://127.0.0.1:7481/mcp, with a harness token: …
 ```
 
-`--name`, `--public-url` and `--listen` go into its settings file,
-`/etc/nerve-center/center.env`. [Run the center](center.md) says what comes
+`--name`, `--public-url`, `--listen`, `--ui` and `--mcp` go into its
+settings file, `/etc/nerve-center/center.env`, and
+`sudo nerve-center set <name> <value>` changes them later. [Run the center](center.md) says what comes
 next. `journalctl -u nerve-center` shows its output.
 
 The installed center sees no GPU: its local model runs on the CPU

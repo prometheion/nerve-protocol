@@ -1,5 +1,5 @@
 //! The center as a Windows service (docs/dev/windows.md, "The center as a
-//! Windows service"): `install`, `update` and `uninstall` in an
+//! Windows service"): `install`, `set`, `update` and `uninstall` in an
 //! administrator's terminal, as the Linux ones in [`crate::service`] are.
 //! The service `nerve-center` runs `nerve-center service` as its own
 //! virtual account, `NT SERVICE\nerve-center`, which Windows makes and
@@ -35,7 +35,7 @@ const NODE_PORT: u16 = 7443;
 /// The start of the name a program gets when it moves aside, held by
 /// Windows, until it goes at the next start ([`WinSystem::remove_program`]).
 pub const ASIDE: &str = "nerve-center.";
-/// Why `update` and the restore into the service do nothing here.
+/// Why `set`, `update` and the restore into the service do nothing here.
 pub const NOT_INSTALLED: &str = "the center is not installed as a service here; `nerve-center install` in an administrator's terminal installs it";
 
 /// What `install`, `update` and `uninstall` do to a Windows machine besides
@@ -239,7 +239,7 @@ pub(crate) fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs `install`, `update` or `uninstall` (`what`) on `layout`, as
+/// Runs `install`, `set`, `update` or `uninstall` (`what`) on `layout`, as
 /// [`crate::service::execute`] has them checked already.
 pub async fn execute(
     cmd: crate::config::Cmd,
@@ -252,9 +252,13 @@ pub async fn execute(
     use crate::config::Cmd;
     match cmd {
         Cmd::Install => install(layout, sys, exe, set, out),
+        // `set` here names the settings `install` writes.
+        Cmd::Set { setting, value } => {
+            self::set(layout, sys, setting.as_deref(), value.as_deref(), out)
+        }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
-        _ => Err("only install, update and uninstall are service commands".into()),
+        _ => Err("only install, set, update and uninstall are service commands".into()),
     }
 }
 
@@ -346,6 +350,62 @@ pub fn install(
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
     for line in done_lines(&file, &owner_token, &crate::owner::path(&layout.state)) {
+        let _ = writeln!(steps.out, "{line}");
+    }
+    Ok(())
+}
+
+/// `set` on Windows, as [`crate::service::set`] on Linux: without a
+/// setting the settings it changes; with one, the value written into
+/// `center.env` and the service restarted when it runs. A new node port
+/// takes the firewall rule along, as `install --listen` does.
+pub fn set(
+    layout: &Layout,
+    sys: &dyn WinSystem,
+    setting: Option<&str>,
+    value: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    use crate::service::{not_running_with, said_already, set_checked, set_lines, settings_lines};
+    supported(sys, "set")?;
+    let Some(runs) = sys.service()? else {
+        return Err(NOT_INSTALLED.into());
+    };
+    let path = layout.settings();
+    let kept = settings_text(std::fs::read_to_string(&path), &path)?;
+    let Some((name, value)) = setting.zip(value) else {
+        for line in settings_lines(&kept, &path, layout) {
+            let _ = writeln!(out, "{line}");
+        }
+        return Ok(());
+    };
+    let Some(var) = set_checked(name, value, &kept, layout)? else {
+        return said_already(name, value, &kept, layout, out);
+    };
+    let mut steps = Steps::new(out);
+    crate::service::settings_file(layout, &[(var, value.to_string())], steps.out)?;
+    let file = std::fs::read_to_string(&path).unwrap_or_default();
+    if var == "NERVE_CENTER_LISTEN" {
+        let port = node_port(&file);
+        sys.put_firewall(layout, port)?;
+        steps.did(format!(
+            "the Windows Firewall rule \"{FIREWALL_RULE}\" lets other machines reach the node port {port} now"
+        ));
+    }
+    if runs {
+        sys.stop()
+            .and_then(|()| start(sys, layout))
+            .and_then(|()| sys.wait_running(layout))
+            .map_err(|e| not_running_with(&e, name, value, &kept, layout))?;
+        steps.did(format!(
+            "restarted the service {SERVICE_NAME}: the center runs with it"
+        ));
+    } else {
+        steps.did(format!(
+            "the service {SERVICE_NAME} does not run; it takes this at its next start (`Start-Service {SERVICE_NAME}` in an administrator's PowerShell)"
+        ));
+    }
+    for line in set_lines(var, &file, layout) {
         let _ = writeln!(steps.out, "{line}");
     }
     Ok(())
@@ -875,6 +935,143 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("NERVE_CENTER_NAME"), "{e}");
+    }
+
+    /// `set` writes the setting in place of its line in `center.env`,
+    /// keeps the others, and restarts the running service; a new node port
+    /// takes the firewall rule along. Beyond loopback it says that the
+    /// firewall rule covers the node port only, and how to let the other
+    /// port in.
+    #[test]
+    fn set_writes_the_setting_restarts_the_service_and_moves_the_firewall_rule() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let before = std::fs::read_to_string(l.settings()).unwrap();
+        sys.calls.borrow_mut().clear();
+        let mut out = Vec::new();
+        set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut out).unwrap();
+        let after = std::fs::read_to_string(l.settings()).unwrap();
+        let changed: Vec<(&str, &str)> = before
+            .lines()
+            .zip(after.lines())
+            .filter(|(b, a)| b != a)
+            .collect();
+        assert_eq!(
+            changed,
+            [(
+                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                "NERVE_CENTER_UI=0.0.0.0:7480"
+            )]
+        );
+        assert_eq!(before.lines().count(), after.lines().count());
+        assert_eq!(sys.calls(), ["stop", "start"]);
+        assert_eq!(sys.firewall.get(), Some(7443), "the node port's rule stays");
+        assert_eq!(sys.service.get(), Some(true));
+        let out = String::from_utf8(out).unwrap();
+        let host = crate::center::host_name();
+        for want in [
+            "restarted the service nerve-center: the center runs with it\n",
+            &format!("Web UI:      https://{host}:7480\n"),
+            "uses TLS with the center's self-signed certificate",
+            "The Windows Firewall rule \"Nerve center\" lets in the node port only",
+            "-LocalPort 7480",
+            &format!("-Program '{}'", l.bin.display()),
+        ] {
+            assert!(out.contains(want), "{want}: {out}");
+        }
+        // A new node port: the firewall rule follows it.
+        sys.calls.borrow_mut().clear();
+        let mut out = Vec::new();
+        set(&l, &sys, Some("listen"), Some("0.0.0.0:9443"), &mut out).unwrap();
+        assert_eq!(
+            sys.calls(),
+            [
+                format!("put_firewall {} 9443", l.bin.display()),
+                "stop".into(),
+                "start".into()
+            ]
+        );
+        assert_eq!(sys.firewall.get(), Some(9443));
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("the node port 9443 now"), "{out}");
+        // MCP on loopback needs no rule and no TLS; a stopped service is
+        // not started.
+        sys.service.set(Some(false));
+        sys.calls.borrow_mut().clear();
+        let mut out = Vec::new();
+        set(&l, &sys, Some("mcp"), Some("127.0.0.1:7491"), &mut out).unwrap();
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("does not run; it takes this at its next start"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Harnesses:   http://127.0.0.1:7491/mcp"),
+            "{out}"
+        );
+        assert!(!out.contains("Firewall") && !out.contains("TLS"), "{out}");
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        let harness = |f: &str| setting_in(f, "NERVE_CENTER_HARNESS_TOKEN");
+        assert_eq!(harness(&file), harness(&before));
+        // `set` alone lists them, as an administrator runs it.
+        let mut out = Vec::new();
+        set(&l, &sys, None, None, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("  listen      0.0.0.0:9443\n"), "{out}");
+        assert!(out.contains("  mcp         127.0.0.1:7491\n"), "{out}");
+        assert!(
+            out.contains("`nerve-center set <name> <value>` in an administrator's terminal"),
+            "{out}"
+        );
+    }
+
+    /// A bad value, a caller without an administrator's rights and a
+    /// machine without the service change nothing; a center that does not
+    /// start again on the new value is said with how to put back the old.
+    #[test]
+    fn set_refuses_before_anything_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let before = std::fs::read_to_string(l.settings()).unwrap();
+        sys.calls.borrow_mut().clear();
+        for (name, bad) in [("ui", "0.0.0.0"), ("mcp", "stdio"), ("listen", "9443")] {
+            let e = set(&l, &sys, Some(name), Some(bad), &mut Vec::new()).unwrap_err();
+            assert!(e.starts_with(&format!("{name} {bad:?}: ")), "{e}");
+        }
+        let mut not_admin = Fake::new();
+        not_admin.admin = false;
+        let e = set(
+            &l,
+            &not_admin,
+            Some("ui"),
+            Some("0.0.0.0:7480"),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(e.contains("Run as administrator"), "{e}");
+        assert_eq!(std::fs::read_to_string(l.settings()).unwrap(), before);
+        assert!(sys.calls().is_empty() && not_admin.calls().is_empty());
+        assert_eq!(sys.firewall.get(), Some(7443));
+        let e = set(
+            &layout(&d.path().join("none")),
+            &Fake::new(),
+            None,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(e, NOT_INSTALLED);
+        sys.starts.set(false);
+        let e = set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut Vec::new()).unwrap_err();
+        assert!(
+            e.ends_with(
+                "`nerve-center set ui 127.0.0.1:7480` in an administrator's terminal puts back the value before"
+            ),
+            "{e}"
+        );
     }
 
     /// Without an administrator's rights nothing changes, and the refusal
