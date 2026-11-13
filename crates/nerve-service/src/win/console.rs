@@ -9,23 +9,28 @@ use std::path::Path;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Console::{
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleProcessList, GetStdHandle,
-    STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleProcessList, GetConsoleWindow,
+    GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::win::sid::wide;
 
-/// Whether this process is the only one on its console: Explorer made the
-/// console for it, so a double-click started it. A program started in a
-/// terminal shares the terminal's console with its shell.
+/// Whether this process is the only one on a console with a window:
+/// Explorer made the console for it, so a double-click started it. A
+/// program started in a terminal shares the terminal's console with its
+/// shell; one another program started without a window (as `update` runs
+/// the new program's `service-files`) has a console of its own but no
+/// window, and no person who could read it or press Enter.
 pub fn alone() -> bool {
     let mut pids = [0u32; 2];
     // SAFETY: a buffer of two pids; the answer is how many are on the
-    // console (0 when this process has none).
-    let n = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
-    n == 1
+    // console (0 when this process has none). GetConsoleWindow only reads.
+    unsafe {
+        GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) == 1
+            && !GetConsoleWindow().is_null()
+    }
 }
 
 /// Starts `exe` with `args` again with the administrators' rights, in a

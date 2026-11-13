@@ -144,7 +144,10 @@ fn main() -> std::process::ExitCode {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => failed(&e),
         };
-        hold_own_window();
+        // `service-files` is asked by `update`, never by a person.
+        if !matches!(cmd, Cmd::ServiceFiles) {
+            hold_own_window();
+        }
         return code;
     }
     // The level of the settings replaces this one once the state is opened.
