@@ -77,6 +77,19 @@ fn with_forget(action: &str, mut args: Vec<String>, forget: bool) -> Vec<String>
     args
 }
 
+/// The arguments of an update: from the file `from`, or else from the
+/// latest release, with `pre` the newest one, a pre-release too (Settings ›
+/// App › Pre-releases).
+fn update_args(from: Option<String>, pre: bool) -> Vec<String> {
+    let mut args = vec!["update".to_string()];
+    match from {
+        Some(from) => args.push(format!("--from={from}")),
+        None if pre => args.push("--pre".into()),
+        None => {}
+    }
+    args
+}
+
 /// What a service command said, as the steps it did and what it warned
 /// about. Its advice for what comes next (`Next: …`) is the app's to give,
 /// in its own words: the app asked for root through pkexec, and opens its
@@ -279,22 +292,23 @@ impl Ctl {
     /// The update: the installer's from this program, Settings' from the
     /// latest release or the file chosen.
     fn update_go(self: &Rc<Self>) {
-        let Some((shown, source, file)) =
-            self.with_install(|i| (i.get_shown(), i.get_source(), i.get_file().to_string()))
-        else {
+        let Some((shown, source, file, pre)) = self.with_install(|i| {
+            (
+                i.get_shown(),
+                i.get_source(),
+                i.get_file().to_string(),
+                i.get_pre_releases(),
+            )
+        }) else {
             return;
         };
-        let mut args = vec!["update".to_string()];
         // The installer updates with itself: the program its commands run.
         let from = if shown {
             Some(self.runner().exe().display().to_string())
         } else {
             (source == 1).then_some(file)
         };
-        if let Some(from) = from {
-            args.push(format!("--from={from}"));
-        }
-        self.run_service_command("update", args, None);
+        self.run_service_command("update", update_args(from, pre), None);
     }
 
     fn uninstall_go(self: &Rc<Self>) {
@@ -432,6 +446,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     i.on_ask_update(move || c.ask_update());
     let c = ctl.clone();
+    i.on_set_pre_releases(move |on| c.set_pre_releases(on));
+    let c = ctl.clone();
     i.on_other_update(move || c.other_update());
     let c = ctl.clone();
     i.on_choose_file(move || c.choose_file());
@@ -444,6 +460,18 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Update takes a file, else the latest release, or with Settings ›
+    /// App › Pre-releases on the newest release, a pre-release too (#213).
+    #[test]
+    fn the_update_follows_the_pre_release_switch() {
+        assert_eq!(update_args(None, false), ["update"]);
+        assert_eq!(update_args(None, true), ["update", "--pre"]);
+        assert_eq!(
+            update_args(Some("/x/nerve".into()), true),
+            ["update", "--from=/x/nerve"]
+        );
+    }
 
     /// The way past a node that cannot put its keys aside is offered for
     /// that error only, and becomes a flag of the command.

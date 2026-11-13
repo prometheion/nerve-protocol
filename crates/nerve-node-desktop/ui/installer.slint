@@ -174,7 +174,7 @@ export component UpdateChoice {
             spacing: Space.md;
             OptionTile {
                 icon: @image-url("icons/download.svg");
-                title: "Latest release";
+                title: Install.pre-releases ? "Newest pre-release" : "Latest release";
                 text: "From GitHub, checked against its SHA256SUMS.";
                 selected: Install.source == 0;
                 clicked => {

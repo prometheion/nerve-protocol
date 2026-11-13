@@ -162,11 +162,19 @@ pub enum Cmd {
     Setup,
     /// Update to the latest release; config, keys and audit stay
     ///
-    /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay.
+    /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay. An older version is refused; the same version from another release is taken.
     Update {
         /// Take the new program from this file instead of downloading the latest release.
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["pre", "tag"])]
         from: Option<PathBuf>,
+        /// Take the newest release, a pre-release too
+        ///
+        /// Take the newest release, a pre-release too, as GitHub's list of releases names it.
+        #[arg(long, conflicts_with = "tag")]
+        pre: bool,
+        /// Take the release of this tag, like pre2-v0.1.0
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
     },
     /// Remove the service and the program; config and state stay
     ///
@@ -1563,7 +1571,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             forget_secrets,
         } => install::install(paths, owner, accept_root_owner, forget_secrets, out).await,
         Cmd::Setup => setup::setup_cmd(paths, out).await,
-        Cmd::Update { from } => install::update(from, out).await,
+        Cmd::Update { from, pre, tag } => {
+            install::update(from, nerve_service::Release::of(pre, tag), out).await
+        }
         Cmd::ServiceFiles { owner, polkit } => install::service_files(owner, polkit, out),
         Cmd::Service(c) => install::service(c, out).await,
         Cmd::Uninstall {

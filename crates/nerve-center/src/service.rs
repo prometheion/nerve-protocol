@@ -814,7 +814,10 @@ async fn execute_on(
         Cmd::Set { setting, value } => {
             self::set(layout, sys, setting.as_deref(), value.as_deref(), out)
         }
-        Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
+        Cmd::Update { from, pre, tag } => {
+            let layout = with_release(layout, pre, tag).await?;
+            update(&layout, sys, from.as_deref(), out).await
+        }
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         Cmd::Backup { .. }
@@ -830,6 +833,21 @@ async fn execute_on(
             unreachable!("refused above")
         }
     }
+}
+
+/// `layout` with the release `update` takes in place of the latest:
+/// with `pre` the newest one, a pre-release too; with `tag` that one
+/// ([`nerve_service::Release`]).
+pub(crate) async fn with_release(
+    layout: &Layout,
+    pre: bool,
+    tag: Option<String>,
+) -> Result<Layout, String> {
+    let mut l = layout.clone();
+    l.release = nerve_service::Release::of(pre, tag)
+        .base(&layout.release)
+        .await?;
+    Ok(l)
 }
 
 /// `service start|stop|restart`: systemd does it, a start waits until the
@@ -2023,7 +2041,14 @@ mod tests {
                     value: None,
                 },
             ),
-            ("update", Cmd::Update { from: None }),
+            (
+                "update",
+                Cmd::Update {
+                    from: None,
+                    pre: false,
+                    tag: None,
+                },
+            ),
             ("uninstall", Cmd::Uninstall { purge: false }),
         ] {
             let r = execute_on(cmd, &[], &[], &l, &NotRoot, &node, &mut Vec::new()).await;
@@ -3105,6 +3130,84 @@ Next  Change one:  sudo nerve-center set <name> <value>
         let e = update(&l2, &sys, None, &mut Vec::new()).await.unwrap_err();
         assert!(e.contains("does not match"), "{e}");
         assert_eq!(std::fs::read(&l2.bin).unwrap(), b"nerve-center 1.0.0\n");
+    }
+
+    /// `update --tag` takes that release's center, `update --pre` the
+    /// newest release's, a pre-release too, each checked against its own
+    /// `SHA256SUMS` (#213).
+    #[tokio::test]
+    async fn update_takes_a_pre_release_or_a_tag() {
+        use nerve_transport::http::{Response, read_request};
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let asset = asset_name().unwrap();
+        let sha = crate::util::sha256_hex;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let files = move |tag: &str| -> Option<(String, Vec<u8>)> {
+            let program = match tag {
+                "pre2-v1.3.0" => b"nerve-center 1.3.0\n".to_vec(),
+                "v1.3.0" => b"nerve-center 1.3.0\n{}\n".to_vec(),
+                _ => return None,
+            };
+            Some((format!("{}  {asset}\n", sha(&program)), program))
+        };
+        let asset2 = asset_name().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = listener.accept().await {
+                let req = read_request(&mut io, 0).await.unwrap();
+                let path = req.path.clone();
+                let tagged = path
+                    .strip_prefix("/o/r/releases/download/")
+                    .and_then(|p| p.split_once('/'));
+                let r = match (path.as_str(), tagged) {
+                    ("/o/r/api/releases", _) => Response::new(
+                        200,
+                        "application/json",
+                        br#"[{"tag_name": "pre2-v1.3.0", "prerelease": true}, {"tag_name": "v1.2.0"}]"#.to_vec(),
+                    ),
+                    (_, Some((tag, "SHA256SUMS"))) => match files(tag) {
+                        Some((sums, _)) => Response::text(200, &sums),
+                        None => Response::text(404, "no"),
+                    },
+                    (_, Some((tag, name))) if name == asset2 => match files(tag) {
+                        Some((_, program)) => Response::new(200, "application/octet-stream", program),
+                        None => Response::text(404, "no"),
+                    },
+                    _ => Response::text(404, "no"),
+                };
+                let _ = r.write(&mut io).await;
+            }
+        });
+        let mut l = installed(d.path(), &sys, "1.0.0");
+        l.release = format!("http://127.0.0.1:{port}/o/r/releases/latest/download");
+        let pre = with_release(&l, true, None).await.unwrap();
+        let mut out = Vec::new();
+        update(&pre, &sys, None, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("/o/r/releases/download/pre2-v1.3.0 and checked it"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.3.0\n");
+        // The release of the same version is another program, and taken.
+        let tagged = with_release(&l, false, Some("v1.3.0".into()))
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        update(&tagged, &sys, None, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("replaced nerve-center 1.3.0 with 1.3.0"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.3.0\n{}\n");
+        // A tag that has no such release changes nothing.
+        let none = with_release(&l, false, Some("v9.9.9".into()))
+            .await
+            .unwrap();
+        assert!(update(&none, &sys, None, &mut Vec::new()).await.is_err());
+        assert!(with_release(&l, false, Some("../x".into())).await.is_err());
     }
 
     /// The center is known to run when its harness socket takes a

@@ -134,6 +134,16 @@ impl Package {
         }
     }
 
+    /// The words the package manager installs a file with: `again` over the
+    /// same version, which it would leave as it is otherwise.
+    pub fn install_args(self, again: bool) -> &'static [&'static str] {
+        match (self, again) {
+            (_, false) => &["install", "-y"],
+            (Package::Deb, true) => &["install", "--reinstall", "-y"],
+            (Package::Rpm, true) => &["reinstall", "-y"],
+        }
+    }
+
     /// What removes the package.
     pub fn remove(self, program: &str) -> String {
         match self {
@@ -646,8 +656,9 @@ pub trait System: nerve_service::System {
         ))
     }
     /// Installs the package file at `file` with the package manager of its
-    /// kind, without a question.
-    fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+    /// kind, without a question; `again` over the same version.
+    fn install_package(&self, package: Package, file: &Path, again: bool) -> Result<(), String> {
+        let _ = again;
         Err(format!(
             "cannot install {} with {} here",
             file.display(),
@@ -792,12 +803,13 @@ impl System for Host {
             .is_ok_and(|v| v.trim() == "1")
     }
 
-    fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+    fn install_package(&self, package: Package, file: &Path, again: bool) -> Result<(), String> {
         let manager = package.manager();
         let mut c = std::process::Command::new(manager);
         // A path, so that the package manager takes the file and does not
-        // look for a package of that name.
-        c.args(["install", "-y"])
+        // look for a package of that name. The same version again is a
+        // reinstall: both would leave it as it is otherwise.
+        c.args(package.install_args(again))
             .arg(file)
             .env(UPDATING_VAR, "1")
             .env("DEBIAN_FRONTEND", "noninteractive")
@@ -1987,14 +1999,12 @@ async fn install_package(
                 "the release's package is {program} {n}, older than the installed {o}; nothing changed"
             ));
         }
-        // The service may still run an older one, which the package
-        // manager replaced without a restart: it restarts with this one.
-        (Some(o), Some(n)) if n == o => {
-            steps.did(format!("the release's {program} {o} is installed already"));
-            return Ok(nerve_service::Placed::default());
-        }
         _ => {}
     }
+    // The same version from another release (a pre-release, then the
+    // release) may be another program: the package manager installs it
+    // again. The service restarts with it whatever it was.
+    let again = old_v.is_some() && old_v == new_v;
     let old = std::fs::read(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
     // In a folder of root's own, which the package manager reads as root.
     let stamp = std::time::SystemTime::now()
@@ -2004,10 +2014,15 @@ async fn install_package(
     let names = (0..16).map(|i| format!("nerve-update-{}-{stamp:x}-{i}", std::process::id()));
     let dir = fresh_dir(&std::env::temp_dir(), names)?;
     let file = dir.join(&asset);
-    let r = write_file(&file, &bytes, 0o644).and_then(|()| sys.install_package(package, &file));
+    let r =
+        write_file(&file, &bytes, 0o644).and_then(|()| sys.install_package(package, &file, again));
     let _ = std::fs::remove_dir_all(&dir);
     r?;
-    steps.did(format!("installed {asset} with {}", package.manager()));
+    let what = if again { " again" } else { "" };
+    steps.did(format!(
+        "installed {asset}{what} with {}",
+        package.manager()
+    ));
     Ok(nerve_service::Placed {
         old: Some(old),
         version: old_v,
@@ -2823,10 +2838,16 @@ pub(crate) mod tests {
             ));
             Ok(())
         }
-        fn install_package(&self, package: Package, file: &Path) -> Result<(), String> {
+        fn install_package(
+            &self,
+            package: Package,
+            file: &Path,
+            again: bool,
+        ) -> Result<(), String> {
             self.calls.borrow_mut().push(format!(
-                "{} install {}",
+                "{} {} {}",
                 package.manager(),
+                package.install_args(again).join(" "),
                 file.file_name().unwrap().to_string_lossy()
             ));
             let bin = self.package_bin.borrow().clone().ok_or("no package here")?;
@@ -5163,16 +5184,28 @@ pub(crate) mod tests {
         let calls = sys.calls();
         let at = calls
             .iter()
-            .position(|c| *c == format!("apt-get install {deb}"))
+            .position(|c| *c == format!("apt-get install -y {deb}"))
             .unwrap();
         assert_eq!(calls[at + 1..], [format!("systemctl restart {UNIT_NAME}")]);
-        // The same again restarts the service with it, and an older one is
-        // refused.
-        update(&l, &sys, None, &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            sys.calls().last().unwrap(),
-            &format!("systemctl restart {UNIT_NAME}")
+        // The same version again, from another release (a pre-release, then
+        // the release) is installed again by the package manager, and the
+        // service restarts with it (#213); an older one is refused.
+        let mut out = Vec::new();
+        update(&l, &sys, None, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!("installed {deb} again with apt-get")),
+            "{out}"
         );
+        let calls = sys.calls();
+        assert_eq!(
+            calls[calls.len() - 2..],
+            [
+                format!("apt-get install --reinstall -y {deb}"),
+                format!("systemctl restart {UNIT_NAME}")
+            ]
+        );
+        assert_eq!(Package::Rpm.install_args(true), ["reinstall", "-y"]);
         let older = Package::Deb.asset("nerve-node-desktop", "1.2.0");
         let old_program: &[u8] = b"nerve-node-desktop 1.2.0\n";
         l.release = release_of(

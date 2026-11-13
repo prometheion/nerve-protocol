@@ -6,7 +6,7 @@ import { Load, RelayNodeRow, Limit } from "data.slint";
 import { Store, Prefs, Install, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Segmented, Divider,
-    TextField, Field, InfoRow, ListRow, Icon, IconTile, Reveal, TabBar, Fold,
+    TextField, Field, InfoRow, ListRow, Icon, IconTile, Reveal, TabBar, Fold, Switch,
 } from "widgets.slint";
 
 // A setting card: its icon, title and sentence on top, its controls below.
@@ -526,6 +526,35 @@ export component SettingsPage inherits PageFrame {
                         icon: @image-url("icons/download.svg");
                         clicked => {
                             Install.ask-update();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.lg;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: Space.xs;
+                        Text {
+                            text: "Pre-releases";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            font-weight: Type.medium;
+                        }
+                        Text {
+                            text: "Update takes test builds too, before their release.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Switch {
+                            checked: Install.pre-releases;
+                            label: "Pre-releases";
+                            toggled(on) => {
+                                Install.set-pre-releases(on);
+                            }
                         }
                     }
                 }

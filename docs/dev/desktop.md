@@ -54,7 +54,9 @@ What the mark changes (`service::Layout::of`, `service::Package`):
   `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve-node-desktop`.
 - `update` takes the release's package of the same kind from `SHA256SUMS`,
   checks it, refuses an older one, installs it with `apt-get install -y` or
-  `dnf install -y`, and restarts the service with it, the service's files
+  `dnf install -y` (the same version again with `apt-get install --reinstall`
+  or `dnf reinstall`, as a pre-release and its release share one), and
+  restarts the service with it, the service's files
   as the new program has them; a new program that does not start is put
   back. `update --from <file>` is refused: only the package manager replaces
   the program. A package installed by hand runs
@@ -266,7 +268,8 @@ so the node checks a value as it checks the command line's.
   administrator's restore the app stops and starts the service). **Keep its
   keys in files** restores the backup of a machine that kept them in a
   keyring onto one without.
-- **App**: **Update…** and **Uninstall…**. Light, dark or the system's
+- **App**: **Update…**, **Pre-releases** (off: on, Update passes `--pre`)
+  and **Uninstall…**. Light, dark or the system's
   look is chosen at the foot of the sidebar, on every page.
 - **Advanced**: **Any setting** shows and sets any setting of `node.toml`
   by its name, and **Add** and **Remove** change a list, such as
@@ -453,6 +456,8 @@ after a failed window hands the link on the same way.
 
 **Settings**, **App**, **Update…**: from the latest release
 on GitHub (checked against its `SHA256SUMS`), or from a file you downloaded.
+With **Pre-releases** on, the newest release, a pre-release too
+(`update --pre`).
 The update replaces the program, puts the menu entry back and restarts the
 service; the node's settings, keys and audit log stay. The app from a package
 installs the release's newer package with `apt-get` or `dnf` instead
@@ -587,8 +592,8 @@ asks the desktop portal's `reduced-motion` first, and GTK's
 `gtk-enable-animations` on other desktops. It follows a change within a few
 seconds.
 
-The appearance (system, light or dark), and the card on commands that run as
-you when you hid it, are kept in
+The appearance (system, light or dark), the **Pre-releases** switch, and the
+card on commands that run as you when you hid it, are kept in
 `~/.config/nerve-node-desktop/settings.json` on Linux and
 `%APPDATA%\nerve-node-desktop\settings.json` on Windows, apart from the
 node's settings.

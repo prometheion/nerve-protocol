@@ -115,6 +115,11 @@ and every limit is in
 - `update` checks the download against the release's `SHA256SUMS` and puts
   the old program back if the new one does not start. The programs are not
   signed yet.
+- `update --pre` takes the newest release, a pre-release too, and
+  `update --tag <tag>` one release, for the center and the node; the same
+  version from another release is taken (a pre-release, then its release).
+  The desktop app's **Settings › App › Pre-releases** does it there, on Linux
+  and Windows.
 - `uninstall` keeps the data, or deletes it with `--purge` (**Delete the
   data** in the app).
 

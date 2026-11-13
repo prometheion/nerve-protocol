@@ -1207,8 +1207,21 @@ impl Ctl {
     /// there.
     pub fn keep_settings(self: &Rc<Self>, file: PathBuf) {
         let appearance = crate::settings::appearance(&file);
+        let pre = crate::settings::pre_releases(&file);
         *self.settings.borrow_mut() = Some(file);
         self.show_appearance(appearance);
+        self.with_install(|i| i.set_pre_releases(pre));
+    }
+
+    /// Whether Update takes the pre-releases too: shown, and kept in the
+    /// app's settings.
+    fn set_pre_releases(self: &Rc<Self>, on: bool) {
+        self.with_install(|i| i.set_pre_releases(on));
+        if let Some(file) = self.settings.borrow().as_ref()
+            && let Err(e) = crate::settings::save_pre_releases(file, on)
+        {
+            self.toast(format!("The choice is not saved: {e}"), Tone::Danger);
+        }
     }
 
     fn set_appearance(self: &Rc<Self>, i: i32) {

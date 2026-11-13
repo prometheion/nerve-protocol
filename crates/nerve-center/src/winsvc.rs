@@ -256,7 +256,10 @@ pub async fn execute(
         Cmd::Set { setting, value } => {
             self::set(layout, sys, setting.as_deref(), value.as_deref(), out)
         }
-        Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
+        Cmd::Update { from, pre, tag } => {
+            let layout = crate::service::with_release(layout, pre, tag).await?;
+            update(&layout, sys, from.as_deref(), out).await
+        }
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         _ => Err("only install, set, service, update and uninstall are service commands".into()),

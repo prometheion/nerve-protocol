@@ -1381,8 +1381,17 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_set_appearance(2);
     assert_eq!(nerve_node_desktop::settings::appearance(&settings), 2);
     store.set_appearance(0);
-    ctl.keep_settings(settings);
+    ctl.keep_settings(settings.clone());
     assert_eq!(store.get_appearance(), 2);
+    // So is the switch for the pre-releases, off until it is turned on
+    // (#213).
+    let app = window.global::<Install>();
+    assert!(!app.get_pre_releases());
+    app.invoke_set_pre_releases(true);
+    assert!(nerve_node_desktop::settings::pre_releases(&settings));
+    app.set_pre_releases(false);
+    ctl.keep_settings(settings);
+    assert!(app.get_pre_releases());
 
     // A service command goes through the broker too, and says when it
     // cannot be done: here no service is installed.

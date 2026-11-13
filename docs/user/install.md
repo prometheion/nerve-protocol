@@ -190,12 +190,19 @@ sudo nerve-node update
 
 `update` takes the program from the latest release, checks it against that
 release's `SHA256SUMS`, and restarts the service. `--from <file>` takes a
-file you checked yourself. The config, the keys and the audit log stay. If
+file you checked yourself. `--pre` takes the newest release, a pre-release
+too, and `--tag pre2-v0.1.0` that one release, each checked against its own
+`SHA256SUMS`. An older version is refused; the same version from another
+release (a pre-release, then the release) is taken. `--pre` asks GitHub
+which release is the newest, which it answers 60 times an hour per machine
+without a login; when it refuses, name the release with `--tag`. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own
 to a unit belong in `sudo systemctl edit nerve-node`, which `update` leaves
 alone. The desktop app updates under **Settings › App › Update…**, also on
-Windows; from a package, it installs the release's newer package with `apt` or `dnf`, and a
-newer package you install yourself updates the node's service too.
+Windows, and **Settings › App › Pre-releases** makes it take the
+pre-releases too. From a package, it installs the release's package with
+`apt` or `dnf`, the same version again too, and a newer package you install
+yourself updates the node's service too.
 
 ## Uninstall
 

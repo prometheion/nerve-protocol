@@ -125,7 +125,9 @@ A relay on Windows needs a firewall rule for its port, which you add yourself.
 
 Update the center first, then the nodes. **Settings › App › Update…** checks
 the download against `SHA256SUMS`; if the new program does not start, the
-old one comes back. The center: `nerve-center update` as an administrator.
+old one comes back. **Pre-releases** beside it makes Update take test
+builds too. The center: `nerve-center update` as an administrator, with
+`--pre` or `--tag <tag>` for a pre-release.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. The quiet uninstall of Apps & features

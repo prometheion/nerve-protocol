@@ -414,6 +414,16 @@ GitHub (`nerve-node-x86_64-linux` or `nerve-node-aarch64-linux`, the names
 `install` takes too), checks it against the release's `SHA256SUMS`, puts it
 in place as `/usr/local/bin/nerve-node` and restarts the service. `HTTPS_PROXY` is used when it is set.
 `--from <file>` takes a program you downloaded and checked yourself.
+`--pre` takes the newest release, a pre-release too: GitHub's API
+(`api.github.com/repos/<owner>/<repo>/releases`, without a login, 60 calls
+an hour per address) names its tag, and its files come from
+`releases/download/<tag>/`, checked against that release's `SHA256SUMS`.
+When GitHub refuses (HTTP 403 or 429), `update` says so and names `--tag`.
+`--tag <tag>` takes that release the same way without asking the API. An
+older version is refused; the same version is taken when the program
+differs, so a pre-release gives way to its release. The app from a `.deb` or
+`.rpm` has its package manager install the same version again (`apt-get
+install --reinstall`, `dnf reinstall`).
 
 `update` also writes the service unit, the polkit files and the helper that
 starts and stops the service as the new program has them, for the owner the
@@ -626,7 +636,8 @@ sudo nerve-center update
 against the release's `SHA256SUMS`, puts it in place as
 `/usr/local/bin/nerve-center` and restarts the service. `HTTPS_PROXY` is used
 when it is set. `--from <file>` takes a program you downloaded and checked
-yourself.
+yourself; `--pre` and `--tag <tag>` take a pre-release as the node's
+`update` does ([update the node](#update-the-node)).
 
 `update` also writes the service unit as the new program has it, so a
 release that changes it needs no `install` again, and its steps go to the

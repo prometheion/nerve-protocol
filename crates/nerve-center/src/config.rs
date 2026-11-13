@@ -261,11 +261,19 @@ pub enum Cmd {
     },
     /// Update to the latest release; the state and the settings stay
     ///
-    /// It checks the download against the release's SHA256SUMS, restarts the service, and puts the old program back when the new one does not start.
+    /// It checks the download against the release's SHA256SUMS, restarts the service, and puts the old program back when the new one does not start. An older version is refused; the same version from another release is taken.
     Update {
         /// Take the new program from this file instead of downloading the latest release.
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["pre", "tag"])]
         from: Option<PathBuf>,
+        /// Take the newest release, a pre-release too
+        ///
+        /// GitHub's list of releases names it, which it answers 60 times an hour without a login; --tag needs no list.
+        #[arg(long, conflicts_with = "tag")]
+        pre: bool,
+        /// Take the release of this tag, like pre2-v0.1.0
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
     },
     /// Remove the service and the program; state and settings stay
     ///
@@ -1252,10 +1260,41 @@ mod tests {
         assert_eq!(
             cmd(&["update", "--from", "x"]),
             Some(Cmd::Update {
-                from: Some("x".into())
+                from: Some("x".into()),
+                pre: false,
+                tag: None
             })
         );
-        assert_eq!(cmd(&["update"]), Some(Cmd::Update { from: None }));
+        assert_eq!(
+            cmd(&["update"]),
+            Some(Cmd::Update {
+                from: None,
+                pre: false,
+                tag: None
+            })
+        );
+        // From a pre-release, or a release by its tag; a file is neither
+        // (#213).
+        assert_eq!(
+            cmd(&["update", "--tag", "pre2-v0.1.0"]),
+            Some(Cmd::Update {
+                from: None,
+                pre: false,
+                tag: Some("pre2-v0.1.0".into())
+            })
+        );
+        assert!(matches!(
+            cmd(&["update", "--pre"]),
+            Some(Cmd::Update { pre: true, .. })
+        ));
+        for both in [
+            &["update", "--pre", "--tag", "x"][..],
+            &["update", "--from", "f", "--pre"],
+            &["update", "--from", "f", "--tag", "x"],
+        ] {
+            let args = std::iter::once("nerve-center").chain(both.iter().copied());
+            assert!(Args::try_parse_from(args).is_err(), "{both:?}");
+        }
         assert_eq!(
             cmd(&["uninstall", "--purge"]),
             Some(Cmd::Uninstall { purge: true })

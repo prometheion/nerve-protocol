@@ -30,6 +30,12 @@ Every run builds and publishes the Linux and the Windows programs.
 - A release needs a `## <version>` section with entries in `CHANGELOG.md`. The
   section becomes its release notes. A pre-release never reads that file. Its
   text is one line about the binaries and their checksums.
+- `update --pre` on a machine takes the newest release, pre-releases too
+  (GitHub's API names it), and `update --tag pre<N>-v<version>` that one, from
+  `releases/download/<tag>/`; plain `update` takes `releases/latest/`, which
+  skips pre-releases. A pre-release and its release of one version are
+  different programs: `update` takes the release over the pre-release. The
+  desktop app's **Settings › App › Pre-releases** passes `--pre`.
 - The run builds the commit the branch is at when it starts. It tags that
   commit in its last job, after the checks and every build passed.
 - One run at a time. A second run waits for the first. While one run waits, a

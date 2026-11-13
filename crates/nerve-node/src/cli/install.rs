@@ -124,10 +124,16 @@ async fn root_then_owner_check(what: &str, root: bool, paths: &[&NodePaths]) -> 
     owner_check(paths).await
 }
 
-/// `update`: the installed node from a newer release.
-pub(super) async fn update(from: Option<PathBuf>, out: &mut dyn Write) -> Result<(), String> {
-    let layout = Layout::system();
+/// `update`: the installed node from a newer release, or from `release`
+/// (the newest with the pre-releases, or a tag's).
+pub(super) async fn update(
+    from: Option<PathBuf>,
+    release: nerve_service::Release,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let mut layout = Layout::system();
     root_then_owner_check("update", crate::rights::full_rights(), &[&layout.paths]).await?;
+    layout.release = release.base(&layout.release).await?;
     #[cfg(windows)]
     return crate::winsvc::update(&layout, &crate::win_host::WinHost, from.as_deref(), out).await;
     #[cfg(not(windows))]
@@ -309,6 +315,34 @@ mod tests {
             let e = run(&paths, cmd).unwrap_err();
             assert!(e.contains("leave out --config-dir and --state-dir"), "{e}");
             assert!(!e.contains("not done"), "{e}");
+        }
+    }
+
+    /// `update --pre` and `update --tag` take a pre-release; neither goes
+    /// with the other or with a file (#213).
+    #[test]
+    fn update_takes_a_pre_release_or_a_tag() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("nerve-node").chain(args.iter().copied()))
+                .map(|c| c.cmd)
+        };
+        let release = |args: &[&str]| match parse(args).unwrap() {
+            Cmd::Update { pre, tag, .. } => nerve_service::Release::of(pre, tag),
+            c => panic!("{c:?}"),
+        };
+        assert_eq!(release(&["update"]), nerve_service::Release::Latest);
+        assert_eq!(release(&["update", "--pre"]), nerve_service::Release::Pre);
+        assert_eq!(
+            release(&["update", "--tag", "pre2-v0.1.0"]),
+            nerve_service::Release::Tag("pre2-v0.1.0".into())
+        );
+        for both in [
+            &["update", "--pre", "--tag", "x"][..],
+            &["update", "--from", "f", "--pre"],
+            &["update", "--from", "f", "--tag", "x"],
+        ] {
+            assert!(parse(both).is_err(), "{both:?}");
         }
     }
 
