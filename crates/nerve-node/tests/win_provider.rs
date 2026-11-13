@@ -481,11 +481,18 @@ async fn the_owners_program_attaches_on_the_provider_pipe() {
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
+    // Its row under Providers: the name, the program, attached.
+    let row = format!("{NAME} {} attached", exe.display());
     assert!(
-        out.contains(&format!("program {NAME}: {}, attached", exe.display())),
+        out.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") == row),
         "{out}"
     );
-    assert!(out.lines().any(|l| l.starts_with("wintest.echo")), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l.trim_start().starts_with("wintest.echo")),
+        "{out}"
+    );
 
     // The center sees its action and calls it; the call reaches the program.
     let until = Instant::now() + WAIT;
