@@ -17,6 +17,7 @@ pub mod eventlog;
 #[doc(hidden)]
 pub mod fake;
 mod files;
+pub mod out;
 pub mod prompt;
 mod update;
 pub mod win;

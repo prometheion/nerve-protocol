@@ -88,6 +88,11 @@ and every limit is in
 
 - `status`, the one place to look, also as `--json`; the audit log and the
   log, in the terminal, the web UIs and the desktop app.
+- One output style for both programs' commands: a head line with the
+  program, its version and its state, short aligned lines, lists as
+  columns, and a `Next` block with the commands to run. Colour only on a
+  terminal (never with `NO_COLOR`); `--json` stays as it is, and the audit
+  and the log show their times as dates (UTC).
 - Panic stops every link and command at once; unlock lets the node work
   again.
 - On Windows the node and the center also write to the Event Log.

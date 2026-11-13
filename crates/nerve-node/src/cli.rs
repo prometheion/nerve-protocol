@@ -61,7 +61,7 @@ use log::{audit, log_cmd};
 pub(crate) use mode::mode_data;
 use mode::{set_mode, then_text};
 use network::{NO_NETWORK_LINE, apart_by_hand_here, network_mode_note, set_network};
-use provider::program_lines;
+use provider::program_rows;
 use proxy::keys_place;
 pub use proxy::{proxy_password, proxy_wants_password};
 pub use relay::link_address;
@@ -71,6 +71,7 @@ pub use setup::setup;
 #[cfg(unix)]
 use setup::setup_after_install;
 use setup::{keyring_of, offer_keyring};
+pub(crate) use status::done_page;
 use status::live_status;
 #[cfg(unix)]
 use sudo::read_password;
@@ -1357,6 +1358,29 @@ async fn daemon_answers(paths: &NodePaths) -> bool {
 }
 
 /// Writes `s` as one line of what a command shows.
+/// Shows `page` on `out`, bold and coloured only on a terminal
+/// ([`nerve_service::out`]).
+fn show(out: &mut dyn Write, page: &nerve_service::out::Page) {
+    let _ = out.write_all(page.render(nerve_service::out::Style::stdout()).as_bytes());
+}
+
+/// A page of the node's whose state is `state` ([`nerve_service::out`]).
+fn page(state: &str) -> nerve_service::out::Page {
+    status::page().state(state, nerve_service::out::Tone::Plain)
+}
+
+/// The page of a command that has nothing to show as no center is paired.
+fn no_center_page() -> nerve_service::out::Page {
+    let mut p = page("no center paired");
+    p.next("Pair one", "nerve-node center add -");
+    p
+}
+
+/// A note of a node's message (`note: …`) as a page shows it.
+fn note_text(note: &str) -> String {
+    nerve_service::out::capital(note.strip_prefix("note: ").unwrap_or(note))
+}
+
 fn w(out: &mut dyn Write, s: String) {
     let _ = writeln!(out, "{s}");
 }
@@ -1628,7 +1652,7 @@ fn parse_enum<T: serde::de::DeserializeOwned>(s: &str, choices: &str) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[cfg(unix)]
     use super::config::tell_folder_commands;
     #[cfg(unix)]
@@ -1709,6 +1733,14 @@ mod tests {
         );
     }
 
+    /// Whether a line of a page in `text` holds `words`, the blanks that
+    /// align its columns aside.
+    pub(super) fn has_row(text: &str, words: &str) -> bool {
+        let words = words.split_whitespace().collect::<Vec<_>>();
+        text.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == words)
+    }
+
     pub(super) fn run(paths: &NodePaths, args: &[&str]) -> Result<String, String> {
         let mut argv = vec![
             "nerve-node".to_string(),
@@ -1748,7 +1780,7 @@ mod tests {
         }
     }
 
-    pub(super) fn setup(names: &[&str]) -> (tempfile::TempDir, NodePaths) {
+    pub(crate) fn setup(names: &[&str]) -> (tempfile::TempDir, NodePaths) {
         let d = tempfile::tempdir().unwrap();
         let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
         let mut cfg = NodeConfig::default();
@@ -2105,12 +2137,15 @@ mod tests {
         let (_d, paths) = setup(&["home"]);
         let ls = run(&paths, &["cap"]).unwrap();
         assert!(ls.contains("fs.read"), "{ls}");
-        assert!(ls.contains("no program is allowed as a provider"), "{ls}");
+        assert!(!ls.contains("Providers"), "{ls}");
         run(&paths, &["cap", "set", "exec", "hidden"]).unwrap();
         let ls = run(&paths, &["cap"]).unwrap();
-        let run_line = ls.lines().find(|l| l.starts_with("exec.run ")).unwrap();
+        let run_line = ls
+            .lines()
+            .find(|l| l.trim_start().starts_with("exec.run "))
+            .unwrap();
         assert!(run_line.ends_with("home: hidden"), "{ls}");
-        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
+        assert!(run(&paths, &["proxy"]).unwrap().contains(" · no proxy\n"));
         run(
             &paths,
             &[
@@ -2129,7 +2164,7 @@ mod tests {
         );
         assert!(!ls.contains("s3cret"), "{ls}");
         run(&paths, &["proxy", "off"]).unwrap();
-        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
+        assert!(run(&paths, &["proxy"]).unwrap().contains(" · no proxy\n"));
     }
 
     /// A buffer the test's log subscriber writes into (the one test that

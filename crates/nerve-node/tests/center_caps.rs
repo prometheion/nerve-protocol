@@ -13,7 +13,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{linked, owner_edit};
+use common::{linked, owner_edit, rows};
 use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
@@ -228,13 +228,15 @@ async fn a_center_adds_runs_and_edits_its_own_and_the_owner_removes_it() {
 
     // `cap` says who added it and how it counts.
     let ls = cli(&paths, &["cap"]).await.unwrap();
-    let row = ls.lines().find(|l| l.starts_with("say.back")).unwrap();
+    let row = ls.lines().find(|l| l.starts_with("  say.back ")).unwrap();
     assert!(
         row.contains("execute") && row.contains("center lab"),
         "{ls}"
     );
     assert!(
-        ls.contains("capability say.back (added by center lab, counted as execute): printf"),
+        rows(&ls)
+            .iter()
+            .any(|r| r.starts_with("say.back (added by center lab, counted as execute) printf")),
         "{ls}"
     );
 
@@ -503,9 +505,9 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
     assert_eq!(code_of(&e), "forbidden");
     let ls = cli(&paths, &["cap"]).await.unwrap();
     assert!(
-        ls.contains(
-            "capability cam.look (added by center lab, senses: only you turn it on): echo frame"
-        ),
+        rows(&ls)
+            .iter()
+            .any(|r| r == "cam.look (added by center lab, senses: only you turn it on) echo frame"),
         "{ls}"
     );
     let e = settings_set(&mut conn, |d| d["policy"]["caps"]["cam"] = json!("on"))
@@ -1454,7 +1456,10 @@ async fn another_center_never_sees_what_one_added() {
     );
     // Each center's view lists its own once, and not the other's.
     let ls = cli(&paths, &["cap", "--center", "lab"]).await.unwrap();
-    let rows: Vec<&str> = ls.lines().filter(|l| l.starts_with("say.back")).collect();
+    let rows: Vec<&str> = ls
+        .lines()
+        .filter(|l| l.starts_with("  say.back "))
+        .collect();
     assert_eq!(rows.len(), 1, "{ls}");
     assert!(rows[0].contains("center lab"), "{ls}");
     assert!(!ls.contains("ops:%s"), "{ls}");

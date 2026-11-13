@@ -202,45 +202,46 @@ pub(super) async fn proxy_cmd(
 async fn show_proxy(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
     let (cfg, _) = read_config(paths).await?;
     let Some(url) = &cfg.connection.proxy else {
-        let _ = writeln!(out, "no proxy");
+        let mut p = page("no proxy");
+        p.note("The node reaches its centers directly.");
+        show(out, &p);
         return Ok(());
     };
-    let _ = writeln!(out, "proxy {url}");
-    if let Some(p) = &cfg.connection.pin {
-        let _ = writeln!(out, "pin {p}");
+    let mut p = page("proxy");
+    p.row("Proxy", url.clone());
+    if let Some(pin) = &cfg.connection.pin {
+        p.row("Pin", pin.clone());
     }
     if let Some(u) = &cfg.connection.login {
         let storage = cfg.machine.secret_storage;
+        p.row("Login", u.clone());
         match crate::secrets::proxy_login(paths, storage) {
             Ok(_) => {
-                let _ = writeln!(
-                    out,
-                    "login {u} (its password is kept with the node's keys: {})",
-                    keys_place(storage)
+                p.row(
+                    "Password",
+                    format!("with the node's keys: {}", keys_place(storage)),
                 );
             }
             Err(e) => {
-                let _ = writeln!(out, "login {u}");
-                let _ = writeln!(out, "the link cannot use this proxy: {e}");
+                p.warn(format!("The link cannot use this proxy: {e}"));
             }
         }
     }
     // The keyring is asked whether it holds every value; only the
     // names are shown.
     let names = &cfg.connection.headers;
-    match crate::secrets::proxy_headers(paths, names) {
-        Ok(_) => {
-            for n in names {
-                let _ = writeln!(out, "header {n} (its value is in the system keyring)");
+    if !names.is_empty() {
+        p.row("Headers", names.join(", "));
+        match crate::secrets::proxy_headers(paths, names) {
+            Ok(_) => {
+                p.note("The header values are in the system keyring.");
             }
-        }
-        Err(e) => {
-            for n in names {
-                let _ = writeln!(out, "header {n}");
+            Err(e) => {
+                p.warn(format!("The link cannot use this proxy: {e}"));
             }
-            let _ = writeln!(out, "the link cannot use this proxy: {e}");
         }
     }
+    show(out, &p);
     Ok(())
 }
 
@@ -554,7 +555,11 @@ mod tests {
                 }
             }
             let ls = run(&paths, &["proxy"]).unwrap();
-            assert!(ls.contains("login lab (its password is kept"), "{ls}");
+            assert!(ls.contains("\n  Login       lab\n"), "{ls}");
+            assert!(
+                ls.contains("\n  Password    with the node's keys: "),
+                "{ls}"
+            );
             run(&paths, &["proxy", "off"]).unwrap();
             assert_eq!(crate::secrets::store::get(entry.account()).unwrap(), None);
             assert!(!paths.proxy_login_file().exists());
@@ -597,21 +602,27 @@ mod tests {
         // With the entry: ls says the value is there, rm deletes it.
         run(&paths, &set).unwrap();
         let ls = run(&paths, &["proxy"]).unwrap();
-        assert_eq!(
-            ls,
-            "proxy http://127.0.0.1:3128\nheader X-Key (its value is in the system keyring)\n"
+        assert!(
+            ls.ends_with(
+                " · proxy\n\n  Proxy       http://127.0.0.1:3128\n  Headers     X-Key\n\nNote  The header values are in the system keyring.\n"
+            ),
+            "{ls}"
         );
         let rm = run(&paths, &["proxy", "off"]).unwrap();
         assert!(rm.contains("deleted the header values"), "{rm}");
         assert_eq!(keyring_entry(&paths), None);
-        assert_eq!(run(&paths, &["proxy"]).unwrap(), "no proxy\n");
+        assert!(run(&paths, &["proxy"]).unwrap().contains(" · no proxy\n"));
 
         // Without it: ls names the entry the link misses, rm still works.
         run(&paths, &set).unwrap();
         let entry = crate::secrets::Entry::proxy(&paths);
         crate::secrets::store::delete(entry.account()).unwrap();
         let ls = run(&paths, &["proxy"]).unwrap();
-        assert!(ls.contains("header X-Key\n"), "{ls}");
+        assert!(ls.contains("\n  Headers     X-Key\n"), "{ls}");
+        assert!(
+            ls.contains("Warning  The link cannot use this proxy: "),
+            "{ls}"
+        );
         assert!(ls.contains(&format!("no entry {entry}")), "{ls}");
         let rm = run(&paths, &["proxy", "off"]).unwrap();
         assert_eq!(
@@ -631,7 +642,10 @@ mod tests {
             plain.unwrap(),
             format!("proxy http://127.0.0.1:3128\n{next}")
         );
-        assert_eq!(ls.unwrap(), "proxy http://127.0.0.1:3128\n");
+        assert!(
+            ls.unwrap()
+                .ends_with(" · proxy\n\n  Proxy       http://127.0.0.1:3128\n")
+        );
         assert_eq!(rm.unwrap(), format!("no proxy\n{next}"));
     }
 
@@ -709,7 +723,10 @@ mod tests {
             "{toml}"
         );
         let ls = run(&paths, &["proxy"]).unwrap();
-        assert!(ls.contains("its value is in the system keyring"), "{ls}");
+        assert!(
+            ls.contains("The header values are in the system keyring."),
+            "{ls}"
+        );
         assert!(!ls.contains("s3cret"), "{ls}");
         run(&paths, &["proxy", "set", "http://127.0.0.1:3129"]).unwrap();
         assert_eq!(keyring_entry(&paths), None);

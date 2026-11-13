@@ -80,17 +80,17 @@ or run `nerve-node folder sync`.
 <details>
 <summary>The machine shows offline</summary>
 
-`nerve-node center` shows a flag:
+`nerve-node center` shows a state:
 
-| Flag | Fix |
+| State | Fix |
 |---|---|
-| `[paused]` | `nerve-node center resume <name>` |
-| `[revoked]` or `[unknown]` | `nerve-node center rm <name>`, then pair again |
-| none | The node is dialling, with a wait of up to 60 seconds |
+| `paused` | `nerve-node center resume <name>` |
+| `revoked` or `unknown` | `nerve-node center rm <name>`, then pair again |
+| `-` | The node is dialling, with a wait of up to 60 seconds |
 
-- `status` says `LOCKED (panic)`: `nerve-node unlock`.
+- `status` says `locked` (panic): `nerve-node unlock`.
 - `status` says the center is older than this node: update the center first.
-- `node: not running`: `nerve-node service start`.
+- `status` says `stopped` or `not running`: its `Next` names the command.
 
 </details>
 

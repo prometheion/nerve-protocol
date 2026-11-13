@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::owner_edit;
+use common::{has_row, owner_edit};
 use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
@@ -289,7 +289,7 @@ async fn a_provider_the_owner_no_longer_allows_is_detached() {
     assert!(
         status(&paths)
             .await
-            .contains("provider desk attached: lamp")
+            .contains("  Providers\n    desk   lamp\n")
     );
     owner_edit(&paths, |c| c.providers.allowed.clear()).await;
     assert_eq!(p.next().await, None, "the connection ends");
@@ -647,9 +647,9 @@ async fn a_oneof_action_is_left_out_and_status_names_it() {
     );
     let paths = daemon.paths().clone();
     let text = status(&paths).await;
-    assert!(text.contains("provider desk attached: lamp"), "{text}");
+    assert!(text.contains("  Providers\n    desk   lamp\n"), "{text}");
     assert!(
-        text.contains(&format!("provider desk: lamp.dim left out: {reason}")),
+        text.contains(&format!("Provider desk: lamp.dim left out: {reason}")),
         "{text}"
     );
     let json: Value = serde_json::from_str(&status_as(&paths, &["--json"]).await).unwrap();
@@ -1801,7 +1801,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     let ls = cli(&paths, &["cap"]).await;
     let words = |name: &str| {
         ls.lines()
-            .find(|l| l.split_whitespace().next() == Some(name))
+            .find(|l| l.starts_with("  ") && l.split_whitespace().next() == Some(name))
             .unwrap_or_else(|| panic!("no {name}: {ls}"))
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -1821,14 +1821,8 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     assert_eq!(words("fs.write"), "fs.write write built-in lab: off");
     assert_eq!(words("exec.run"), "exec.run execute built-in lab: hidden");
     assert!(!ls.contains("does not run"), "{ls}");
-    assert!(
-        ls.contains(&format!("program desk: {}, attached", me())),
-        "{ls}"
-    );
-    assert!(
-        ls.contains("program fan: /usr/bin/fan, not attached"),
-        "{ls}"
-    );
+    assert!(has_row(&ls, &format!("desk {} attached", me())), "{ls}");
+    assert!(has_row(&ls, "fan /usr/bin/fan not attached"), "{ls}");
 
     let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap"]).await).unwrap();
     let on = v["capabilities"]
@@ -2881,7 +2875,7 @@ async fn cap_ls_names_the_kind_of_a_programs_units() {
     let ls = cli(&paths, &["cap"]).await;
     let words = |name: &str| {
         ls.lines()
-            .find(|l| l.split_whitespace().next() == Some(name))
+            .find(|l| l.starts_with("  ") && l.split_whitespace().next() == Some(name))
             .unwrap_or_else(|| panic!("no {name}: {ls}"))
             .split_whitespace()
             .collect::<Vec<_>>()

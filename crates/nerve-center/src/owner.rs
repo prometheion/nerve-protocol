@@ -126,18 +126,29 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     } else {
         ensure(state)?
     };
-    let p = path(state);
-    if made {
-        let _ = writeln!(out, "made a new owner token, kept in {}:", p.display());
-    } else {
-        let _ = writeln!(out, "the owner token, kept in {}:", p.display());
-    }
-    let _ = writeln!(out, "{token}");
-    let _ = writeln!(
-        out,
-        "It logs in to the web UI. A running center takes a new one at once, and the sessions of the old one end."
-    );
+    let page = token_page(&token, &path(state), made);
+    let _ = out.write_all(page.render(nerve_service::out::Style::stdout()).as_bytes());
     Ok(())
+}
+
+/// What `owner-token` shows: the token and where it is kept; `made` when
+/// it was made now.
+fn token_page(token: &str, kept: &Path, made: bool) -> nerve_service::out::Page {
+    use nerve_service::out::Tone;
+    let mut p = crate::service::page().state(
+        match made {
+            true => "new owner token",
+            false => "owner token",
+        },
+        Tone::Plain,
+    );
+    p.row("Token", token)
+        .row("Kept in", kept.display().to_string());
+    p.note("It logs in to the web UI.");
+    if made {
+        p.note("A running center takes it at once, and the old one's sessions end.");
+    }
+    p
 }
 
 /// The owner token as the web UI checks it: the file's hash, read again
@@ -327,7 +338,8 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         let new = read(d.path()).unwrap().unwrap();
         assert_ne!(new, t);
-        assert!(text.contains("made a new owner token") && text.contains(&new));
+        assert!(text.contains(" · new owner token\n"), "{text}");
+        assert!(text.contains(&format!("  Token       {new}\n")), "{text}");
     }
 
     /// Another account's folder says so and names sudo, not that no center

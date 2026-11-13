@@ -29,11 +29,11 @@ nerve-node audit --last 50
 ```
 
 ```text
-1791834106607  lab  fs.read  /etc/hostname  forbidden: no allow rule matches /etc/hostname
-1791834531401  lab  fs.read  /home/u/proj/a.txt  allowed
+2026-10-12 19:41:46  lab  fs.read  /etc/hostname  forbidden: no allow rule matches /etc/hostname
+2026-10-12 19:48:51  lab  fs.read  /home/u/proj/a.txt  allowed
 ```
 
-A refusal names what is missing; use it to write the rule you want. The
+Times are in UTC. A refusal names what is missing; use it to write the rule you want. The
 audit log never holds file contents, command output or the sudo password.
 `nerve-node audit clear` starts it afresh; the old entries become
 `audit.jsonl.1`. Only you may clear it, never a center.

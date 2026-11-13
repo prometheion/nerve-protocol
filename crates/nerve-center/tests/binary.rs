@@ -422,7 +422,7 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     let stdout = String::from_utf8_lossy(&made.stdout);
     assert!(made.status.success(), "{made:?}");
     assert!(
-        stdout.contains("backed up") && stdout.contains("pin"),
+        stdout.contains(" · backed up\n") && stdout.contains("\n  Pin "),
         "{stdout}"
     );
     // The private key is nowhere in what the program said.

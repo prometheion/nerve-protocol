@@ -8,7 +8,10 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::GetLastError;
-use windows_sys::Win32::System::Console::GetConsoleProcessList;
+use windows_sys::Win32::System::Console::{
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleProcessList, GetStdHandle,
+    STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -62,4 +65,25 @@ pub fn hold(out: &mut dyn Write) {
     let _ = out.flush();
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
+}
+
+/// Turns colour codes on for the console of stdout (`stdout`) or stderr;
+/// whether it takes them. An old console that cannot gets plain text
+/// (crate::out).
+pub fn virtual_terminal(stdout: bool) -> bool {
+    let which = match stdout {
+        true => STD_OUTPUT_HANDLE,
+        false => STD_ERROR_HANDLE,
+    };
+    // SAFETY: the process's own standard handle, and a mode read into a
+    // local before it is set with one flag more.
+    unsafe {
+        let h = GetStdHandle(which);
+        let mut mode = 0u32;
+        if h.is_null() || GetConsoleMode(h, &mut mode) == 0 {
+            return false;
+        }
+        mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+            || SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
 }

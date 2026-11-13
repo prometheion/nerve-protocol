@@ -585,8 +585,8 @@ Check that your kernel supports it, with the node running:
 nerve-node status
 ```
 
-The first line reads `node: running (confinement landlock v…)`. With
-`confinement none` the kernel has no Landlock. The installed node then runs
+Its `Confined` line reads `landlock v…`. With `none` the kernel has no
+Landlock. The installed node then runs
 `folder` mode and `allowlist` mode commands as `nerve-run` without it: its
 account alone holds it back, so it reaches the folders you give it and
 whatever other accounts may reach ([your
@@ -888,14 +888,15 @@ Without such a cgroup (no systemd, cgroup v1, a node started in a terminal),
 commands run without these limits. `nerve-node status` says so, and why:
 
 ```
-limits per command: memory 4096 MiB, CPU 200 %, 1024 processes; a call may ask for up to 16384 MiB, 800 %, 8192 processes
-limits held by the cgroup /system.slice/nerve-node.service: memory, cpu, processes
+  Limits      4 GiB · 200 % CPU · 1024 processes per command
+  Up to       16 GiB · 800 % CPU · 8192 processes when a call asks
+  Held by     the cgroup /system.slice/nerve-node.service: memory · cpu · processes
 ```
 
 or
 
 ```
-commands run WITHOUT these limits: the node's cgroup /user.slice/… is not delegated to it: …
+Warning  Commands run WITHOUT these limits: the node's cgroup /user.slice/… is not delegated to it: …
 ```
 
 When a cgroup offers only some controllers, the line names the limits that

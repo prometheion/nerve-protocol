@@ -19,13 +19,20 @@ pub(super) async fn show_mode(
         None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
     };
     if names.is_empty() {
-        w(out, NO_CENTER_PAIRED.into());
+        show(out, &no_center_page());
+        return Ok(());
     }
     let now = crate::now_ms();
-    for name in names {
-        let p = &cfg.center(&name).expect("listed").policy;
-        w(out, format!("{name}: {}", mode_line(p, now)));
-    }
+    let rows = names
+        .into_iter()
+        .map(|name| {
+            let p = &cfg.center(&name).expect("listed").policy;
+            vec![name, mode_line(p, now)]
+        })
+        .collect();
+    let mut p = page("modes");
+    p.list(None, rows);
+    show(out, &p);
     Ok(())
 }
 
@@ -169,7 +176,7 @@ pub(super) async fn set_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::tests::{json_of, load, run, setup};
+    use crate::cli::tests::{has_row, json_of, load, run, setup};
 
     /// Allowlist mode runs as the owner only when asked for, and setting a
     /// mode again without the flag takes it back; the other modes refuse it.
@@ -268,12 +275,12 @@ mod tests {
         assert_eq!(policy().mode_at(until), Mode::Folder);
         let shown = run(&paths, &["mode"]).unwrap();
         assert!(
-            shown.starts_with("home: user for 1 h 59 min more, then folder\n"),
+            has_row(&shown, "home user for 1 h 59 min more, then folder"),
             "{shown}"
         );
         let status = run(&paths, &["status"]).unwrap();
         assert!(
-            status.contains("mode user for 1 h 59 min more, then folder"),
+            status.contains("user mode for 1 h 59 min more, then folder"),
             "{status}"
         );
         let v = json_of(&paths, &["mode"]);
@@ -303,6 +310,6 @@ mod tests {
         assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
         // Without a timer nothing is said of one.
         run(&paths, &["mode", "user"]).unwrap();
-        assert_eq!(run(&paths, &["mode"]).unwrap(), "home: user\n");
+        assert!(has_row(&run(&paths, &["mode"]).unwrap(), "home user"));
     }
 }

@@ -102,3 +102,16 @@ pub async fn owner_edit(paths: &NodePaths, f: impl Fn(&mut NodeConfig)) {
     .await
     .expect("the owner's edit");
 }
+
+/// Whether a line of a page in `text` holds `words`, the blanks that align
+/// its columns aside (nerve_service::out).
+pub fn has_row(text: &str, words: &str) -> bool {
+    rows(text).contains(&words.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// The lines of a page in `text`, each with one blank between its words.
+pub fn rows(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}

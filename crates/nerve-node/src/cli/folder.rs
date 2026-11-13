@@ -29,22 +29,30 @@ pub(super) async fn show_folders(
     let (cfg, _) = read_config(&paths).await?;
     let name = pick_center(&cfg, &center)?;
     let policy = &cfg.center(&name).expect("picked").policy;
+    let mut p = page(&format!("folders of {name}"));
+    p.list(
+        None,
+        policy
+            .folders
+            .iter()
+            .map(|f| vec![f.access.to_chmod(), f.path.clone()])
+            .collect(),
+    );
     if policy.folders.is_empty() {
-        w(out, format!("{name}: no folders"));
-    }
-    for f in &policy.folders {
-        w(out, format!("{}  {}", f.access.to_chmod(), f.path));
+        p.row("Folders", "none");
+        p.next("Give it one", "nerve-node folder add ~/project rwx");
     }
     if policy.no_network {
-        w(out, format!("{name}: {NO_NETWORK_LINE}"));
+        p.note(format!("Network off: {NO_NETWORK_LINE}."));
     }
     if let Some(note) = network_mode_note(
         policy,
         crate::service::is_service_node(&paths),
         apart_by_hand_here(),
     ) {
-        w(out, note);
+        p.note(note_text(&note));
     }
+    show(out, &p);
     Ok(())
 }
 
@@ -1050,7 +1058,7 @@ mod tests {
         assert!(run(&paths, &["folder", "add", dir, "r", "--center", "nobody"]).is_err());
         assert_eq!(access(), "rx");
         let out = run(&paths, &["folder"]).unwrap();
-        assert!(out.starts_with("r-x  "), "{out}");
+        assert!(out.contains("\n\n  r-x   "), "{out}");
         run(&paths, &["folder", "rm", dir]).unwrap();
         assert!(load(&paths).centers[0].policy.folders.is_empty());
         assert!(run(&paths, &["folder", "rm", dir]).is_err());

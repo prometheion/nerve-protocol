@@ -250,7 +250,7 @@ printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 step "2. Install the node as the owner"
 owners_sudo "$NODE" install
 as_owner status | tee "$OUT/status-files"
-grep -q 'node: running' "$OUT/status-files"
+grep -q ' · running$' "$OUT/status-files"
 as_owner config get machine.secret_storage | tee "$OUT/storage"
 grep -q 'file' "$OUT/storage"
 # The keys start in their files; config set moves them.
@@ -313,12 +313,12 @@ real nerve_env TMPDIR=/tmp PATH=/usr/sbin:/usr/bin:/sbin:/bin "$KEYRING_TESTS" -
 step "5. The node starts again with the keys from the keyring"
 systemctl restart nerve-node
 for _ in $(seq 1 60); do
-  as_owner status 2>/dev/null | grep -q 'node: running' && break
+  as_owner status 2>/dev/null | grep -q ' · running$' && break
   sleep 1
 done
 as_owner status | tee "$OUT/status-keyring"
-grep -q 'node: running' "$OUT/status-keyring" || fail "the node does not come up with its keys in the keyring"
-if grep -q 'folder mode runs no command' "$OUT/status-keyring"; then fail "folder mode is refused with the keys in the keyring"; fi
+grep -q ' · running$' "$OUT/status-keyring" || fail "the node does not come up with its keys in the keyring"
+if grep -q 'Folder mode runs no command' "$OUT/status-keyring"; then fail "folder mode is refused with the keys in the keyring"; fi
 # What status says in JSON: the node found its keyring and no folder mode
 # command is held back (the refusal this job exists to keep away).
 as_owner --json status | tee "$OUT/status-json"
@@ -370,7 +370,7 @@ fi
 node_runs_with_keys() {
   systemctl restart nerve-node
   for _ in $(seq 1 90); do
-    as_owner status 2>/dev/null | grep -q 'node: running' && break
+    as_owner status 2>/dev/null | grep -q ' · running$' && break
     sleep 1
   done
   as_owner --json status | tee "$OUT/status-json2"

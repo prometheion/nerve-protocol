@@ -11,17 +11,22 @@ pub(super) async fn sudo_cmd(
     c: Option<SudoCmd>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let w = |out: &mut dyn Write, s: &str| {
-        let _ = writeln!(out, "{s}");
-    };
     let Some(c) = c else {
         let on = sudo_is_on(paths).await?;
-        w(out, if on { "sudo: on" } else { "sudo: off" });
+        let mut p = page(if on { "sudo on" } else { "sudo off" });
+        match on {
+            true => p.note("Only commands the sudo list names run with sudo."),
+            false => p.next("Turn it on", "nerve-node sudo on"),
+        };
+        show(out, &p);
         return Ok(());
     };
     #[cfg(unix)]
     {
         use nerve_transport::ctl::{NOT_RUNNING, call};
+        let w = |out: &mut dyn Write, s: &str| {
+            let _ = writeln!(out, "{s}");
+        };
         let sock = paths.ctl_socket();
         match c {
             SudoCmd::On => {

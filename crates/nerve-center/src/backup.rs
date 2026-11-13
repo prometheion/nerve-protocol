@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+use nerve_service::out::{Page, Style, Tone};
+
 use nerve_transport::backup::{self, Contents, Kind, Passphrase};
 use nerve_transport::tls::ServerIdentity;
 
@@ -564,10 +566,10 @@ pub fn run(
             }
             let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
-            print_backup(&r, file, out);
             // Which center it is, since an owner command may take another
             // folder than the installed one (round 7, security 2).
-            let _ = writeln!(out, "The state folder: {}", state.display());
+            let page = backup_page(&r, file, state);
+            let _ = out.write_all(page.render(Style::stdout()).as_bytes());
         }
         Cmd::Restore {
             file,
@@ -586,8 +588,8 @@ pub fn run(
             let parsed = open(&bytes, &pass)?;
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
-            print_restore(&r, &parsed, out);
-            let _ = writeln!(out, "The state folder: {}", state.display());
+            let page = restore_page(&r, &parsed, state);
+            let _ = out.write_all(page.render(Style::stdout()).as_bytes());
         }
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.
@@ -608,46 +610,36 @@ pub fn run(
     Ok(())
 }
 
-/// Says what a backup did.
-pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn Write) {
-    let _ = writeln!(out, "backed up to {}", file.display());
-    let _ = writeln!(
-        out,
-        "  the center {} ({}), pin {}, with {} paired {}",
-        r.name,
-        r.id,
-        r.pin,
-        r.nodes,
-        if r.nodes == 1 { "node" } else { "nodes" }
-    );
-    let _ = writeln!(out, "  its certificate and private key, and its state");
-    let _ = writeln!(
-        out,
-        "The file is encrypted with your passphrase. Keep both; nobody can recover the file without it."
-    );
+/// What a backup did, of the center in `state`.
+pub fn backup_page(r: &BackupReport, file: &Path, state: &Path) -> Page {
+    let mut p = crate::service::page().state("backed up", Tone::Good);
+    p.row("File", file.display().to_string())
+        .row("Center", format!("{} ({})", r.name, r.id))
+        .row("Pin", r.pin.clone())
+        .row("Machines", r.nodes.to_string())
+        .row("Folder", state.display().to_string());
+    p.note("The file holds the center's certificate, its private key and its state.");
+    p.note("A passphrase encrypts it. Keep both: nobody can open the file without it.");
+    p
 }
 
-/// Says what a restore did and what comes next.
-pub fn print_restore(r: &RestoreReport, b: &Parsed, out: &mut dyn Write) {
-    let _ = writeln!(
-        out,
-        "restored the center {} ({}), pin {} (backup made by {})",
-        b.name(),
-        b.store.center_id,
-        if r.pin.is_empty() {
-            b.pin()
-        } else {
-            r.pin.clone()
-        },
-        b.program
-    );
+/// What a restore did into `state`, and what comes next.
+pub fn restore_page(r: &RestoreReport, b: &Parsed, state: &Path) -> Page {
+    let mut p = crate::service::page().state("restored", Tone::Good);
+    let pin = match r.pin.is_empty() {
+        true => b.pin(),
+        false => r.pin.clone(),
+    };
+    p.row("Center", format!("{} ({})", b.name(), b.store.center_id))
+        .row("Pin", pin)
+        .row("Backup of", b.program.clone())
+        .row("Folder", state.display().to_string());
     for n in &r.notes {
-        let _ = writeln!(out, "  {n}");
+        p.note(n.clone());
     }
-    let _ = writeln!(
-        out,
-        "Start the center. The nodes that paired with it find it again by the same pin; if it now answers under another address, set --public-url and change `center.<name>.url` on each node (docs/user/backup.md)."
-    );
+    p.note("The machines paired with it find it again by its pin. Where its address changed, set its public-url and each node's `center.<name>.url` (docs/user/backup.md).");
+    p.next("Start it", crate::service::admin("service start"));
+    p
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 //! Linux) say their steps on stdout instead, as `owner-token` says the token.
 
 use clap::FromArgMatches;
+use nerve_service::out::{Said, Style};
 
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
@@ -36,12 +37,9 @@ fn main() -> std::process::ExitCode {
         #[cfg(windows)]
         return nerve_center::win_host::serve(args);
         #[cfg(not(windows))]
-        {
-            eprintln!(
-                "nerve-center: `service` is how Windows starts the installed center; on Linux systemd starts `nerve-center` itself"
-            );
-            return std::process::ExitCode::FAILURE;
-        }
+        return failed(
+            "`service` is how Windows starts the installed center; on Linux systemd starts `nerve-center` itself",
+        );
     }
     // A double-click in Explorer installs the center, as the desktop app
     // installs the node: it starts itself again as `install` with the
@@ -81,12 +79,12 @@ fn main() -> std::process::ExitCode {
             &nerve_center::config::settings_given(&matches),
             elevated,
         ) {
-            eprintln!("nerve-center: {e}");
-            return std::process::ExitCode::FAILURE;
+            return failed(&e.to_string());
         }
         let state = args.owner_state_dir();
         let settle = nerve_center::service::settle_user;
-        let mut out = std::io::stdout();
+        let mut stdout = std::io::stdout();
+        let mut out = Said::new(&mut stdout, Style::stdout());
         let done = match cmd {
             // What `update` asks the new program (or, when it is the same
             // one, the installed one), which it runs as root with an
@@ -121,12 +119,10 @@ fn main() -> std::process::ExitCode {
             }
             _ => nerve_center::backup::run(&state, cmd, &settle, &mut out),
         };
+        let _ = out.finish(None);
         let code = match done {
             Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("nerve-center: {e}");
-                std::process::ExitCode::FAILURE
-            }
+            Err(e) => failed(&e),
         };
         hold_own_window();
         return code;
@@ -136,12 +132,12 @@ fn main() -> std::process::ExitCode {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("nerve-center: {e}");
-            return std::process::ExitCode::FAILURE;
+            return failed(&e.to_string());
         }
     };
     if let Some(cmd) = args.cmd.clone() {
-        let mut out = std::io::stdout();
+        let mut stdout = std::io::stdout();
+        let mut out = Said::new(&mut stdout, Style::stdout());
         let given = nerve_center::config::settings_given(&matches);
         #[cfg(windows)]
         let elevated = nerve_service::win::sid::is_admin();
@@ -150,8 +146,7 @@ fn main() -> std::process::ExitCode {
         if matches!(cmd, Cmd::Install)
             && let Err(e) = nerve_center::config::refuse_install_variables(&given, elevated)
         {
-            eprintln!("nerve-center: {e}");
-            return std::process::ExitCode::FAILURE;
+            return failed(&e.to_string());
         }
         // What `install` writes into the service's settings.
         let set: Vec<(&str, String)> = nerve_center::config::INSTALL_SETTINGS
@@ -168,12 +163,11 @@ fn main() -> std::process::ExitCode {
                 value.map(|v| (*var, v))
             })
             .collect();
-        let code = match rt.block_on(nerve_center::service::execute(cmd, &given, &set, &mut out)) {
+        let done = rt.block_on(nerve_center::service::execute(cmd, &given, &set, &mut out));
+        let _ = out.finish(None);
+        let code = match done {
             Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("nerve-center: {e}");
-                std::process::ExitCode::FAILURE
-            }
+            Err(e) => failed(&e),
         };
         hold_own_window();
         return code;
@@ -226,14 +220,24 @@ fn install_by_double_click() -> std::process::ExitCode {
     match started {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!(
-                "nerve-center: a double-click installs the center as a service, which needs the administrator rights: {e}. Or run `{} install` in a terminal opened with Run as administrator.",
+            let code = failed(&format!(
+                "a double-click installs the center as a service, which needs the administrator rights: {e}. Or run `{} install` in a terminal opened with Run as administrator.",
                 nerve_center::config::started_as(std::env::args_os().next())
-            );
+            ));
             nerve_service::win::console::hold(&mut std::io::stderr());
-            std::process::ExitCode::FAILURE
+            code
         }
     }
+}
+
+/// Says why a command failed, in the style of both programs; its exit
+/// code.
+fn failed(e: &str) -> std::process::ExitCode {
+    eprintln!(
+        "{}",
+        nerve_service::out::error("nerve-center", e, Style::stderr())
+    );
+    std::process::ExitCode::FAILURE
 }
 
 fn refuse(

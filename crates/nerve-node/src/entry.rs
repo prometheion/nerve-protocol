@@ -58,7 +58,14 @@ pub fn main() -> i32 {
     nerve_transport::log::install(nerve_transport::log::Level::Info, true);
     // A folder named by an old variable would be dropped without a word.
     if let Err(e) = crate::paths::refuse_old_names(|k| std::env::var_os(k)) {
-        eprintln!("{}: {e}", crate::edition::get().program);
+        eprintln!(
+            "{}",
+            nerve_service::out::error(
+                crate::edition::get().program,
+                &e,
+                nerve_service::out::Style::stderr()
+            )
+        );
         return 1;
     }
     // Named after this program, so `--version` and the usage say which one
@@ -136,7 +143,10 @@ pub(crate) fn failed(json: bool, e: &str) -> i32 {
         use std::io::Write;
         let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "error": e }));
     }
-    eprintln!("nerve-node: {e}");
+    eprintln!(
+        "{}",
+        nerve_service::out::error("nerve-node", e, nerve_service::out::Style::stderr())
+    );
     1
 }
 
@@ -148,8 +158,88 @@ fn run(cli: crate::cli::Cli) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("cannot start the runtime: {e}"))?;
-    let mut out = std::io::stdout();
-    rt.block_on(crate::cli::execute(cli, &mut out))
+    let mut stdout = std::io::stdout();
+    if cli.json {
+        return rt.block_on(crate::cli::execute(cli, &mut stdout));
+    }
+    let style = nerve_service::out::Style::stdout();
+    rt.block_on(for_people(cli, &mut stdout, style))
+}
+
+/// Runs `cli` for people: the lines in the style of both programs, a
+/// change's warnings, notes and next steps set apart at its end, and
+/// `install` and `update` ending with the page `status` shows
+/// (nerve_service::out). `--json` keeps the lines as they are.
+async fn for_people(
+    cli: crate::cli::Cli,
+    out: &mut dyn std::io::Write,
+    style: nerve_service::out::Style,
+) -> Result<(), String> {
+    let ends_on_status = matches!(
+        cli.cmd,
+        crate::cli::Cmd::Install { .. } | crate::cli::Cmd::Update { .. }
+    );
+    let paths = crate::paths::NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
+    let mut said = nerve_service::out::Said::new(out, style);
+    let r = crate::cli::execute(cli, &mut said).await;
+    let page = match r.is_ok() && ends_on_status {
+        true => crate::cli::done_page(&paths).await,
+        false => None,
+    };
+    let _ = said.finish(page);
+    r
+}
+
+#[cfg(all(test, unix))]
+mod plain_tests {
+    use clap::Parser;
+
+    /// A change says its lines for people as `--json` gives them, its
+    /// notes set apart at the end in the style of both programs (#213).
+    #[tokio::test]
+    async fn a_change_sets_its_notes_apart_and_json_keeps_them() {
+        let (d, paths) = crate::cli::tests::setup(&["home"]);
+        let dir = d.path().join("closed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = |json: bool| {
+            let mut a = vec![
+                "nerve-node".to_string(),
+                "--config-dir".into(),
+                paths.config_dir.display().to_string(),
+                "--state-dir".into(),
+                paths.state_dir.display().to_string(),
+            ];
+            if json {
+                a.push("--json".into());
+            }
+            a.extend(["folder", "add", dir.to_str().unwrap(), "none"].map(String::from));
+            crate::cli::Cli::try_parse_from(a).unwrap()
+        };
+        let mut out = Vec::new();
+        super::for_people(args(false), &mut out, nerve_service::out::Style::PLAIN)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("home: folder "), "{text}");
+        assert!(
+            text.contains(
+                "\n\nNote  The folder grants nothing: it closes it to file calls; a command run in the folder around it still reaches it (`nerve-node folder rm` removes it)\n      Folders do not count here: "
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("note: "), "{text}");
+        // `--json` gives the lines as they were.
+        let mut out = Vec::new();
+        crate::cli::execute(args(true), &mut out).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            v["messages"].as_array().unwrap().iter().any(|m| m
+                .as_str()
+                .unwrap()
+                .starts_with("note: the folder grants nothing")),
+            "{v}"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]

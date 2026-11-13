@@ -134,10 +134,17 @@ sudo ./nerve-center-x86_64-linux install --name lab
 It runs as the account `nerve-center`, with MCP over HTTP, and ends with:
 
 ```text
-Web UI:      http://127.0.0.1:7480
-Owner token: nrv_owner_… (logs in to the web UI; …)
-Harnesses:   http://127.0.0.1:7481/mcp, with a harness token: …
+Nerve center 0.1.0 · running as a service
+
+  Web UI        http://127.0.0.1:7480
+  Harnesses     http://127.0.0.1:7481/mcp
+  Machines      none paired yet
+  Owner token   nrv_owner_…
+
+Next  Owner token:  sudo nerve-center owner-token
 ```
+
+The owner token logs in to the web UI.
 
 `--name`, `--public-url`, `--listen`, `--ui` and `--mcp` go into its
 settings file, `/etc/nerve-center/center.env`, and

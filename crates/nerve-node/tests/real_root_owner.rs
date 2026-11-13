@@ -237,7 +237,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("owner: root is the owner: commands of user mode"),
+        text.contains("Warning  root is the owner: commands of user mode"),
         "{text}"
     );
     assert!(text.contains("mode user, as root"), "{text}");
@@ -314,8 +314,8 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("node: not running")
-            && text.contains("owner: root is the owner: commands of user mode"),
+        text.contains(" · stopped\n")
+            && text.contains("Warning  root is the owner: commands of user mode"),
         "{text}"
     );
     assert!(sh(Command::new(BIN).args(["service", "start"])).0);
@@ -567,7 +567,7 @@ async fn a_program_of_root_attaches_as_a_provider() {
     let (provider, first) = started(None, &[&python, script, at]);
     assert!(first.contains("\"ok\""), "{first}");
     let (_, st) = sh(Command::new(BIN).arg("status"));
-    assert!(st.contains("provider rootprov attached: files"), "{st}");
+    assert!(st.contains("  Providers\n    rootprov   files\n"), "{st}");
     let r = conn
         .call(
             "invoke",

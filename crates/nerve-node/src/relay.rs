@@ -2584,7 +2584,7 @@ mod tests {
         round_trip(&mut t, b"up").await;
         let ls = cli(&["relay"]).await;
         assert!(
-            ls.contains("tunnel lab from 127.0.0.1:") && ls.contains(" to center home for "),
+            ls.contains("  Tunnels\n    lab   from 127.0.0.1:") && ls.contains("   to home   for "),
             "{ls}"
         );
         // A new token: the running node took the change, so the old one is

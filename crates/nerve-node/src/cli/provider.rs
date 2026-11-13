@@ -62,32 +62,36 @@ pub(super) async fn rm_provider(
 pub(super) async fn show_providers(paths: NodePaths, out: &mut dyn Write) -> Result<(), String> {
     let (cfg, _) = read_config(&paths).await?;
     let v = cap_listing(&paths, &cfg).await?;
-    for l in program_lines(&v) {
-        w(out, l);
+    let rows = program_rows(&v);
+    let mut p = page(match rows.is_empty() {
+        true => "no provider",
+        false => "providers",
+    });
+    if rows.is_empty() {
+        p.next("Allow one", "nerve-node provider add <name> <program>");
     }
+    p.list(None, rows);
+    show(out, &p);
     Ok(())
 }
 
-/// The lines of `provider`: each program allowed, and whether it is
+/// The rows of `provider`: each program allowed, and whether it is
 /// attached.
-pub(super) fn program_lines(v: &Value) -> Vec<String> {
+pub(super) fn program_rows(v: &Value) -> Vec<Vec<String>> {
     let programs = v["programs"].as_array().cloned().unwrap_or_default();
-    if programs.is_empty() {
-        return vec!["no program is allowed as a provider".into()];
-    }
     programs
         .iter()
         .map(|p| {
             let state = match p["attached"].as_bool() {
                 Some(true) => "attached",
                 Some(false) => "not attached",
-                None => "the node does not run",
+                None => "node not running",
             };
-            format!(
-                "program {}: {}, {state}",
-                p["name"].as_str().unwrap_or_default(),
-                p["exe"].as_str().unwrap_or_default()
-            )
+            vec![
+                p["name"].as_str().unwrap_or_default().to_string(),
+                p["exe"].as_str().unwrap_or_default().to_string(),
+                state.to_string(),
+            ]
         })
         .collect()
 }
@@ -125,12 +129,13 @@ mod tests {
             .map(|p| (p.name.as_str(), p.exe.as_str()))
             .collect();
         assert_eq!(allowed, [("desk", b.as_str()), ("lamp-2", lamp.as_str())]);
-        assert_eq!(
-            run(&paths, &["provider"]).unwrap(),
-            format!(
-                "program desk: {b}, the node does not run\nprogram lamp-2: {lamp}, the node does \
-                 not run\n"
-            )
+        let shown = run(&paths, &["provider"]).unwrap();
+        let w = b.len().max(lamp.len());
+        assert!(
+            shown.ends_with(&format!(
+                " · providers\n\n  desk     {b:w$}   node not running\n  lamp-2   {lamp:w$}   node not running\n"
+            )),
+            "{shown}"
         );
         let v = json_of(&paths, &["provider"]);
         assert_eq!(v["programs"][1]["name"], "lamp-2", "{v}");
@@ -153,9 +158,7 @@ mod tests {
         let v = json_of(&paths, &["provider"]);
         assert_eq!(v["programs"].as_array().unwrap().len(), 1, "{v}");
         run(&paths, &["provider", "rm", "lamp-2"]).unwrap();
-        assert_eq!(
-            run(&paths, &["provider"]).unwrap(),
-            "no program is allowed as a provider\n"
-        );
+        let shown = run(&paths, &["provider"]).unwrap();
+        assert!(shown.contains(" · no provider\n"), "{shown}");
     }
 }

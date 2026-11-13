@@ -1140,10 +1140,9 @@ async fn a_restore_after_two_center_rotations_keeps_the_keys_here() {
     // The second in its grace: N served, M aside; the restore says N.
     let report = nerve_center::backup::restore(a.path(), &parsed, false).unwrap();
     assert_eq!(report.pin, n);
-    let mut out = Vec::new();
-    nerve_center::backup::print_restore(&report, &parsed, &mut out);
-    let out = String::from_utf8(out).unwrap();
-    assert!(out.contains(&format!("pin {n}")), "{out}");
+    let out = nerve_center::backup::restore_page(&report, &parsed, a.path())
+        .render(nerve_service::out::Style::PLAIN);
+    assert!(out.contains(&format!("  Pin         {n}\n")), "{out}");
     assert!(a.path().join("tls.next.pem").exists());
     let r = center(a.path(), true).await;
     assert_eq!(r.center.pin().as_deref(), Some(n.as_str()));

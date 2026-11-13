@@ -23,7 +23,7 @@ use nerve_service::win::service::{Settings, service_sid, virtual_account};
 use nerve_service::win::update::{clean_aside, previous, staged};
 use nerve_service::{Steps, write_file};
 
-use crate::service::{Layout, check_setting, done_lines, setting_in};
+use crate::service::{Layout, check_setting, done_page, setting_in};
 
 /// The name the service is registered under, which also names its virtual
 /// account.
@@ -349,9 +349,12 @@ pub fn install(
     start(sys, layout)?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
-    for line in done_lines(&file, &owner_token, &crate::owner::path(&layout.state)) {
-        let _ = writeln!(steps.out, "{line}");
-    }
+    let page = done_page(layout, &file, Some(&owner_token), None);
+    let _ = write!(
+        steps.out,
+        "\n{}",
+        page.render(nerve_service::out::Style::stdout())
+    );
     Ok(())
 }
 
@@ -366,7 +369,8 @@ pub fn set(
     value: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    use crate::service::{not_running_with, said_already, set_checked, set_lines, settings_lines};
+    use crate::service::{not_running_with, said_already, set_checked, set_page, settings_page};
+    use nerve_service::out::Style;
     supported(sys, "set")?;
     let Some(runs) = sys.service()? else {
         return Err(NOT_INSTALLED.into());
@@ -374,13 +378,12 @@ pub fn set(
     let path = layout.settings();
     let kept = settings_text(std::fs::read_to_string(&path), &path)?;
     let Some((name, value)) = setting.zip(value) else {
-        for line in settings_lines(&kept, &path, layout) {
-            let _ = writeln!(out, "{line}");
-        }
+        let page = settings_page(&kept, &path, layout);
+        let _ = out.write_all(page.render(Style::stdout()).as_bytes());
         return Ok(());
     };
     let Some(var) = set_checked(name, value, &kept, layout)? else {
-        return said_already(name, value, &kept, layout, out);
+        return said_already(name, value, &kept, layout, runs, out);
     };
     let mut steps = Steps::new(out);
     crate::service::settings_file(layout, &[(var, value.to_string())], steps.out)?;
@@ -397,17 +400,12 @@ pub fn set(
             .and_then(|()| start(sys, layout))
             .and_then(|()| sys.wait_running(layout))
             .map_err(|e| not_running_with(&e, name, value, &kept, layout))?;
-        steps.did(format!(
-            "restarted the service {SERVICE_NAME}: the center runs with it"
-        ));
+        steps.did(format!("restarted the service {SERVICE_NAME}"));
     } else {
-        steps.did(format!(
-            "the service {SERVICE_NAME} does not run; it takes this at its next start (`Start-Service {SERVICE_NAME}` in an administrator's PowerShell)"
-        ));
+        steps.did("the center takes it at its next start");
     }
-    for line in set_lines(var, &file, layout) {
-        let _ = writeln!(steps.out, "{line}");
-    }
+    let page = set_page(var, &file, layout, runs);
+    let _ = write!(steps.out, "\n{}", page.render(Style::stdout()));
     Ok(())
 }
 
@@ -516,7 +514,19 @@ pub async fn update(
     let r = update_steps(layout, sys, from, &mut steps).await;
     let logged = r.clone().map(|()| true);
     crate::service::log_update(layout, &steps.done, &logged, steps.out);
-    r
+    r?;
+    let version = sys
+        .version_of(&layout.bin)
+        .ok()
+        .and_then(|said| nerve_service::Version::parse_of(SERVICE_NAME, &said))
+        .map(|v| v.to_string());
+    let page = done_page(layout, &file, None, version.as_deref());
+    let _ = write!(
+        steps.out,
+        "\n{}",
+        page.render(nerve_service::out::Style::stdout())
+    );
+    Ok(())
 }
 
 async fn update_steps(
@@ -853,7 +863,7 @@ mod tests {
         let owner = crate::owner::read(&l.state)
             .unwrap()
             .expect("an owner token");
-        assert!(out.contains(&format!("Owner token: {owner}")), "{out}");
+        assert!(out.contains(&format!("  Owner token   {owner}\n")), "{out}");
         let file = std::fs::read_to_string(l.settings()).unwrap();
         assert!(file.contains("NERVE_CENTER_HARNESS_TOKEN=nrv_"), "{file}");
         // Windows texts in the file the owner edits.
@@ -894,7 +904,10 @@ mod tests {
         );
         assert!(out.contains("runs as NT SERVICE\\nerve-center"), "{out}");
         assert!(out.contains("the node port 7443"), "{out}");
-        assert!(out.contains("Web UI:      http://127.0.0.1:7480"), "{out}");
+        assert!(
+            out.contains("  Web UI        http://127.0.0.1:7480\n"),
+            "{out}"
+        );
         assert_eq!(sys.service.get(), Some(true));
     }
 
@@ -971,8 +984,8 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         let host = crate::center::host_name();
         for want in [
-            "restarted the service nerve-center: the center runs with it\n",
-            &format!("Web UI:      https://{host}:7480\n"),
+            "restarted the service nerve-center\n",
+            &format!("  Web UI      https://{host}:7480\n"),
             "uses TLS with the center's self-signed certificate",
             "The Windows Firewall rule \"Nerve center\" lets in the node port only",
             "-LocalPort 7480",
@@ -1004,11 +1017,11 @@ mod tests {
         assert!(sys.calls().is_empty(), "{:?}", sys.calls());
         let out = String::from_utf8(out).unwrap();
         assert!(
-            out.contains("does not run; it takes this at its next start"),
+            out.contains("the center takes it at its next start\n"),
             "{out}"
         );
         assert!(
-            out.contains("Harnesses:   http://127.0.0.1:7491/mcp"),
+            out.contains("  Harnesses   http://127.0.0.1:7491/mcp\n"),
             "{out}"
         );
         assert!(!out.contains("Firewall") && !out.contains("TLS"), "{out}");
@@ -1019,10 +1032,14 @@ mod tests {
         let mut out = Vec::new();
         set(&l, &sys, None, None, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("  listen      0.0.0.0:9443\n"), "{out}");
-        assert!(out.contains("  mcp         127.0.0.1:7491\n"), "{out}");
+        assert!(out.contains("  listen       0.0.0.0:9443\n"), "{out}");
+        assert!(out.contains("  mcp          127.0.0.1:7491\n"), "{out}");
         assert!(
-            out.contains("`nerve-center set <name> <value>` in an administrator's terminal"),
+            out.contains("Next  Change one:  nerve-center set <name> <value>\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Note  Run these commands in an administrator's terminal.\n"),
             "{out}"
         );
     }

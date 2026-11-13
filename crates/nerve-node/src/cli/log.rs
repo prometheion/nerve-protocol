@@ -1,6 +1,8 @@
 //! `nerve-node audit` and `nerve-node log`: what was allowed and refused,
 //! and the node's own log, also as they grow.
 
+use nerve_service::out;
+
 use super::*;
 
 /// `audit clear`: starts the audit log afresh, keeping the entries so far
@@ -33,6 +35,8 @@ pub(super) async fn log_clear(paths: NodePaths, out: &mut dyn Write) -> Result<(
 
 fn audit_line(v: &Value) -> String {
     let s = |k: &str| match &v[k] {
+        // The time as people read it; `--json` keeps the number.
+        Value::Number(n) if k == "ts" => n.as_u64().map_or_else(|| n.to_string(), out::time),
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         other => other.to_string(),
@@ -323,7 +327,7 @@ pub(super) async fn log_cmd(
 fn log_line(v: &Value) -> String {
     let mut line = format!(
         "{}  {}  {}",
-        v["ts"].as_u64().unwrap_or_default(),
+        out::time(v["ts"].as_u64().unwrap_or_default()),
         v["level"].as_str().unwrap_or_default(),
         v["msg"].as_str().unwrap_or_default()
     );
@@ -600,9 +604,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "1  info  node started",
-                "2  warn  link dropped",
-                "3  error  cannot connect"
+                "1970-01-01 00:00:00  info  node started",
+                "1970-01-01 00:00:00  warn  link dropped",
+                "1970-01-01 00:00:00  error  cannot connect"
             ]
         );
         let v = json_of(&paths, &["log", "--last", "2"]);
@@ -621,7 +625,7 @@ mod tests {
         assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
         assert_eq!(v["entries"][0]["msg"], "link dropped", "{v}");
         let out = run(&paths, &["log", "--problems"]).unwrap();
-        assert_eq!(out, "2  warn  link dropped\n");
+        assert_eq!(out, "1970-01-01 00:00:00  warn  link dropped\n");
         // No log yet is no error.
         let empty = NodePaths::new(d.path().join("c2"), d.path().join("s2"));
         assert_eq!(json_of(&empty, &["log"]), json!({"entries": []}));
@@ -782,13 +786,13 @@ mod tests {
             "target": "svc.restart", "decision": "allowed", "command": "systemctl restart -- nginx"});
         assert_eq!(
             audit_line(&call),
-            "1  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
+            "1970-01-01 00:00:00  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
         );
         let refused = json!({"ts": 2, "center": "lab", "cap": "proj", "action": "deploy",
             "target": "proj.deploy", "decision": "forbidden", "reason": "no", "command": "sh x"});
         assert_eq!(
             audit_line(&refused),
-            "2  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
+            "1970-01-01 00:00:00  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
         );
     }
 }
