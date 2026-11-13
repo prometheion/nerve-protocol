@@ -805,6 +805,7 @@ fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
     assert!(pair.contains("nerve-node center add -"), "{pair}");
     let nodes = said(&["nodes"]);
     assert!(nodes.contains(" · no machine paired\n"), "{nodes}");
+    assert_eq!(said(&["nodes", "list"]), nodes);
     let made = said(&["token", "new", "ci"]);
     let token = made
         .lines()
@@ -824,4 +825,44 @@ fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
     assert!(String::from_utf8_lossy(&gone.stderr).contains("no machine named nope"));
     drop(center.stdin.take());
     assert!(wait(&mut center, Duration::from_secs(10)));
+}
+
+/// With the web UI off and MCP over HTTP on, `token new` in the terminal
+/// shows how a harness reaches the endpoint, as the web UI's card does
+/// (round 1 of #213's second pass, correctness 5: it said to turn on MCP
+/// over HTTP, which was on).
+#[test]
+fn a_new_token_names_the_mcp_endpoint_with_the_web_ui_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut center = bare(&mut Command::new(env!("CARGO_BIN_EXE_nerve-center")))
+        .env("NERVE_CENTER_STATE_DIR", &state)
+        .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+        .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+        .env("NERVE_CENTER_UI", "off")
+        .env("NERVE_CENTER_MCP", "127.0.0.1:0")
+        .env("NERVE_CENTER_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let made = loop {
+        let o = owner(&["token", "new", "ci"], Some(&state));
+        if o.status.success() {
+            break String::from_utf8_lossy(&o.stdout).into_owned();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let _ = center.kill();
+    let _ = center.wait();
+    assert!(made.contains("\n  URL         http://127.0.0.1:"), "{made}");
+    assert!(made.contains("Claude Code:"), "{made}");
+    assert!(!made.contains("Turn on MCP over HTTP"), "{made}");
 }

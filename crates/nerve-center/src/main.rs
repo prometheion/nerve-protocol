@@ -9,10 +9,7 @@ use nerve_service::out::{Said, Style};
 fn main() -> std::process::ExitCode {
     use nerve_center::config::Cmd;
     let layout = nerve_center::service::Layout::system();
-    // `service` alone; `service start` is the owner's.
-    let is_service = cfg!(windows)
-        && std::env::args_os().nth(1).is_some_and(|a| a == "service")
-        && std::env::args_os().len() == 2;
+    let is_service = cfg!(windows) && nerve_center::config::starts_the_service(std::env::args_os());
     // The Windows service reads its settings from its own file, as systemd
     // gives the Linux one its own: before anything reads the environment.
     #[cfg(windows)]

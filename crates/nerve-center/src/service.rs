@@ -983,21 +983,29 @@ pub fn install_with(
         &mut steps,
     )?;
     let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
-    let page = done_page(layout, &file, Some(&owner_token), None);
+    let page = done_page(layout, &file, Some(&owner_token), None, true);
     let _ = write!(steps.out, "\n{}", page.render(Style::stdout()));
     Ok(())
 }
 
-/// The page `install` and `update` end with: the running center as
-/// `status` shows it, with the owner token that logs in to the web UI
-/// (`owner_token`) once; from the settings `file`. `version` is the
-/// installed program's where it is known, after an update.
+/// The page `install` and `update` end with: the center as `status` shows
+/// it, with the owner token that logs in to the web UI (`owner_token`)
+/// once; from the settings `file`. `version` is the installed program's
+/// where it is known, after an update. `started`: the command started the
+/// service and saw the center answer; an update that found nothing to do
+/// started nothing, and says whether the center runs.
 pub(crate) fn done_page(
     layout: &Layout,
     file: &str,
     owner_token: Option<&str>,
     version: Option<&str>,
+    started: bool,
 ) -> Page {
+    let runs = match started {
+        true => Some(true),
+        false => crate::attach::runs(&layout.state),
+    };
+    let active = runs == Some(true);
     let mut p = status_page_of(
         layout,
         &layout.state,
@@ -1005,11 +1013,14 @@ pub(crate) fn done_page(
         Some(file),
         "",
         &crate::config::McpMode::Off,
-        Some(true),
+        runs,
         Some(ServiceState {
-            active: true,
-            state: "running".into(),
-            boot: Some(true),
+            active,
+            state: match active {
+                true => "running".into(),
+                false => "stopped".into(),
+            },
+            boot: started.then_some(true),
         }),
     );
     if let Some(v) = version {
@@ -1584,7 +1595,7 @@ pub async fn update(
     let started = || sys.wait_running(&layout.state);
     let r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
     log_update(layout, &steps.done, &r, steps.out);
-    r?;
+    let started = r?;
     let version = sys
         .account(USER)
         .ok()
@@ -1592,7 +1603,7 @@ pub async fn update(
         .and_then(|a| sys.version_of(&layout.bin, &a).ok())
         .and_then(|said| nerve_service::Version::parse_of("nerve-center", &said))
         .map(|v| v.to_string());
-    let page = done_page(layout, &file, None, version.as_deref());
+    let page = done_page(layout, &file, None, version.as_deref(), started);
     let _ = write!(out, "\n{}", page.render(Style::stdout()));
     Ok(())
 }
@@ -2628,6 +2639,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             "NERVE_CENTER_UI=off\nNERVE_CENTER_MCP=off\n",
             Some("tok"),
             None,
+            true,
         )
         .render(Style::PLAIN);
         assert!(off.contains("  Web UI        off\n"), "{off}");
@@ -2640,7 +2652,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             )),
             "{off}"
         );
-        let on = done_page(&l, "", None, Some("1.2.0")).render(Style::PLAIN);
+        let on = done_page(&l, "", None, Some("1.2.0"), true).render(Style::PLAIN);
         assert!(on.starts_with("Nerve center 1.2.0 · "), "{on}");
         assert!(on.contains("  Web UI      http://127.0.0.1:7480\n"), "{on}");
         assert!(on.contains("/mcp\n"), "{on}");
@@ -2910,14 +2922,18 @@ Next  Change one:  sudo nerve-center set <name> <value>
         );
         assert_eq!(kept(&l), before);
         assert!(!l.bin.with_file_name(".nerve-center.new").exists());
-        // The same program again changes nothing.
+        // The same program again changes nothing, and starts nothing: the
+        // page says the center that does not run is stopped (round 1 of
+        // #213's second pass, correctness 7).
         let calls = sys.calls().len();
         let mut out = Vec::new();
         update(&l, &sys, Some(&new), &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("nothing to update"), "{out}");
+        assert!(out.contains("\nNerve center 1.2.0 · stopped\n"), "{out}");
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("nothing to update")
+            has_next(&out, "Start it: sudo nerve-center service start"),
+            "{out}"
         );
         assert_eq!(sys.calls().len(), calls);
     }

@@ -42,7 +42,7 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 | `service start\|stop\|restart` | Starts, stops or restarts the service |
 | `status` | Whether it runs, its addresses and its machines |
 | `pair` | Makes a link that pairs a new machine |
-| `nodes [disable\|enable\|rm <name>]` | Shows the machines, or turns one off, on, or removes it |
+| `nodes [list\|disable\|enable\|rm <name>]` | Shows the machines, or turns one off, on, or removes it |
 | `token new\|list\|rm` | Makes, lists or removes harness tokens |
 | `log [--last N] [--problems] [--follow]` | Shows the center's log |
 | `owner-token [--new]` | Shows the token that logs in to the web UI |

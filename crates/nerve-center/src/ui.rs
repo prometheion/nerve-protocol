@@ -1078,6 +1078,53 @@ mod tests {
         );
     }
 
+    /// The owner's commands in the terminal reach only their own requests
+    /// of the web UI (round 1 of #213's second pass, spec 1 and security
+    /// 5): each listed one is a route the web UI answers; any other, which
+    /// the web UI would take from a logged-in owner, is refused over the
+    /// attach socket or pipe and changes nothing.
+    #[tokio::test]
+    async fn the_owner_channel_takes_only_the_owners_requests() {
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let ui = Ui::new(&c, None, true);
+        let refused = "is none of the owner's commands";
+        for (method, path) in OWNER_CALLS {
+            if let Err((_, e)) = ui.owner_call(method, path, &json!({})).await {
+                assert!(!e.to_string().contains(refused), "{method} {path}: {e}");
+            }
+        }
+        let center_before = ui
+            .api(&req("GET", "/api/center", &[], ""), &json!({}))
+            .await
+            .unwrap();
+        let pin = c.pin();
+        for (method, path, body) in [
+            ("POST", "/api/center", json!({"name": "other"})),
+            ("POST", "/api/center/key/rotate", json!({})),
+            ("POST", "/api/checker", json!({})),
+            ("POST", "/api/nodes/rename", json!({"id": "x", "name": "y"})),
+            ("GET", "/api/stats", json!({})),
+            ("GET", "/api/center", json!({})),
+        ] {
+            let (code, e) = ui.owner_call(method, path, &body).await.unwrap_err();
+            assert_eq!(code, 404, "{method} {path}");
+            assert!(e.to_string().contains(refused), "{method} {path}: {e}");
+        }
+        // The web UI itself answers them.
+        assert!(
+            ui.api(&req("GET", "/api/stats", &[], ""), &json!({}))
+                .await
+                .is_ok()
+        );
+        let center_after = ui
+            .api(&req("GET", "/api/center", &[], ""), &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(center_after, center_before);
+        assert_eq!(c.pin(), pin);
+    }
+
     async fn pair_status(ui: &Ui, code: &str) -> Value {
         ui.api(
             &req("POST", "/api/pair/status", &[], ""),

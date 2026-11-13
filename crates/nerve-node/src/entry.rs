@@ -175,19 +175,49 @@ async fn for_people(
     out: &mut dyn std::io::Write,
     style: nerve_service::out::Style,
 ) -> Result<(), String> {
-    let ends_on_status = matches!(
-        cli.cmd,
-        crate::cli::Cmd::Install { .. } | crate::cli::Cmd::Update { .. }
-    );
-    let paths = crate::paths::NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
+    let paths = closing_page_of(&cli.cmd);
     let mut said = nerve_service::out::Said::new(out, style);
     let r = crate::cli::execute(cli, &mut said).await;
-    let page = match r.is_ok() && ends_on_status {
-        true => crate::cli::done_page(&paths).await,
-        false => None,
+    let page = match (&r, paths) {
+        (Ok(()), Some(paths)) => crate::cli::done_page(&paths).await,
+        _ => None,
     };
     let _ = said.finish(page);
     r
+}
+
+/// The node whose page `install` and `update` end with: the installed
+/// one, whose folders the machine's layout names. Not the folders the
+/// command was given: before a first install they are the caller's own.
+fn closing_page_of(cmd: &crate::cli::Cmd) -> Option<crate::paths::NodePaths> {
+    matches!(
+        cmd,
+        crate::cli::Cmd::Install { .. } | crate::cli::Cmd::Update { .. }
+    )
+    .then(|| crate::service::Layout::system().paths)
+}
+
+#[cfg(test)]
+mod page_tests {
+    use clap::Parser;
+
+    /// `install` ends with the page of the node it installed, also on a
+    /// machine where none was installed before (round 1 of #213's second
+    /// pass, correctness 3: it showed the caller's own, stopped node).
+    #[test]
+    fn install_and_update_end_with_the_installed_node_s_page() {
+        let installed = crate::service::Layout::system().paths;
+        for args in [&["install"][..], &["update"]] {
+            let cli =
+                crate::cli::Cli::try_parse_from(["nerve-node"].iter().chain(args.iter()).copied())
+                    .unwrap();
+            let paths = super::closing_page_of(&cli.cmd).expect("a page");
+            assert_eq!(paths.config_dir, installed.config_dir, "{args:?}");
+            assert_eq!(paths.state_dir, installed.state_dir, "{args:?}");
+        }
+        let cli = crate::cli::Cli::try_parse_from(["nerve-node", "status"]).unwrap();
+        assert!(super::closing_page_of(&cli.cmd).is_none());
+    }
 }
 
 #[cfg(all(test, unix))]

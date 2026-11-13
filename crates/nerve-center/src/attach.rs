@@ -47,13 +47,15 @@ pub fn pipe_name(state: &Path) -> String {
     nerve_service::win::pipe::name_for("nerve-center", &dir.to_string_lossy())
 }
 
-/// Whether the account `sid` (as `S-1-5-…`) may attach to the center of
-/// `own`: that one, or SYSTEM. An administrator's other account may open
-/// the pipe (its access list names the administrators) and still does not
-/// attach.
+/// Whether the account `sid` (as `S-1-5-…`) may attach a harness to the
+/// center of `own`: that one, or SYSTEM. Any other account the pipe's
+/// access list lets in (the administrators) makes the owner's requests
+/// only. So does one whose account is not known (`None`): a service that
+/// is no administrator cannot open an elevated administrator's process to
+/// read it, and the access list lets in no one else.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn may_attach_sid(sid: &str, own: &str) -> bool {
-    sid == own || sid == "S-1-5-18"
+fn may_attach_sid(sid: Option<&str>, own: &str) -> bool {
+    sid.is_some_and(|sid| sid == own || sid == "S-1-5-18")
 }
 
 /// The held center lock; dropping it releases the lock.
@@ -342,11 +344,13 @@ mod windows {
         })
     }
 
-    /// Whether the account `sid` may attach ([`super::may_attach_sid`]).
-    fn may_attach(sid: &[u8], own: &[u8]) -> bool {
-        match (sid_text(sid), sid_text(own)) {
-            (Ok(sid), Ok(own)) => super::may_attach_sid(&sid, &own),
-            _ => false,
+    /// Whether the account `sid`, where it is known, may attach a harness
+    /// ([`super::may_attach_sid`]).
+    fn may_attach(sid: Option<&[u8]>, own: &[u8]) -> bool {
+        let sid = sid.and_then(|s| sid_text(s).ok());
+        match sid_text(own) {
+            Ok(own) => super::may_attach_sid(sid.as_deref(), &own),
+            Err(_) => false,
         }
     }
 
@@ -380,15 +384,11 @@ mod windows {
             if connected.is_err() {
                 continue;
             }
-            let account = client_pid(&conn).and_then(|pid| user_of(Some(pid)).ok());
-            let Some(account) = account else {
-                tracing::warn!("refused a connection whose account is not known");
-                continue;
-            };
             // Any other account the pipe's access list let in is an
-            // administrator in an elevated terminal: the owner's requests
-            // only, no harness.
-            let harness = may_attach(&account, &own);
+            // administrator in an elevated terminal, whose process the
+            // service may not open: the owner's requests only, no harness.
+            let account = client_pid(&conn).and_then(|pid| user_of(Some(pid)).ok());
+            let harness = may_attach(account.as_deref(), &own);
             tokio::spawn(super::attached(center.clone(), ui.clone(), conn, harness));
         }
     }
@@ -507,8 +507,11 @@ mod lock_tests {
     #[test]
     fn only_the_centers_account_and_system_attach() {
         let own = "S-1-5-21-1-2-3-1001";
-        assert!(may_attach_sid(own, own));
-        assert!(may_attach_sid("S-1-5-18", own));
+        assert!(may_attach_sid(Some(own), own));
+        assert!(may_attach_sid(Some("S-1-5-18"), own));
+        // An account the service could not read is an administrator's in
+        // an elevated terminal: the owner's requests, no harness.
+        assert!(!may_attach_sid(None, own));
         for other in [
             "S-1-5-21-1-2-3-1002",
             "S-1-5-32-544",
@@ -517,7 +520,7 @@ mod lock_tests {
             "S-1-5-80-1-2-3-4-5",
             "",
         ] {
-            assert!(!may_attach_sid(other, own), "{other}");
+            assert!(!may_attach_sid(Some(other), own), "{other}");
         }
     }
 
@@ -613,5 +616,62 @@ mod tests {
             .expect("runs() waited on a FIFO");
         assert_eq!(answer, None);
         assert_eq!(runs(&held), Some(true));
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    /// What a peer gets for `lines` on a connection that may or may not
+    /// attach a harness: the first line of the answer, empty for none.
+    async fn first_answer(harness: bool, lines: &str) -> String {
+        nerve_transport::init_crypto();
+        let d = tempfile::tempdir().unwrap();
+        let center = crate::center::Center::open(crate::center::Options {
+            state_dir: d.path().to_path_buf(),
+            name: Some("test".into()),
+            public_url: "http://127.0.0.1:1".into(),
+            log: None,
+            log_level: None,
+        })
+        .unwrap();
+        let ui = crate::ui::Ui::new(&center, None, true);
+        let (mine, theirs) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(attached(center, ui, theirs, harness));
+        let (r, mut w) = tokio::io::split(mine);
+        w.write_all(lines.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        let mut r = tokio::io::BufReader::new(r);
+        let read =
+            tokio::time::timeout(std::time::Duration::from_secs(10), r.read_line(&mut answer))
+                .await;
+        assert!(read.is_ok(), "no answer and no end within 10 s");
+        answer
+    }
+
+    /// A peer that may not attach a harness (an administrator's other
+    /// account on Windows) gets no MCP session, only the owner's requests
+    /// (round 1 of #213's second pass, security 4).
+    #[tokio::test]
+    async fn only_a_peer_that_may_attach_gets_a_harness_session() {
+        let init = format!(
+            "{HELLO}\n{}\n",
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}})
+        );
+        let refused = first_answer(false, &init).await;
+        assert_eq!(refused, "", "{refused}");
+        let served = first_answer(true, &init).await;
+        assert!(served.contains("\"serverInfo\""), "{served}");
+        let request = format!(
+            "{OWNER_HELLO}\n{}\n",
+            serde_json::json!({"method": "GET", "path": "/api/overview", "body": {}})
+        );
+        let owners = first_answer(false, &request).await;
+        let v: serde_json::Value = serde_json::from_str(&owners).unwrap();
+        assert!(v["ok"]["nodes"].is_array(), "{v}");
     }
 }

@@ -353,7 +353,7 @@ pub fn install(
     start(sys, layout)?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
-    let page = done_page(layout, &file, Some(&owner_token), None);
+    let page = done_page(layout, &file, Some(&owner_token), None, true);
     let _ = write!(
         steps.out,
         "\n{}",
@@ -516,15 +516,14 @@ pub async fn update(
         .map_err(|e| format!("{e}; update changed nothing"))?;
     let mut steps = Steps::new(out);
     let r = update_steps(layout, sys, from, &mut steps).await;
-    let logged = r.clone().map(|()| true);
-    crate::service::log_update(layout, &steps.done, &logged, steps.out);
-    r?;
+    crate::service::log_update(layout, &steps.done, &r, steps.out);
+    let started = r?;
     let version = sys
         .version_of(&layout.bin)
         .ok()
         .and_then(|said| nerve_service::Version::parse_of(SERVICE_NAME, &said))
         .map(|v| v.to_string());
-    let page = done_page(layout, &file, None, version.as_deref());
+    let page = done_page(layout, &file, None, version.as_deref(), started);
     let _ = write!(
         steps.out,
         "\n{}",
@@ -538,7 +537,7 @@ async fn update_steps(
     sys: &dyn WinSystem,
     from: Option<&Path>,
     steps: &mut Steps<'_>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let p = nerve_service::win::update::Program {
         name: SERVICE_NAME,
         bin: &layout.bin,
@@ -549,9 +548,7 @@ async fn update_steps(
         settings_args: Vec::new(),
         install: "`nerve-center install` in an administrator's terminal",
     };
-    nerve_service::win::update::update(&p, &Machine { sys, layout }, from, steps)
-        .await
-        .map(|_| ())
+    nerve_service::win::update::update(&p, &Machine { sys, layout }, from, steps).await
 }
 
 /// The machine as `update` sees it (nerve_service::win::update::Installed).
@@ -869,6 +866,34 @@ mod tests {
         let l = layout(root);
         install(&l, sys, &download(root, version), &[], &mut Vec::new()).unwrap();
         l
+    }
+
+    /// The command line the service control manager starts is the
+    /// service, which takes its settings first; `service start|stop|restart`
+    /// is the owner's (round 1 of #213's second pass, correctness 1: a
+    /// count of the arguments took the service for the owner's command).
+    #[test]
+    fn the_service_s_own_command_line_starts_the_service() {
+        use crate::config::starts_the_service;
+        let l = layout(Path::new("C:/"));
+        // Split as Windows splits it: quoted parts, blanks between.
+        let line = command_line(&l);
+        let args: Vec<String> = line
+            .split('"')
+            .enumerate()
+            .flat_map(|(i, part)| match i % 2 {
+                1 => vec![part.to_string()],
+                _ => part.split_whitespace().map(str::to_string).collect(),
+            })
+            .collect();
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert!(starts_the_service(&args), "{args:?}");
+        assert!(starts_the_service(["nerve-center", "service"]));
+        for owners in ["start", "stop", "restart"] {
+            assert!(!starts_the_service(["nerve-center", "service", owners]));
+        }
+        assert!(!starts_the_service(["nerve-center", "status"]));
+        assert!(!starts_the_service(["nerve-center"]));
     }
 
     /// `service start|stop|restart` asks the service control manager, as

@@ -2302,7 +2302,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
         // The second pairing of nerve-run (a new one is in folder mode) is
         // told that nothing keeps it apart from the first without Landlock.
         assert_eq!(
-            said.contains("Warning: Without Landlock nothing keeps the pairings apart"),
+            said.contains("Without Landlock nothing keeps the pairings apart"),
             name == "home" && !landlock,
             "{name}: {said}"
         );

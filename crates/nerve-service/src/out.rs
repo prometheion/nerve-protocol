@@ -187,27 +187,33 @@ impl Page {
         !self.next.is_empty()
     }
 
-    /// The page as text, a line each, ending in a line break.
+    /// The page as text, a line each, ending in a line break. Every text
+    /// on it is one line without control characters ([`one_line`]): a
+    /// value may come from a machine, and the colour is added after.
     pub fn render(&self, style: Style) -> String {
         let mut blocks: Vec<Vec<String>> = Vec::new();
-        let mut head = self.title.clone();
+        let mut head = one_line(&self.title);
         if let Some((state, tone)) = &self.state {
             head.push_str(" · ");
-            head.push_str(&style.paint(state, *tone));
+            head.push_str(&style.paint(&one_line(state), *tone));
         }
         blocks.push(vec![head]);
         if !self.rows.is_empty() {
             let width = self
                 .rows
                 .iter()
-                .map(|(l, _)| width(l) + 3)
+                .map(|(l, _)| width(&one_line(l)) + 3)
                 .max()
                 .unwrap_or(0)
                 .max(LABEL);
             blocks.push(
                 self.rows
                     .iter()
-                    .map(|(l, v)| format!("  {}", pad(l, width) + v).trim_end().to_string())
+                    .map(|(l, v)| {
+                        format!("  {}", pad(&one_line(l), width) + &one_line(v))
+                            .trim_end()
+                            .to_string()
+                    })
                     .collect(),
             );
         }
@@ -215,7 +221,7 @@ impl Page {
             let mut block = Vec::new();
             let indent = match title {
                 Some(t) => {
-                    block.push(format!("  {t}"));
+                    block.push(format!("  {}", one_line(t)));
                     "    "
                 }
                 None => "  ",
@@ -258,6 +264,10 @@ fn set_apart(
     if items.is_empty() {
         return None;
     }
+    let items: Vec<(String, String)> = items
+        .iter()
+        .map(|(w, t)| (one_line(w), one_line(t)))
+        .collect();
     let what = items
         .iter()
         .filter(|(w, _)| !w.is_empty())
@@ -285,8 +295,14 @@ fn set_apart(
 }
 
 /// `rows` as aligned columns, three blanks apart; the last column is not
-/// padded.
+/// padded. Each cell is one line without control characters
+/// ([`one_line`]).
 pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(|c| one_line(c)).collect())
+        .collect();
+    let rows = &rows[..];
     let n = rows.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..n)
         .map(|i| {
@@ -308,6 +324,22 @@ pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
             }
             line.trim_end().to_string()
         })
+        .collect()
+}
+
+/// `text` as one line that does nothing to a terminal: control characters
+/// (C0, DEL and C1, escapes and line breaks among them) and the Unicode
+/// line and paragraph separators become blanks. A machine's name, system
+/// or version reaches a page as it sent it, and the owner's terminal must
+/// show it, not act on it.
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .map(
+            |c| match c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                true => ' ',
+                false => c,
+            },
+        )
         .collect()
 }
 
@@ -544,6 +576,37 @@ Next  nerve-node unlock
             "Nerve node 0.1.0 · \x1b[1;31mnot running\x1b[0m\n"
         );
         assert_eq!(error("nerve-node", "no", Style::PLAIN), "nerve-node: no");
+    }
+
+    /// What a machine sent reaches a page as text, never as a control
+    /// sequence for the terminal: escapes, C1 controls and line breaks in
+    /// a value, a cell or a label become blanks (round 1 of #213's second
+    /// pass, security 2).
+    #[test]
+    fn a_page_shows_control_characters_as_blanks() {
+        let evil = "0.1\x1b]52;c;aGk=\x07\u{9b}2J\r\nx\u{2028}y";
+        let mut p = Page::new("Nerve center", evil).state(evil, Tone::Good);
+        p.row(evil, evil);
+        p.list(Some(evil), vec![vec![evil.into(), evil.into()]]);
+        p.warn(evil).note(evil).next(evil, evil);
+        for style in [Style::PLAIN, Style::COLOR] {
+            let text = p.render(style);
+            // Colour codes are the page's own; nothing else is a control.
+            let bare = text
+                .replace("\x1b[1;32m", "")
+                .replace("\x1b[1;33m", "")
+                .replace("\x1b[1m", "")
+                .replace("\x1b[0m", "");
+            assert!(
+                !bare
+                    .chars()
+                    .any(|c| (c.is_control() && c != '\n') || matches!(c, '\u{2028}' | '\u{2029}')),
+                "{bare:?}"
+            );
+            assert!(bare.contains("0.1 ]52;c;aGk=  2J  x y"), "{bare:?}");
+        }
+        let cells = columns(&[vec!["a\x1bb".into(), "c\u{85}d".into()]]);
+        assert_eq!(cells, ["a b   c d"]);
     }
 
     /// A time reads as a date and a clock, in UTC.

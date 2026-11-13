@@ -97,12 +97,16 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         tasks.push(tokio::spawn(u.serve(server)));
     }
 
+    // The owner's commands in the terminal ask the web UI's handlers, also
+    // where the web UI is off (crate::attach); `token new` there shows how
+    // a harness reaches MCP, as the web UI's card does.
+    let owner_ui = page
+        .clone()
+        .unwrap_or_else(|| Ui::new(&center, token.as_deref(), true));
     let mut mcp = None;
     let mut mcp_url = None;
     let told = |mode: &str, url: Option<String>, pin: Option<String>| {
-        if let Some(p) = &page {
-            p.set_mcp(mode, url, pin);
-        }
+        owner_ui.set_mcp(mode, url, pin);
     };
     match &args.mcp {
         McpMode::Stdio => told("stdio", None, None),
@@ -140,11 +144,6 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         ));
     }
 
-    // The owner's commands in the terminal ask the web UI's handlers, also
-    // where the web UI is off (crate::attach).
-    let owner_ui = page
-        .clone()
-        .unwrap_or_else(|| Ui::new(&center, token.as_deref(), true));
     #[cfg(unix)]
     {
         let listener = crate::attach::bind(&args.state_dir())?;

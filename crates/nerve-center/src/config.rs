@@ -370,6 +370,8 @@ pub enum ServiceCmd {
 /// What `nodes` changes of a paired machine, by its name.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum NodesCmd {
+    /// List the paired machines, as `nodes` alone does.
+    List,
     /// Turn a machine off: its link ends and the agent cannot use it.
     Disable {
         /// The machine's name, as `nodes` shows it.
@@ -402,6 +404,37 @@ pub enum TokenCmd {
         /// The token's label, as `token list` shows it, or its id.
         label: String,
     },
+}
+
+/// Whether the arguments `args` (the program's first) are how Windows
+/// starts the installed center: `service` with none of the owner's commands
+/// after it. The service control manager adds `--state-dir <folder>`
+/// (crate::winsvc::command_line), so the count does not tell; `service
+/// start|stop|restart` is the owner's. Read before clap, which reads the
+/// environment that the service's settings replace first.
+pub fn starts_the_service<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    use clap::CommandFactory;
+    use std::ffi::OsStr;
+    let mut args = args.into_iter().skip(1);
+    if !args
+        .next()
+        .is_some_and(|a| a.as_ref() == OsStr::new("service"))
+    {
+        return false;
+    }
+    let owners = Args::command()
+        .find_subcommand("service")
+        .map(|s| {
+            s.get_subcommands()
+                .map(|c| c.get_name().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    !args.any(|a| owners.iter().any(|o| a.as_ref() == OsStr::new(o)))
 }
 
 impl Cmd {
@@ -1327,6 +1360,12 @@ mod tests {
         for (args, want) in [
             (&["pair"][..], Cmd::Pair),
             (&["nodes"], Cmd::Nodes { cmd: None }),
+            (
+                &["nodes", "list"],
+                Cmd::Nodes {
+                    cmd: Some(NodesCmd::List),
+                },
+            ),
             (
                 &["nodes", "disable", "lab"],
                 Cmd::Nodes {

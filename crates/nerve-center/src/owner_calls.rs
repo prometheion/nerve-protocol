@@ -44,10 +44,7 @@ pub async fn call(
 ) -> Result<Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     if crate::owner::not_yours(state) {
-        return Err(match cfg!(windows) {
-            true => "only an administrator asks the installed center: run it in an administrator's terminal".into(),
-            false => "only root and the center's account ask the installed center: run it with sudo".into(),
-        });
+        return Err(only_the_owner("ask the installed center"));
     }
     let not_running = || match installed {
         true => format!(
@@ -89,6 +86,15 @@ pub async fn call(
             .as_str()
             .unwrap_or("the center refused it")
             .to_string()),
+    }
+}
+
+/// Why another account's command cannot `what` ("ask the installed
+/// center"), and how it can.
+fn only_the_owner(what: &str) -> String {
+    match cfg!(windows) {
+        true => format!("only an administrator may {what}: run it in an administrator's terminal"),
+        false => format!("only root and the center's account {what}: run it with sudo"),
     }
 }
 
@@ -228,10 +234,23 @@ async fn nodes(
     out: &mut dyn Write,
 ) -> Result<Page, String> {
     let overview = || call(state, installed, "GET", "/api/overview", json!({}));
-    let Some(cmd) = cmd else {
+    let Some((name, path, body, done)) = cmd.and_then(node_change) else {
         return Ok(nodes_page(&overview().await?));
     };
-    let (name, path, body, done) = match cmd {
+    let id = node_id(&overview().await?, name)?;
+    let mut body = body;
+    body["id"] = json!(id);
+    call(state, installed, "POST", path, body).await?;
+    let _ = writeln!(out, "{done} {name}\n");
+    Ok(nodes_page(&overview().await?))
+}
+
+/// The web UI's request that `cmd` makes of the machine it names: the
+/// name, the path, the body without the machine's id, and what to say
+/// when it is done. None for `nodes list`, which changes nothing.
+fn node_change(cmd: &NodesCmd) -> Option<(&str, &'static str, Value, &'static str)> {
+    Some(match cmd {
+        NodesCmd::List => return None,
         NodesCmd::Disable { name } => (
             name,
             "/api/nodes/disable",
@@ -245,13 +264,7 @@ async fn nodes(
             "turned on",
         ),
         NodesCmd::Rm { name } => (name, "/api/nodes/remove", json!({}), "removed"),
-    };
-    let id = node_id(&overview().await?, name)?;
-    let mut body = body;
-    body["id"] = json!(id);
-    call(state, installed, "POST", path, body).await?;
-    let _ = writeln!(out, "{done} {name}\n");
-    Ok(nodes_page(&overview().await?))
+    })
 }
 
 /// `token new|list|rm`.
@@ -402,6 +415,9 @@ pub async fn log(
     let read = |p: &Path| match std::fs::read(p) {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(only_the_owner("read the installed center's log"))
+        }
         Err(e) => Err(format!("{}: {e}", p.display())),
     };
     let mut older = file.clone().into_os_string();
@@ -548,6 +564,82 @@ mod tests {
         let off = new_token_page(&made, "ci", &json!({"mode": "off"})).render(Style::PLAIN);
         assert!(off.contains("Turn on MCP over HTTP:  "), "{off}");
         assert!(off.contains("set mcp http\n"), "{off}");
+    }
+
+    /// `nodes disable|enable|rm` send the web UI's requests for the
+    /// machine; `nodes list` changes nothing.
+    #[test]
+    fn a_machine_is_turned_off_on_or_removed_as_the_web_ui_does() {
+        let name = || "lab".to_string();
+        let off = NodesCmd::Disable { name: name() };
+        let (n, path, body, done) = node_change(&off).unwrap();
+        assert_eq!((n, path, done), ("lab", "/api/nodes/disable", "turned off"));
+        assert_eq!(body, json!({"disabled": true}));
+        let on = NodesCmd::Enable { name: name() };
+        let (_, path, body, done) = node_change(&on).unwrap();
+        assert_eq!((path, done), ("/api/nodes/disable", "turned on"));
+        assert_eq!(body, json!({"disabled": false}));
+        let rm = NodesCmd::Rm { name: name() };
+        let (_, path, _, done) = node_change(&rm).unwrap();
+        assert_eq!((path, done), ("/api/nodes/remove", "removed"));
+        assert!(node_change(&NodesCmd::List).is_none());
+    }
+
+    /// `log` reads the older file first, then the current one up to its
+    /// last whole line; `--last` keeps the newest N, `--problems` the
+    /// errors and warnings.
+    #[tokio::test]
+    async fn the_log_reads_both_files_and_keeps_the_newest() {
+        let d = tempfile::tempdir().unwrap();
+        let file = nerve_transport::log::file_in(d.path());
+        let mut older = file.clone().into_os_string();
+        older.push(".1");
+        let line = |ts: u64, level: &str, msg: &str| {
+            format!("{}\n", json!({"ts": ts * 1000, "level": level, "msg": msg}))
+        };
+        std::fs::write(&older, line(1, "info", "one") + &line(2, "error", "two")).unwrap();
+        std::fs::write(
+            &file,
+            line(3, "warn", "three") + &line(4, "info", "four") + "{\"ts\":5000,\"lev",
+        )
+        .unwrap();
+        let said = |last: Option<usize>, problems: bool| {
+            let state = d.path().to_path_buf();
+            async move {
+                let mut out = Vec::new();
+                log(&state, false, last, problems, &mut out).await.unwrap();
+                String::from_utf8(out)
+                    .unwrap()
+                    .lines()
+                    .map(|l| l.rsplit("  ").next().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(said(None, false).await, ["one", "two", "three", "four"]);
+        assert_eq!(said(Some(2), false).await, ["three", "four"]);
+        assert_eq!(said(None, true).await, ["two", "three"]);
+        assert_eq!(said(Some(1), true).await, ["three"]);
+    }
+
+    /// Another account's `log` of the installed center is told to use
+    /// sudo, not given the system's refusal (round 1 of #213's second
+    /// pass, correctness 8).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_log_this_account_may_not_read_says_how_to_read_it() {
+        if nerve_transport::net::euid() == 0 {
+            eprintln!("skipped: root reads every file");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let file = nerve_transport::log::file_in(d.path());
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = log(d.path(), false, None, false, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("run it with sudo"), "{e}");
     }
 
     /// The log's lines read as the node's do: the time, the level, the
