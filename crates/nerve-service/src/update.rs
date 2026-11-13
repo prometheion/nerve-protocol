@@ -648,7 +648,7 @@ mod tests {
                 .unwrap(),
             "https://github.com/o/r/releases/download/pre2-v0.1.0"
         );
-        for bad in ["", "../x", "a/b", "v1 2", "x?y"] {
+        for bad in ["", "../x", "a..b", "a/b", "v1 2", "x?y"] {
             assert!(tag_base(latest, bad).is_err(), "{bad:?}");
         }
         assert_eq!(
