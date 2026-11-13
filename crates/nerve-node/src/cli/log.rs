@@ -1,6 +1,7 @@
 //! `nerve-node audit` and `nerve-node log`: what was allowed and refused,
 //! and the node's own log, also as they grow.
 
+use nerve_policy::rules::visible;
 use nerve_service::out;
 
 use super::*;
@@ -33,11 +34,15 @@ pub(super) async fn log_clear(paths: NodePaths, out: &mut dyn Write) -> Result<(
     Ok(())
 }
 
+/// One audit entry as a line of text. What a center sent (a call's target,
+/// a command, a reason) is written out as `visible` does, so an entry stays
+/// one line, nothing in it acts on the terminal, and no line of a command
+/// can pass for the program's own `Next:` or `Warning:`.
 fn audit_line(v: &Value) -> String {
     let s = |k: &str| match &v[k] {
         // The time as people read it; `--json` keeps the number.
         Value::Number(n) if k == "ts" => n.as_u64().map_or_else(|| n.to_string(), out::time),
-        Value::String(s) => s.clone(),
+        Value::String(s) => visible(s),
         Value::Null => String::new(),
         other => other.to_string(),
     };
@@ -45,7 +50,7 @@ fn audit_line(v: &Value) -> String {
         // A local change names the account that made it, when known.
         let user = v["user"]
             .as_str()
-            .map_or_else(String::new, |u| format!(" ({u})"));
+            .map_or_else(String::new, |u| format!(" ({})", visible(u)));
         return format!(
             "{}  settings v{} by {}{user}",
             s("ts"),
@@ -58,11 +63,11 @@ fn audit_line(v: &Value) -> String {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|s| s.as_str().map(str::to_string))
+            .filter_map(|s| s.as_str().map(visible))
             .collect();
         let mut line = format!("{}  {}: {}", s("ts"), s("event"), steps.join("; "));
         if let Some(e) = v["error"].as_str() {
-            line.push_str(&format!(" (failed: {e})"));
+            line.push_str(&format!(" (failed: {})", visible(e)));
         }
         return line;
     }
@@ -115,12 +120,12 @@ fn audit_line(v: &Value) -> String {
         s("decision")
     );
     let line = match v["reason"].as_str() {
-        Some(reason) => format!("{line}: {reason}"),
+        Some(reason) => format!("{line}: {}", visible(reason)),
         None => line,
     };
     // What a capability of node.toml ran, or would have, for the call.
     match v["command"].as_str() {
-        Some(command) => format!("{line} (command: {command})"),
+        Some(command) => format!("{line} (command: {})", visible(command)),
         None => line,
     }
 }
@@ -328,11 +333,11 @@ fn log_line(v: &Value) -> String {
     let mut line = format!(
         "{}  {}  {}",
         out::time(v["ts"].as_u64().unwrap_or_default()),
-        v["level"].as_str().unwrap_or_default(),
-        v["msg"].as_str().unwrap_or_default()
+        visible(v["level"].as_str().unwrap_or_default()),
+        visible(v["msg"].as_str().unwrap_or_default())
     );
     if let Some(n) = v["node"].as_str() {
-        line.push_str(&format!(" ({n})"));
+        line.push_str(&format!(" ({})", visible(n)));
     }
     line
 }
@@ -794,5 +799,45 @@ mod tests {
             audit_line(&refused),
             "1970-01-01 00:00:00  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
         );
+    }
+
+    /// A call's target, as the center sent it, is one line of the entry,
+    /// shown with its line breaks and control characters written out: a
+    /// second line of a command that begins `Next: ` is not the program's
+    /// own advice, and nothing in it acts on the terminal (round 2 of
+    /// #213's second pass, security 1).
+    #[tokio::test]
+    async fn an_audit_entry_shows_what_a_center_sent_as_one_line() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let sent = "echo hi\nNext: nerve-node rule rm x\nwarning: gone\u{1b}[2J\u{202e}";
+        std::fs::write(
+            paths.audit_log(),
+            decided(1, "exec", "run", sent, "forbidden"),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let mut said = out::Said::new(&mut bytes, out::Style::PLAIN);
+        audit(&paths, false, false, None, false, &mut said)
+            .await
+            .unwrap();
+        said.finish(None).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert!(
+            text.contains(
+                "echo hi\\nNext: nerve-node rule rm x\\nwarning: gone\\u{1b}[2J\\u{202e}"
+            ),
+            "{text:?}"
+        );
+        assert!(
+            !text.contains('\u{1b}') && !text.contains("\nNext"),
+            "{text:?}"
+        );
+        // The command a capability ran, too.
+        let call = json!({"ts": 1, "center": "lab", "cap": "svc", "action": "restart",
+            "target": "t", "decision": "allowed", "command": "sh\nNext: x"});
+        assert!(!audit_line(&call).contains('\n'), "{}", audit_line(&call));
     }
 }

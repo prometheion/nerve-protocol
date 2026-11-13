@@ -722,7 +722,7 @@ fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
         Cmd::Set { .. } => "set",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
-        Cmd::Service { cmd: Some(_) } => "service",
+        Cmd::Service { cmd: Some(c) } => c.typed(),
         // `main` gives these to crate::backup, crate::owner and
         // crate::owner_calls.
         Cmd::Backup { .. }
@@ -859,7 +859,7 @@ pub fn service(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     use crate::config::ServiceCmd;
-    supported(sys, "service")?;
+    supported(sys, c.typed())?;
     if !layout.installed() {
         return Err(NOT_INSTALLED.into());
     }
@@ -1790,11 +1790,14 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e, NOT_INSTALLED);
-        assert!(
-            service(&l, &NotRoot, ServiceCmd::Stop, &mut Vec::new())
-                .unwrap_err()
-                .contains("sudo nerve-center service")
-        );
+        // The hint names the command that was typed, not a bare `service`,
+        // which is how Windows starts the center.
+        for c in [ServiceCmd::Start, ServiceCmd::Stop, ServiceCmd::Restart] {
+            assert_eq!(
+                service(&l, &NotRoot, c, &mut Vec::new()).unwrap_err(),
+                format!("{0} needs root: run `sudo nerve-center {0}`", c.typed())
+            );
+        }
     }
 
     fn mode(p: &Path) -> u32 {
@@ -2010,6 +2013,26 @@ mod tests {
                 format!("{what} needs root: run `sudo nerve-center {what}`")
             );
         }
+        // `service restart` names itself, not a bare `service`, which is how
+        // Windows starts the center (round 2 of #213's second pass,
+        // correctness 1).
+        let e = rt
+            .block_on(execute_on(
+                Cmd::Service {
+                    cmd: Some(crate::config::ServiceCmd::Restart),
+                },
+                &[],
+                &[],
+                &l,
+                &NotRoot,
+                Path::new("/nonexistent"),
+                &mut Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(
+            e,
+            "service restart needs root: run `sudo nerve-center service restart`"
+        );
     }
 
     /// The socket the center asks whether a node's command runs it is the

@@ -860,8 +860,29 @@ fn a_new_token_names_the_mcp_endpoint_with_the_web_ui_off() {
         );
         std::thread::sleep(Duration::from_millis(200));
     };
+    // A long label is cut by the center; the page shows the cut one, which
+    // `token rm` finds the token by (round 2 of #213's second pass,
+    // correctness 6).
+    let long = "l".repeat(70);
+    let long_made = owner(&["token", "new", &long], Some(&state));
+    let long_made = String::from_utf8_lossy(&long_made.stdout).into_owned();
+    let shown = long_made
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Label"))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let removed = owner(&["token", "rm", &shown], Some(&state));
     let _ = center.kill();
     let _ = center.wait();
+    // Cut by the center, and the cut label found again.
+    assert!(shown.starts_with("lll") && shown.len() <= 63, "{long_made}");
+    assert_ne!(shown, long, "{long_made}");
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
     assert!(made.contains("\n  URL         http://127.0.0.1:"), "{made}");
     assert!(made.contains("Claude Code:"), "{made}");
     assert!(!made.contains("Turn on MCP over HTTP"), "{made}");

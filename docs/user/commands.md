@@ -10,7 +10,7 @@ commands.
 
 | Group | Commands |
 |---|---|
-| Set up | `install`, `setup`, `update`, `uninstall [--purge]`, `backup <file>`, `restore <file>`, `service start\|stop\|restart` |
+| Set up | `install`, `setup`, `update [--pre\|--tag <tag>]`, `uninstall [--purge]`, `backup <file>`, `restore <file>`, `service start\|stop\|restart` |
 | Centers | `center`, `center add -`, `center rm\|pause\|resume\|rotate-key [<name>]`, `center settings on\|off` |
 | What a center may do | `mode [<mode>] [--for H]`, `folder`, `folder add <path> <rights>\|none`, `folder rm`, `folder sync`, `network [on\|off]` |
 | | `rule`, `rule add allow\|deny '<command>'`, `rule rm '<entry>'`, `rule edit`, `sudo [on\|off]` |
@@ -18,6 +18,10 @@ commands.
 | More | `cap`, `cap set\|add\|edit\|rm`, `provider`, `provider add\|rm`, `proxy`, `proxy set\|off` |
 | | `relay`, `relay on\|off\|add\|set\|token\|rm`, `ui`, `ui on\|off`, `ui token [add\|rm]` |
 | | `config get\|set\|unset\|add\|rm\|accept`, `run` |
+
+`update --pre` takes the newest release, a pre-release too; `update --tag
+<tag>` one release by its tag ([install](install.md)). The desktop app has a
+switch for pre-releases in its settings.
 
 A noun alone shows (`mode`, `folder`, `rule`). `add` and `rm` change a list,
 `set` a value, `on` and `off` a switch. `-` as a value reads it from stdin,
@@ -46,7 +50,7 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 | `token new\|list\|rm` | Makes, lists or removes harness tokens |
 | `log [--last N] [--problems] [--follow]` | Shows the center's log |
 | `owner-token [--new]` | Shows the token that logs in to the web UI |
-| `update`, `uninstall [--purge]` | Updates or removes the service |
+| `update [--pre\|--tag <tag>]`, `uninstall [--purge]` | Updates or removes the service; `--pre` takes the newest pre-release, `--tag` one release |
 | `backup <file>`, `restore <file>` | Saves or restores its identity and pairings |
 | `nerve-center` alone | Runs the center; MCP on stdin, for a harness |
 

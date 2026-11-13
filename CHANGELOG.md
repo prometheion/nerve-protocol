@@ -97,7 +97,9 @@ and every limit is in
   program, its version and its state, short aligned lines, lists as
   columns, and a `Next` block with the commands to run. Colour only on a
   terminal (never with `NO_COLOR`); `--json` stays as it is, and the audit
-  and the log show their times as dates (UTC).
+  and the log show their times as dates (UTC). What a center sent into an
+  audit entry (a command's line breaks and control characters) is written
+  out, so an entry stays one line.
 - Panic stops every link and command at once; unlock lets the node work
   again.
 - On Windows the node and the center also write to the Event Log.

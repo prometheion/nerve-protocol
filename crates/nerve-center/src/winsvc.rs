@@ -602,7 +602,7 @@ pub fn service(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     use crate::config::ServiceCmd;
-    supported(sys, "service")?;
+    supported(sys, c.typed())?;
     let Some(running) = sys.service()? else {
         return Err(NOT_INSTALLED.into());
     };
@@ -953,7 +953,8 @@ mod tests {
         assert_eq!(e, NOT_INSTALLED);
         let mut not_admin = Fake::new();
         not_admin.admin = false;
-        assert!(service(&l, &not_admin, ServiceCmd::Stop, &mut Vec::new()).is_err());
+        let e = service(&l, &not_admin, ServiceCmd::Stop, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("`nerve-center service stop`"), "{e}");
     }
 
     /// The install makes the folders with their own DACLs, the owner token,

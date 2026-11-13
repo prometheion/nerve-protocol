@@ -144,6 +144,12 @@ async fn attached<S>(
     }
     match first.trim() {
         HELLO if harness => crate::mcp::serve_lines(center, r, w, "attached").await,
+        // The accept loop of Linux refuses such a peer before this; on
+        // Windows an administrator's account gets here, and the log is the
+        // only place that says why its harness ended at once.
+        HELLO => {
+            tracing::warn!("refused a harness: this account may make the owner's requests only")
+        }
         OWNER_HELLO => owner_request(&ui, r, w).await,
         _ => {}
     }
@@ -651,6 +657,48 @@ mod role_tests {
         answer
     }
 
+    /// The `tracing` events of a thread: their level and message.
+    struct Events(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for Events {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "message" {
+                        self.0 = format!("{v:?}");
+                    }
+                }
+            }
+            let mut m = Message(String::new());
+            e.record(&mut m);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", e.metadata().level(), m.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// What `run` gives and the events of this thread while it ran (the
+    /// test's runtime runs its tasks on this thread).
+    async fn said<T>(run: impl std::future::Future<Output = T>) -> (T, Vec<String>) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _guard = tracing::subscriber::set_default(Events(seen.clone()));
+        let answer = run.await;
+        let events = seen.lock().unwrap().clone();
+        (answer, events)
+    }
+
     /// A peer that may not attach a harness (an administrator's other
     /// account on Windows) gets no MCP session, only the owner's requests
     /// (round 1 of #213's second pass, security 4).
@@ -662,8 +710,14 @@ mod role_tests {
                 "protocolVersion": "2025-06-18", "capabilities": {},
                 "clientInfo": {"name": "t", "version": "1"}}})
         );
-        let refused = first_answer(false, &init).await;
+        let (refused, said) = said(first_answer(false, &init)).await;
         assert_eq!(refused, "", "{refused}");
+        // The refusal is in the log (round 2 of #213's second pass,
+        // correctness 5).
+        assert!(
+            said.iter().any(|l| l.contains("refused a harness")),
+            "{said:?}"
+        );
         let served = first_answer(true, &init).await;
         assert!(served.contains("\"serverInfo\""), "{served}");
         let request = format!(

@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use nerve_policy::rules::visible;
 use nerve_service::out::{Page, Style, Tone};
 
 use crate::config::{NodesCmd, TokenCmd};
@@ -22,14 +23,38 @@ pub async fn run(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     use crate::config::Cmd;
+    let command = commands(state, installed);
     let page = match cmd {
         Cmd::Pair => pair_page(&call(state, installed, "POST", "/api/pair", json!({})).await?),
-        Cmd::Nodes { cmd } => nodes(state, installed, cmd.as_ref(), out).await?,
-        Cmd::Token(t) => token(state, installed, t, out).await?,
+        Cmd::Nodes { cmd } => nodes(state, installed, cmd.as_ref(), &command, out).await?,
+        Cmd::Token(t) => token(state, installed, t, &command, out).await?,
         _ => return Err("only pair, nodes and token ask the running center".into()),
     };
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
+}
+
+/// The owner's commands for the center in `state`, as a person types them
+/// where they are: for the installed center with `sudo` (on Windows in an
+/// administrator's terminal), for one a harness or a person started with
+/// the folder it needs, as `status` names them.
+fn commands(state: &Path, installed: bool) -> impl Fn(&str) -> String {
+    let state = state.to_path_buf();
+    let system = crate::service::Layout::system();
+    let installed_dir = match installed {
+        true => Some(state.clone()),
+        false => system.installed().then(|| system.state.clone()),
+    };
+    move |what: &str| {
+        crate::ui::command_of(
+            what,
+            &state,
+            installed_dir.as_deref(),
+            &crate::config::default_state_dir(),
+            true,
+            cfg!(windows),
+        )
+    }
 }
 
 /// One request to the running center in `state`, as the web UI would send
@@ -190,7 +215,7 @@ fn node_rows(overview: &Value) -> Vec<Vec<String>> {
 }
 
 /// What `nodes` shows: the paired machines.
-fn nodes_page(overview: &Value) -> Page {
+fn nodes_page(overview: &Value, command: &dyn Fn(&str) -> String) -> Page {
     let rows = node_rows(overview);
     let mut p = crate::service::page().state(
         match rows.len() {
@@ -201,7 +226,7 @@ fn nodes_page(overview: &Value) -> Page {
         Tone::Plain,
     );
     if rows.is_empty() {
-        p.next("Pair one", crate::service::admin("pair"));
+        p.next("Pair one", command("pair"));
     }
     p.list(None, rows);
     p
@@ -231,18 +256,19 @@ async fn nodes(
     state: &Path,
     installed: bool,
     cmd: Option<&NodesCmd>,
+    command: &dyn Fn(&str) -> String,
     out: &mut dyn Write,
 ) -> Result<Page, String> {
     let overview = || call(state, installed, "GET", "/api/overview", json!({}));
     let Some((name, path, body, done)) = cmd.and_then(node_change) else {
-        return Ok(nodes_page(&overview().await?));
+        return Ok(nodes_page(&overview().await?, command));
     };
     let id = node_id(&overview().await?, name)?;
     let mut body = body;
     body["id"] = json!(id);
     call(state, installed, "POST", path, body).await?;
     let _ = writeln!(out, "{done} {name}\n");
-    Ok(nodes_page(&overview().await?))
+    Ok(nodes_page(&overview().await?, command))
 }
 
 /// The web UI's request that `cmd` makes of the machine it names: the
@@ -272,6 +298,7 @@ async fn token(
     state: &Path,
     installed: bool,
     cmd: &TokenCmd,
+    command: &dyn Fn(&str) -> String,
     out: &mut dyn Write,
 ) -> Result<Page, String> {
     let list = || call(state, installed, "GET", "/api/tokens", json!({}));
@@ -287,9 +314,25 @@ async fn token(
             )
             .await?;
             let overview = call(state, installed, "GET", "/api/overview", json!({})).await?;
-            Ok(new_token_page(&made, &label, &overview["mcp"]))
+            // The label the center kept (it cuts a long one), which `token
+            // rm` finds the token by.
+            let kept = list().await?;
+            let label = kept
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|t| t["id"] == made["id"])
+                .and_then(|t| t["label"].as_str())
+                .unwrap_or(&label);
+            Ok(new_token_page(
+                &made,
+                label,
+                &overview["mcp"],
+                installed,
+                command,
+            ))
         }
-        TokenCmd::List => Ok(tokens_page(&list().await?)),
+        TokenCmd::List => Ok(tokens_page(&list().await?, command)),
         TokenCmd::Rm { label } => {
             let tokens = list().await?;
             let id = token_id(&tokens, label)?;
@@ -302,15 +345,22 @@ async fn token(
             )
             .await?;
             let _ = writeln!(out, "removed the harness token {label}\n");
-            Ok(tokens_page(&list().await?))
+            Ok(tokens_page(&list().await?, command))
         }
     }
 }
 
 /// What `token new` shows: the token, once, with what a harness needs, as
 /// the web UI's Connect a harness card shows it; `mcp` is how the center
-/// serves MCP.
-fn new_token_page(made: &Value, label: &str, mcp: &Value) -> Page {
+/// serves MCP. `label` is the one the center kept; `installed` says it is
+/// the installed center, whose settings `set` changes.
+fn new_token_page(
+    made: &Value,
+    label: &str,
+    mcp: &Value,
+    installed: bool,
+    command: &dyn Fn(&str) -> String,
+) -> Page {
     let token = made["token"].as_str().unwrap_or_default();
     let mut p = crate::service::page().state("new harness token", Tone::Good);
     p.row("Token", token);
@@ -335,11 +385,12 @@ fn new_token_page(made: &Value, label: &str, mcp: &Value) -> Page {
                 ));
             }
         }
+        // `set` changes the installed center's settings, not another's.
+        _ if installed => {
+            p.next("Turn on MCP over HTTP", command("set mcp http"));
+        }
         _ => {
-            p.next(
-                "Turn on MCP over HTTP",
-                crate::service::admin("set mcp http"),
-            );
+            p.note("MCP over HTTP is off in this center: start it with --mcp http.");
         }
     }
     p.note("It is shown only now; the center keeps its hash. The Claude Code line puts it in your shell's history.");
@@ -347,7 +398,7 @@ fn new_token_page(made: &Value, label: &str, mcp: &Value) -> Page {
 }
 
 /// What `token list` shows: each harness token by its label.
-fn tokens_page(tokens: &Value) -> Page {
+fn tokens_page(tokens: &Value, command: &dyn Fn(&str) -> String) -> Page {
     let rows: Vec<Vec<String>> = tokens
         .as_array()
         .into_iter()
@@ -373,7 +424,7 @@ fn tokens_page(tokens: &Value) -> Page {
         Tone::Plain,
     );
     if rows.is_empty() {
-        p.next("Make one", crate::service::admin("token new"));
+        p.next("Make one", command("token new"));
     }
     p.list(None, rows);
     p
@@ -412,7 +463,10 @@ pub async fn log(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let file = nerve_transport::log::file_in(state);
-    let read = |p: &Path| match std::fs::read(p) {
+    // A plain file only, as everything else in the center's folder is read:
+    // the service's account owns the folder on Windows, where an
+    // administrator reads it, and may put a link or a pipe there.
+    let read = |p: &Path| match nerve_transport::files::read_plain(p) {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -424,12 +478,18 @@ pub async fn log(
     older.push(".1");
     let mut bytes = read(Path::new(&older))?;
     let current = read(&file)?;
+    let mut at = current.len();
+    // The file's first bytes tell it from the one that replaces it, which
+    // can be as long already.
+    let head = |b: &[u8]| b[..b.len().min(64)].to_vec();
+    let mut first = head(&current);
     // A line the center is still writing waits for its end.
     let whole = current
         .iter()
         .rposition(|b| *b == b'\n')
         .map_or(0, |i| i + 1);
     bytes.extend_from_slice(&current[..whole]);
+    let mut rest: Vec<u8> = current[whole..].to_vec();
     let mut lines = log_lines(&bytes, problems);
     if let Some(n) = last {
         lines.drain(..lines.len().saturating_sub(n));
@@ -441,23 +501,29 @@ pub async fn log(
     if !follow {
         return Ok(());
     }
-    let mut at = whole as u64;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let now = read(&file)?;
-        // A new file (the log was moved aside) starts again at its top.
-        if (now.len() as u64) < at {
+        if now.len() < at || !now.starts_with(&first) {
+            // Moved aside: what the old file got after the last look, then
+            // the new file from its start.
+            let moved = read(Path::new(&older))?;
+            rest.extend_from_slice(moved.get(at..).unwrap_or_default());
             at = 0;
         }
-        let new = &now[at as usize..];
-        let Some(end) = new.iter().rposition(|b| *b == b'\n') else {
+        if first.len() < 64 {
+            first = head(&now);
+        }
+        rest.extend_from_slice(&now[at..]);
+        at = now.len();
+        let Some(end) = rest.iter().rposition(|b| *b == b'\n') else {
             continue;
         };
-        for l in log_lines(&new[..=end], problems) {
+        let done: Vec<u8> = rest.drain(..=end).collect();
+        for l in log_lines(&done, problems) {
             let _ = writeln!(out, "{l}");
         }
         let _ = out.flush();
-        at += end as u64 + 1;
     }
 }
 
@@ -472,11 +538,11 @@ fn log_lines(bytes: &[u8], problems: bool) -> Vec<String> {
             let mut line = format!(
                 "{}  {}  {}",
                 nerve_service::out::time(v["ts"].as_u64().unwrap_or_default()),
-                v["level"].as_str().unwrap_or_default(),
-                v["msg"].as_str().unwrap_or_default()
+                visible(v["level"].as_str().unwrap_or_default()),
+                visible(v["msg"].as_str().unwrap_or_default())
             );
             if let Some(n) = v["node"].as_str() {
-                line.push_str(&format!(" ({n})"));
+                line.push_str(&format!(" ({})", visible(n)));
             }
             line
         })
@@ -487,6 +553,37 @@ fn log_lines(bytes: &[u8], problems: bool) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The commands of the installed center.
+    fn admin(what: &str) -> String {
+        format!("sudo nerve-center {what}")
+    }
+
+    /// The commands of a center that was started by hand in another
+    /// folder name that folder and use no `sudo`; the installed one's
+    /// (`commands`) are as `status` gives them.
+    #[test]
+    fn the_pages_name_the_commands_of_the_center_they_ask() {
+        let by_hand = |what: &str| format!("nerve-center {what} --state-dir /srv/c");
+        let none = nodes_page(&json!({"nodes": []}), &by_hand).render(Style::PLAIN);
+        assert!(
+            none.contains("Pair one:  nerve-center pair --state-dir /srv/c\n"),
+            "{none}"
+        );
+        let none = tokens_page(&json!([]), &by_hand).render(Style::PLAIN);
+        assert!(
+            none.contains("Make one:  nerve-center token new --state-dir /srv/c\n"),
+            "{none}"
+        );
+        let state = Path::new("/srv/c");
+        assert_eq!(
+            commands(state, true)("pair"),
+            match cfg!(windows) {
+                true => "nerve-center pair",
+                false => "sudo nerve-center pair",
+            }
+        );
+    }
+
     /// The paired machines as a list, a machine that is off said so; a
     /// name is looked up once, a shared one refused.
     #[test]
@@ -495,7 +592,7 @@ mod tests {
             {"id": "n1", "name": "lab", "online": true, "disabled": false, "platform": "linux", "arch": "x86_64", "software": "0.1.0"},
             {"id": "n2", "name": "desk", "online": false, "disabled": true, "platform": "windows", "arch": "x86_64"},
         ]});
-        let page = nodes_page(&overview).render(Style::PLAIN);
+        let page = nodes_page(&overview, &admin).render(Style::PLAIN);
         assert!(page.contains(" · 2 machines\n"), "{page}");
         assert!(
             page.contains(
@@ -515,7 +612,7 @@ mod tests {
                 .unwrap_err()
                 .contains("2 machines are named x")
         );
-        let none = nodes_page(&json!({"nodes": []})).render(Style::PLAIN);
+        let none = nodes_page(&json!({"nodes": []}), &admin).render(Style::PLAIN);
         assert!(none.contains(" · no machine paired\n"), "{none}");
         assert!(none.contains("Next  Pair one:  "), "{none}");
     }
@@ -538,7 +635,7 @@ mod tests {
                 .unwrap_err()
                 .contains("set in the center's settings")
         );
-        let page = tokens_page(&tokens).render(Style::PLAIN);
+        let page = tokens_page(&tokens, &admin).render(Style::PLAIN);
         assert!(page.contains(" · 4 harness tokens\n"), "{page}");
         assert!(
             page.contains("  laptop                       made 1970-01-01 00:00:00 UTC   t1\n"),
@@ -552,7 +649,7 @@ mod tests {
     fn a_new_token_comes_with_what_a_harness_needs() {
         let made = json!({"id": "t1", "token": "nrv_abc"});
         let mcp = json!({"mode": "http", "url": "http://127.0.0.1:7481/mcp"});
-        let page = new_token_page(&made, "", &mcp).render(Style::PLAIN);
+        let page = new_token_page(&made, "", &mcp, true, &admin).render(Style::PLAIN);
         for want in [
             "  Token       nrv_abc\n",
             "  Label       harness\n",
@@ -561,9 +658,18 @@ mod tests {
         ] {
             assert!(page.contains(want), "{want}\n{page}");
         }
-        let off = new_token_page(&made, "ci", &json!({"mode": "off"})).render(Style::PLAIN);
-        assert!(off.contains("Turn on MCP over HTTP:  "), "{off}");
-        assert!(off.contains("set mcp http\n"), "{off}");
+        let off = json!({"mode": "off"});
+        let page = new_token_page(&made, "ci", &off, true, &admin).render(Style::PLAIN);
+        assert!(
+            page.contains("Turn on MCP over HTTP:  sudo nerve-center set mcp http\n"),
+            "{page}"
+        );
+        // A center that was started by hand has no `set`: its page says
+        // the flag and names no command of the installed one.
+        let by_hand = |what: &str| format!("nerve-center {what} --state-dir /srv/c");
+        let page = new_token_page(&made, "ci", &off, false, &by_hand).render(Style::PLAIN);
+        assert!(!page.contains("set mcp http"), "{page}");
+        assert!(page.contains("--mcp http"), "{page}");
     }
 
     /// `nodes disable|enable|rm` send the web UI's requests for the
@@ -655,5 +761,131 @@ mod tests {
             ]
         );
         assert_eq!(log_lines(bytes, true).len(), 1);
+    }
+
+    /// Output that a test reads while `log --follow` writes it.
+    #[derive(Clone, Default)]
+    struct Seen(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Seen {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seen {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+
+        async fn until(&self, what: &str) {
+            for _ in 0..100 {
+                if self.text().contains(what) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("{what:?} was not shown: {}", self.text());
+        }
+    }
+
+    /// `log --follow` shows what the old file got just before the center
+    /// moved it aside, then the new file (round 2 of #213's second pass,
+    /// correctness 3).
+    #[tokio::test]
+    async fn log_follow_shows_what_the_old_file_got_before_it_was_moved() {
+        let d = tempfile::tempdir().unwrap();
+        let file = nerve_transport::log::file_in(d.path());
+        let mut older = file.clone().into_os_string();
+        older.push(".1");
+        let line = |ts: u64, msg: &str| {
+            format!(
+                "{}\n",
+                json!({"ts": ts * 1000, "level": "info", "msg": msg})
+            )
+        };
+        let append = |text: String| {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file)
+                .unwrap();
+            f.write_all(text.as_bytes()).unwrap();
+        };
+        append(line(1, "first"));
+        let seen = Seen::default();
+        let mut out = seen.clone();
+        let follow = log(d.path(), true, None, false, &mut out);
+        let writer = async {
+            seen.until("first").await;
+            append(line(2, "before-the-move"));
+            std::fs::rename(&file, &older).unwrap();
+            append(line(3, "after-the-move"));
+            seen.until("after-the-move").await;
+        };
+        tokio::select! {
+            r = follow => panic!("follow ended: {r:?}"),
+            () = writer => {}
+        }
+        let msgs: Vec<String> = seen
+            .text()
+            .lines()
+            .map(|l| l.rsplit("  ").next().unwrap().to_string())
+            .collect();
+        assert_eq!(msgs, ["first", "before-the-move", "after-the-move"]);
+    }
+
+    /// The log is read from plain files only: a link in the center's
+    /// folder (on Windows the service's account may make one where an
+    /// administrator reads) shows nothing of its target, and a pipe does
+    /// not make the command wait (round 2 of #213's second pass, security 2).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_log_is_not_read_through_a_link_or_a_pipe() {
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let secret = d.path().join("secret.jsonl");
+        std::fs::write(
+            &secret,
+            format!("{}\n", json!({"ts": 0, "level": "info", "msg": "secret"})),
+        )
+        .unwrap();
+        let file = nerve_transport::log::file_in(&state);
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+        let mut out = Vec::new();
+        let e = log(&state, false, None, false, &mut out).await.unwrap_err();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert!(!e.contains("secret"), "{e}");
+        std::fs::remove_file(&file).unwrap();
+        let fifo = std::ffi::CString::new(file.to_str().unwrap()).unwrap();
+        // SAFETY: a plain call with a valid path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            log(&state, false, None, false, &mut Vec::new()),
+        )
+        .await
+        .expect("log waited on a pipe");
+        assert!(read.is_err());
+    }
+
+    /// `token new` shows the label the center kept, which it cuts at 60
+    /// bytes, as `token rm` finds the token by it (round 2 of #213's
+    /// second pass, correctness 6).
+    #[test]
+    fn a_token_is_known_by_the_label_the_center_kept() {
+        let made = json!({"id": "t1", "token": "nrv_abc"});
+        let kept = "x".repeat(59) + "…";
+        let page = new_token_page(&made, &kept, &json!({"mode": "off"}), true, &admin)
+            .render(Style::PLAIN);
+        assert!(page.contains(&format!("  Label       {kept}\n")), "{page}");
+        let tokens = json!([{"id": "t1", "label": kept, "created_ms": 0}]);
+        assert_eq!(token_id(&tokens, &kept).unwrap(), "t1");
     }
 }

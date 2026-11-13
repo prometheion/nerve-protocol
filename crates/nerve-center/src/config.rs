@@ -367,6 +367,17 @@ pub enum ServiceCmd {
     Restart,
 }
 
+impl ServiceCmd {
+    /// The command as it is typed, for a hint that names it.
+    pub fn typed(self) -> &'static str {
+        match self {
+            Self::Start => "service start",
+            Self::Stop => "service stop",
+            Self::Restart => "service restart",
+        }
+    }
+}
+
 /// What `nodes` changes of a paired machine, by its name.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum NodesCmd {
@@ -410,8 +421,9 @@ pub enum TokenCmd {
 /// starts the installed center: `service` with none of the owner's commands
 /// after it. The service control manager adds `--state-dir <folder>`
 /// (crate::winsvc::command_line), so the count does not tell; `service
-/// start|stop|restart` is the owner's. Read before clap, which reads the
-/// environment that the service's settings replace first.
+/// start|stop|restart` is the owner's, and so is the help. Read before
+/// clap, which reads the environment that the service's settings replace
+/// first.
 pub fn starts_the_service<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -434,7 +446,13 @@ where
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    !args.any(|a| owners.iter().any(|o| a.as_ref() == OsStr::new(o)))
+    // The help is not the service starting: it has nothing to refuse or
+    // to log.
+    !args.any(|a| {
+        let a = a.as_ref();
+        ["help", "-h", "--help"].iter().any(|h| a == OsStr::new(h))
+            || owners.iter().any(|o| a == OsStr::new(o))
+    })
 }
 
 impl Cmd {
@@ -1355,6 +1373,11 @@ mod tests {
         assert!(cmd(&["service", "stop"]).unwrap().is_service());
         assert!(cmd(&["service"]).unwrap().runs_the_service());
         assert!(!cmd(&["service"]).unwrap().is_service());
+        // The help of `service` is not the service starting (#213).
+        assert!(starts_the_service(["nerve-center", "service"]));
+        for help in ["--help", "-h", "help"] {
+            assert!(!starts_the_service(["nerve-center", "service", help]));
+        }
         // The owner's commands that ask the running center are no service
         // commands: they go to the state folder.
         for (args, want) in [
