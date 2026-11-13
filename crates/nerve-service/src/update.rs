@@ -584,7 +584,13 @@ pub async fn fetch_release_where(
     pick: &dyn Fn(&str) -> bool,
 ) -> Result<(String, Vec<u8>), String> {
     nerve_transport::init_crypto();
-    let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX).await?;
+    // A tag with no release (`--tag` mistyped) has no SHA256SUMS either.
+    let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX)
+        .await
+        .map_err(|e| match e.contains("HTTP 404") {
+            true => format!("no release is at {base}: {e}"),
+            false => e,
+        })?;
     let (asset, want) = String::from_utf8_lossy(&sums)
         .lines()
         .find_map(|l| {

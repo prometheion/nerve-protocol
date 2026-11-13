@@ -3206,7 +3206,13 @@ Next  Change one:  sudo nerve-center set <name> <value>
         let none = with_release(&l, false, Some("v9.9.9".into()))
             .await
             .unwrap();
-        assert!(update(&none, &sys, None, &mut Vec::new()).await.is_err());
+        let e = update(&none, &sys, None, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            e.starts_with(&format!("no release is at {}", none.release)),
+            "{e}"
+        );
         assert!(with_release(&l, false, Some("../x".into())).await.is_err());
     }
 
