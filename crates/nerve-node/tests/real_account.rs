@@ -198,7 +198,7 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
         "{said}"
     );
     assert_eq!(
-        said.contains("this kernel has no Landlock"),
+        said.to_lowercase().contains("this kernel has no landlock"),
         !landlock,
         "{said}"
     );
@@ -347,7 +347,7 @@ except OSError as e:
     let p = proj.to_str().unwrap();
     assert!(as_owner(&owner, &["folder", "add", p, "rw"]).0);
     let (ok, said) = as_owner(&owner, &["folder", "add", p, "rwx"]);
-    assert!(ok && !said.contains("warning"), "{said}");
+    assert!(ok && !said.to_lowercase().contains("warning"), "{said}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains("did not get every folder"), "{st}");
     let (_, ls) = as_owner(&owner, &["--json", "center"]);
@@ -2569,7 +2569,8 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     let (ok, said) = as_owner(&owner, &["network", "off", "--center", "lab"]);
     assert!(ok, "{said}");
     assert_eq!(
-        said.contains("the owner turned the network off"),
+        said.to_lowercase()
+            .contains("the owner turned the network off"),
         !filter,
         "{said}"
     );

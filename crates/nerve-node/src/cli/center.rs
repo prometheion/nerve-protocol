@@ -369,14 +369,24 @@ mod tests {
         assert!(cfg.center("a").unwrap().paused);
         assert!(!cfg.center("b").unwrap().paused);
         let ls = run(&paths, &["center"]).unwrap();
-        let row = |name: &str| {
+        // The STATE column, wherever it is: Windows adds the AppContainer
+        // after it.
+        let words = |l: &str| l.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let head = ls
+            .lines()
+            .map(words)
+            .find(|w| w.first().map(String::as_str) == Some("NAME"))
+            .unwrap_or_else(|| panic!("no head: {ls}"));
+        let state = head.iter().position(|w| w == "STATE").unwrap();
+        let state_of = |name: &str| {
             ls.lines()
-                .map(|l| l.split_whitespace().collect::<Vec<_>>())
-                .find(|w| w.first() == Some(&name))
-                .unwrap_or_else(|| panic!("no {name}: {ls}"))
+                .map(words)
+                .find(|w| w.first().map(String::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("no {name}: {ls}"))[state]
+                .clone()
         };
-        assert_eq!(row("a").last(), Some(&"paused"), "{ls}");
-        assert_eq!(row("b").last(), Some(&"-"), "{ls}");
+        assert_eq!(state_of("a"), "paused", "{ls}");
+        assert_eq!(state_of("b"), "-", "{ls}");
         run(&paths, &["center", "resume", "a"]).unwrap();
         assert!(!load(&paths).center("a").unwrap().paused);
         run(&paths, &["center", "rm", "b"]).unwrap();
@@ -404,7 +414,7 @@ mod tests {
         assert!(profile.exists(), "{}", profile.display());
         assert!(!crate::grants::record_file(&paths).exists());
         let ls = run(&paths, &["center"]).unwrap();
-        assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
+        assert!(ls.contains("APPCONTAINER") && ls.contains(&name), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(
             out.contains(&format!("removed the AppContainer profile {name} of home")),
@@ -436,7 +446,7 @@ mod tests {
         );
         assert!(profile.exists(), "{}", profile.display());
         let ls = run(&paths, &["center"]).unwrap();
-        assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
+        assert!(ls.contains("APPCONTAINER") && ls.contains(&name), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(out.contains(&name), "{out}");
         assert!(!profile.exists(), "{}", profile.display());

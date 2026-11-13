@@ -370,8 +370,14 @@ fn pad(s: &str, to: usize) -> String {
     p
 }
 
-/// `text` with a capital first letter, as a sentence set apart starts.
+/// `text` with a capital first letter, as a sentence set apart starts. A
+/// text that starts with a name (the account `nerve-run`, a path, a
+/// command) stays as it is: a name keeps its case.
 pub fn capital(text: &str) -> String {
+    let first = text.split([' ', ':', ',']).next().unwrap_or_default();
+    if !first.chars().all(char::is_alphabetic) {
+        return text.to_string();
+    }
     let mut c = text.chars();
     c.next()
         .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
@@ -531,8 +537,12 @@ impl<'a> Said<'a> {
                 for n in kept.notes {
                     p.note(n);
                 }
-                for (w, c) in kept.next {
-                    p.next(w, c);
+                // The page's own next steps say it shorter: a line's
+                // explanation of the same step goes only to `--json`.
+                if p.next.is_empty() {
+                    for (w, c) in kept.next {
+                        p.next(w, c);
+                    }
                 }
                 writeln!(self.out)?;
                 p
@@ -594,6 +604,19 @@ impl Write for Said<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A warning set apart starts with a capital, but a name keeps its
+    /// case (#229: `nerve-run did not get every folder`).
+    #[test]
+    fn a_sentence_gets_a_capital_and_a_name_keeps_its_case() {
+        assert_eq!(capital("the node runs"), "The node runs");
+        assert_eq!(
+            capital("nerve-run did not get every folder"),
+            "nerve-run did not get every folder"
+        );
+        assert_eq!(capital("/home/alice: closed"), "/home/alice: closed");
+        assert_eq!(capital(""), "");
+    }
 
     /// The center's status as the owner approved it (#213): the head line,
     /// the aligned rows, and the next steps apart, their commands aligned.
@@ -733,6 +756,11 @@ Next  nerve-node unlock
         let mut said = Said::new(&mut out, Style::PLAIN);
         writeln!(said, "started the service").unwrap();
         writeln!(said, "note: kept").unwrap();
+        writeln!(
+            said,
+            "next: `nerve-node center add -` pairs the node with a center"
+        )
+        .unwrap();
         let mut page = Page::new("Nerve node", "0.1.0").state("running", Tone::Good);
         page.next("Pair a center", "nerve-node center add -");
         said.finish(Some(page)).unwrap();
