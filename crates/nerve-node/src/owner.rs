@@ -1099,8 +1099,16 @@ where
                 continue;
             };
             if let Some(s) = v["out"].as_str() {
-                let _ = io.out.write_all(s.as_bytes());
-                let _ = io.out.flush();
+                // The reader is gone (`| head -1`): leaving drops the
+                // connection, and the node ends the command with it.
+                if io
+                    .out
+                    .write_all(s.as_bytes())
+                    .and_then(|()| io.out.flush())
+                    .is_err()
+                {
+                    return Ok(0);
+                }
             } else if let Some(s) = v["err"].as_str() {
                 let _ = io.err.write_all(s.as_bytes());
             } else if let Some(chunk) = v["file"].as_str() {
