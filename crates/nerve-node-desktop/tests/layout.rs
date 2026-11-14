@@ -240,7 +240,8 @@ fn the_list_and_its_details_follow_the_window() {
     // A large window adds the third pane; the page keeps margins past its
     // cap.
     at(&screen, 2600, 1200);
-    assert_eq!(window.get_side_width(), 380.0, "no third pane from 1800 px");
+    // Its 380 px and the gap to the details.
+    assert_eq!(window.get_side_width(), 396.0, "no third pane from 1800 px");
     assert!(
         window.get_split_width() > 1900.0 && window.get_split_width() <= 2000.0,
         "the page is {} wide in a window of 2600",

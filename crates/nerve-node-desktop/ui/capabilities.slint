@@ -1,292 +1,224 @@
 // Capabilities: what this node offers, from `nerve-node cap`. Its own
 // capabilities, those of node.toml and those of the programs the owner
-// allows, each unit with what it does and its switch for one center; and the
-// programs allowed as providers. Each change runs one `nerve-node` command.
+// allows, each unit with what it does and its switch for one center in its
+// row; and the programs allowed as providers. A list of them, and the
+// picked one's details beside it, where a capability or a program is added
+// too. On a large window the capabilities are a list of their own on the
+// left, and the list shows the one picked. Each change runs one
+// `nerve-node` command.
 
-import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Shape } from "theme.slint";
 import { Load, CapRow, DeclaredRow, ProgramRow } from "data.slint";
 import { Store, Caps } from "store.slint";
 import {
-    Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Divider,
-    Segmented, Picker, ListRow, TextField, Icon, Reveal, PathText, ScrollBox,
+    Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState,
+    Segmented, Picker, TextField, Icon, Reveal, Fold, Code, Field, TextArea, StatusDot, Split,
+    ListPane, DetailsPane, SidePane, ListCard, ListGroup, ListItem, AddItem, RemoveAsk, PaneForm, ListSwitch,
+    DetailCard,
 } from "widgets.slint";
-import { Section } from "permissions.slint";
 
-// Every capability and its units, each with its switch for the page's
-// center; one the node leaves out says why instead.
-component OfferedSection inherits Section {
-    icon: @image-url("icons/plug.svg");
-    title: "What this node offers";
-    text: Caps.center == "" ? "Pair a center to switch them for it."
-        : "Each one's switch for " + Caps.center + "; none chosen: its mode decides.";
-    more: Caps.center == "" ? "" : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. \"Like its capability\": it has no switch of its own.";
-    Reveal {
-        shown: !Caps.running;
-        HorizontalLayout {
-            padding-left: Space.xl;
-            padding-right: Space.xl;
-            padding-bottom: Space.md;
-            Banner {
-                tone: Tone.neutral;
-                text: "The node does not run: the programs' capabilities show while it runs.";
-                more: "Whether a center may use each one now shows then, too.";
-            }
-        }
+// A capability of node.toml: a fixed command the node runs as nerve-run,
+// held to the folders. The app checks each field as the node and the
+// center do while the owner types; the node checks again on save. A form
+// in the details pane; Save is offered while a field is wrong, and a click
+// shows what is.
+component CapForm inherits PaneForm {
+    icon: @image-url("icons/terminal.svg");
+    title: Caps.edit-new ? "Add a capability" : "Change " + Caps.edit-name;
+    subtitle: "A command the node runs as nerve-run, held to the center's folders.";
+    subtitle-more: "A word written {name} is the call's argument name, as one whole word; no shell reads it.";
+    error: Caps.edit-error;
+    error-title: "The node did not take it";
+    save-text: Caps.edit-new ? "Add" : "Save";
+    busy: Caps.edit-busy;
+    cancel => {
+        Caps.edit-open = false;
     }
-    ScrollBox {
-        rows: Caps.rows.length;
-        max-rows: 14;
-        long-height: 640px;
-        for c[i] in Caps.rows: ListRow {
-            first: i == 0;
-            HorizontalLayout {
-                horizontal-stretch: 1;
-                padding-left: c.action ? Space.xl : 0;
-                spacing: Space.sm;
-                VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    Text {
-                        text: c.name;
-                        color: Theme.text;
-                        font-size: Type.small;
-                        font-weight: c.action ? Type.regular : Type.semibold;
-                        font-family: Type.mono;
+    save => {
+        Caps.edit-save();
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        // Each at the top: a longer hint or error below one leaves the
+        // other's field where it is.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+            Field {
+                label: "Name";
+                hint: "capability.action, like sensors.read.";
+                error: Caps.name-error;
+                TextField {
+                    text <=> Caps.edit-name;
+                    enabled: Caps.edit-new;
+                    mono: true;
+                    invalid: Caps.name-error != "";
+                    placeholder: "sensors.read";
+                    label: "Name";
+                    edited => {
+                        Caps.edit-check();
                     }
-                }
-                if !c.action: VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    Pill {
-                        text: c.source;
-                        tone: c.source == "built-in" ? Tone.neutral : Tone.accent;
-                    }
-                }
-                if c.action && c.effect != "": VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    Pill {
-                        text: c.effect;
-                        tone: c.tone;
-                    }
-                }
-                if c.action && c.left-out != "": VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    Pill {
-                        text: "left out";
-                        tone: Tone.danger;
-                    }
-                }
-                // Its line for the agent, or why the node leaves it out, and
-                // what a center's runs.
-                VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 1;
-                    spacing: 2px;
-                    Text {
-                        text: c.left-out != "" ? c.left-out : c.summary;
-                        color: c.left-out != "" ? Theme.tone(Tone.danger) : Theme.text-muted;
-                        font-size: Type.small;
-                        overflow: elide;
-                    }
-                    // Whole, over as many lines as it takes: the owner reads
-                    // what it runs, the program first, before turning on one
-                    // that senses or acts.
-                    Reveal {
-                        shown: c.command != "";
-                        Text {
-                            text: c.command;
-                            color: Theme.text-muted;
-                            font-size: Type.small;
-                            font-family: Type.mono;
-                            wrap: char-wrap;
+                    accepted => {
+                        if (!Caps.edit-busy) {
+                            Caps.edit-save();
                         }
                     }
                 }
             }
-            if c.now != "": VerticalLayout {
-                alignment: center;
-                Pill {
-                    text: c.now == "on" ? "Usable now" : "Not now";
-                    tone: c.now == "on" ? Tone.ok : Tone.neutral;
-                    dot: true;
+        }
+        VerticalLayout {
+            width: 120px;
+            alignment: start;
+            Field {
+                label: "Time limit";
+                hint: "Seconds, or empty.";
+                error: Caps.timeout-error;
+                TextField {
+                    text <=> Caps.edit-timeout;
+                    invalid: Caps.timeout-error != "";
+                    placeholder: "default";
+                    label: "Time limit";
+                    edited => {
+                        Caps.edit-check();
+                    }
+                    accepted => {
+                        if (!Caps.edit-busy) {
+                            Caps.edit-save();
+                        }
+                    }
                 }
             }
-            if c.switchable && c.inherited: VerticalLayout {
-                alignment: center;
-                Text {
-                    text: "like its capability";
-                    color: Theme.text-muted;
-                    font-size: Type.small;
+        }
+    }
+    Field {
+        label: "What it does";
+        hint: Caps.edit-effect >= 3 ? "A center may use it only once you turn it on for that center." : "";
+        ListSwitch {
+            label: "What it does";
+            options: ["Read", "Write", "Execute", "Sense", "Actuate"];
+            current: Caps.edit-effect;
+            chosen(i) => {
+                Caps.edit-effect = i;
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Summary";
+        hint: "One line for the agent.";
+        error: Caps.summary-error;
+        TextField {
+            text <=> Caps.edit-summary;
+            invalid: Caps.summary-error != "";
+            placeholder: "The machine's temperatures, as JSON.";
+            label: "Summary";
+            edited => {
+                Caps.edit-check();
+            }
+            accepted => {
+                if (!Caps.edit-busy) {
+                    Caps.edit-save();
                 }
             }
-            if c.switchable: Segmented {
-                options: ["On", "Off", "Hidden"];
-                current: c.setting;
-                chosen(s) => {
-                    Caps.cap-set(c.name, s);
+        }
+    }
+    Field {
+        label: "Command";
+        hint: "The program first. A word with blanks goes in quotes.";
+        error: Caps.command-error;
+        TextField {
+            text <=> Caps.edit-command;
+            mono: true;
+            invalid: Caps.command-error != "";
+            placeholder: "sensors -j";
+            label: "Command";
+            edited => {
+                Caps.edit-check();
+            }
+            accepted => {
+                if (!Caps.edit-busy) {
+                    Caps.edit-save();
                 }
+            }
+        }
+    }
+    Field {
+        label: "Arguments";
+        hint: "A JSON Schema of an object; empty for none.";
+        more: "A property with \"x-nerve-path\": \"read\" or \"write\" is a path the node holds to the folders.";
+        error: Caps.params-error;
+        TextArea {
+            text <=> Caps.edit-params;
+            scrolled <=> Caps.params-scrolled;
+            mono: true;
+            invalid: Caps.params-error != "";
+            lines-high: 110px;
+            placeholder: "{\"type\": \"object\", \"properties\": {\"chip\": {\"type\": \"string\"}}}";
+            label: "Arguments";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Result";
+        hint: "Empty: what the command prints, as text. Or a JSON Schema the JSON it prints must fit.";
+        error: Caps.result-error;
+        TextArea {
+            text <=> Caps.edit-result;
+            mono: true;
+            invalid: Caps.result-error != "";
+            lines-high: 76px;
+            placeholder: "{\"type\": \"object\"}";
+            label: "Result";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Where it runs";
+        ListSwitch {
+            label: "Where it runs";
+            options: ["Any system", "Linux", "Windows"];
+            current: Caps.edit-platform;
+            chosen(i) => {
+                Caps.edit-platform = i;
+                Caps.edit-check();
             }
         }
     }
 }
 
-// The capabilities of node.toml the owner declared, to change or remove,
-// and the button for one more. Where the node offers none, it says why.
-component DeclaredSection inherits Section {
-    icon: @image-url("icons/terminal.svg");
-    tone: Caps.config-note != "" ? Tone.neutral : Tone.accent;
-    title: "Your capabilities";
-    text: Caps.config-note != "" ? Caps.config-note
-        : "Capabilities of node.toml: each runs a fixed command as nerve-run, in the folders.";
-    more: Caps.config-note != "" ? "" : "Held to the folders of the center that calls it.";
-    ScrollBox {
-        rows: Caps.declared.length;
-        for d[i] in Caps.declared: ListRow {
-            first: i == 0;
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 2px;
-                HorizontalLayout {
-                    spacing: Space.sm;
-                    Text {
-                        text: d.name;
-                        color: Theme.text;
-                        font-size: Type.small;
-                        font-weight: Type.semibold;
-                        font-family: Type.mono;
-                        vertical-alignment: center;
-                    }
-                    Pill {
-                        text: d.effect;
-                        tone: d.effect == "sense" || d.effect == "actuate" ? Tone.warn
-                            : d.effect == "execute" ? Tone.accent : Tone.neutral;
-                    }
-                    Text {
-                        horizontal-stretch: 1;
-                        text: d.detail;
-                        color: Theme.text-faint;
-                        font-size: Type.caption;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-                PathText {
-                    text: d.command;
-                    color: Theme.text-muted;
-                }
-            }
-            Button {
-                text: "Edit";
-                icon: @image-url("icons/edit.svg");
-                kind: ButtonKind.ghost;
-                small: true;
-                accessible-label: "Edit " + d.name;
-                clicked => {
-                    Caps.edit(d.name);
-                }
-            }
-            Button {
-                icon: @image-url("icons/trash.svg");
-                kind: ButtonKind.ghost;
-                small: true;
-                accessible-label: "Remove " + d.name;
-                clicked => {
-                    Caps.remove(d.name);
-                }
-            }
-        }
-    }
-    VerticalLayout {
-        if Caps.declared.length > 0: Divider { }
-        HorizontalLayout {
-            padding: Space.lg;
-            padding-left: Space.xl;
-            spacing: Space.md;
-            if Caps.declared.length == 0: Text {
-                text: "None yet.";
-                color: Theme.text-muted;
-                font-size: Type.small;
-                vertical-alignment: center;
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            Button {
-                text: "Add a capability…";
-                icon: @image-url("icons/plus.svg");
-                small: true;
-                clicked => {
-                    Caps.add();
-                }
-            }
-        }
-    }
-}
-
-// The programs the owner allows to add capabilities while they run, and a
-// row to allow one more.
-component ProgramSection inherits Section {
+// Allowing a program as a provider, in the details pane.
+component ProgramForm inherits PaneForm {
     icon: @image-url("icons/window.svg");
-    title: "Programs";
-    text: "A program you allow adds capabilities while it runs, as a provider.";
-    more: "The node checks that the program that attaches runs this very file.";
-    ScrollBox {
-        rows: Caps.programs.length;
-        for p[i] in Caps.programs: ListRow {
-            first: i == 0;
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: p.name;
-                    color: Theme.text;
-                    font-size: Type.small;
-                    font-weight: Type.semibold;
-                    font-family: Type.mono;
-                }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                PathText {
-                    text: p.exe;
-                    color: Theme.text-muted;
-                }
-            }
-            if p.attached != "": VerticalLayout {
-                alignment: center;
-                Pill {
-                    text: p.attached == "attached" ? "Attached" : "Not attached";
-                    tone: p.attached == "attached" ? Tone.ok : Tone.neutral;
-                    dot: true;
-                }
-            }
-            Button {
-                icon: @image-url("icons/trash.svg");
-                kind: ButtonKind.ghost;
-                small: true;
-                accessible-label: "Remove " + p.name;
-                clicked => {
-                    Caps.program-remove(p.name);
-                }
-            }
+    title: "Allow a program";
+    subtitle: "A program you allow adds capabilities while it runs, as a provider.";
+    error: Caps.program-error;
+    save-text: "Allow";
+    busy: Caps.program-busy;
+    can-save: Caps.program-name != "" && Caps.program-exe != "";
+    cancel => {
+        Caps.pick-kind = 0;
+        Store.details-open = false;
+    }
+    save => {
+        Caps.program-allow();
+    }
+    Field {
+        label: "Name";
+        TextField {
+            text <=> Caps.program-name;
+            mono: true;
+            placeholder: "desk";
+            label: "Name";
         }
     }
-    VerticalLayout {
-        if Caps.programs.length > 0: Divider { }
+    Field {
+        label: "Program";
         HorizontalLayout {
-            padding: Space.lg;
-            padding-left: Space.xl;
-            spacing: Space.md;
-            TextField {
-                width: 150px;
-                text <=> Caps.program-name;
-                mono: true;
-                placeholder: "desk";
-                label: "Name";
-            }
+            spacing: Space.sm;
             TextField {
                 horizontal-stretch: 1;
                 text <=> Caps.program-exe;
@@ -299,39 +231,129 @@ component ProgramSection inherits Section {
             }
             Button {
                 text: "Choose…";
-                small: true;
                 clicked => {
                     Caps.program-choose();
-                }
-            }
-            Button {
-                text: "Allow";
-                icon: @image-url("icons/plus.svg");
-                small: true;
-                busy: Caps.program-busy;
-                enabled: Caps.program-name != "" && Caps.program-exe != "";
-                clicked => {
-                    Caps.program-allow();
-                }
-            }
-        }
-        Reveal {
-            shown: Caps.program-error != "";
-            HorizontalLayout {
-                padding-left: Space.xl;
-                padding-right: Space.xl;
-                padding-bottom: Space.lg;
-                Banner {
-                    tone: Tone.danger;
-                    text: Caps.program-error;
                 }
             }
         }
     }
 }
 
+// A unit's row: its name and what it does, its line when the list is
+// wide, whether the center may use it now, and its switch.
+component UnitItem inherits ListItem {
+    in property <CapRow> unit;
+    in property <bool> wide;
+    label: root.unit.name;
+    HorizontalLayout {
+        spacing: Space.sm;
+        width: root.wide ? 210px : self.preferred-width;
+        horizontal-stretch: root.wide ? 0 : 1;
+        Text {
+            text: root.unit.name;
+            color: Theme.text;
+            font-size: Type.small;
+            font-family: Type.mono;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: min(60px, self.preferred-width);
+        }
+        if root.unit.effect != "": VerticalLayout {
+            alignment: center;
+            Pill {
+                text: root.unit.effect;
+                tone: root.unit.tone;
+            }
+        }
+        if root.unit.left-out != "": VerticalLayout {
+            alignment: center;
+            Pill {
+                text: "left out";
+                tone: Tone.danger;
+            }
+        }
+        if root.wide: Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    // Its line for the agent, or why the node leaves it out.
+    Text {
+        horizontal-stretch: root.wide ? 1 : 0;
+        max-width: root.wide ? 100000px : 0px;
+        visible: root.wide;
+        text: root.unit.left-out != "" ? root.unit.left-out : root.unit.summary;
+        color: root.unit.left-out != "" ? Theme.danger : Theme.text-muted;
+        font-size: Type.small;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.unit.now != "": VerticalLayout {
+        alignment: center;
+        StatusDot {
+            tone: root.unit.now == "on" ? Tone.ok : Tone.neutral;
+            size: 7px;
+            accessible-role: text;
+            accessible-label: root.unit.now == "on" ? "Usable now" : "Not now";
+        }
+    }
+    if root.unit.switchable: VerticalLayout {
+        alignment: center;
+        Segmented {
+            small: true;
+            label: "Switch of " + root.unit.name;
+            options: ["On", "Off", "Hidden"];
+            current: root.unit.setting;
+            chosen(s) => {
+                Caps.cap-set(root.unit.name, s);
+            }
+        }
+    }
+}
+
+// The head of a details card: a name, what follows it, and its buttons.
+component Head inherits HorizontalLayout {
+    in property <string> title;
+    spacing: Space.sm;
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Type.heading;
+        font-weight: Type.semibold;
+        font-family: Type.mono;
+        vertical-alignment: center;
+        overflow: elide;
+        min-width: min(80px, self.preferred-width);
+    }
+    @children
+}
+
 export component CapabilitiesPage inherits PageFrame {
+    // What is picked, where it still is: a row that went shows nothing.
+    property <CapRow> unit: Caps.rows[Caps.pick-at];
+    property <DeclaredRow> mine: Caps.declared[Caps.pick-at];
+    property <ProgramRow> program: Caps.programs[Caps.pick-at];
+    property <int> kind: Caps.edit-open ? 4
+        : Caps.pick-kind == 0 && (Caps.pick-at >= Caps.rows.length || !root.unit.action) ? -1
+        : Caps.pick-kind == 1 && Caps.pick-at >= Caps.declared.length ? -1
+        : Caps.pick-kind == 2 && Caps.pick-at >= Caps.programs.length ? -1
+        : Caps.pick-kind;
+    // The list is wide enough for each unit's line: what the window leaves
+    // it beside the sidebar, the margins and the other panes. (Its own width
+    // would follow from what it shows.)
+    property <length> list-room: Shape.window-width - Size.sidebar - (Shape.wide ? 2 * Space.page : 2 * Space.xxl)
+        - (Shape.large ? 200px + 460px + 2 * Space.lg : Shape.wide ? 400px + Space.lg : 0px);
+    property <bool> wide: root.list-room > 600px;
+    property <bool> open: Store.details-open || Caps.edit-open;
     gap: 0;
+    init => {
+        Store.details-open = false;
+    }
+    function pick(kind: int, at: int) {
+        Caps.pick-kind = kind;
+        Caps.pick-at = at;
+        Caps.edit-open = false;
+        Store.details-open = true;
+    }
     PageHeader {
         icon: @image-url("icons/plug.svg");
         title: "Capabilities";
@@ -353,7 +375,7 @@ export component CapabilitiesPage inherits PageFrame {
 
     Reveal {
         shown: Caps.centers.length > 1;
-        gap: Space.xxl;
+        gap: Space.xl;
         HorizontalLayout {
             alignment: start;
             spacing: Space.md;
@@ -366,6 +388,7 @@ export component CapabilitiesPage inherits PageFrame {
             if Caps.centers.length <= 4: Segmented {
                 options: Caps.centers;
                 current: Caps.current;
+                label: "Center";
                 chosen(i) => {
                     Caps.pick(i);
                 }
@@ -385,12 +408,453 @@ export component CapabilitiesPage inherits PageFrame {
 
     Reveal {
         shown: Caps.read;
-        gap: Space.xxl;
-        VerticalLayout {
-            spacing: Space.xxl;
-            OfferedSection { }
-            DeclaredSection { }
-            ProgramSection { }
+        gap: Space.lg;
+        Split {
+            // On a large window: the capabilities, your capabilities and
+            // the programs, one of them in the list beside.
+            SidePane {
+                pane-width: 200px;
+                leading: true;
+                ListCard {
+                    label: "Groups";
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for c in Caps.rows: ListItem {
+                        first: true;
+                        collapsed: c.action;
+                        least: 34px;
+                        selected: Caps.group == c.group;
+                        label: c.name;
+                        clicked => {
+                            Caps.group = c.group;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: c.name;
+                            color: Caps.group == c.group ? Theme.accent-text : Theme.text;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            font-weight: Caps.group == c.group ? Type.semibold : Type.regular;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: c.units;
+                            color: Theme.text-faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ListItem {
+                        least: 34px;
+                        selected: Caps.group == -1;
+                        label: "Your capabilities";
+                        clicked => {
+                            Caps.group = -1;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Your capabilities";
+                            color: Caps.group == -1 ? Theme.accent-text : Theme.text;
+                            font-size: Type.small;
+                            font-weight: Caps.group == -1 ? Type.semibold : Type.regular;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: Caps.declared.length;
+                            color: Theme.text-faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ListItem {
+                        first: true;
+                        least: 34px;
+                        selected: Caps.group == -2;
+                        label: "Programs";
+                        clicked => {
+                            Caps.group = -2;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Programs";
+                            color: Caps.group == -2 ? Theme.accent-text : Theme.text;
+                            font-size: Type.small;
+                            font-weight: Caps.group == -2 ? Type.semibold : Type.regular;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: Caps.programs.length;
+                            color: Theme.text-faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            ListPane {
+                open: root.open;
+                stretch: 1;
+                least: 380px;
+                most: 100000px;
+                ListCard {
+                    label: "Capabilities";
+                    // A line on the switches, and the rest of it folded.
+                    VerticalLayout {
+                        padding-left: Space.lg;
+                        padding-right: Space.lg;
+                        padding-top: Space.md;
+                        Text {
+                            text: Caps.center == "" ? "Pair a center to switch them for it."
+                                : "The switches are for " + Caps.center + ". None chosen: its mode decides.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            wrap: word-wrap;
+                        }
+                        if Caps.center != "": Fold {
+                            more: "Off: " + Caps.center + " may not use it. Hidden: it does not see it. \"Like its capability\": it has no switch of its own.";
+                        }
+                        Reveal {
+                            shown: !Caps.running;
+                            gap: Space.sm;
+                            Banner {
+                                tone: Tone.neutral;
+                                text: "The node does not run: the programs' capabilities show while it runs.";
+                                more: "Whether a center may use each one now shows then, too.";
+                            }
+                        }
+                    }
+                    for c[i] in Caps.rows: VerticalLayout {
+                        property <bool> other: Shape.large && c.group != Caps.group;
+                        // A capability: its name, where it comes from and its
+                        // own switch, over its units.
+                        ListGroup {
+                            collapsed: c.action || parent.other;
+                            mono: true;
+                            text: c.name + " · " + c.source;
+                            count: c.units;
+                            if c.switchable: Segmented {
+                                small: true;
+                                label: "Switch of " + c.name;
+                                options: ["On", "Off", "Hidden"];
+                                current: c.setting;
+                                chosen(s) => {
+                                    Caps.cap-set(c.name, s);
+                                }
+                            }
+                        }
+                        UnitItem {
+                            collapsed: !c.action || parent.other;
+                            unit: c;
+                            wide: root.wide;
+                            selected: root.kind == 0 && Caps.pick-at == i;
+                            clicked => {
+                                root.pick(0, i);
+                            }
+                        }
+                    }
+                    // Your capabilities: those of node.toml.
+                    ListGroup {
+                        collapsed: Shape.large && Caps.group != -1;
+                        text: "Your capabilities";
+                        count: Caps.declared.length;
+                    }
+                    Reveal {
+                        shown: Caps.config-note != "" && !(Shape.large && Caps.group != -1);
+                        VerticalLayout {
+                            padding-left: Space.lg;
+                            padding-right: Space.lg;
+                            padding-bottom: Space.sm;
+                            Text {
+                                text: Caps.config-note;
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    for d[i] in Caps.declared: ListItem {
+                        collapsed: Shape.large && Caps.group != -1;
+                        selected: root.kind == 1 && Caps.pick-at == i;
+                        label: d.name;
+                        clicked => {
+                            root.pick(1, i);
+                        }
+                        Text {
+                            text: d.name;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: d.effect;
+                                tone: d.effect == "sense" || d.effect == "actuate" ? Tone.warn
+                                    : d.effect == "execute" ? Tone.accent : Tone.neutral;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: d.detail != "" ? d.detail : d.command;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    AddItem {
+                        collapsed: Shape.large && Caps.group != -1;
+                        text: "Add a capability…";
+                        active: Caps.edit-open && Caps.edit-new;
+                        clicked => {
+                            Caps.add();
+                        }
+                    }
+                    // The programs allowed as providers.
+                    ListGroup {
+                        collapsed: Shape.large && Caps.group != -2;
+                        text: "Programs";
+                        count: Caps.programs.length;
+                    }
+                    for p[i] in Caps.programs: ListItem {
+                        collapsed: Shape.large && Caps.group != -2;
+                        selected: root.kind == 2 && Caps.pick-at == i;
+                        label: p.name;
+                        clicked => {
+                            root.pick(2, i);
+                        }
+                        Text {
+                            text: p.name;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: p.exe;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if p.attached != "": VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: p.attached == "attached" ? "Attached" : "Not attached";
+                                tone: p.attached == "attached" ? Tone.ok : Tone.neutral;
+                                dot: true;
+                            }
+                        }
+                    }
+                    AddItem {
+                        collapsed: Shape.large && Caps.group != -2;
+                        text: "Allow a program…";
+                        active: root.kind == 3;
+                        clicked => {
+                            root.pick(3, 0);
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: root.open;
+                stretch: 0;
+                least: 300px;
+                most: Shape.large ? 460px : 400px;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Store.details-open = false;
+                    Caps.edit-open = false;
+                }
+                VerticalLayout {
+                    Reveal {
+                        shown: root.kind == -1;
+                        DetailCard {
+                            Text {
+                                text: "Pick a capability to read what it does.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    // A unit the node offers.
+                    Reveal {
+                        shown: root.kind == 0;
+                        DetailCard {
+                            Head {
+                                title: root.unit.name;
+                                if root.unit.effect != "": VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        text: root.unit.effect;
+                                        tone: root.unit.tone;
+                                    }
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.unit.source;
+                                    color: Theme.text-faint;
+                                    font-size: Type.small;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                if root.unit.now != "": VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        text: root.unit.now == "on" ? "Usable now" : "Not now";
+                                        tone: root.unit.now == "on" ? Tone.ok : Tone.neutral;
+                                        dot: true;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                Text {
+                                    text: root.unit.left-out != "" ? root.unit.left-out
+                                        : root.unit.summary != "" ? root.unit.summary : "No line for the agent.";
+                                    color: root.unit.left-out != "" ? Theme.danger : Theme.text;
+                                    font-size: Type.body;
+                                    wrap: word-wrap;
+                                }
+                                // Whole, over as many lines as it takes: the owner
+                                // reads what it runs, the program first, before
+                                // turning on one that senses or acts.
+                                Reveal {
+                                    shown: root.unit.command != "";
+                                    gap: Space.md;
+                                    Text {
+                                        text: root.unit.command;
+                                        color: Theme.text-muted;
+                                        font-size: Type.small;
+                                        font-family: Type.mono;
+                                        wrap: char-wrap;
+                                    }
+                                }
+                                Reveal {
+                                    shown: root.unit.switchable && root.unit.inherited;
+                                    gap: Space.md;
+                                    Text {
+                                        text: "Like its capability: it has no switch of its own.";
+                                        color: Theme.text-muted;
+                                        font-size: Type.small;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // One of your capabilities.
+                    Reveal {
+                        shown: root.kind == 1;
+                        DetailCard {
+                            Head {
+                                title: root.mine.name;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        text: root.mine.effect;
+                                        tone: root.mine.effect == "sense" || root.mine.effect == "actuate" ? Tone.warn
+                                            : root.mine.effect == "execute" ? Tone.accent : Tone.neutral;
+                                    }
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                                Button {
+                                    text: "Edit";
+                                    icon: @image-url("icons/edit.svg");
+                                    small: true;
+                                    accessible-label: "Edit " + root.mine.name;
+                                    clicked => {
+                                        Caps.edit(root.mine.name);
+                                    }
+                                }
+                                Button {
+                                    text: "Remove";
+                                    icon: @image-url("icons/trash.svg");
+                                    kind: ButtonKind.danger-soft;
+                                    small: true;
+                                    accessible-label: "Remove " + root.mine.name;
+                                    clicked => {
+                                        Caps.remove(root.mine.name);
+                                    }
+                                }
+                            }
+                            Text {
+                                text: "Runs a fixed command as nerve-run, in the folders of the center that calls it." + (root.mine.detail != "" ? " " + root.mine.detail + "." : "");
+                                color: Theme.text;
+                                font-size: Type.body;
+                                wrap: word-wrap;
+                            }
+                            Code {
+                                text: root.mine.command;
+                            }
+                        }
+                    }
+                    // A program allowed as a provider.
+                    Reveal {
+                        shown: root.kind == 2;
+                        DetailCard {
+                            Head {
+                                title: root.program.name;
+                                if root.program.attached != "": VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        text: root.program.attached == "attached" ? "Attached" : "Not attached";
+                                        tone: root.program.attached == "attached" ? Tone.ok : Tone.neutral;
+                                        dot: true;
+                                    }
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                                RemoveAsk {
+                                    label: "Remove " + root.program.name;
+                                    asking: Store.asking == "program:" + root.program.name;
+                                    ask => {
+                                        Store.asking = "program:" + root.program.name;
+                                    }
+                                    cancel => {
+                                        Store.asking = "";
+                                    }
+                                    confirmed => {
+                                        Store.asking = "";
+                                        Caps.program-remove(root.program.name);
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                Text {
+                                    text: "A program you allow adds capabilities while it runs, as a provider.";
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    wrap: word-wrap;
+                                }
+                                Fold {
+                                    more: "The node checks that the program that attaches runs this very file.";
+                                }
+                            }
+                            Code {
+                                text: root.program.exe;
+                            }
+                        }
+                    }
+                    Reveal {
+                        shown: root.kind == 3;
+                        ProgramForm { }
+                    }
+                    Reveal {
+                        shown: root.kind == 4;
+                        CapForm { }
+                    }
+                }
+            }
         }
     }
 }

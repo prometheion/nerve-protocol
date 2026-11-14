@@ -318,6 +318,13 @@ export global Caps {
     in-out property <[CapRow]> rows;
     in-out property <[DeclaredRow]> declared;
     in-out property <[ProgramRow]> programs;
+    // The row picked: 0 a unit of what the node offers, by its place in
+    // `rows`; 1 one of your capabilities and 2 a program, by their place;
+    // 3 allowing a program. And on a large window the group the list shows:
+    // a capability's (CapRow.group), -1 your capabilities, -2 the programs.
+    in-out property <int> pick-kind;
+    in-out property <int> pick-at: 1;
+    in-out property <int> group;
     // Whether the node runs: only then does it know the programs'
     // capabilities and whether a center may use each one now.
     in-out property <bool> running;

@@ -840,7 +840,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             .unwrap_or_default()
     };
     let mut rows = Vec::new();
-    for (cap, source, units) in groups {
+    for (group, (cap, source, units)) in groups.into_iter().enumerate() {
+        let group = group as i32;
         let switches = !center.is_empty() && cap != "settings";
         rows.push(CapRow {
             name: cap.into(),
@@ -855,6 +856,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             inherited: false,
             now: SharedString::new(),
             command: SharedString::new(),
+            group,
+            units: units.len() as i32,
         });
         for r in units {
             let name = s(&r["name"]);
@@ -896,6 +899,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
                 inherited: own < 0 && shown >= 0,
                 now: now.into(),
                 command: command(source, name).into(),
+                group,
+                units: 0,
             });
         }
     }
@@ -2481,12 +2486,12 @@ mod tests {
         // The page shows it whole, wrapped, not cut at its start as a path.
         let page = include_str!("../ui/capabilities.slint");
         let shown = page
-            .split("shown: c.command != \"\";")
+            .split("shown: root.unit.command != \"\";")
             .nth(1)
             .and_then(|s| s.split('}').next())
             .unwrap();
         assert!(shown.trim_start().starts_with("Text {"), "{shown}");
-        assert!(shown.contains("text: c.command;"), "{shown}");
+        assert!(shown.contains("text: root.unit.command;"), "{shown}");
         assert!(shown.contains("wrap: char-wrap;"), "{shown}");
     }
 
@@ -2572,6 +2577,27 @@ mod tests {
         assert_eq!(row("lamp.on").left_out, "for windows only");
         assert!(!row("lamp").switchable && !row("lamp.on").switchable);
         assert_eq!(row("lamp.on").summary, "");
+        // The groups of the page: each row knows its capability's place,
+        // and each capability counts its units.
+        let groups: Vec<(i32, i32)> = rows.iter().map(|r| (r.group, r.units)).collect();
+        assert_eq!(
+            groups,
+            [
+                (0, 1),
+                (0, 0),
+                (1, 1),
+                (1, 0),
+                (2, 1),
+                (2, 0),
+                (3, 1),
+                (3, 0),
+                (4, 2),
+                (4, 0),
+                (4, 0),
+                (5, 1),
+                (5, 0)
+            ]
+        );
         // No center paired: no switch, nothing now.
         assert!(
             cap_rows(&v, "")

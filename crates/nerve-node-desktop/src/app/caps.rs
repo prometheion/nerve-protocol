@@ -358,6 +358,10 @@ impl Ctl {
                     c.with_caps(|p| {
                         p.set_program_name(SharedString::new());
                         p.set_program_exe(SharedString::new());
+                        // The form gives way to the new program's details:
+                        // the node lists it after the others.
+                        p.set_pick_kind(2);
+                        p.set_pick_at(slint::Model::row_count(&p.get_programs()) as i32);
                     });
                     c.done(&v, format!("{name} may attach as a provider."));
                 }

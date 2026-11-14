@@ -877,9 +877,14 @@ export component Picker {
 export component Segmented {
     in property <[string]> options;
     in property <int> current;
+    // In a list's row: lower, with smaller text.
+    in property <bool> small;
+    in property <string> label;
     callback chosen(int);
     horizontal-stretch: 0;
-    height: Size.control;
+    height: root.small ? 26px : Size.control;
+    accessible-role: tab-list;
+    accessible-label: root.label;
     forward-focus: focus;
     Rectangle {
         background: Theme.inset;
@@ -895,7 +900,7 @@ export component Segmented {
         shown: focus.has-focus;
     }
     HorizontalLayout {
-        padding: 3px;
+        padding: root.small ? 2px : 3px;
         spacing: 2px;
         for option[i] in root.options: Rectangle {
             border-radius: Radius.sm;
@@ -906,12 +911,12 @@ export component Segmented {
             accessible-label: option;
             accessible-item-selected: i == root.current;
             HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
+                padding-left: root.small ? 9px : 12px;
+                padding-right: root.small ? 9px : 12px;
                 Text {
                     text: option;
                     color: i == root.current ? Theme.accent-text : Theme.text-muted;
-                    font-size: Type.small;
+                    font-size: root.small ? Type.caption : Type.small;
                     font-weight: i == root.current ? Type.semibold : Type.medium;
                     vertical-alignment: center;
                     horizontal-alignment: center;
@@ -2284,8 +2289,10 @@ export component ScrollBox {
 // for both, so a resize keeps what was typed, the focus and the pick.
 // Its children are a ListPane, a DetailsPane and, where a page has one, a
 // SidePane.
+// The gap between the panes is the panes' own (the details' and a third
+// pane's), so a pane that is not shown leaves none.
 export component Split inherits HorizontalLayout {
-    spacing: Shape.wide ? Space.lg : 0px;
+    spacing: 0px;
 }
 
 // The list's side of a Split. Side by side it is `least` to `most` wide, or
@@ -2328,6 +2335,8 @@ export component DetailsPane {
     in property <length> view-height: 100000px;
     callback back();
     property <bool> shown: Shape.wide || root.open;
+    // Its gap to the list beside it.
+    property <length> gap: Shape.wide ? Space.lg : 0px;
     // As tall as its content, side by side up to the window's height less
     // a margin above and below.
     property <length> natural: body.preferred-height;
@@ -2335,8 +2344,8 @@ export component DetailsPane {
     visible: root.shown;
     horizontal-stretch: root.stretch;
     preferred-width: 1px;
-    min-width: !root.shown ? 0px : Shape.wide ? root.least : 0px;
-    max-width: !root.shown ? 0px : Shape.wide ? root.most : 100000px;
+    min-width: !root.shown ? 0px : Shape.wide ? root.least + root.gap : 0px;
+    max-width: !root.shown ? 0px : Shape.wide ? root.most + root.gap : 100000px;
     min-height: 0px;
     preferred-height: root.shown ? root.tall : 0px;
     // How far it moved down to stay in view: from where the page's visible
@@ -2347,8 +2356,9 @@ export component DetailsPane {
     // the page.
     property <bool> long: root.natural > root.tall + 1px;
     flick := Flickable {
+        x: root.gap;
         y: root.follow;
-        width: root.width;
+        width: root.width - root.gap;
         height: root.tall;
         interactive: root.long;
         content-width: self.width;
@@ -2394,15 +2404,20 @@ export component DetailsPane {
     }
 }
 
-// A third pane of a Split, from 1800 px only (Shape.large), `width` wide.
+// A third pane of a Split, from 1800 px only (Shape.large), `pane-width`
+// wide, with its gap on the side of the list: before it (`leading`) or
+// after the details.
 export component SidePane {
     in property <length> pane-width: 380px;
+    in property <bool> leading;
     visible: Shape.large;
-    min-width: Shape.large ? root.pane-width : 0px;
-    max-width: Shape.large ? root.pane-width : 0px;
+    min-width: Shape.large ? root.pane-width + Space.lg : 0px;
+    max-width: Shape.large ? root.pane-width + Space.lg : 0px;
     min-height: 0px;
     preferred-height: Shape.large ? column.preferred-height : 0px;
     column := VerticalLayout {
+        x: root.leading ? 0px : Space.lg;
+        width: root.pane-width;
         alignment: start;
         spacing: Space.md;
         @children
@@ -2456,7 +2471,9 @@ export component ListGroup {
     in property <string> text;
     in property <string> count;
     in property <bool> mono;
-    height: self.preferred-height;
+    in property <bool> collapsed;
+    height: root.collapsed ? 0px : self.preferred-height;
+    visible: !root.collapsed;
     HorizontalLayout {
         padding-left: Space.lg;
         padding-right: Space.lg;
@@ -2496,8 +2513,12 @@ export component ListItem inherits Rectangle {
     in property <bool> pickable: true;
     // Its least height: a row of one line, or of two.
     in property <length> least: root.tall ? 52px : 40px;
+    // Not shown, and no room taken (a group of the list that is not the
+    // one picked).
+    in property <bool> collapsed;
     callback clicked();
-    height: max(root.least, self.preferred-height);
+    height: root.collapsed ? 0px : max(root.least, self.preferred-height);
+    visible: !root.collapsed;
     background: root.selected ? Theme.accent-soft : touch.has-hover && root.pickable ? Theme.hover : transparent;
     animate background { duration: Motion.quick; }
     accessible-role: list-item;
