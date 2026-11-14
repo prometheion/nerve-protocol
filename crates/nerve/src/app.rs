@@ -218,9 +218,11 @@ pub fn app_user() -> String {
 }
 
 /// Whether the command `args` needs an administrator even for an owner of
-/// the installed node (nerve_node::owner::needs_admin).
+/// the installed node (nerve_node::owner::needs_admin). Every command of
+/// the center the app runs does (`__center`): they are its administrator's.
 pub fn needs_admin(args: &[String]) -> bool {
-    nerve_node::owner::args_need_admin(args)
+    args.first().map(String::as_str) == Some(nerve_center::edition::APP_WORD)
+        || nerve_node::owner::args_need_admin(args)
 }
 
 fn strings(args: &[String]) -> Vec<&str> {

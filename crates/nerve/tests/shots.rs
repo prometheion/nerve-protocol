@@ -1082,6 +1082,17 @@ fn every_page_light_and_dark() {
     let bin = root.join("usr/local/bin/nerve");
     ctl.installer(Launch::Plain, &bin);
     install.set_program("/usr/local/bin/nerve".into());
+    // What this machine becomes, then each role's install (#232).
+    install.set_step("role".into());
+    shots.take("installer-role");
+    install.set_role(1);
+    shots.take("installer-role-center");
+    install.set_step("welcome-center".into());
+    shots.take("installer-welcome-center");
+    install.set_center_ui("http://127.0.0.1:7480".into());
+    install.set_step("center".into());
+    shots.take("installer-center");
+    install.set_role(0);
     install.set_step("welcome".into());
     install.set_node_only(false);
     shots.take("installer-welcome");

@@ -131,6 +131,12 @@ and every limit is in
 
 ### The desktop app
 
+- One app, `nerve`, for both roles: its first step asks what this machine
+  is, a node or a center, and installs that role; one role per machine
+  (for both, use the terminal programs `nerve-node` and `nerve-center`).
+  On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
+  link to it. The `.deb` and `.rpm` are named `nerve` and replace
+  `nerve-node-desktop`: a pre-release tester removes that first.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
 - On Windows it is the only way to the node: no message sends you to a

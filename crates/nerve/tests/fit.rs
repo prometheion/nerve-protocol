@@ -81,9 +81,18 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     install.set_shown(true);
     fits("the installer");
 
+    // The role choice and the center's steps fit the installer's window
+    // without scrolling, the role's fold open too (#232, proposal A).
+    screen.resize(INSTALLER.0, INSTALLER.1);
+    for step in ["role", "welcome-center", "center"] {
+        install.set_step(step.into());
+        assert!(
+            foot_is_background(&screen.draw()),
+            "the installer's step {step} does not fit its window"
+        );
+    }
     // A step longer than the installer's window scrolls to its end: the
     // welcome on Windows, with its password field, after a long error.
-    screen.resize(INSTALLER.0, INSTALLER.1);
     install.set_windows(true);
     install.set_program("C:\\Program Files\\Nerve\\nerve.exe".into());
     install.set_step("welcome".into());

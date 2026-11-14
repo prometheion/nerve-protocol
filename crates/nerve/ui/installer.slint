@@ -9,7 +9,7 @@ import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
 import { Install } from "store.slint";
 import {
     Button, ButtonKind, CheckBox, Card, Banner, Field, TextField, InfoRow, Icon, IconTile, OptionTile,
-    Reveal, Fit, Dots, PathText, Divider,
+    Reveal, Fit, Dots, PathText, Divider, OptionTile, Fold,
 } from "widgets.slint";
 
 // One thing that will be installed.
@@ -386,6 +386,150 @@ export component InstallerView inherits Rectangle {
                         pad: Space.xxl;
                         gap: 0;
 
+                        // What this machine becomes (proposal A of #232: two
+                        // cards, one column, in the installer's window).
+                        Reveal {
+                            shown: Install.step == "role";
+                            fade: true;
+                            VerticalLayout {
+                                spacing: Space.xl;
+                                StepHead {
+                                    title: "What is this machine?";
+                                    text: "Nerve sets up one role here. Settings can change it later.";
+                                }
+                                VerticalLayout {
+                                    spacing: Space.md;
+                                    OptionTile {
+                                        icon: @image-url("icons/server.svg");
+                                        title: "A node";
+                                        text: "This machine does what your centers ask, within the rules you set here.";
+                                        selected: Install.role == 0;
+                                        clicked => {
+                                            Install.role = 0;
+                                        }
+                                    }
+                                    OptionTile {
+                                        icon: @image-url("icons/route.svg");
+                                        title: "A center";
+                                        text: "Your AI harness talks to it, and your nodes pair with it.";
+                                        selected: Install.role == 1;
+                                        clicked => {
+                                            Install.role = 1;
+                                        }
+                                    }
+                                }
+                                Fold {
+                                    summary: "What each one sets up";
+                                    more: "A node: the node as a service, which runs as its own user and starts with the machine; nerve:// links, which open a center's pairing link in Nerve; and its web UI, off until you turn it on.\n\nA center: the center as a service, which runs as its own user and starts with the machine; its web UI, to manage it from another machine; and an MCP endpoint, where a harness connects with a token.";
+                                }
+                                StepFoot {
+                                    note: "The system asks for an administrator's password next.";
+                                    note-icon: @image-url("icons/shield.svg");
+                                    Spacer { }
+                                    Button {
+                                        text: "Close";
+                                        kind: ButtonKind.ghost;
+                                        clicked => {
+                                            Install.close();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Continue";
+                                        kind: ButtonKind.primary;
+                                        clicked => {
+                                            Install.error = "";
+                                            Install.step = Install.role == 0 ? "welcome" : "welcome-center";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // What the center's install sets up.
+                        Reveal {
+                            shown: Install.step == "welcome-center";
+                            fade: true;
+                            VerticalLayout {
+                                spacing: Space.xl;
+                                StepHead {
+                                    title: "Make this machine a center";
+                                    text: "Your AI harness talks to it, and your nodes pair with it.";
+                                }
+                                VerticalLayout {
+                                    spacing: Space.lg;
+                                    WhatRow {
+                                        icon: @image-url("icons/server.svg");
+                                        title: "The center, as a service";
+                                        text: "Runs as its own user and starts with the machine.";
+                                    }
+                                    WhatRow {
+                                        icon: @image-url("icons/globe.svg");
+                                        title: "Its web UI";
+                                        text: "On this machine, at 127.0.0.1:7480; it asks for the owner token.";
+                                    }
+                                    WhatRow {
+                                        icon: @image-url("icons/plug.svg");
+                                        title: "An MCP endpoint";
+                                        text: "Where a harness connects, with a token.";
+                                    }
+                                }
+                                StepFoot {
+                                    note: "The system asks for an administrator's password next.";
+                                    note-icon: @image-url("icons/shield.svg");
+                                    Button {
+                                        text: "Back";
+                                        kind: ButtonKind.ghost;
+                                        clicked => {
+                                            Install.error = "";
+                                            Install.step = "role";
+                                        }
+                                    }
+                                    Spacer { }
+                                    Button {
+                                        text: "Install";
+                                        icon: @image-url("icons/shield.svg");
+                                        kind: ButtonKind.primary;
+                                        clicked => {
+                                            Install.install-center();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // This machine is a center: its web UI manages it.
+                        Reveal {
+                            shown: Install.step == "center";
+                            fade: true;
+                            VerticalLayout {
+                                spacing: Space.xl;
+                                StepHead {
+                                    icon: @image-url("icons/ok.svg");
+                                    tone: Tone.ok;
+                                    title: "This machine is a center";
+                                    text: "Its web UI manages it: open it here, and log in with the owner token" + (Install.center-ui != "" ? " (" + Install.center-ui + ")." : ".");
+                                }
+                                StepFoot {
+                                    Spacer { }
+                                    Button {
+                                        text: "Close";
+                                        kind: ButtonKind.ghost;
+                                        clicked => {
+                                            Install.close();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Open the web UI";
+                                        icon: @image-url("icons/globe.svg");
+                                        kind: ButtonKind.primary;
+                                        clicked => {
+                                            Install.open-center-ui();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // What will be installed.
                         Reveal {
                             shown: Install.step == "welcome";
@@ -437,6 +581,15 @@ export component InstallerView inherits Rectangle {
                                 StepFoot {
                                     note: "The system asks for an administrator's password next.";
                                     note-icon: @image-url("icons/shield.svg");
+                                    // Back to the role choice, which a node alone has not.
+                                    if !Install.node-only: Button {
+                                        text: "Back";
+                                        kind: ButtonKind.ghost;
+                                        clicked => {
+                                            Install.error = "";
+                                            Install.step = "role";
+                                        }
+                                    }
                                     Spacer { }
                                     Button {
                                         text: "Close";
@@ -579,9 +732,11 @@ export component InstallerView inherits Rectangle {
                                     tone: Tone.ok;
                                     title: Install.action == "update" ? "Nerve is updated to " + Install.installed-version
                                         : Install.action == "uninstall" ? "Nerve is removed"
+                                        : Install.action == "install-center" ? "The center is installed"
                                         : "Nerve is installed";
                                     text: Install.action == "update" ? "The service runs the new version."
                                         : Install.action == "uninstall" ? (Install.purge ? "Nerve and its data are gone." : "Nerve is gone. Its data stays for a new install.")
+                                        : Install.action == "install-center" ? "It runs and starts with the machine. Its web UI asks for the owner token, which the steps above show; keep it in your password manager."
                                         : "The node runs and starts with the machine. Open Nerve to pair it with a center.";
                                 }
                                 DidList { }
@@ -594,11 +749,19 @@ export component InstallerView inherits Rectangle {
                                             Install.close();
                                         }
                                     }
-                                    if Install.action != "uninstall": Button {
+                                    if Install.action != "uninstall" && Install.action != "install-center": Button {
                                         text: "Open Nerve";
                                         kind: ButtonKind.primary;
                                         clicked => {
                                             Install.open-app();
+                                        }
+                                    }
+                                    if Install.action == "install-center": Button {
+                                        text: "Open the web UI";
+                                        icon: @image-url("icons/globe.svg");
+                                        kind: ButtonKind.primary;
+                                        clicked => {
+                                            Install.open-center-ui();
                                         }
                                     }
                                 }

@@ -122,6 +122,46 @@ fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
     ))
 }
 
+/// The installer's first step: Nerve installed already, the app added to a
+/// node installed alone (Linux), a center installed here, or what this
+/// machine becomes (the role is read from the installed services).
+pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) -> &'static str {
+    if app {
+        "installed"
+    } else if node_only {
+        "welcome"
+    } else if roles.center {
+        "center"
+    } else {
+        "role"
+    }
+}
+
+/// Where the installed center's web UI listens, as it says in its file
+/// (nerve_center::ui_file); `None` while it does not run or it is off.
+fn center_ui() -> Option<String> {
+    let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
+    nerve_center::ui_file::read(&file).ok()??.url
+}
+
+/// Opens the center's web UI in the browser once the center's service is
+/// found to hold its port (nerve_center::holder): a program that took the
+/// port while the center was stopped would get the owner token a password
+/// manager fills there.
+pub fn open_center_ui() -> Result<(), String> {
+    let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
+    let said = nerve_center::ui_file::read(&file)?.ok_or("The center is not running.")?;
+    let url = said.url.ok_or("The center's web UI is off.")?;
+    let at: std::net::SocketAddr = url
+        .split_once("://")
+        .map(|(_, a)| a)
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| format!("{url} names no address"))?;
+    nerve_center::holder::check(at)?;
+    crate::browser::open(&url)
+}
+
 impl Ctl {
     /// Makes the window the installer for the app at `bin`: what will be
     /// installed, or, when Nerve is installed, what it can do with it. `how`
@@ -150,11 +190,14 @@ impl Ctl {
             let app = v["present"] == true;
             let installed = v["installed"] == true;
             let version = v["version"].as_str().unwrap_or_default().to_string();
+            let node_only = adds_the_app(installed, app, cfg!(windows));
+            let roles = nerve_node::role::Roles::here();
             c.with_install(|i| {
                 i.set_installed_version(version.as_str().into());
                 i.set_newer(app && newer(&i.get_version(), &version));
-                i.set_node_only(adds_the_app(installed, app, cfg!(windows)));
-                i.set_step(if app { "installed" } else { "welcome" }.into());
+                i.set_node_only(node_only);
+                i.set_center_ui(center_ui().unwrap_or_default().into());
+                i.set_step(first_step(app, node_only, roles).into());
             });
         });
     }
@@ -210,6 +253,7 @@ impl Ctl {
         self.with_install(|i| {
             let back = match i.get_action().as_str() {
                 "uninstall" => "choose",
+                "install-center" => "welcome-center",
                 "update" if !i.get_shown() => "choose",
                 "update" => "installed",
                 _ => "welcome",
@@ -278,6 +322,16 @@ impl Ctl {
                 },
             );
         });
+    }
+
+    /// The center's install, as the role picked in the first step: the app's
+    /// program runs it behind its hidden word, with the rights.
+    fn install_center_go(self: &Rc<Self>) {
+        self.run_service_command(
+            "install-center",
+            vec![nerve_center::edition::APP_WORD.into(), "install".into()],
+            None,
+        );
     }
 
     fn install_go(self: &Rc<Self>) {
@@ -438,6 +492,14 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     i.on_install(move || c.install_go());
     let c = ctl.clone();
+    i.on_install_center(move || c.install_center_go());
+    let c = ctl.clone();
+    i.on_open_center_ui(move || {
+        if let Err(e) = open_center_ui() {
+            c.with_install(|i| i.set_error(e.into()));
+        }
+    });
+    let c = ctl.clone();
     i.on_update(move || c.update_go());
     let c = ctl.clone();
     i.on_uninstall(move || c.uninstall_go());
@@ -460,6 +522,27 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The installer starts with what this machine becomes where no role is
+    /// installed; a center installed here is said, not offered a node.
+    #[test]
+    fn the_first_step_follows_the_installed_roles() {
+        use nerve_node::role::Roles;
+        let none = Roles::default();
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        assert_eq!(first_step(false, false, none), "role");
+        assert_eq!(first_step(false, false, center), "center");
+        assert_eq!(first_step(true, false, none), "installed");
+        assert_eq!(first_step(false, true, none), "welcome");
+        // The center's commands always need the rights.
+        assert!(crate::app::needs_admin(&[
+            "__center".into(),
+            "status".into()
+        ]));
+    }
 
     /// Update takes a file, else the latest release, or with Settings ›
     /// App › Pre-releases on the newest release, a pre-release too (#213).

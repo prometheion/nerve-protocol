@@ -573,10 +573,18 @@ export global Prefs {
 export global Install {
     // The window is the installer.
     in-out property <bool> shown;
-    // welcome: what will be installed; installed: it is, from another
-    // file; choose: what goes with an uninstall, or where an update comes
-    // from; working; done.
+    // role: what this machine becomes, a node or a center (no role is
+    // installed yet); welcome: what the node's install sets up;
+    // welcome-center: what the center's does; center: this machine is a
+    // center; installed: Nerve is, from another file; choose: what goes
+    // with an uninstall, or where an update comes from; working; done.
     in-out property <string> step: "welcome";
+    // The role picked in the first step: 0 a node, 1 a center.
+    in-out property <int> role;
+    // The address of the center's web UI, once it is installed.
+    in-out property <string> center-ui;
+    callback install-center();
+    callback open-center-ui();
     // What runs or ran: install, update or uninstall.
     in-out property <string> action: "install";
     // This program's version, the installed one's ("" when none), and

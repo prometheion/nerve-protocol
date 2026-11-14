@@ -106,6 +106,15 @@ impl Runner {
     }
 
     fn args(&self, args: &[&str]) -> Vec<String> {
+        // The center's command line: its hidden word first, then `--json`;
+        // the node's folders are no flags of it.
+        if let Some((&word, rest)) = args.split_first()
+            && word == nerve_center::edition::APP_WORD
+        {
+            let mut all = vec![word.to_string(), "--json".to_string()];
+            all.extend(rest.iter().map(|a| a.to_string()));
+            return all;
+        }
         let mut all = self.dirs.clone();
         all.push("--json".into());
         all.extend(args.iter().map(|a| a.to_string()));
@@ -306,6 +315,20 @@ pub fn answer(ok: bool, code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The center's command line takes its hidden word first, then `--json`,
+    /// and none of the node's folders.
+    #[test]
+    fn the_center_s_commands_start_with_its_word() {
+        let r = Runner::new(PathBuf::from("nerve"), Some("/etc/x".into()), None);
+        let node = r.args(&["status"]);
+        assert_eq!(node.last().map(String::as_str), Some("status"));
+        assert!(node.contains(&"--json".to_string()));
+        assert_eq!(
+            r.args(&["__center", "install"]),
+            ["__center", "--json", "install"]
+        );
+    }
 
     #[test]
     fn the_answer_is_the_json_on_stdout() {
