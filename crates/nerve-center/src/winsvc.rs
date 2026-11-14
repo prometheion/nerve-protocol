@@ -134,6 +134,13 @@ fn settings_dacl() -> String {
     owned_by_admins(&dacl_of(&["SY", "BA"], &[&account_sid()]))
 }
 
+/// The run folder, where the service says where its web UI listens
+/// (crate::ui_file): every account of the machine may read it, as Linux's
+/// `/run/nerve-center`; it holds no secret.
+fn run_dacl() -> String {
+    owned_by_admins(&dacl_of(&[&account_sid(), "SY", "BA"], &["BU"]))
+}
+
 /// The folder that holds the state and the settings folders.
 fn home(layout: &Layout) -> PathBuf {
     layout
@@ -297,6 +304,7 @@ pub fn install(
     sys.secure(&home(layout), &top_dacl())?;
     sys.secure(&layout.state, &state_dacl())?;
     sys.secure(&layout.settings_dir, &settings_dacl())?;
+    sys.secure(&layout.run, &run_dacl())?;
     steps.did(format!(
         "{} is open to {} and the administrators only; {} to the administrators, and the service may read it",
         layout.state.display(),
@@ -442,6 +450,12 @@ pub fn uninstall(
         ));
     }
     let top = home(layout);
+    // The run folder holds only what a running service says: it goes
+    // either way.
+    if layout.run.exists() {
+        std::fs::remove_dir_all(&layout.run)
+            .map_err(|e| format!("{}: {e}", layout.run.display()))?;
+    }
     let folders = [&layout.state, &layout.settings_dir];
     if purge {
         for dir in folders {
@@ -851,6 +865,7 @@ mod tests {
             state: root.join("ProgramData/nerve-center/state"),
             settings_dir: root.join("ProgramData/nerve-center/settings"),
             release: "http://127.0.0.1:1/none".into(),
+            run: root.join("ProgramData/nerve-center/run"),
         }
     }
 
@@ -981,6 +996,12 @@ mod tests {
         assert_eq!(
             sys.dacl_of(&l.settings_dir).unwrap(),
             format!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;{sid})")
+        );
+        // Where the service says where its web UI listens: every account
+        // reads it (crate::ui_file).
+        assert_eq!(
+            sys.dacl_of(&l.run).unwrap(),
+            format!("O:BAD:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)")
         );
         assert_eq!(
             sys.secured.borrow()[0],
@@ -1251,6 +1272,8 @@ mod tests {
         assert_eq!(sys.firewall.get(), None);
         assert!(!l.bin.exists());
         assert!(l.state.join(crate::owner::FILE).exists());
+        // What a running service said goes with it, the data kept or not.
+        assert!(!l.run.exists());
         let admins = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string();
         assert_eq!(sys.dacl_of(&l.state), Some(admins.clone()));
         assert_eq!(sys.dacl_of(&l.settings_dir), Some(admins));

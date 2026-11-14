@@ -225,6 +225,11 @@ pub struct Args {
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+    /// Where the running center says where its web UI listens
+    /// ([`crate::ui_file`]): the installed service's file, which
+    /// [`crate::server::run`] names; no flag sets it.
+    #[arg(skip)]
+    pub ui_file: Option<PathBuf>,
 }
 
 /// What the owner runs by hand; a harness never does. Without one,

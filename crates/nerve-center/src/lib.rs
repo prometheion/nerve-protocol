@@ -34,6 +34,7 @@ pub mod store;
 pub mod streams;
 pub mod tools;
 pub mod ui;
+pub mod ui_file;
 pub mod util;
 #[cfg(windows)]
 pub mod win_host;

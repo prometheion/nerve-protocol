@@ -229,3 +229,49 @@ async fn the_harness_token_from_a_flag_stays_out_of_the_log() {
     // The startup line is in it too, and names no token.
     assert!(file.contains("web UI at http://"), "{file}");
 }
+
+/// The installed center says where its web UI listens, in a file the
+/// desktop app reads, and that it is off when it is; the file goes when the
+/// center stops.
+#[tokio::test]
+async fn the_web_ui_s_address_is_in_its_file_while_the_center_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("run/ui");
+    for (extra, on) in [
+        (&["--ui", "127.0.0.1:0"][..], true),
+        (&["--ui", "off"], false),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let mut argv = vec![
+            "nerve-center",
+            "--state-dir",
+            state.path().to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--plain-loopback",
+            "--mcp",
+            "off",
+        ];
+        argv.extend_from_slice(extra);
+        let mut args = Args::try_parse_from(argv).unwrap();
+        args.ui_file = Some(file.clone());
+        nerve_transport::init_crypto();
+        let lock = nerve_center::attach::try_lock(state.path())
+            .unwrap()
+            .unwrap();
+        let r = server::start(&args, lock).await.unwrap();
+        let said = nerve_center::ui_file::read(&file)
+            .unwrap()
+            .expect("the file");
+        match on {
+            true => {
+                let ui = r.ui.unwrap();
+                assert_eq!(said.url, Some(format!("http://{ui}")));
+                assert_eq!(said.listen, Some(ui));
+            }
+            false => assert_eq!(said.url, None),
+        }
+        r.stop().await;
+        assert_eq!(nerve_center::ui_file::read(&file).unwrap(), None);
+    }
+}

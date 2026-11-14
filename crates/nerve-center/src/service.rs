@@ -68,6 +68,10 @@ pub struct Layout {
     /// Where `update` finds the programs of the latest release and their
     /// `SHA256SUMS`.
     pub release: String,
+    /// The folder of the web UI's address file, which every account may
+    /// read ([`crate::ui_file`]): the service's runtime folder on Linux,
+    /// which systemd makes and removes with the service.
+    pub run: PathBuf,
 }
 
 impl Layout {
@@ -92,6 +96,7 @@ impl Layout {
                 state: data.join("state"),
                 settings_dir: data.join("settings"),
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+                run: data.join("run"),
             }
         }
         #[cfg(not(windows))]
@@ -102,6 +107,7 @@ impl Layout {
                 state: "/var/lib/nerve-center".into(),
                 settings_dir: "/etc/nerve-center".into(),
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+                run: "/run/nerve-center".into(),
             }
         }
     }
@@ -145,7 +151,9 @@ impl Layout {
     /// after that default, so it may set another mode. Unlike the node it
     /// starts no command and needs no privilege at all: it keeps no
     /// capability, gets no new privileges, and may write its state folder
-    /// only. The rest keeps a center an attacker took over from the kernel
+    /// only, and the runtime folder where it says where its web UI listens
+    /// ([`crate::ui_file`]), which every account may read. The rest keeps a
+    /// center an attacker took over from the kernel
     /// paths it never needs: no namespaces (a user namespace would give it
     /// capabilities of its own there), sockets of the internet and Unix
     /// only, the system calls of an ordinary service, no shared memory.
@@ -174,6 +182,8 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
 ReadWritePaths={state}
+RuntimeDirectory=nerve-center
+RuntimeDirectoryMode=0755
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -1723,6 +1733,20 @@ mod tests {
         }
     }
 
+    /// The run folder of the installed center is the runtime folder its
+    /// unit has systemd make.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_run_folder_is_the_unit_s_runtime_folder() {
+        let l = Layout::system();
+        let unit = l.unit_text();
+        let name = l.run.strip_prefix("/run").unwrap().display().to_string();
+        assert!(
+            unit.contains(&format!("\nRuntimeDirectory={name}\n")),
+            "{unit}"
+        );
+    }
+
     fn layout(root: &Path) -> Layout {
         Layout {
             unit: root.join("etc/systemd/system").join(UNIT_NAME),
@@ -1730,6 +1754,7 @@ mod tests {
             state: root.join("var/lib/nerve-center"),
             settings_dir: root.join("etc/nerve-center"),
             release: "http://127.0.0.1:1/none".into(),
+            run: root.join("run/nerve-center"),
         }
     }
 
@@ -1910,6 +1935,10 @@ mod tests {
             "LimitNOFILE=65536",
             "SystemCallFilter=@system-service",
             "MemoryDenyWriteExecute=yes",
+            // Where it says where its web UI listens, for every account to
+            // read (crate::ui_file).
+            "RuntimeDirectory=nerve-center",
+            "RuntimeDirectoryMode=0755",
         ] {
             assert!(unit.contains(&format!("\n{line}\n")), "{line}: {unit}");
         }
