@@ -142,10 +142,18 @@ install this version, and pair the node again. The installer refuses to
 install or update over 0.0.6, whose settings it cannot read, and the app's
 **Update** of 0.0.6 puts the old program back.
 
+## The node's web UI
+
+The node's own web UI is off until you turn it on in **Settings › Network ›
+Web UI**. There you make its tokens (each is shown once) and revoke them.
+Open it with **Open** there, once the app says it listens: the app checks
+first that the node holds the port. Only you get in from this machine, from
+your own session; another account, a service and the commands of the centers
+do not ([web UIs](web-uis.md#the-nodes-web-ui)).
+
 ## What Windows does not have
 
 - No `nerve-node` for a terminal: the app runs its commands for you.
-- No node web UI: the app is the node's window.
 - No node run by hand: it runs only as the installed service.
 
 ## Limits

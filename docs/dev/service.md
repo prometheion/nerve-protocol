@@ -628,6 +628,14 @@ unelevated programs run as it, and one could make the pipe while the
 service is stopped); for a center run by hand it is the caller's. `log` reads `log.jsonl` (and
 `log.jsonl.1`) in the state folder, so it works with the center stopped.
 
+`--json` gives the administrator's commands (`install`, `set`, `update`,
+`uninstall`, `service start|stop|restart`, `owner-token`, `backup`, `restore`)
+and `status` an answer for programs, as the node's commands have one: the
+lines they print as `{"messages": [...]}`, with their data beside them
+(`owner-token`'s `token` and `made`; `status`'s `installed`, `service` and
+`running`), and an error as `{"error": "..."}` on stdout too. The other
+commands refuse it. The desktop app runs these through its broker.
+
 ### Update
 
 ```sh

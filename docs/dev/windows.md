@@ -111,8 +111,20 @@ what they do.
 
 ### The node's web UI
 
-The installed node on Linux can serve a [web UI](web-uis.md#the-nodes-web-ui). On Windows
-there is none: the desktop app is the node's UI there.
+The installed node serves a [web UI](web-uis.md#the-nodes-web-ui) on Windows
+too, off until the app's **Settings › Network › Web UI** turns it on. Who may
+connect is told by session there, not by account
+([who can reach it](web-uis.md#who-can-reach-it)), and listening beyond
+loopback is an administrator's step, with a firewall rule for the service
+`nerve-node` and its port.
+
+### The listeners
+
+Every listener of the node and the center (the web UIs, the node port, HTTP
+MCP, the relay) is bound with `SO_EXCLUSIVEADDRUSE`
+(`nerve_service::listen`): while the service listens, no program of another
+account can bind the same address and port with `SO_REUSEADDR` and take its
+connections.
 
 ### The control pipe
 
