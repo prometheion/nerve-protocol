@@ -620,8 +620,11 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
                 let w = shot.width() as usize;
                 let px = shot.as_slice();
                 let background = px[(shot.height() as usize - 1) * w + from];
-                let overrun = (0..shot.height() as usize)
-                    .find(|y| px[y * w + from..y * w + to].iter().any(|p| *p != background));
+                let overrun = (0..shot.height() as usize).find(|y| {
+                    px[y * w + from..y * w + to]
+                        .iter()
+                        .any(|p| *p != background)
+                });
                 assert_eq!(
                     overrun, None,
                     "{page:?} at {width}x{height} (details open: {open}) runs into the margin"
@@ -660,7 +663,8 @@ fn made_up(window: &AppWindow) {
     store.set_service_state("running".into());
     let center = |name: &str| CenterRow {
         name: name.into(),
-        url: "https://nerve-center.platform-engineering.internal.example.com:8443/teams/nerve".into(),
+        url: "https://nerve-center.platform-engineering.internal.example.com:8443/teams/nerve"
+            .into(),
         link: "Connected".into(),
         link_tone: Tone::Ok,
         mode: "Folder mode".into(),
@@ -692,7 +696,10 @@ fn made_up(window: &AppWindow) {
     logs.set_rows(ModelRc::new(VecModel::from(vec![LogRow {
         tone: Tone::Danger,
         level: "Error".into(),
-        msg: format!("center lab: cannot resolve {long_path}, and the link waits for the next try in 30 s").into(),
+        msg: format!(
+            "center lab: cannot resolve {long_path}, and the link waits for the next try in 30 s"
+        )
+        .into(),
         when: "2 min ago".into(),
         when_exact: "2026-11-14 18:02:05 UTC".into(),
     }])));
@@ -711,7 +718,9 @@ fn made_up(window: &AppWindow) {
         write: true,
         execute: true,
     }])));
-    perm.set_deny(ModelRc::new(VecModel::from(vec![SharedString::from(long_rule)])));
+    perm.set_deny(ModelRc::new(VecModel::from(vec![SharedString::from(
+        long_rule,
+    )])));
     perm.set_deny_unfit(ModelRc::new(VecModel::from(vec![SharedString::new()])));
     let caps = window.global::<Caps>();
     caps.set_centers(perm.get_centers());
@@ -719,7 +728,8 @@ fn made_up(window: &AppWindow) {
     caps.set_read(true);
     caps.set_running(true);
     caps.set_edit_open(false);
-    let unit = |name: &str, action: bool| CapRow {
+    let unit = |name: &str, action: bool| {
+        CapRow {
         name: name.into(),
         action,
         effect: if action { "execute".into() } else { "".into() },
@@ -732,6 +742,7 @@ fn made_up(window: &AppWindow) {
         command: long_rule.into(),
         units: if action { 0 } else { 1 },
         ..Default::default()
+    }
     };
     caps.set_rows(ModelRc::new(VecModel::from(vec![
         unit("exec", false),

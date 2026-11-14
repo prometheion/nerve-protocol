@@ -535,7 +535,7 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
-    // Nor does the Add dialog make a folder that is written and not read.
+    // Nor does the folder form make a folder that is written and not read.
     perm.invoke_folder_choose();
     perm.set_folder_read(false);
     perm.set_folder_write(true);
@@ -547,6 +547,37 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // The form row of a folder changes it in place: its rights, and a new
+    // path moves the grant there (the old one goes).
+    let moved = root.join("work-moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    perm.set_folder_edit(path.clone());
+    perm.set_folder_path(moved.display().to_string().into());
+    perm.set_folder_read(true);
+    perm.set_folder_write(false);
+    perm.set_folder_execute(true);
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
+    assert_eq!(perm.get_folder_edit(), "");
+    let folders = &config(&paths).centers[0].policy.folders;
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    assert!(
+        folders[0].path.ends_with("work-moved")
+            && folders[0].access.read
+            && !folders[0].access.write
+            && folders[0].access.execute,
+        "{folders:?}"
+    );
+    // Back where it was, for what follows.
+    let moved = perm.get_folders().row_data(0).unwrap().path;
+    perm.set_folder_edit(moved);
+    perm.set_folder_path(path.clone());
+    perm.set_folder_write(true);
+    perm.set_folder_execute(false);
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
     // Sync folders walks the grants again. No node runs here: on Linux the
     // node walks them when it starts, on Windows this command does.
     perm.invoke_folder_sync();
