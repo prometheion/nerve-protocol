@@ -379,9 +379,14 @@ export global Logs {
     in-out property <string> error;
     in-out property <[LogRow]> rows;
     in-out property <bool> problems-only;
+    // Words the shown lines hold (the search bar), and the line picked.
+    in-out property <string> search;
+    in-out property <int> pick;
     // How many of the newest lines the page asks for (src/app/live.rs).
     in-out property <int> limit: 300;
     callback filter(bool);
+    // The search bar changed.
+    callback searched();
     callback more();
     // Asks before `log clear`.
     callback clear();

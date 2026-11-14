@@ -1006,11 +1006,14 @@ pub fn declared(v: &Value) -> Vec<DeclaredRow> {
 }
 
 /// The lines of the log to show, from `newest` first: all of them, or the
-/// errors and warnings only.
-pub fn log_rows(newest: &[Value], problems_only: bool, now_ms: u64) -> Vec<LogRow> {
+/// errors and warnings only, and of those the ones whose message holds
+/// `search` (any case; empty: every one).
+pub fn log_rows(newest: &[Value], problems_only: bool, search: &str, now_ms: u64) -> Vec<LogRow> {
+    let search = search.trim().to_lowercase();
     newest
         .iter()
         .filter(|e| !problems_only || matches!(s(&e["level"]), "error" | "warn"))
+        .filter(|e| search.is_empty() || s(&e["msg"]).to_lowercase().contains(&search))
         .map(|e| {
             let ts = e["ts"].as_u64().unwrap_or_default();
             let level = s(&e["level"]);
@@ -2849,15 +2852,20 @@ mod tests {
             json!({"ts": NOW, "level": "info", "msg": "node started"}),
             json!({"ts": NOW, "level": "warn", "msg": "link dropped", "node": "web-1"}),
         ];
-        let rows = log_rows(&lines, false, NOW);
+        let rows = log_rows(&lines, false, "", NOW);
         assert_eq!(rows.len(), 3);
         assert_eq!(
             (rows[0].level.as_str(), rows[0].tone),
             ("Error", Tone::Danger)
         );
-        let rows = log_rows(&lines, true, NOW);
+        let rows = log_rows(&lines, true, "", NOW);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].msg, "link dropped (web-1)");
+        // The search bar: words of the message, in any case.
+        let rows = log_rows(&lines, false, " Link ", NOW);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg, "link dropped (web-1)");
+        assert!(log_rows(&lines, true, "started", NOW).is_empty());
     }
 
     #[test]

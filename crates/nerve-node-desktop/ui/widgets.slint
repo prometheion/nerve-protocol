@@ -2299,6 +2299,9 @@ export component ListPane {
     property <bool> shown: Shape.wide || !root.open;
     visible: root.shown;
     horizontal-stretch: Shape.wide ? root.stretch : 1;
+    // A list of its own width takes its most; one that stretches shares
+    // the room with the details by their stretch alone.
+    preferred-width: root.stretch > 0 ? 1px : root.most;
     min-width: !root.shown ? 0px : Shape.wide ? root.least : 0px;
     max-width: !root.shown ? 0px : Shape.wide ? root.most : 100000px;
     // Hidden, it adds nothing to the height of the Split.
@@ -2331,6 +2334,7 @@ export component DetailsPane {
     property <length> tall: Shape.wide ? min(root.natural, max(160px, root.view-height - 2 * Space.lg)) : root.natural;
     visible: root.shown;
     horizontal-stretch: root.stretch;
+    preferred-width: 1px;
     min-width: !root.shown ? 0px : Shape.wide ? root.least : 0px;
     max-width: !root.shown ? 0px : Shape.wide ? root.most : 100000px;
     min-height: 0px;

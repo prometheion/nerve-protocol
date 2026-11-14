@@ -1,28 +1,28 @@
 // Log: what the node did, newest first, as `nerve-node log --follow` gives
-// it while the page is open.
+// it while the page is open: a filter bar, the lines one each with their
+// time, and the picked line whole.
 
-import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Theme, Type, Space, Radius, Tone, Shape } from "theme.slint";
 import { Load, LogRow } from "data.slint";
 import { Logs, Store } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Segmented,
-    ListRow, StatusDot, Reveal, MoreFoot,
+    StatusDot, Reveal, MoreFoot, TextField, CopyText, Split, ListPane, DetailsPane, ListCard, ListItem,
+    DetailCard,
 } from "widgets.slint";
 
 export component LogPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Logs.pick, Logs.rows.length - 1));
+    property <LogRow> picked: Logs.rows[root.pick];
     gap: 0;
+    init => {
+        Store.details-open = false;
+    }
     PageHeader {
         icon: @image-url("icons/log.svg");
         title: "Log";
         error-title: "The log could not be read";
         error: Logs.error;
-        Segmented {
-            options: ["All", "Problems"];
-            current: Logs.problems-only ? 1 : 0;
-            chosen(i) => {
-                Logs.filter(i == 1);
-            }
-        }
         Button {
             text: "Clear";
             icon: @image-url("icons/trash.svg");
@@ -34,19 +34,46 @@ export component LogPage inherits PageFrame {
         }
     }
 
+    // The filter bar: everything or the problems, and words to find.
+    Rectangle {
+        height: Space.xl;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Segmented {
+            options: ["All", "Problems"];
+            current: Logs.problems-only ? 1 : 0;
+            chosen(i) => {
+                Logs.pick = 0;
+                Logs.filter(i == 1);
+            }
+        }
+        TextField {
+            horizontal-stretch: 1;
+            text <=> Logs.search;
+            placeholder: "Search the messages";
+            label: "Search the messages";
+            edited => {
+                Logs.pick = 0;
+                Logs.searched();
+            }
+        }
+    }
+
     if Logs.load == Load.loading && Logs.rows.length == 0: Loading {
         text: "Reading the log…";
     }
 
     Reveal {
         shown: Logs.load == Load.ready && Logs.rows.length == 0;
-        gap: Space.xxl;
+        gap: Space.lg;
         Card {
             EmptyState {
                 icon: @image-url("icons/log.svg");
-                title: Logs.problems-only ? "No problems" : "Nothing logged yet";
-                text: Logs.problems-only
-                    ? "No error or warning in the log."
+                title: Logs.search != "" ? "No line matches"
+                    : Logs.problems-only ? "No problems" : "Nothing logged yet";
+                text: Logs.search != "" ? "Change or clear the search."
+                    : Logs.problems-only ? "No error or warning in the log."
                     : "The node writes its log while it runs.";
             }
         }
@@ -54,61 +81,104 @@ export component LogPage inherits PageFrame {
 
     Reveal {
         shown: Logs.rows.length > 0;
-        gap: Space.xxl;
-        Card {
-            pad: 0;
-            gap: 0;
-            for row[i] in Logs.rows: ListRow {
-                first: i == 0;
-                VerticalLayout {
-                    alignment: start;
-                    padding-top: 3px;
-                    StatusDot {
-                        tone: row.tone;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Store.details-open;
+                stretch: Shape.large ? 1 : 5;
+                least: 320px;
+                most: 100000px;
+                ListCard {
+                    label: "Log";
+                    step(d) => {
+                        Logs.pick = Math.max(0, Math.min(Logs.rows.length - 1, root.pick + d));
                     }
-                }
-                VerticalLayout {
-                    spacing: 3px;
-                    horizontal-stretch: 1;
-                    HorizontalLayout {
-                        spacing: Space.sm;
-                        Text {
-                            text: row.level;
-                            color: row.tone == Tone.neutral ? Theme.text-muted : Theme.tone(row.tone);
-                            font-size: Type.caption;
-                            font-weight: Type.semibold;
-                            vertical-alignment: center;
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for row[i] in Logs.rows: ListItem {
+                        first: i == 0;
+                        selected: i == root.pick;
+                        label: row.level + ", " + row.when + ": " + row.msg;
+                        clicked => {
+                            Logs.pick = i;
+                            Store.details-open = true;
                         }
-                        Rectangle {
-                            horizontal-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            StatusDot {
+                                tone: row.tone;
+                                size: 7px;
+                            }
                         }
                         Text {
+                            width: 78px;
                             text: row.when;
                             color: Theme.text-faint;
                             font-size: Type.caption;
+                            vertical-alignment: center;
+                            overflow: elide;
                             accessible-label: row.when-exact;
                         }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: row.msg;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
                     }
-                    Text {
-                        text: row.msg;
-                        color: Theme.text;
-                        font-size: Type.small;
-                        wrap: word-wrap;
+                    Reveal {
+                        shown: Logs.rows.length >= Logs.limit;
+                        VerticalLayout {
+                            padding-top: Space.md;
+                            padding-left: Space.lg;
+                            padding-right: Space.lg;
+                            MoreFoot {
+                                text: Logs.limit < 1000 ? "The newest " + Logs.rows.length + " lines."
+                                    : "The newest " + Logs.rows.length + " lines. Older ones stay in the log file.";
+                                more: Logs.limit < 1000;
+                                clicked => {
+                                    Logs.more();
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-
-    Reveal {
-        shown: Logs.rows.length >= Logs.limit;
-        gap: Space.lg;
-        MoreFoot {
-            text: Logs.limit < 1000 ? "The newest " + Logs.rows.length + " lines."
-                : "The newest " + Logs.rows.length + " lines. Older ones stay in the log file.";
-            more: Logs.limit < 1000;
-            clicked => {
-                Logs.more();
+            DetailsPane {
+                open: Store.details-open;
+                stretch: Shape.large ? 1 : 6;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Store.details-open = false;
+                }
+                DetailCard {
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: root.picked.level;
+                                tone: root.picked.tone;
+                                dot: true;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.picked.when-exact;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    CopyText {
+                        text: root.picked.msg;
+                        copy-button: true;
+                    }
+                }
             }
         }
     }

@@ -287,12 +287,15 @@ impl Ctl {
             }
         }
         if log {
-            let problems = self
+            let (problems, search) = self
                 .window
                 .upgrade()
-                .map(|w| w.global::<Logs>().get_problems_only())
-                .unwrap_or(false);
-            let rows = view::log_rows(&self.log.borrow(), problems, now_ms());
+                .map(|w| {
+                    let l = w.global::<Logs>();
+                    (l.get_problems_only(), l.get_search().to_string())
+                })
+                .unwrap_or_default();
+            let rows = view::log_rows(&self.log.borrow(), problems, &search, now_ms());
             if let Some(w) = self.window.upgrade() {
                 let l = w.global::<Logs>();
                 l.set_rows(ModelRc::new(VecModel::from(rows)));
@@ -320,7 +323,12 @@ impl Ctl {
                     return;
                 };
                 let l = w.global::<Logs>();
-                let rows = view::log_rows(&self.log.borrow(), l.get_problems_only(), now);
+                let rows = view::log_rows(
+                    &self.log.borrow(),
+                    l.get_problems_only(),
+                    &l.get_search(),
+                    now,
+                );
                 retime(&l.get_rows(), rows, |r| &r.when);
             }
             Some(Page::Audit) => {
@@ -339,6 +347,22 @@ impl Ctl {
             }
             _ => {}
         }
+    }
+
+    /// Shows the lines of the log again that hold the search bar's words,
+    /// from what the page read: nothing is asked of the node.
+    pub(super) fn log_search(&self) {
+        let Some(w) = self.window.upgrade() else {
+            return;
+        };
+        let l = w.global::<Logs>();
+        let rows = view::log_rows(
+            &self.log.borrow(),
+            l.get_problems_only(),
+            &l.get_search(),
+            now_ms(),
+        );
+        l.set_rows(ModelRc::new(VecModel::from(rows)));
     }
 
     /// Shows the log again, all of it or its problems.
@@ -389,6 +413,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     window
         .global::<Logs>()
         .on_filter(move |problems| c.log_filter(problems));
+    let c = ctl.clone();
+    window.global::<Logs>().on_searched(move || c.log_search());
     let c = ctl.clone();
     window.global::<Logs>().on_clear(move || c.ask_clear(true));
     let c = ctl.clone();
