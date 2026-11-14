@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod center;
 pub mod checker;
 pub mod config;
+pub mod holder;
 pub mod jobs;
 pub mod link;
 pub mod listen;

@@ -221,7 +221,7 @@ pub struct Spec<'a> {
 
 #[cfg(windows)]
 pub use sys::{
-    configure, delete, delete_at_restart, put, registered, set_dacl, start, state, stop,
+    configure, delete, delete_at_restart, pid, put, registered, set_dacl, start, state, stop,
     wait_running,
 };
 
@@ -273,6 +273,16 @@ mod sys {
         Scm::open(SC_MANAGER_CONNECT)
             .and_then(|m| m.service(name, SERVICE_QUERY_STATUS))
             .is_ok_and(|s| s.is_some())
+    }
+
+    /// The process of the service `name` while it runs, as anyone may ask;
+    /// `None` when it is not registered or does not run.
+    pub fn pid(name: &str) -> Result<Option<u32>, String> {
+        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(name, SERVICE_QUERY_STATUS)? else {
+            return Ok(None);
+        };
+        let st = s.status()?;
+        Ok((st.dwCurrentState == SERVICE_RUNNING && st.dwProcessId != 0).then_some(st.dwProcessId))
     }
 
     /// The state of the service `name`; `None` when it is not registered.
