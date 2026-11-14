@@ -12,6 +12,8 @@ nerve-transport.workspace = true
 nerve-policy.workspace = true
 serde_json.workspace = true
 ring.workspace = true
+# The listeners of both services (src/listen.rs).
+tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -50,7 +52,6 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Wdk_System_SystemInformation",
 ] }
-tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

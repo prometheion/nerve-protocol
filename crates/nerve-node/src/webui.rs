@@ -420,12 +420,12 @@ async fn listen(
         }
         Some(Acceptor::new(&id)?)
     };
-    let listener = TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
+    let listener = nerve_service::listen::bind_addr(addr).map_err(|e| e.to_string())?;
     let also = match other_loopback(addr.ip()) {
         None => None,
         Some(ip) => {
             let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-            match TcpListener::bind((ip, port)).await {
+            match nerve_service::listen::bind_addr(SocketAddr::new(ip, port)) {
                 Ok(l) => Some(l),
                 // Asked for any port, the one given may be taken on the
                 // other address: no one has the UI's page there.

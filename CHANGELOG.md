@@ -148,6 +148,8 @@ and every limit is in
   only the app turns it on.
 - A capability's template whose program reads its line again as commands
   (`cmd`, a `.bat` file, PowerShell without `-File`) is refused.
+- The node's and the center's listeners hold their ports alone
+  (`SO_EXCLUSIVEADDRUSE`): no other program can bind them while they listen.
 
 ### Since 0.0.8
 
