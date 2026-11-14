@@ -125,8 +125,20 @@ export global Size {
     out property <length> icon: 16px;
     out property <length> icon-lg: 20px;
     out property <length> sidebar: 236px;
-    out property <length> content-max: 980px;
+    // A page's width at most: a very wide window keeps margins on both
+    // sides, a usual one uses its whole width.
+    out property <length> content-max: 2000px;
     out property <length> dialog: 520px;
+}
+
+// The window's width, which the pages follow (the window sets it,
+// ui/app.slint): below 1100 px a list and its details take turns, from 1100
+// px they stand side by side, and from 1800 px a page may add a third pane.
+// The app opens at 1180 px and is at least 900 px wide.
+export global Shape {
+    in-out property <length> window-width: 1180px;
+    out property <bool> wide: root.window-width >= 1100px;
+    out property <bool> large: root.window-width >= 1800px;
 }
 
 // How things move: every animation of the app takes its time from here, and

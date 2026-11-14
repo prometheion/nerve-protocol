@@ -1,7 +1,7 @@
 // The window: the sidebar of pages, the page, and the dialogs over it.
 
 import { Palette } from "std-widgets.slint";
-import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape } from "theme.slint";
 import {
     Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow,
     ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
@@ -26,7 +26,7 @@ import {
 import { InstallerView } from "installer.slint";
 
 export {
-    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Tone, Page, Load, NodeStatus, CenterRow,
+    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Shape, Tone, Page, Load, NodeStatus, CenterRow,
     AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow, ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup,
     RelayNodeRow, TunnelRow, Pick, Limit,
 }
@@ -250,6 +250,11 @@ export component AppWindow inherits Window {
     }
     init => {
         keys.focus();
+        Shape.window-width = self.width;
+    }
+    // The pages follow the window's width (Shape).
+    changed width => {
+        Shape.window-width = self.width;
     }
 
     // The window's shortcuts: Ctrl+1 to Ctrl+8 open the pages in the
