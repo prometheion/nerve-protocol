@@ -386,9 +386,17 @@ fn the_readme_starts_on_linux_and_windows() {
     };
     let windows = section("### On Windows");
     for needed in [
-        "nerve-center-x86_64-windows.exe",
         "nerve-x86_64-windows.exe",
-        "Run as administrator",
+        "A center",
+        "A node",
+        "HTTP MCP",
+        "(docs/user/windows.md)",
+    ] {
+        assert!(windows.contains(needed), "{needed}: {windows}");
+    }
+    // No center of its own for Windows (owner, 2026-11-14).
+    assert!(!readme.contains("nerve-center-x86_64-windows"), "{readme}");
+    for needed in [
         "(docs/user/windows.md)",
     ] {
         assert!(windows.contains(needed), "{needed}: {windows}");

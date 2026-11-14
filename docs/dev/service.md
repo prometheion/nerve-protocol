@@ -17,18 +17,24 @@ A center and a node can share a machine.
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has these nine files, seven for Linux and two for Windows, and a
+release has these eight files, seven for Linux and one for Windows, and a
 `SHA256SUMS` file.
 
 | System | Files |
 |---|---|
 | Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-x86_64-linux`, which also comes as `nerve_<version>_amd64.deb` and `nerve-<version>.x86_64.rpm` |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-x86_64-windows.exe` |
+| Windows, x86_64 | `nerve-x86_64-windows.exe` |
 
-`nerve` is the node with a desktop app, which installs itself
-when you open it ([desktop app](desktop.md)). Windows has no `nerve-node` of
-its own: there the app is the only way to the node.
+`nerve` is the app, one program for both roles, which installs one role per
+machine when you open it ([desktop app](desktop.md)). Its first word picks
+what it is: none, the window; `__center`, the center's command line (as a
+link named `nerve-center` on Linux); anything else, the node's command line
+(also as a link named `nerve-node`). Its center's service runs
+`nerve __center --state-dir …` (on Windows `nerve.exe __center service
+--state-dir …`), and its update takes the app's file. Windows has no
+`nerve-node` or `nerve-center` of its own: there the app is the only way to
+either.
 
 The Linux programs except the desktop app are static and need no libraries. The Windows programs
 need no Visual C++ runtime. The programs are not signed, so check them

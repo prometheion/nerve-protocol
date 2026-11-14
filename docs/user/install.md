@@ -1,8 +1,15 @@
 # Install, update and remove
 
 Put the center where your harness runs, and a node on each machine the agent
-may use. A center and a node can share a machine. On Windows the node is
-the desktop app: [Nerve on Windows](windows.md) has its install.
+may use. The app `nerve` is either: its first step asks which, and it
+installs one role per machine. The terminal programs `nerve-center` and
+`nerve-node` are for Linux servers and aarch64, and may share a machine.
+On Windows the app is the only program: [Nerve on Windows](windows.md) has
+its install.
+
+**Tried a pre-release?** Remove its `nerve-node-desktop` first (`sudo apt
+remove nerve-node-desktop`, or `sudo dnf remove nerve-node-desktop`; on
+Windows, Apps & features). The `nerve` package replaces it.
 
 ## Download
 
@@ -11,13 +18,13 @@ Get the programs from
 
 | Machine | Files |
 |---|---|
-| x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`; the desktop app as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm` or `nerve-x86_64-linux` |
+| x86_64 | the app as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm` or `nerve-x86_64-linux`; `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux` |
 | ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows x64 | `nerve-center-x86_64-windows.exe`, the desktop app `nerve-x86_64-windows.exe` ([Windows](windows.md)) |
+| Windows x64 | the app `nerve-x86_64-windows.exe` ([Windows](windows.md)) |
 
-`nerve-center` and `nerve-node` are static and need no libraries. The
-desktop app needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
-and later) and fontconfig.
+`nerve-center` and `nerve-node` are static and need no libraries: take them
+for a server without a desktop, and on ARM. The app needs glibc 2.35 or
+newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and fontconfig.
 
 ### Check the download
 
@@ -105,17 +112,25 @@ manager. Such a node runs every command as you
 2. Double-click it, and press **Install** in the software installer (or
    `sudo apt install ./nerve_<version>_amd64.deb`,
    `sudo dnf install ./nerve-<version>.x86_64.rpm`).
-3. Open **Nerve** from the application menu, and press **Install**. The
-   system asks for an administrator's password.
+3. Open **Nerve** from the application menu. It asks what this machine is,
+   **A node** or **A center**, and installs that role; the system asks for
+   an administrator's password.
 
 The plain program works too: download `nerve-x86_64-linux`,
 switch on **Executable as Program** in its **Properties** (GNOME Files) or
 tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
 press **Install**.
 
-It installs the node as a service, `nerve://` links, so a pairing link opens
-in Nerve, and, for the plain program, **Nerve** in the application menu. You
-become the node's owner. Its first steps pair your first center and choose its mode.
+As a node it installs the node as a service, `nerve://` links, so a pairing
+link opens in Nerve, the command `nerve-node` (a link to the app), and, for
+the plain program, **Nerve** in the application menu. You become the node's
+owner. Its first steps pair your first center and choose its mode.
+
+As a center it installs the center as a service, as `nerve-center install`
+does below, and the command `nerve-center` (a link to the app); its last
+step shows the owner token and opens the web UI. A role installed in the
+terminal stays that program's: the app does not install the other role
+beside it.
 After that the app needs the password only for what changes the system
 ([rights](../dev/desktop.md#administrator-rights)).
 
@@ -152,9 +167,8 @@ settings file, `/etc/nerve-center/center.env`, and
 next. `journalctl -u nerve-center` shows its output.
 
 The installed center sees no GPU: its local model runs on the CPU
-([the service](../dev/service.md#settings-of-the-service)). On Windows,
-install it in an administrator's terminal
-([Windows](windows.md#the-center-as-a-service)).
+([the service](../dev/service.md#settings-of-the-service)). On Windows the
+app installs it ([Windows](windows.md#the-center-as-a-service)).
 
 ## What it needs
 

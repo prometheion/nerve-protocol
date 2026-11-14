@@ -1,16 +1,16 @@
 # Nerve on Windows
 
-On Windows the node is the desktop app: it installs the node as a service,
-and you do everything in its window. There is no `nerve-node` to type. The
-rest of this guide holds on Windows too; this page says where each task is
-in the app, and what differs. [Windows in depth](../dev/windows.md).
+On Windows the app `nerve` is the node or the center: it installs one of
+them as a service, and you do everything in its window and the web UIs.
+There is no `nerve-node` or `nerve-center` to type. The rest of this guide
+holds on Windows too; this page says where each task is in the app, and
+what differs. [Windows in depth](../dev/windows.md).
 
 ## Download and check
 
 From [Releases](https://github.com/prometheion/nerve-protocol/releases/latest)
-take `nerve-x86_64-windows.exe`, the node with its app, and for a
-center `nerve-center-x86_64-windows.exe`. Both are for x64. In PowerShell,
-compare the hash with its line in `SHA256SUMS`:
+take `nerve-x86_64-windows.exe`, the app, for x64. In PowerShell, compare
+the hash with its line in `SHA256SUMS`:
 
 ```powershell
 (Get-FileHash .\nerve-x86_64-windows.exe).Hash
@@ -22,9 +22,10 @@ on, can block them, with no way past.
 
 ## Install
 
-Double-click the file. The installer asks for your Windows password, then
-Windows asks once for an administrator (UAC). You become the node's owner.
-It installs:
+Double-click the file. The installer asks what this machine is: **A node**
+or **A center** (for a center, see [below](#the-center-as-a-service)). For a
+node it asks for your Windows password, then Windows asks once for an
+administrator (UAC). You become the node's owner. It installs:
 
 - the services `nerve-node` and `nerve-run-profile`, which start with Windows;
 - the users `nerve`, which runs the node, and `nerve-run`, which runs a
@@ -94,31 +95,19 @@ without `-File` read their line again as commands, so a template with
 
 ## The center as a service
 
-Double-click `nerve-center-x86_64-windows.exe`. After the UAC prompt it
-installs itself, and its window shows the web UI's address and the owner
-token until you press Enter. A newer one double-clicked later installs over
-it, and the settings stay. To give
-it a name or other settings, run it in a terminal opened with **Run as
-administrator**, in the download folder:
+Double-click the file and pick **A center**. After the UAC prompt it
+installs the center as the service `nerve-center`, which runs the app's
+program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
+`C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
+the node port (7443) of the center's service. Its last step shows what it
+did, the owner token among it, and **Open the web UI**, which checks first
+that the center holds the web UI's port. Keep the token in your password
+manager: the web UI asks for it.
 
-```powershell
-.\nerve-center-x86_64-windows.exe install --name lab
-```
-
-It puts itself in `C:\Program Files\Nerve` as `nerve-center.exe`, on the
-machine's `Path`, so a harness and every terminal opened after it find
-`nerve-center`. It runs as the service `nerve-center`, keeps its state in
-`C:\ProgramData\nerve-center`, and adds the firewall rule `Nerve center` for
-the node port. `nerve-center set` shows its settings, in
-`settings\center.env` there; `nerve-center set ui 0.0.0.0:7480` changes one
-and restarts the service. A new `listen` port takes the firewall rule along.
-The rule lets in the node port of the center's service only: for the web UI
-or MCP beyond loopback, `set` prints the `New-NetFirewallRule` line for their
-port, and `uninstall` removes those rules too. These and the
-center's other commands work in an administrator's terminal: `status`,
-`service start|stop|restart`, `pair`, `nodes`, `token`, `log` and
-`owner-token` ([in the terminal](center.md#in-the-terminal)).
-[Run the center](center.md) says what comes next.
+Harnesses connect over HTTP MCP: the web UI's **Connect a harness** makes a
+harness token and the entry. The center's settings are in
+`settings\center.env` there; its web UI and MCP stay on this machine, and
+the app installs no second role beside it.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.
 
@@ -127,8 +116,7 @@ A relay on Windows needs a firewall rule for its port, which you add yourself.
 Update the center first, then the nodes. **Settings › App › Update…** checks
 the download against `SHA256SUMS`; if the new program does not start, the
 old one comes back. **Pre-releases** beside it makes Update take test
-builds too. The center: `nerve-center update` as an administrator, with
-`--pre` or `--tag <tag>` for a pre-release.
+builds too.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. The quiet uninstall of Apps & features

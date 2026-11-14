@@ -165,10 +165,13 @@ The user guide's [Windows page](../user/windows.md) has the download, the
 check with `Get-FileHash`, SmartScreen, the install and the first run. The
 app does everything for the node from then on: pairing, settings, folders,
 rules, sudo, backups, update and uninstall. No terminal command is needed or
-offered. The center's `install` puts it in `%ProgramFiles%\Nerve` as
-`nerve-center.exe` and that folder on the machine's `Path` (its uninstall
-takes it off again), where a harness starts it, and runs it as a
-[service](#the-center-as-a-windows-service). A double-click on the
+offered. The app installs the center too, as its role: its service runs
+`nerve.exe __center service --state-dir …` ([one program](desktop.md#one-program-two-roles)),
+and harnesses reach it over HTTP MCP. The release has no `nerve-center.exe`
+for Windows; one built from source keeps what follows. Its `install` puts it
+in `%ProgramFiles%\Nerve` as `nerve-center.exe` and that folder on the
+machine's `Path` (its uninstall takes it off again), where a harness starts
+it, and runs it as a [service](#the-center-as-a-windows-service). A double-click on the
 downloaded center runs that `install`: with no arguments, its console as
 stdin and alone on that console (`GetConsoleProcessList`), it starts itself
 again as `install` with `runas` (the UAC prompt), and the new window waits

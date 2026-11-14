@@ -8,13 +8,13 @@ Three programs:
 
 | Program | Job | Put it on |
 |---|---|---|
-| `nerve-center` | The center. Your harness reaches it as an MCP server and gets two tools, `list` and `execute`. It pairs machines and serves a web UI | the machine where the harness runs, or a server it reaches |
-| `nerve-node` | The node: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each Linux machine the agent may use |
-| `nerve` | The node with a desktop app: a window that does what the CLI does | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
+| `nerve` | The app: one download for both roles. Its first step asks what this machine is, a node or a center, and installs that role with a window for it | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
+| `nerve-center` | The center alone, for Linux servers and aarch64. Your harness reaches the center as an MCP server and gets two tools, `list` and `execute`. It pairs machines and serves a web UI | the machine where the harness runs, or a server it reaches |
+| `nerve-node` | The node alone, for Linux servers and aarch64: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each Linux machine the agent may use |
 
-A machine runs one node. Nerve runs on Linux (x86_64, aarch64) and Windows
-(x64). On Windows the node is always the desktop app, with no CLI; the
-center runs there too.
+The app installs one role per machine; on Linux the terminal programs may
+install both, for tests. Nerve runs on Linux (x86_64, aarch64) and Windows
+(x64). On Windows the app is the only program, with no CLI.
 
 ## Quick start
 
@@ -77,25 +77,22 @@ nerve-node ui on
 
 ### The desktop app
 
-On a Linux desktop, take the desktop app in place of `nerve-node`: the
-`.deb` (Ubuntu, Debian) or the `.rpm` (Fedora). Double-click it, install it,
-then open **Nerve** and press **Install**. The plain
-`nerve-x86_64-linux` works too
-([install](docs/user/install.md#the-desktop-app)).
-
-It installs the node as a service, and its first steps pair your first
-center.
+On a Linux desktop, take the app `nerve` in place of the terminal programs:
+the `.deb` (Ubuntu, Debian) or the `.rpm` (Fedora). Double-click it,
+install it, then open **Nerve**: it asks what this machine is, a node or a
+center, and installs that role. The plain `nerve-x86_64-linux` works too
+([install](docs/user/install.md#the-desktop-app)). It names the role's
+terminal command, `nerve-node` or `nerve-center`, as a link to itself.
 
 ### On Windows
 
-1. For the center, double-click `nerve-center-x86_64-windows.exe`. After the
-   UAC prompt it installs itself as a service, puts itself on the `PATH`, and
-   shows the web UI's address and the owner token, as on Linux. (Or run
-   `.\nerve-center-x86_64-windows.exe install` in a terminal opened with
-   **Run as administrator**.)
-2. On each machine the agent may use, double-click
-   `nerve-x86_64-windows.exe`. It is not signed: SmartScreen
-   asks, **More info**, **Run anyway**. Its installer asks for your Windows
+Double-click `nerve-x86_64-windows.exe`. It is not signed: SmartScreen asks,
+**More info**, **Run anyway**. Its installer asks what this machine is:
+
+1. **A center**: after the UAC prompt it installs the center as a service,
+   and its last step shows the owner token and opens the web UI. Harnesses
+   connect over HTTP MCP (**Connect a harness** in the web UI).
+2. **A node**, on each machine the agent may use: it asks for your Windows
    password, installs the node as a service, and pairs your first center.
 
 The owner must be a local account with a password. Everything else is in

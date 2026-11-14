@@ -78,10 +78,10 @@ Every run builds and publishes the Linux and the Windows programs.
    `nerve-<version>.x86_64.rpm`: packed from that program with
    `dpkg-deb` and `rpmbuild` (`.github/scripts/desktop-packages.sh`) and
    installed on Ubuntu 22.04 and 24.04 and Fedora in containers first
-   (`desktop-packages-test`). And the two for Windows:
-   `nerve-center-x86_64-windows.exe` and
-   `nerve-x86_64-windows.exe` (Windows has no `nerve-node` of
-   its own: the desktop app is the node there). The release text ends with a
+   (`desktop-packages-test`). And the one for Windows,
+   `nerve-x86_64-windows.exe`, the app, which is the node or the center
+   there (the Windows job builds `nerve-center.exe` for the install test
+   only). The release text ends with a
    footer that names the programs it has. The desktop app's update takes its
    own file from there, as `nerve-node update` takes `nerve-node-*`. A release
    is marked latest. A pre-release is marked as a pre-release.

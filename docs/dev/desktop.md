@@ -1,6 +1,6 @@
 # The desktop app
 
-`nerve`: the node with an app. Its installer, the rights it
+`nerve`: one app for the node and the center. Its installer, the rights it
 asks for, its settings tabs, what it needs per desktop, its keys and its own
 settings. The user guide's [install](../user/install.md#the-desktop-app) and
 [web UIs](../user/web-uis.md#the-desktop-app) pages are the short version,
@@ -16,6 +16,42 @@ without one; on Linux two things stay with the terminal
 ([settings](#settings)). On Windows the app is the only way to the node:
 there is no `nerve-node` for a terminal there. The window runs the CLI for
 every action, so it has the CLI's checks and audit records.
+
+## One program, two roles
+
+`nerve` holds the node, the center and the window, and installs one role per
+machine (#232):
+
+- **Its first word picks what it is.** None: the window. `__center`: the
+  center's command line (`nerve_center::entry`), as `__desktop-broker` makes it
+  the broker. Any other: the node's command line. On Linux the role's
+  terminal name is a link to it, `nerve-node` or `nerve-center`, and the
+  program picks that command line by the name it was started by, for those
+  two names only. The edition stays the app's (`nerve`): `update` through
+  either link updates the app.
+- **The center's edition** (`nerve_center::edition`): its service runs the
+  app's program with `__center` (the unit's `ExecStart`, the Windows command
+  line), its update takes the app's release file (from a package: the
+  package manager does, and the package's script restarts the service), its
+  install puts the link `nerve-center` on the `PATH` (Linux) and no folder on
+  the machine's `Path` (Windows), and its uninstall leaves the app's program.
+- **One role per machine.** The role is read from the installed services
+  (`nerve_service::role`), never from a setting of the app. The app's program
+  refuses to install a node where the center's service is installed, and the
+  other way round. The terminal programs are files of their own and may
+  install both roles, for tests; each service is updated by the program it
+  runs.
+- **The installer asks first** what the machine is: **A node** or **A center**
+  (two cards, one column, in its 760x700 window). A center is installed by
+  `nerve __center install`, with the rights; its last step, and the installer
+  on a machine that is a center, open its web UI after checking that the
+  center's service holds the port ([web UIs](web-uis.md#where-it-listens)).
+- **The broker's closed lists**, by the installed role: the node's commands
+  where the machine is no center only; behind `__center` the center's
+  `install` where none is, else its administrator's commands and `status`,
+  and `update` from the release only (from a file it stays a terminal's: the
+  file would lie in the user's folders). The center's commands always take
+  the broker.
 
 ## Download
 

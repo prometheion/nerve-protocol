@@ -3,9 +3,10 @@
 ## 0.1.0
 
 The first release of Nerve for Linux and Windows: `nerve-center` and
-`nerve-node` for Linux x86_64 and aarch64, the desktop app for Linux x86_64
-(also as a `.deb` and an `.rpm`) and Windows x64, and `nerve-center` for
-Windows x64. It is a beta, not 1.0.0.
+`nerve-node` for Linux x86_64 and aarch64, and the app `nerve`, which is a
+node or a center, for Linux x86_64 (also as a `.deb` and an `.rpm`) and
+Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
+`nerve-node-desktop` first; the `nerve` package replaces it.
 
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
 0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
@@ -113,11 +114,13 @@ and every limit is in
 - Linux: `sudo nerve-node install` and `sudo nerve-center install` as
   services, which ask the first questions; tested on Ubuntu 22.04, 24.04 and
   26.04 and Debian 12 and 13 (x86_64), and Ubuntu 24.04 (aarch64).
-- Windows: the desktop app's installer (also `--silent`, and a quiet
-  uninstall that keeps the data), and the center by a double-click (or
-  `nerve-center install` in an administrator's terminal), which installs it
-  as a service and puts it on the machine's `Path`;
-  tested on Windows 11 Pro and Windows Server 2025.
+- Windows: the app's installer, which asks whether this machine is a node
+  or a center and installs that role as a service (also `--silent` for a
+  node, and a quiet uninstall that keeps the data); a harness reaches the
+  center over HTTP MCP; tested on Windows 11 Pro and Windows Server 2025.
+- The package's update restarts the service that runs the app's program,
+  the node's or the center's; one a terminal program installed is that
+  program's to update.
 - `update` checks the download against the release's `SHA256SUMS` and puts
   the old program back if the new one does not start. The programs are not
   signed yet.
