@@ -51,7 +51,10 @@
 # - what the install puts on the machine as Windows has it: the Start menu's
 #   link, the handler of nerve:// links, the entry in Apps & features; then
 #   the entry's quiet uninstall (winget's), which keeps the data, and
-#   `--silent`, which installs again without a question.
+#   `--silent`, which installs again without a question;
+# - the app as a center, once the node is gone: `nerve.exe __center install`,
+#   its service's command line, its web UI's file, its firewall rule by
+#   service, and its uninstall, which leaves the app's program.
 # The release calls it too, with the release-profile programs it is about to
 # publish.
 # A test that skips fails the job. The account's password is masked in the
@@ -402,6 +405,32 @@ jobs:
             if (Get-LocalUser nerve-run -ErrorAction SilentlyContinue) { throw 'nerve-run stays' }
             if (Get-Service nerve-run-profile -ErrorAction SilentlyContinue) { throw 'nerve-run-profile stays' }
           }
+      # The app as a center (#232), once the node is gone: the service runs
+      # the app's program behind __center, says where its web UI listens in
+      # a file every account reads, its firewall rule names the service, and
+      # its uninstall leaves the app's program, which is the app's.
+      - name: The app as a center
+        run: |
+          $exe = (Resolve-Path dist/nerve.exe).Path
+          $bin = "$env:ProgramFiles\Nerve\nerve.exe"
+          & $exe __center --json install 2>&1 | Tee-Object "$env:RUNNER_TEMP/app-center.log" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the app's center did not install ($LASTEXITCODE)" }
+          $image = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\nerve-center').ImagePath
+          $want = "`"$bin`" __center service --state-dir `"$env:ProgramData\nerve-center\state`""
+          if ($image -ne $want) { throw "the service runs $image, not $want" }
+          $ui = Get-Content "$env:ProgramData\nerve-center\run\ui" -Raw | ConvertFrom-Json
+          if ($ui.url -ne 'http://127.0.0.1:7480') { throw "the web UI's file says $($ui.url)" }
+          $rule = Get-NetFirewallRule -DisplayName 'Nerve center' | Get-NetFirewallServiceFilter
+          if ($rule.Service -ne 'nerve-center') { throw "the firewall rule is for '$($rule.Service)', not the service" }
+          $status = & $bin __center --json status | ConvertFrom-Json
+          if (-not $status.installed) { throw "status: $($status | ConvertTo-Json)" }
+          & $bin __center --json uninstall --purge 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the app's center did not uninstall ($LASTEXITCODE)" }
+          if (Get-Service nerve-center -ErrorAction SilentlyContinue) { throw 'the service stays' }
+          if (-not (Test-Path $bin)) { throw "the center's uninstall took the app's program" }
+          if (Get-NetFirewallRule -DisplayName 'Nerve center' -ErrorAction SilentlyContinue) { throw 'the firewall rule stays' }
+          Remove-Item $bin
+          "the app as a center: installed, its service, web UI file and firewall rule, uninstalled" >> $env:GITHUB_STEP_SUMMARY
       # A test that returns early says so with `skipped` at the start of a
       # line, or behind `test <name> ... ` with one test thread.
       - name: No test skipped

@@ -23,9 +23,10 @@ fn job(name: &str) -> String {
 
 /// From 0.1.0 every release publishes Windows too (the switch of the
 /// releases before is gone): the Windows job builds the app and the center,
-/// no `nerve-node`; the publish job needs it and its install test like every
-/// other job, counts nine files (the Linux programs, the app's .deb and .rpm,
-/// Windows' two) and names them in its one footer.
+/// no `nerve-node`, and releases the app alone; the publish job needs it and
+/// its install test like every other job, counts eight files (the Linux
+/// programs, the app's .deb and .rpm, Windows' app) and names them in its
+/// one footer.
 #[test]
 fn every_release_has_windows_the_app_and_the_center() {
     assert!(!RELEASE.contains("inputs.windows"), "a switch is left");
@@ -78,7 +79,15 @@ fn every_release_has_windows_the_app_and_the_center() {
         !publish.lines().any(|l| l.starts_with("    if:")),
         "{publish}"
     );
-    assert!(publish.contains("want=9\n"), "{publish}");
+    assert!(publish.contains("want=8\n"), "{publish}");
+    // No center of its own for Windows in the release (owner, 2026-11-14):
+    // it is built for the install test only.
+    assert!(
+        windows.contains("cp built/nerve.exe \"dist/nerve-$SUFFIX.exe\""),
+        "{windows}"
+    );
+    assert!(!windows.contains("dist/nerve-center"), "{windows}");
+    assert!(!publish.contains("nerve-center-x86_64-windows"), "{publish}");
     let footers: Vec<&str> = publish
         .lines()
         .filter(|l| l.trim_start().starts_with("footer="))
@@ -118,12 +127,10 @@ fn the_release_installs_its_own_windows_programs_before_it_publishes() {
         .to_string();
     assert!(needs.contains(" windows-installed,"), "{needs}");
     // The programs it installs are the release builds the `windows` job
-    // publishes, under the names the workflow runs them by.
+    // built (the app it publishes, and the center alone for the test),
+    // under the names the workflow runs them by.
     let windows = job("windows");
-    assert!(
-        windows.contains("cp \"dist/$b-$SUFFIX.exe\" \"installed/$b.exe\""),
-        "{windows}"
-    );
+    assert!(windows.contains("cp built/*.exe installed/"), "{windows}");
     assert!(
         windows.contains(".github/scripts/windows-test-programs.sh installed/tests"),
         "{windows}"
@@ -208,6 +215,12 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
         "Depends: libc6 (>= 2.35), libfontconfig1",
         "Requires: glibc >= 2.35",
         "Requires: fontconfig",
+        // The service that runs the app's program, whichever role it is,
+        // restarts with the new one; a terminal program's is left alone.
+        "grep -qs \"^ExecStart=/usr/bin/nerve \" /etc/systemd/system/nerve-node.service",
+        "/usr/bin/nerve update --from=/usr/bin/nerve",
+        "grep -qs \"^ExecStart=/usr/bin/nerve __center \" /etc/systemd/system/nerve-center.service",
+        "/usr/bin/nerve __center update --from=/usr/bin/nerve",
         // The pre-releases' package, which this one replaces.
         "Replaces: nerve-node-desktop",
         "Conflicts: nerve-node-desktop",

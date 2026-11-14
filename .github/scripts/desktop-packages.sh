@@ -7,10 +7,13 @@
 # /usr/bin, its menu entry and icon, the mark of the package's kind), and
 # dpkg-deb and rpmbuild pack them; the version is the one the program says.
 #
-# Once installed, the package's script brings an installed node to the new
-# program: the update with the program in place writes the service's files
-# and restarts it. A package that `nerve update` installs
-# itself leaves that to the update (NERVE_PACKAGE_UPDATE).
+# Once installed, the package's script brings the service that runs
+# /usr/bin/nerve to the new program, the node's or the center's (the app
+# installs one role per machine): the update with the program in place
+# writes the service's files and restarts it. A service of a terminal
+# program (nerve-node, nerve-center in /usr/local/bin) is that program's to
+# update. A package that `nerve update` installs itself leaves that to the
+# update (NERVE_PACKAGE_UPDATE).
 set -euo pipefail
 
 bin=$(realpath "$1")
@@ -30,9 +33,15 @@ description="One app for this machine's role in Nerve: a node, which decides
 what your centers may do here, or a center, which your agent's harness
 reaches; its window, and the node's command line."
 homepage="https://github.com/prometheion/nerve-protocol"
-after_install='if [ -z "${NERVE_PACKAGE_UPDATE:-}" ] && [ -f /etc/systemd/system/nerve-node.service ]; then
-  /usr/bin/nerve update --from=/usr/bin/nerve \
-    || echo "nerve: the node still runs the earlier program; the app'"'"'s Update tries again" >&2
+after_install='if [ -z "${NERVE_PACKAGE_UPDATE:-}" ]; then
+  if grep -qs "^ExecStart=/usr/bin/nerve " /etc/systemd/system/nerve-node.service; then
+    /usr/bin/nerve update --from=/usr/bin/nerve \
+      || echo "nerve: the node still runs the earlier program; the app'"'"'s Update tries again" >&2
+  fi
+  if grep -qs "^ExecStart=/usr/bin/nerve __center " /etc/systemd/system/nerve-center.service; then
+    /usr/bin/nerve __center update --from=/usr/bin/nerve \
+      || echo "nerve: the center still runs the earlier program; sudo nerve-center update --from=/usr/bin/nerve tries again" >&2
+  fi
 fi'
 
 # The .deb: glibc 2.35 or newer and fontconfig, which the program links. It
