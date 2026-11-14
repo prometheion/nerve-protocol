@@ -1451,7 +1451,7 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
             (
                 ui_address(file),
                 "the web UI",
-                "web UI",
+                crate::winsvc::PRINTED_RULES[0],
                 "your browser asks you to trust it",
             )
         }
@@ -1460,7 +1460,7 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
             (
                 mcp_address(file),
                 "the HTTP MCP endpoint",
-                "MCP",
+                crate::winsvc::PRINTED_RULES[1],
                 "let the harness trust it (the Connect a harness card shows its fingerprint)",
             )
         }
@@ -1491,8 +1491,8 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
         p.next(
             format!("Let in port {port}"),
             format!(
-                "New-NetFirewallRule -DisplayName 'Nerve center {rule}' -Direction Inbound -Protocol TCP -LocalPort {port} -Program '{}' -Action Allow",
-                layout.bin.display()
+                "New-NetFirewallRule -DisplayName '{rule}' -Direction Inbound -Protocol TCP -LocalPort {port} -Service {} -Action Allow",
+                crate::winsvc::SERVICE_NAME
             ),
         );
     }

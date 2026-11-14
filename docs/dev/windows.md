@@ -483,9 +483,12 @@ The install does this, and says each step:
    also a value mistyped in `center.env`.
    It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
-   the node port (`--listen`, 7443 by default) of that program, and nothing
-   else. The web UI and MCP stay on loopback; beyond it their ports need a
-   rule of their own, whose `New-NetFirewallRule` line `set` prints.
+   the node port (`--listen`, 7443 by default) of the service `nerve-center`,
+   and nothing else. The rule names the service, not its program: another
+   process of the same program (the node's service, the desktop app) gets
+   nothing from it. The web UI and MCP stay on loopback; beyond it their
+   ports need a rule of their own, `Nerve center web UI` or `Nerve center
+   MCP`, whose `New-NetFirewallRule -Service nerve-center` line `set` prints.
 6. Starts the service and waits until the center runs, then says the web
    UI's address, the owner token and where harnesses connect.
 
@@ -527,7 +530,8 @@ without the administrators' rights, with an environment of `SystemRoot`
 alone, in the system folder, and in a job object that ends what it starts;
 it still runs as the administrator's own account, so it comes from the
 administrator's own hand (`--from`) or a release asset. `nerve-center
-uninstall` removes the service, its account, the firewall rule, the Event
+uninstall` removes the service, its account, its firewall rules (the two
+that `set` prints too), the Event
 Log source `nerve-center` and the program; the folders stay,
 open to the administrators only, and `--purge` deletes them. Run from the
 installed program, it moves that aside, and Windows deletes it at its next

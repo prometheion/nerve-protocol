@@ -30,6 +30,10 @@ use crate::service::{Layout, check_setting, done_page, setting_in};
 pub const SERVICE_NAME: &str = "nerve-center";
 /// The Windows Firewall rule that lets other machines reach the node port.
 pub const FIREWALL_RULE: &str = "Nerve center";
+/// The rules `set` prints for the web UI's and MCP's ports beyond loopback
+/// ([`crate::service::set_page`]): `uninstall` removes them with the
+/// center's own.
+pub const PRINTED_RULES: &[&str] = &["Nerve center web UI", "Nerve center MCP"];
 /// The node port where the settings name none.
 const NODE_PORT: u16 = 7443;
 /// The start of the name a program gets when it moves aside, held by
@@ -218,8 +222,10 @@ pub fn settings_env(text: &str) -> Result<Vec<(String, String)>, String> {
 }
 
 /// What `netsh` is asked to put the firewall rule in place: inbound TCP to
-/// `port`, for `program` only, in every profile.
-pub fn firewall_args(program: &Path, port: u16) -> Vec<String> {
+/// `port`, for the service `nerve-center` only, in every profile. Not for
+/// its program: the desktop app's program is the node's service's too, and
+/// a rule by program would let that one in on the port as well.
+pub fn firewall_args(port: u16) -> Vec<String> {
     vec![
         "advfirewall".into(),
         "firewall".into(),
@@ -228,7 +234,7 @@ pub fn firewall_args(program: &Path, port: u16) -> Vec<String> {
         format!("name={FIREWALL_RULE}"),
         "dir=in".into(),
         "action=allow".into(),
-        format!("program={}", program.display()),
+        format!("service={SERVICE_NAME}"),
         "protocol=TCP".into(),
         format!("localport={port}"),
         "profile=any".into(),
@@ -1139,10 +1145,13 @@ mod tests {
             "uses TLS with the center's self-signed certificate",
             "The Windows Firewall rule \"Nerve center\" lets in the node port only",
             "-LocalPort 7480",
-            &format!("-Program '{}'", l.bin.display()),
+            "-Service nerve-center",
+            // A rule `uninstall` removes with the center.
+            &format!("-DisplayName '{}'", PRINTED_RULES[0]),
         ] {
             assert!(out.contains(want), "{want}: {out}");
         }
+        assert!(!out.contains("-Program"), "{out}");
         // A new node port: the firewall rule follows it.
         sys.calls.borrow_mut().clear();
         let mut out = Vec::new();
@@ -1579,14 +1588,13 @@ mod tests {
         assert_eq!(node_port("#NERVE_CENTER_LISTEN=0.0.0.0:1\n"), 7443);
         assert_eq!(node_port("NERVE_CENTER_LISTEN=0.0.0.0:9443\n"), 9443);
         assert_eq!(node_port("NERVE_CENTER_LISTEN=[::]:9444\n"), 9444);
-        let args = firewall_args(
-            Path::new("C:\\Program Files\\Nerve\\nerve-center.exe"),
-            7443,
-        );
+        let args = firewall_args(7443);
         assert!(args.contains(&"dir=in".to_string()));
         assert!(args.contains(&"localport=7443".to_string()));
         assert!(args.contains(&"protocol=TCP".to_string()));
-        assert!(args.contains(&"program=C:\\Program Files\\Nerve\\nerve-center.exe".to_string()));
+        // For the service, never for its program.
+        assert!(args.contains(&"service=nerve-center".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("program=")));
         // No rule for the web UI's or MCP's ports, nor for every port.
         assert_eq!(
             args.iter().filter(|a| a.starts_with("localport=")).count(),

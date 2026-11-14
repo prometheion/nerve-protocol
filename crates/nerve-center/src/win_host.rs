@@ -13,7 +13,7 @@ use nerve_service::win::service::{self as svc, Settings, Spec};
 use nerve_transport::log::Level;
 
 use crate::service::Layout;
-use crate::winsvc::{ASIDE, FIREWALL_RULE, SERVICE_NAME, WinSystem, firewall_args};
+use crate::winsvc::{ASIDE, FIREWALL_RULE, PRINTED_RULES, SERVICE_NAME, WinSystem, firewall_args};
 
 /// A program of Windows itself, by its whole path: a program of that name
 /// in the folder this one started from (the downloads, as an administrator)
@@ -71,29 +71,19 @@ impl WinSystem for WinHost {
         svc::wait_running(SERVICE_NAME, &log.display().to_string())
     }
 
-    fn put_firewall(&self, layout: &Layout, port: u16) -> Result<(), String> {
-        let _ = self.delete_firewall()?;
-        netsh(&firewall_args(&layout.bin, port)).map(|_| ())
+    fn put_firewall(&self, _layout: &Layout, port: u16) -> Result<(), String> {
+        let _ = delete_rule(FIREWALL_RULE)?;
+        netsh(&firewall_args(port)).map(|_| ())
     }
 
     fn delete_firewall(&self) -> Result<bool, String> {
-        let name = format!("name={FIREWALL_RULE}");
-        // netsh says "No rules match" and fails where there is none.
-        let listed = std::process::Command::new(system_program("netsh.exe"))
-            .args(["advfirewall", "firewall", "show", "rule", &name])
-            .output()
-            .map_err(|e| format!("netsh: {e}"))?;
-        if !listed.status.success() {
-            return Ok(false);
+        let mut any = delete_rule(FIREWALL_RULE)?;
+        // The rules `set` printed for the web UI's and MCP's ports go with
+        // the center too.
+        for rule in PRINTED_RULES {
+            any |= delete_rule(rule)?;
         }
-        netsh(&[
-            "advfirewall".into(),
-            "firewall".into(),
-            "delete".into(),
-            "rule".into(),
-            name,
-        ])?;
-        Ok(true)
+        Ok(any)
     }
 
     fn put_event_source(&self, layout: &Layout) -> Result<(), String> {
@@ -143,6 +133,27 @@ fn output_of(program: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Runs `netsh` with `args`; its output, or an error with what it said.
+/// Removes the firewall rule `rule`; `false` when there was none.
+fn delete_rule(rule: &str) -> Result<bool, String> {
+    let name = format!("name={rule}");
+    // netsh says "No rules match" and fails where there is none.
+    let listed = std::process::Command::new(system_program("netsh.exe"))
+        .args(["advfirewall", "firewall", "show", "rule", &name])
+        .output()
+        .map_err(|e| format!("netsh: {e}"))?;
+    if !listed.status.success() {
+        return Ok(false);
+    }
+    netsh(&[
+        "advfirewall".into(),
+        "firewall".into(),
+        "delete".into(),
+        "rule".into(),
+        name,
+    ])?;
+    Ok(true)
+}
+
 fn netsh(args: &[String]) -> Result<String, String> {
     let o = std::process::Command::new(system_program("netsh.exe"))
         .args(args)
