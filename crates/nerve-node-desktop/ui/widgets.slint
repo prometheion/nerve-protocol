@@ -2338,20 +2338,27 @@ export component DetailsPane {
     // How far it moved down to stay in view: from where the page's visible
     // part starts, never above its own place nor below the list's end.
     property <length> follow: Shape.wide ? clamp(root.view-top + Space.lg - root.absolute-position.y, 0px, max(0px, root.height - root.tall)) : 0px;
-    scroll := ScrollView {
+    // Only details taller than their room scroll, with a thin bar of their
+    // own over the card's padding; the others take no wheel, so it scrolls
+    // the page.
+    property <bool> long: root.natural > root.tall + 1px;
+    flick := Flickable {
         y: root.follow;
         width: root.width;
         height: root.tall;
-        content-width: self.visible-width;
-        content-height: root.natural;
+        interactive: root.long;
+        viewport-width: self.width;
+        viewport-height: root.natural;
+        // One card, or a VerticalLayout of a few: a hidden part would
+        // still take the spacing of a layout.
         body := VerticalLayout {
-            width: scroll.visible-width;
+            width: flick.width;
             alignment: start;
-            spacing: Space.md;
             Reveal {
                 shown: !Shape.wide;
                 HorizontalLayout {
                     alignment: start;
+                    padding-bottom: Space.md;
                     Button {
                         text: "Back to the list";
                         icon: @image-url("icons/arrow-left.svg");
@@ -2364,6 +2371,21 @@ export component DetailsPane {
                 }
             }
             @children
+        }
+    }
+    if root.long: Rectangle {
+        x: root.width - 10px;
+        y: root.follow + Space.sm;
+        width: 6px;
+        height: root.tall - 2 * Space.sm;
+        border-radius: self.width / 2;
+        background: Theme.border;
+        Rectangle {
+            width: parent.width;
+            height: max(28px, parent.height * root.tall / max(1px, root.natural));
+            y: (parent.height - self.height) * (-flick.viewport-y / max(1px, root.natural - root.tall));
+            border-radius: self.width / 2;
+            background: Theme.text-faint.transparentize(0.3);
         }
     }
 }

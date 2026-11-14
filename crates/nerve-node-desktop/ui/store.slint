@@ -10,6 +10,15 @@ import {
 
 export global Store {
     in-out property <Page> page: Page.overview;
+    // Below 1100 px a page shows its list or a row's details (the list and
+    // details layout, Split in widgets.slint): whether the details are
+    // open. A page that opens starts with its list.
+    in-out property <bool> details-open;
+    // The row whose remove button asks before it removes ("" none), as
+    // "<what>:<which>", so one row asks at a time.
+    in-out property <string> asking;
+    // The center picked on Centers and the Overview, by its place.
+    in-out property <int> center-pick;
     in-out property <string> version;
     // The git ref of the user guide the Help links open: the release's tag
     // in a release build, `main` in any other.

@@ -1,204 +1,259 @@
-// Centers: the paired centers, pausing one, its settings grant, unpairing,
-// and pairing a new one (the dialog is in dialogs.slint).
+// Centers: the paired centers in a list, and the picked one's details:
+// pausing it, its new key, unpairing, its settings grant, and where its
+// rights are; pairing a new one (the dialog is in dialogs.slint).
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
-import { Load, CenterRow } from "data.slint";
-import { Store, Perm } from "store.slint";
+import { Page, Load, CenterRow } from "data.slint";
+import { Store, Perm, Caps } from "store.slint";
 import {
-    Button, ButtonKind, Card, Pill, IconTile, Banner, Loading, PageHeader, PageFrame,
-    EmptyState, Divider, Switch, Reveal, Fit,
+    Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Switch,
+    Reveal, Icon, StatusDot, Split, ListPane, DetailsPane, ListCard, ListGroup, ListItem, DetailCard,
+    Fact,
 } from "widgets.slint";
 
-component CenterCard inherits Card {
-    in property <CenterRow> item;
-    property <bool> waiting: Store.busy == root.item.name;
-    pad: 0;
-    gap: 0;
-    HorizontalLayout {
-        padding: Space.xl;
-        spacing: Space.lg;
+// The list of the paired centers: each one's state and mode on a second
+// line. The page keeps which is picked (Store.center-pick).
+export component CenterList inherits ListCard {
+    // On the Overview: a button to the Centers page in the head.
+    in property <bool> manage;
+    label: "Centers";
+    step(d) => {
+        Store.center-pick = Math.max(0, Math.min(Store.centers.length - 1, Store.center-pick + d));
+    }
+    ListGroup {
+        text: "Centers";
+        count: Store.centers.length;
+        if root.manage: Button {
+            text: "Manage";
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Store.show(Page.centers);
+            }
+        }
+    }
+    for c[i] in Store.centers: ListItem {
+        tall: true;
+        selected: i == Math.min(Store.center-pick, Store.centers.length - 1);
+        label: c.name;
+        clicked => {
+            Store.center-pick = i;
+            Store.details-open = true;
+        }
         VerticalLayout {
-            alignment: start;
-            IconTile {
-                icon: @image-url("icons/centers.svg");
-                tone: root.item.link-tone == Tone.neutral ? Tone.accent : root.item.link-tone;
-                size: 40px;
+            alignment: center;
+            StatusDot {
+                tone: c.link-tone;
             }
         }
         VerticalLayout {
-            spacing: 4px;
             horizontal-stretch: 1;
             alignment: center;
-            HorizontalLayout {
-                spacing: Space.sm;
-                Text {
-                    text: root.item.name;
-                    color: Theme.text;
-                    font-size: Type.heading;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    // A short name keeps its own width, so the pill sits
-                    // right after it.
-                    min-width: min(40px, self.preferred-width);
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        text: root.item.link;
-                        tone: root.item.link-tone;
-                        dot: true;
-                    }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
+            spacing: 1px;
+            Text {
+                text: c.name;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.semibold;
+                overflow: elide;
             }
             Text {
-                text: root.item.url;
+                text: c.link + " · " + c.mode;
                 color: Theme.text-muted;
                 font-size: Type.small;
-                font-family: Type.mono;
                 overflow: elide;
             }
         }
-        VerticalLayout {
-            alignment: start;
-            HorizontalLayout {
-                spacing: Space.sm;
-                Button {
-                    text: root.item.paused ? "Resume" : "Pause";
-                    icon: root.item.paused ? @image-url("icons/play.svg") : @image-url("icons/pause.svg");
-                    small: true;
-                    enabled: !root.waiting;
-                    clicked => {
-                        Store.center-pause(root.item.name, !root.item.paused);
-                    }
+    }
+}
+
+// One paired center: its link and buttons, its mode and settings grant,
+// and the pages of what it may do here. When the node does not answer, it
+// is what the node said last: greyed, and its buttons wait.
+export component CenterDetails inherits DetailCard {
+    in property <CenterRow> item;
+    in property <int> index;
+    property <bool> waiting: Store.busy == root.item.name;
+    property <bool> stale: Store.status-load == Load.failed;
+    opacity: root.stale ? 0.45 : 1;
+    FlexboxLayout {
+        spacing: Space.md;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                font-size: Type.title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+                overflow: elide;
+                min-width: min(80px, self.preferred-width);
+            }
+            VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: root.item.link;
+                    tone: root.item.link-tone;
+                    dot: true;
                 }
-                Button {
-                    text: "New key…";
-                    icon: @image-url("icons/key.svg");
-                    kind: ButtonKind.ghost;
-                    small: true;
-                    enabled: !root.waiting;
-                    clicked => {
-                        Store.center-rotate(root.item.name);
-                    }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            Button {
+                text: root.item.paused ? "Resume" : "Pause";
+                icon: root.item.paused ? @image-url("icons/play.svg") : @image-url("icons/pause.svg");
+                enabled: !root.waiting && !root.stale;
+                clicked => {
+                    Store.center-pause(root.item.name, !root.item.paused);
                 }
-                Button {
-                    text: "Unpair";
-                    icon: @image-url("icons/unlink.svg");
-                    kind: ButtonKind.danger-soft;
-                    small: true;
-                    enabled: !root.waiting;
-                    clicked => {
-                        Store.center-unpair(root.item.name);
-                    }
+            }
+            Button {
+                text: "New key…";
+                icon: @image-url("icons/key.svg");
+                kind: ButtonKind.ghost;
+                enabled: !root.waiting && !root.stale;
+                clicked => {
+                    Store.center-rotate(root.item.name);
+                }
+            }
+            Button {
+                text: "Unpair";
+                icon: @image-url("icons/unlink.svg");
+                kind: ButtonKind.danger-soft;
+                enabled: !root.waiting && !root.stale;
+                clicked => {
+                    Store.center-unpair(root.item.name);
                 }
             }
         }
     }
-    Divider { }
-    HorizontalLayout {
-        padding-left: Space.xl;
-        padding-right: Space.xl;
-        padding-top: Space.lg;
-        padding-bottom: Space.lg;
-        spacing: Space.xxl;
-        // Both halves start alike, so they share the width.
-        Rectangle {
-            horizontal-stretch: 1;
-            preferred-width: 200px;
-            min-width: 0;
+    Text {
+        text: root.item.url;
+        color: Theme.text-muted;
+        font-size: Type.small;
+        font-family: Type.mono;
+        wrap: char-wrap;
+    }
+    Reveal {
+        shown: root.item.note != "";
+        Banner {
+            tone: root.item.note-tone;
+            text: root.item.note;
+        }
+    }
+    VerticalLayout {
+        padding-top: Space.xs;
+        spacing: Space.lg;
+        Fact {
+            label: "Mode";
             VerticalLayout {
-                spacing: 4px;
-                alignment: start;
-                Text {
-                    text: "Mode";
-                    color: Theme.text-muted;
-                    font-size: Type.caption;
-                    font-weight: Type.semibold;
-                }
+                horizontal-stretch: 1;
+                spacing: 2px;
                 Text {
                     text: root.item.mode;
                     color: Theme.text;
                     font-size: Type.body;
-                    font-weight: Type.medium;
+                    font-weight: Type.semibold;
                 }
                 Text {
                     text: root.item.mode-detail;
                     color: Theme.text-muted;
-                    font-size: Type.caption;
+                    font-size: Type.small;
                     wrap: word-wrap;
                 }
             }
-        }
-        Rectangle {
-            width: 1px;
-            background: Theme.border;
-        }
-        Rectangle {
-            horizontal-stretch: 1;
-            preferred-width: 200px;
-            min-width: 0;
-            HorizontalLayout {
-                spacing: Space.md;
-                VerticalLayout {
-                    spacing: 4px;
-                    alignment: start;
-                    horizontal-stretch: 1;
-                    Text {
-                        text: "Settings grant";
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        font-weight: Type.semibold;
-                    }
-                    Text {
-                        text: root.item.settings-write ? "May change settings" : "Cannot change settings";
-                        color: Theme.text;
-                        font-size: Type.body;
-                        font-weight: Type.medium;
-                    }
-                    Text {
-                        text: !root.item.settings-write ? "Only you change what it may do."
-                            : Perm.owner-is-root ? "Up to user mode, which runs as root on this node."
-                            : "Up to user mode and sudo.";
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        wrap: word-wrap;
+            VerticalLayout {
+                alignment: center;
+                Button {
+                    text: "Change";
+                    small: true;
+                    enabled: !root.stale;
+                    clicked => {
+                        Perm.pick(root.index);
+                        Store.show(Page.policy);
                     }
                 }
-                VerticalLayout {
-                    alignment: center;
-                    Switch {
-                        checked: root.item.settings-write;
-                        enabled: !root.waiting;
-                        label: "Settings grant of " + root.item.name;
-                        toggled(on) => {
-                            Store.center-grant(root.item.name, on);
-                        }
+            }
+        }
+        Fact {
+            label: "Settings grant";
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: root.item.settings-write ? "May change settings" : "Cannot change settings";
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: Type.semibold;
+                }
+                Text {
+                    text: !root.item.settings-write ? "Only you change what it may do."
+                        : Perm.owner-is-root ? "Up to user mode, which runs as root on this node."
+                        : "Up to user mode and sudo.";
+                    color: Theme.text-muted;
+                    font-size: Type.small;
+                    wrap: word-wrap;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Switch {
+                    checked: root.item.settings-write;
+                    enabled: !root.waiting && !root.stale;
+                    label: "Settings grant of " + root.item.name;
+                    toggled(on) => {
+                        Store.center-grant(root.item.name, on);
                     }
                 }
             }
         }
     }
-    Reveal {
-        shown: root.item.note != "";
-        VerticalLayout {
-            padding-left: Space.xl;
-            padding-right: Space.xl;
-            padding-bottom: Space.lg;
-            Banner {
-                tone: root.item.note-tone;
-                text: root.item.note;
+    VerticalLayout {
+        spacing: Space.xs;
+        Text {
+            text: "What it may do here";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.xs;
+            Button {
+                text: "Permissions";
+                icon: @image-url("icons/arrow-right.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                enabled: !root.stale;
+                clicked => {
+                    Perm.pick(root.index);
+                    Store.show(Page.policy);
+                }
+            }
+            Button {
+                text: "Capabilities";
+                icon: @image-url("icons/arrow-right.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                enabled: !root.stale;
+                clicked => {
+                    Caps.pick(root.index);
+                    Store.show(Page.capabilities);
+                }
             }
         }
     }
 }
 
 export component CentersPage inherits PageFrame {
-    property <bool> stale: Store.status-load == Load.failed;
+    property <int> pick: Math.max(0, Math.min(Store.center-pick, Store.centers.length - 1));
     gap: 0;
+    init => {
+        Store.details-open = false;
+    }
     PageHeader {
         icon: @image-url("icons/centers.svg");
         title: "Centers";
@@ -248,11 +303,9 @@ export component CentersPage inherits PageFrame {
         }
     }
 
-    // When the node does not answer (a node.toml it refuses, say), the
-    // cards are what it said last: greyed, and their buttons wait.
     Reveal {
         shown: Store.status.pairings-warning != "";
-        gap: Space.xxl;
+        gap: Space.xl;
         Banner {
             tone: Tone.warn;
             title: "The pairings are not kept apart";
@@ -261,32 +314,35 @@ export component CentersPage inherits PageFrame {
     }
 
     Reveal {
+        shown: Store.centers.length > 0 && Store.status-load == Load.failed;
+        gap: Space.xl;
+        Text {
+            text: "Last known state: the node does not answer.";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+
+    Reveal {
         shown: Store.centers.length > 0;
-        gap: Space.xxl;
-        VerticalLayout {
-            Reveal {
-                shown: root.stale;
-                Text {
-                    text: "Last known state: the node does not answer.";
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    wrap: word-wrap;
-                }
-                Rectangle {
-                    height: Space.md;
-                }
+        gap: Space.xl;
+        Split {
+            ListPane {
+                open: Store.details-open;
+                CenterList { }
             }
-            Rectangle {
-                opacity: root.stale ? 0.45 : 1;
-                VerticalLayout {
-                    spacing: Space.xxl;
-                    for c in Store.centers: Fit {
-                        CenterCard {
-                            item: c;
-                        }
-                    }
+            DetailsPane {
+                open: Store.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Store.details-open = false;
                 }
-                if root.stale: TouchArea { }
+                CenterDetails {
+                    item: Store.centers[root.pick];
+                    index: root.pick;
+                }
             }
         }
     }
