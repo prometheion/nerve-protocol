@@ -2490,7 +2490,8 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split('}').next())
             .unwrap();
-        assert!(shown.trim_start().starts_with("Text {"), "{shown}");
+        let body = shown.trim_start().trim_start_matches("gap: Space.md;");
+        assert!(body.trim_start().starts_with("Text {"), "{shown}");
         assert!(shown.contains("text: root.unit.command;"), "{shown}");
         assert!(shown.contains("wrap: char-wrap;"), "{shown}");
     }

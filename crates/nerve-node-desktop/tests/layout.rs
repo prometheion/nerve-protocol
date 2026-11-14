@@ -185,6 +185,25 @@ fn finds_wrapping_text_in_an_if() {
     assert_eq!(wrapping_ifs(source), vec![2]);
 }
 
+/// The pages, each with one scroll for the whole page (#231): no list in a
+/// box that scrolls on its own.
+#[test]
+fn no_page_scrolls_a_list_of_its_own() {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    for page in [
+        "overview", "centers", "relay", "permissions", "capabilities", "audit", "log", "settings",
+        "help",
+    ] {
+        let source = std::fs::read_to_string(ui.join(format!("{page}.slint"))).unwrap();
+        for scroller in ["ScrollBox", "ScrollView", "Flickable", "ListView"] {
+            assert!(
+                !source.contains(scroller),
+                "{page}.slint scrolls in a {scroller} of its own"
+            );
+        }
+    }
+}
+
 /// Draws the probe page `width` by `height` and lets its changes settle.
 fn at(screen: &Screen, width: u32, height: u32) {
     screen.resize(width, height);
@@ -193,8 +212,8 @@ fn at(screen: &Screen, width: u32, height: u32) {
     }
 }
 
-/// The list and its details at the window's sizes: side by side from 1100
-/// px, in turns below it with Back to the list, the details in view while
+/// The list and its details at the window's sizes (1440x900, 2200x1200,
+/// 1024x700 and 900x580): side by side from 1100 px, in turns below it with Back to the list, the details in view while
 /// the page scrolls a long list, a third pane from 1800 px, the page's cap,
 /// the switch above a list wrapping where it is narrow, and one tree for
 /// every size.
@@ -239,12 +258,12 @@ fn the_list_and_its_details_follow_the_window() {
 
     // A large window adds the third pane; the page keeps margins past its
     // cap.
-    at(&screen, 2600, 1200);
+    at(&screen, 2200, 1200);
     // Its 380 px and the gap to the details.
     assert_eq!(window.get_side_width(), 396.0, "no third pane from 1800 px");
     assert!(
         window.get_split_width() > 1900.0 && window.get_split_width() <= 2000.0,
-        "the page is {} wide in a window of 2600",
+        "the page is {} wide in a window of 2200",
         window.get_split_width()
     );
 
@@ -279,6 +298,13 @@ fn the_list_and_its_details_follow_the_window() {
         }
     }
     assert!(back.get(), "no Back to the list above the details");
+    // The app's least window: the same.
+    at(&screen, 900, 580);
+    assert!(!window.get_list_shown() && window.get_details_shown());
+    window.set_open(false);
+    screen.draw();
+    assert!(window.get_list_shown() && !window.get_details_shown());
+    assert!(window.get_list_width() > 800.0, "the list does not fill the page");
 
     // The switch above a list takes a second line where it is narrow.
     let one = window.get_switch_height();

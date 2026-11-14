@@ -733,14 +733,13 @@ mod tests {
     fn every_place_in_the_app_is_there() {
         let texts = ui_texts();
         let settings = include_str!("../ui/settings.slint");
+        // The sections of Settings, in their list's order.
         let tabs: Vec<&str> = settings
             .lines()
-            .find_map(|l| l.trim().strip_prefix("tabs: ["))
-            .unwrap()
-            .trim_end_matches("];")
-            .split(", ")
-            .map(|t| t.trim_matches('"'))
+            .filter_map(|l| l.trim().strip_prefix("{ name: \""))
+            .filter_map(|l| l.split('"').next())
             .collect();
+        assert_eq!(tabs.len(), 7, "{tabs:?}");
         let pages = [
             (Page::Overview, "Overview"),
             (Page::Centers, "Centers"),
