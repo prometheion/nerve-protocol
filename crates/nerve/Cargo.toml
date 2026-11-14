@@ -17,6 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 nerve-node.workspace = true
+# The center, whose command line the program runs behind `__center` and
+# by the name `nerve-center` (src/main.rs).
+nerve-center.workspace = true
 slint.workspace = true
 serde_json.workspace = true
 

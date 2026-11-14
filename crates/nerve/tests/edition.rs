@@ -36,3 +36,34 @@ fn the_app_called_nerve_node_is_the_app() {
     let program = PathBuf::from(v["service"]["program"].as_str().unwrap());
     assert_eq!(program.file_stem().unwrap(), "nerve", "{v}");
 }
+
+/// The app runs the center's command line behind its hidden word, and by
+/// the terminal name `nerve-center` (a link to it): there it is the center,
+/// not the window, also without arguments' help. `nerve-node` without
+/// arguments is the node's command line, not the window.
+#[test]
+fn the_app_is_the_center_behind_its_word_and_by_its_terminal_name() {
+    let d = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_nerve"));
+    let state = d.path().join("state");
+    let status = |program: &Path, first: &[&str]| -> serde_json::Value {
+        let mut args: Vec<&str> = first.to_vec();
+        args.extend(["--json", "status", "--state-dir", state.to_str().unwrap()]);
+        serde_json::from_str(&said(program, &args)).unwrap()
+    };
+    // The center's own `status --json` answer: messages, and whether it is
+    // installed, which the node's status does not say.
+    let v = status(exe, &["__center"]);
+    assert_eq!(v["installed"], false, "{v}");
+    assert!(v["messages"].is_array(), "{v}");
+    let center = link(exe, d.path(), "nerve-center");
+    let v = status(&center, &[]);
+    assert_eq!(v["installed"], false, "{v}");
+    // The center's help names its commands.
+    let help = said(&center, &["--help"]);
+    assert!(help.contains("owner-token"), "{help}");
+    let node = link(exe, d.path(), "nerve-node");
+    let o = Command::new(&node).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout) + String::from_utf8_lossy(&o.stderr);
+    assert!(text.contains("--help` lists every command"), "{text}");
+}

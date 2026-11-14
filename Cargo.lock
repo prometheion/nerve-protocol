@@ -3150,6 +3150,7 @@ name = "nerve"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "nerve-center",
  "nerve-conformance",
  "nerve-node",
  "nerve-policy",

@@ -25,12 +25,32 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // This program is the desktop app's edition of the node: installed as
-    // nerve, with its menu entry and link handler.
+    // This program is the app's edition of the node: installed as nerve,
+    // with its menu entry and link handler; and of the center, which it
+    // runs behind its hidden word.
     nerve_node::edition::set(&nerve::parts::EDITION);
+    nerve_center::edition::set(&nerve_center::edition::APP);
     // Not `args()`: a path for the CLI need not be UTF-8.
+    let argv0 = std::env::args_os().next();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let words: Vec<Option<&str>> = args.iter().map(|a| a.to_str()).collect();
+    // The center's command line: behind the hidden word, or started by its
+    // terminal name, a link to this program (Linux).
+    match nerve::started_as(argv0.as_deref(), words.first().copied().flatten()) {
+        nerve::StartedAs::Center { skip } => {
+            let argv = std::iter::once(std::ffi::OsString::from(
+                nerve_center::edition::TERMINAL_NAME,
+            ))
+            .chain(args.into_iter().skip(skip))
+            .collect();
+            std::process::exit(match nerve_center::entry::main(argv) {
+                c if c == std::process::ExitCode::SUCCESS => 0,
+                _ => 1,
+            });
+        }
+        nerve::StartedAs::Node => std::process::exit(nerve_node::entry::main()),
+        nerve::StartedAs::App => {}
+    }
     // The elevated broker of the app (nerve::broker), started by
     // the app itself.
     if words.first() == Some(&Some(nerve::broker::ARG)) {

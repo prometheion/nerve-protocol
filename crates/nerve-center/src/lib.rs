@@ -20,6 +20,8 @@ pub mod catalog;
 pub mod center;
 pub mod checker;
 pub mod config;
+pub mod edition;
+pub mod entry;
 pub mod holder;
 pub mod jobs;
 pub mod json;

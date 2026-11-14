@@ -106,8 +106,10 @@ impl WinSystem for WinHost {
         output_of(program, &["--version"])
     }
 
-    fn settings_of(&self, program: &Path) -> Result<String, String> {
-        output_of(program, &[nerve_service::SERVICE_FILES])
+    fn settings_of(&self, program: &Path, word: Option<&str>) -> Result<String, String> {
+        let mut args: Vec<&str> = word.into_iter().collect();
+        args.push(nerve_service::SERVICE_FILES);
+        output_of(program, &args)
     }
 
     fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String> {

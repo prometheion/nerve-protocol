@@ -915,6 +915,7 @@ mod tests {
             settings_dir: d.path().join("etc"),
             release: String::new(),
             run: d.path().join("run"),
+            word: None,
         };
         // Nothing is installed: no command, whatever the folder.
         assert_eq!(start_after(&l, &l.state, false), None);

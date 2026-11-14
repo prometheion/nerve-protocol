@@ -134,6 +134,10 @@ pub struct Program<'a> {
     pub unit: &'a str,
     /// What makes the service again where its user is missing.
     pub install: &'a str,
+    /// The hidden first word the program needs before `service-files` and
+    /// the service's command line: the app's `__center`, where the app runs
+    /// the center.
+    pub word: Option<&'a str>,
     /// What `<program> service-files` is asked besides that word: what the
     /// service's files depend on here (the node's owner, the polkit found).
     pub files_args: Vec<String>,
@@ -313,7 +317,8 @@ pub async fn update(
         // was made for, not under what the installed one wrote. Root asks
         // for them, not the service's user: the files root writes must not
         // come from a process that the service's other processes can reach.
-        let mut args = vec![SERVICE_FILES];
+        let mut args: Vec<&str> = p.word.into_iter().collect();
+        args.push(SERVICE_FILES);
         args.extend(p.files_args.iter().map(String::as_str));
         let want = sys
             .output_of(from_program, None, &args)
@@ -713,6 +718,7 @@ mod tests {
 
     fn program(at: &At) -> Program<'_> {
         Program {
+            word: None,
             name: "svc",
             bin: &at.bin,
             release: "https://releases.invalid",

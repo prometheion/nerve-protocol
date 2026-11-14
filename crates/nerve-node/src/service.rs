@@ -1947,6 +1947,7 @@ async fn update_steps(
         mark: USER_MARK,
         unit: UNIT_NAME,
         install: &install,
+        word: None,
         files_args,
         places: service_places(layout),
         before_restart: &|steps| {

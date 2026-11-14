@@ -84,9 +84,10 @@ pub trait WinSystem {
     /// What `<program> --version` prints, run without the administrators'
     /// rights.
     fn version_of(&self, program: &Path) -> Result<String, String>;
-    /// What `<program> service-files` prints, run so too: the settings of
-    /// its service ([`service_settings`]).
-    fn settings_of(&self, program: &Path) -> Result<String, String>;
+    /// What `<program> service-files` prints (after the app's hidden
+    /// `word`), run so too: the settings of its service
+    /// ([`service_settings`]).
+    fn settings_of(&self, program: &Path, word: Option<&str>) -> Result<String, String>;
     /// Gives the registered service `name` the settings `s`
     /// (nerve_service::win::service::configure).
     fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String>;
@@ -153,11 +154,13 @@ fn home(layout: &Layout) -> PathBuf {
         .map_or_else(|| layout.state.clone(), Path::to_path_buf)
 }
 
-/// The command line the service control manager starts.
+/// The command line the service control manager starts: the app's
+/// program with its hidden word first (crate::edition).
 pub fn command_line(layout: &Layout) -> String {
     format!(
-        "\"{}\" service --state-dir \"{}\"",
+        "\"{}\" {}service --state-dir \"{}\"",
         layout.bin.display(),
+        layout.word.map(|w| format!("{w} ")).unwrap_or_default(),
         layout.state.display()
     )
 }
@@ -340,7 +343,10 @@ pub fn install(
     clean_aside(&layout.bin, ASIDE);
     // As Linux puts the program in /usr/local/bin: found by name in a
     // terminal opened after the install, and by a harness that starts it.
-    if let Some(dir) = layout.bin.parent()
+    // Not the app's: Windows has no terminal for it, and harnesses reach its
+    // center over HTTP MCP.
+    if layout.word.is_none()
+        && let Some(dir) = layout.bin.parent()
         && sys.put_on_path(dir)?
     {
         steps.did(format!(
@@ -490,7 +496,8 @@ pub fn uninstall(
             sys.remove_program(&left)?;
         }
     }
-    if layout.bin.exists() {
+    // The app's program stays: the app goes with its own uninstall.
+    if layout.word.is_none() && layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
         } else {
@@ -500,7 +507,8 @@ pub fn uninstall(
             ));
         }
     }
-    if let Some(dir) = layout.bin.parent()
+    if layout.word.is_none()
+        && let Some(dir) = layout.bin.parent()
         && sys.remove_from_path(dir)?
     {
         steps.did(format!("took {} off the machine's Path", dir.display()));
@@ -541,7 +549,7 @@ pub async fn update(
     let version = sys
         .version_of(&layout.bin)
         .ok()
-        .and_then(|said| nerve_service::Version::parse_of(SERVICE_NAME, &said))
+        .and_then(|said| nerve_service::Version::parse_of(crate::edition::get().program, &said))
         .map(|v| v.to_string());
     let page = done_page(layout, &file, None, version.as_deref(), started);
     let _ = write!(
@@ -559,7 +567,7 @@ async fn update_steps(
     steps: &mut Steps<'_>,
 ) -> Result<bool, String> {
     let p = nerve_service::win::update::Program {
-        name: SERVICE_NAME,
+        name: crate::edition::get().program,
         bin: &layout.bin,
         release: &layout.release,
         asset: crate::service::asset_name(),
@@ -591,7 +599,7 @@ impl nerve_service::win::update::Installed for Machine<'_> {
         self.sys.version_of(program)
     }
     fn settings_of(&self, program: &Path, _: &[String]) -> Result<String, String> {
-        self.sys.settings_of(program)
+        self.sys.settings_of(program, self.layout.word)
     }
     fn configure(&self, name: &str, s: &Settings) -> Result<(), String> {
         self.sys.configure_service(name, s)
@@ -838,7 +846,8 @@ mod tests {
             Ok(first.trim().replace(" broken", ""))
         }
         /// Its second line, where it has one; else what this build says.
-        fn settings_of(&self, program: &Path) -> Result<String, String> {
+        fn settings_of(&self, program: &Path, word: Option<&str>) -> Result<String, String> {
+            let _ = word;
             let said = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
             Ok(said
                 .lines()
@@ -872,7 +881,45 @@ mod tests {
             settings_dir: root.join("ProgramData/nerve-center/settings"),
             release: "http://127.0.0.1:1/none".into(),
             run: root.join("ProgramData/nerve-center/run"),
+            word: None,
         }
+    }
+
+    /// The app's center: the service starts the app's program with its
+    /// hidden word, its install puts no folder on the machine's Path, and
+    /// its uninstall leaves the app's program.
+    #[test]
+    fn the_app_s_center_runs_the_app_behind_its_word() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("Program Files/Nerve/nerve.exe");
+        l.word = Some(crate::edition::APP_WORD);
+        assert_eq!(
+            command_line(&l),
+            format!(
+                "\"{}\" __center service --state-dir \"{}\"",
+                l.bin.display(),
+                l.state.display()
+            )
+        );
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        install(&l, &sys, &l.bin, &[], &mut Vec::new()).unwrap();
+        assert!(
+            !sys.calls().iter().any(|c| c.starts_with("put_on_path")),
+            "{:?}",
+            sys.calls()
+        );
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(l.bin.is_file(), "the app's program stays");
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| c.starts_with("remove_from_path")),
+            "{:?}",
+            sys.calls()
+        );
     }
 
     /// A downloaded "program" that says `version`.
