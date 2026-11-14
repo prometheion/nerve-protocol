@@ -16,6 +16,8 @@ use crate::{HelpArg, Page, RefGroup, RefRow, RefVerb};
 pub type Place = (Option<Page>, i32, &'static str);
 
 const NOT_HERE: Place = (None, -1, "");
+/// Where the app turns the web UI on and off and makes its tokens.
+const WEB_UI: Place = (Some(Page::Settings), 2, "Settings › Network › Web UI");
 
 /// The app's part of each command: its words after `nerve-node`, an
 /// example, and where the app does the same.
@@ -154,14 +156,14 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         "nerve-node relay",
         (Some(Page::Relay), -1, "Relay"),
     ),
-    // The web UI is the node's other way in from a browser; the app does
-    // not switch it.
-    ("ui", "nerve-node ui", NOT_HERE),
-    ("ui on", "nerve-node ui on", NOT_HERE),
-    ("ui off", "nerve-node ui off", NOT_HERE),
-    ("ui token add", "nerve-node ui token add laptop", NOT_HERE),
-    ("ui token", "nerve-node ui token", NOT_HERE),
-    ("ui token rm", "nerve-node ui token rm laptop", NOT_HERE),
+    // The web UI is the node's other way in from a browser, on this
+    // machine; beyond it is the terminal's (an administrator's on Windows).
+    ("ui", "nerve-node ui", WEB_UI),
+    ("ui on", "nerve-node ui on", WEB_UI),
+    ("ui off", "nerve-node ui off", WEB_UI),
+    ("ui token add", "nerve-node ui token add laptop", WEB_UI),
+    ("ui token", "nerve-node ui token", WEB_UI),
+    ("ui token rm", "nerve-node ui token rm laptop", WEB_UI),
     (
         "mode",
         "nerve-node mode folder --center lab",

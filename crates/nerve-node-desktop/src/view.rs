@@ -677,6 +677,47 @@ pub fn relay_token(said: &Value) -> (String, String) {
     (text, s(&t["link"]).to_string())
 }
 
+/// The node's web UI as `ui --json` says it (`said["ui"]`): where it
+/// listens (empty while it is off), what the node says of it, and the
+/// labels of its tokens.
+pub fn web_ui(said: &Value) -> (String, String, Vec<String>) {
+    let ui = &said["ui"];
+    let tokens = ui["tokens"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["label"].as_str().map(str::to_string))
+        .collect();
+    (
+        s(&ui["listen"]).to_string(),
+        s(&ui["status"]).to_string(),
+        tokens,
+    )
+}
+
+/// A label for a new token of the web UI that `tokens` does not hold yet:
+/// `app-1`, `app-2`, … (the CLI's rule: a-z, 0-9 and -).
+pub fn web_ui_label(tokens: &[String]) -> String {
+    (1..)
+        .map(|n| format!("app-{n}"))
+        .find(|l| !tokens.contains(l))
+        .expect("a free label")
+}
+
+/// The token a `ui on` or `ui token add` answer shows once
+/// (`said["token"]`), in the app's words, and the token to copy.
+pub fn web_ui_token(said: &Value) -> Option<(String, String)> {
+    let t = &said["token"];
+    let token = t["token"].as_str()?;
+    Some((
+        format!(
+            "The token {} logs in to the node's web UI. Keep it in your password manager: it is shown only now.",
+            s(&t["label"])
+        ),
+        token.to_string(),
+    ))
+}
+
 /// What `restore` did (`said["restored"]`), in the app's words: the
 /// centers, what to pair again, and what to set again and where. `started`
 /// says what became of the node: the app started it again, or it waits.
@@ -1751,6 +1792,35 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The web UI's state, a free label for a new token, and the token an
+    /// answer shows once.
+    #[test]
+    fn the_web_ui_reads_as_the_cli_says_it() {
+        let said = serde_json::json!({"messages": [], "ui": {
+            "listen": "127.0.0.1:7470", "status": "listening",
+            "tokens": [{"label": "first", "made": ""}, {"label": "app-1", "made": ""}]}});
+        let (listen, status, tokens) = super::web_ui(&said);
+        assert_eq!(
+            (listen.as_str(), status.as_str()),
+            ("127.0.0.1:7470", "listening")
+        );
+        assert_eq!(tokens, ["first", "app-1"]);
+        assert_eq!(super::web_ui_label(&tokens), "app-2");
+        // Off.
+        let (listen, _, tokens) = super::web_ui(&serde_json::json!({"ui": {"listen": null}}));
+        assert!(listen.is_empty() && tokens.is_empty());
+        let (text, copy) = super::web_ui_token(
+            &serde_json::json!({"token": {"label": "app-2", "token": "nui_x"}}),
+        )
+        .unwrap();
+        assert_eq!(copy, "nui_x");
+        assert!(
+            text.contains("app-2") && text.contains("shown only now"),
+            "{text}"
+        );
+        assert!(super::web_ui_token(&serde_json::json!({"messages": []})).is_none());
+    }
+
     /// The app asks for the owner's Windows password only where the node
     /// has none that works; a node that says nothing of it needs none.
     #[test]

@@ -1,5 +1,6 @@
 //! `nerve-node ui`: the node's web UI (crate::webui, docs/dev/web-uis.md).
-//! It is part of the installed node on Linux and off by default; these
+//! It is part of the installed node, on Linux and Windows, and off by
+//! default; these
 //! commands turn it on and off and make, list and revoke the tokens that log
 //! in to it. The running node takes each change at once, as it takes the
 //! relay's. Tokens are made here only: a browser session must not be able to
@@ -15,10 +16,26 @@ pub const UI_ADDRESS: &str = "127.0.0.1:7470";
 /// The label of the token `ui on` makes when there is none yet.
 const FIRST_TOKEN: &str = "first";
 
-/// Why there is no `ui` on Windows: the desktop app is the node's UI there
-/// (#176).
-pub const NO_WEB_UI_HERE: &str =
-    "the node has no web UI on Windows: the desktop app is its UI there";
+/// Who holds the web UI's address `at`: the installed node's service, or
+/// another program that took the port while the node was stopped. The app
+/// asks it before it opens the web UI, whose login a password manager would
+/// fill there (nerve_service::holder).
+pub fn holder(at: std::net::SocketAddr) -> Result<nerve_service::holder::Holder, String> {
+    nerve_service::holder::of(
+        at,
+        nerve_service::holder::Service {
+            account: crate::service::USER,
+            name: crate::winsvc::SERVICE_NAME,
+        },
+    )
+}
+
+/// Whether `at` (as `ui on --listen` takes it) is beyond loopback: on
+/// Windows that is an administrator's step (crate::owner::refused).
+pub fn beyond_loopback(at: &str) -> bool {
+    at.parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| !a.ip().to_canonical().is_loopback())
+}
 
 /// Why `ui on` is refused for a node that is not the installed one.
 fn only_installed() -> String {
@@ -94,9 +111,6 @@ pub(super) async fn ui_cmd(
     c: Option<UiCmd>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    if cfg!(windows) {
-        return Err(NO_WEB_UI_HERE.into());
-    }
     if crate::owner::via_web() && !allowed_from_the_web(&c) {
         return Err(crate::owner::NOT_FROM_THE_WEB.into());
     }
@@ -175,11 +189,19 @@ pub(super) async fn ui_cmd(
                 if cert.made && now.ui.pin.is_some() {
                     w(out, "every session of the old certificate ends".into());
                 }
+                // No terminal on Windows: the rule, by the node's service.
                 w(
                     out,
-                    format!(
-                        "the web UI can now be reached from the network; to keep it on this machine, run `nerve-node ui on` (loopback) and reach it with `ssh -L 7470:{UI_ADDRESS} <you>@<this machine>`"
-                    ),
+                    match cfg!(windows) {
+                        true => format!(
+                            "other machines reach it once a Windows Firewall rule lets them in: for the service {} and port {}, not for the program",
+                            crate::winsvc::SERVICE_NAME,
+                            addr.port()
+                        ),
+                        false => format!(
+                            "the web UI can now be reached from the network; to keep it on this machine, run `nerve-node ui on` (loopback) and reach it with `ssh -L 7470:{UI_ADDRESS} <you>@<this machine>`"
+                        ),
+                    },
                 );
                 json::also(
                     "certificate",
@@ -377,16 +399,10 @@ fn made_text(made: &str) -> &str {
 /// The web UI's state as the running node tells it (`status`): `None` when
 /// no node runs.
 async fn live_ui(paths: &NodePaths) -> Result<Option<Value>, String> {
-    #[cfg(unix)]
-    match nerve_transport::ctl::call(&paths.ctl_socket(), "status", json!({})).await {
+    match node_call(paths, "status", json!({})).await {
         Ok(v) => Ok(Some(v["ui"].clone())),
         Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(None),
         Err(e) => Err(e),
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = paths;
-        Ok(None)
     }
 }
 

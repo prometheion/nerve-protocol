@@ -410,6 +410,68 @@ export component SettingsPage inherits PageFrame {
                     }
                 }
             }
+            // The node's own web UI, on this machine: off until it is
+            // turned on here, and every browser logs in with a token.
+            Group {
+                icon: @image-url("icons/globe.svg");
+                title: "Web UI";
+                text: Prefs.ui-listen == "" ? "Off. On, a browser on this machine opens the node's pages and logs in with a token."
+                    : "On at " + Prefs.ui-listen + (Prefs.ui-status != "" && Prefs.ui-status != "listening" ? ": " + Prefs.ui-status : "") + ". A browser logs in with a token.";
+                more: "Only you reach it from this machine; other accounts and the commands of the centers do not. Open it from here: the app checks first that the node holds its port.";
+                VerticalLayout {
+                    spacing: Space.sm;
+                    for label in Prefs.ui-tokens: HorizontalLayout {
+                        spacing: Space.md;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Token " + label;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Revoke";
+                            kind: ButtonKind.danger-soft;
+                            small: true;
+                            clicked => {
+                                Prefs.ui-token-rm(label);
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Space.sm;
+                        padding-top: Space.sm;
+                        Button {
+                            text: "Open";
+                            small: true;
+                            visible: Prefs.ui-listen != "";
+                            clicked => {
+                                Prefs.ui-open();
+                            }
+                        }
+                        Button {
+                            text: "New token";
+                            small: true;
+                            visible: Prefs.ui-listen != "";
+                            clicked => {
+                                Prefs.ui-token-add();
+                            }
+                        }
+                        Button {
+                            text: Prefs.ui-listen == "" ? "Turn on" : "Turn off";
+                            small: true;
+                            clicked => {
+                                if Prefs.ui-listen == "" {
+                                    Prefs.ui-on();
+                                } else {
+                                    Prefs.ui-off();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
         }
     }

@@ -9,6 +9,9 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use super::{Choose, Ctl, Pending};
 use crate::{Limit, Load, Pick, Prefs, Tone, view};
 
+/// What the dialog of a new web UI token says under it.
+const WEB_UI_NOTE: &str = "It is shown only now.";
+
 /// The words of `log.level`, as Settings' choice orders them.
 const LOG_LEVELS: [&str; 4] = ["error", "warn", "info", "debug"];
 
@@ -213,15 +216,24 @@ impl Ctl {
                         r.run(&["config", "get", "limits"]),
                         r.run(&["config", "get", "log.level"]),
                         r.run(&["config", "get", "machine.shell"]),
+                        r.run(&["ui"]),
                     ),
                 )
             },
-            |c, ((name, storage, proxy, relay, account), (limits, level, shell))| {
+            |c, ((name, storage, proxy, relay, account), (limits, level, shell, ui))| {
                 // Not set: the default, which the CLI leaves out.
                 let value =
                     |v: Result<Value, String>| v.map(|v| v["value"].clone()).unwrap_or_default();
                 let level = value(level);
                 let shell = value(shell);
+                // A node run by hand serves no web UI: it reads as off.
+                let (listen, status, tokens) = ui.map(|v| view::web_ui(&v)).unwrap_or_default();
+                c.with_prefs(|p| {
+                    p.set_ui_listen(listen.into());
+                    p.set_ui_status(status.into());
+                    let tokens: Vec<SharedString> = tokens.into_iter().map(Into::into).collect();
+                    p.set_ui_tokens(ModelRc::new(VecModel::from(tokens)));
+                });
                 let set = json!({
                     "limits": value(limits),
                     "relay": relay.as_ref().cloned().unwrap_or_default(),
@@ -701,6 +713,60 @@ impl Ctl {
             }
             Err(e) => failed(c, e),
         });
+    }
+
+    /// A web UI change whose answer may hold a token shown once: the first
+    /// of `ui on`, a new one of `ui token add`.
+    fn web_ui_change(self: &Rc<Self>, args: Vec<String>) {
+        self.command(args, None, move |c, answer| {
+            match answer {
+                Ok(v) => match view::web_ui_token(&v) {
+                    Some((text, token)) => {
+                        c.show_once("A token for the web UI", WEB_UI_NOTE, &text, &token)
+                    }
+                    None => c.done(&v, String::new()),
+                },
+                Err(e) => c.toast(e, Tone::Danger),
+            }
+            c.prefs_load();
+        });
+    }
+
+    /// Opens the web UI in the browser, once the node's service is found to
+    /// hold its port: a program that took it while the node was stopped
+    /// would get the login, and the token a password manager fills there.
+    fn web_ui_open(self: &Rc<Self>) {
+        let listen = self
+            .with_prefs(|p| p.get_ui_listen().to_string())
+            .unwrap_or_default();
+        let Ok(at) = listen.parse::<std::net::SocketAddr>() else {
+            return self.toast(format!("{listen:?} is not an address"), Tone::Danger);
+        };
+        // Every address of this machine is reached on its loopback one.
+        let ip = match at.ip() {
+            std::net::IpAddr::V4(v4) if v4.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::IpAddr::V6(v6) if v6.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+            ip => ip,
+        };
+        let at = std::net::SocketAddr::new(ip, at.port());
+        use nerve_node::holder::Holder;
+        let said = match nerve_node::cli::ui::holder(at) {
+            Ok(Holder::Service) => {
+                let scheme = if ip.is_loopback() { "http" } else { "https" };
+                crate::browser::open(&format!("{scheme}://{at}"))
+            }
+            Ok(Holder::Nobody) => Err(
+                "The web UI does not listen yet: the node turns it on in a moment, or is stopped."
+                    .into(),
+            ),
+            Ok(Holder::Other) => Err(format!(
+                "Another program listens on {at}, not the node: the web UI is not opened there."
+            )),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = said {
+            self.toast(e, Tone::Danger);
+        }
     }
 
     /// A relay change whose answer holds a link shown once.
@@ -1198,6 +1264,40 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_proxy_remove(move || {
         c.prefs_change(vec!["proxy".into(), "off".into()], None, String::new())
     });
+    let c = ctl.clone();
+    p.on_ui_on(move || c.web_ui_change(vec!["ui".into(), "on".into()]));
+    let c = ctl.clone();
+    p.on_ui_off(move || {
+        c.prefs_change(
+            vec!["ui".into(), "off".into()],
+            None,
+            "The web UI is off; its sessions ended.".into(),
+        )
+    });
+    let c = ctl.clone();
+    p.on_ui_token_add(move || {
+        let tokens: Vec<String> = c
+            .with_prefs(|p| p.get_ui_tokens().iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        let label = view::web_ui_label(&tokens);
+        c.web_ui_change(vec!["ui".into(), "token".into(), "add".into(), label]);
+    });
+    let c = ctl.clone();
+    p.on_ui_token_rm(move |label| {
+        c.prefs_change(
+            vec![
+                "ui".into(),
+                "token".into(),
+                "rm".into(),
+                "--".into(),
+                label.to_string(),
+            ],
+            None,
+            format!("The token {label} is revoked; its sessions ended."),
+        )
+    });
+    let c = ctl.clone();
+    p.on_ui_open(move || c.web_ui_open());
     let c = ctl.clone();
     p.on_relay_on(move || {
         let address = c

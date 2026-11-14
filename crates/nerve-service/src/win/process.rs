@@ -14,7 +14,10 @@ use windows_sys::Win32::Foundation::STATUS_INFO_LENGTH_MISMATCH;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSDomainName, WTSFreeMemory,
+    WTSQuerySessionInformationW, WTSUserName,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -127,6 +130,41 @@ pub fn session_listed(pid: u32) -> Option<u32> {
     None
 }
 
+/// The account signed in to the session `session`, as the Terminal
+/// Services name it (a name and its domain, which any account may ask of
+/// the sessions of this machine); `None` for a session without one, such as
+/// session 0, which holds the services.
+pub fn session_user(session: u32) -> Option<Vec<u8>> {
+    let ask = |class: WTS_INFO_CLASS| -> Option<String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        let mut bytes = 0u32;
+        // SAFETY: this machine's server handle, and places for the answer,
+        // which is freed with WTSFreeMemory.
+        let ok = unsafe {
+            WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                session,
+                class,
+                &mut text,
+                &mut bytes,
+            )
+        };
+        if ok == 0 || text.is_null() {
+            return None;
+        }
+        // SAFETY: a NUL-terminated string the call allocated, freed once.
+        let s = unsafe {
+            let s = super::sid::from_wide(text);
+            WTSFreeMemory(text.cast());
+            s
+        };
+        (!s.is_empty()).then_some(s)
+    };
+    let user = ask(WTSUserName)?;
+    let domain = ask(WTSDomainName)?;
+    super::sid::sid_of_qualified(&format!("{domain}\\{user}")).ok()
+}
+
 /// The account and the session of the process `pid`, as far as they can be
 /// told: from its token where this process may open it, and else only the
 /// session, from the system's list of processes ([`session_listed`]), since
@@ -167,6 +205,17 @@ mod tests {
             std::mem::offset_of!(SYSTEM_PROCESS_INFORMATION, SessionId),
             super::super::procs::SESSION_OFFSET
         );
+    }
+
+    /// The account of a person's session is the account signed in there:
+    /// this test's own where it runs in one; session 0, which holds the
+    /// services, has none.
+    #[test]
+    fn a_session_names_the_account_signed_in_to_it() {
+        assert_eq!(session_user(0), None);
+        if let Some(s) = session_of(std::process::id()).filter(|&s| s != 0) {
+            assert_eq!(session_user(s), Some(user_of(None).unwrap()));
+        }
     }
 
     /// The first process of the machine, the System process, belongs to

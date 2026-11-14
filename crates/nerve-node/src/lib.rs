@@ -38,6 +38,7 @@ pub mod own_dirs;
 pub mod owner;
 pub mod pair;
 pub mod paths;
+pub use nerve_service::holder;
 pub use nerve_service::prompt;
 // The machine's own folders and environment, which the desktop app's
 // elevated parts take too.
@@ -56,7 +57,7 @@ mod secrets;
 pub mod service;
 mod sudo;
 pub mod tap;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod webui;
 // The walk is Windows-only in use, tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]

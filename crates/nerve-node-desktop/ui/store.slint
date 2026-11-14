@@ -449,6 +449,17 @@ export global Prefs {
     callback proxy-set();
     callback proxy-remove();
 
+    // The node's web UI: where it listens (empty while it is off), what the
+    // node says of it, and the labels of the tokens that log in to it.
+    in-out property <string> ui-listen;
+    in-out property <string> ui-status;
+    in-out property <[string]> ui-tokens;
+    callback ui-on();
+    callback ui-off();
+    callback ui-token-add();
+    callback ui-token-rm(string);
+    callback ui-open();
+
     // The Relay page. This node as a relay: where it listens, its state,
     // its pin, the nodes it carries and their tunnels now.
     in-out property <string> relay-listen;

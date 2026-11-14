@@ -43,7 +43,24 @@ use crate::daemon::Shared;
 use crate::owner::{Endpoint, Owners};
 
 mod pages;
+#[cfg(target_os = "linux")]
 pub(crate) use nerve_transport::peer;
+
+/// How a listener's local peers are looked up: on Linux in the kernel's
+/// tables (nerve_transport::peer); on Windows in its table of connections,
+/// which needs no choice ([`judge_windows`]).
+#[cfg(target_os = "linux")]
+type Lookup = peer::Lookup;
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+struct Lookup;
+
+#[cfg(windows)]
+impl Lookup {
+    fn for_listener(_: SocketAddr) -> Lookup {
+        Lookup
+    }
+}
 
 const INDEX: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");
@@ -102,9 +119,69 @@ pub(crate) struct WebUi {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Who {
     /// A local account.
+    #[cfg_attr(windows, allow(dead_code))]
     Uid(u32),
+    /// Windows: the owner's session, which the node tells a local peer by
+    /// ([`judge_windows`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Session(u32),
     /// Another machine: its address, or its /64.
     Address(std::net::IpAddr),
+}
+
+/// What the Windows rule decides of a peer ([`judge_windows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum WinVerdict {
+    /// A process of the owner's own session.
+    Session(u32),
+    /// Another machine.
+    Remote,
+    /// Closed unread, for this reason.
+    Closed(&'static str),
+}
+
+/// The Windows rule for a peer of the web UI (docs/dev/web-uis.md, "Who can
+/// reach it"). The node runs as `nerve`, which cannot open another account's
+/// process to read its account, so a local peer is told by its session:
+/// the process at the other end of the connection (`pid`, from Windows'
+/// table of connections), its session from the system's list of processes
+/// (`session_of`, which needs no handle of the process), and the account
+/// signed in to that session (`owner_session`). Let in is a process of an
+/// interactive session of the owner. Closed is:
+/// - session 0, which holds every service and the node's own commands;
+/// - a process in one of the node's job objects (`from_a_command`), a
+///   second fence beside the AppContainer's loopback block;
+/// - a process whose session cannot be told, and a connection from this
+///   machine (`local`) that the table does not list.
+///
+/// What remains: a program of another account started inside the owner's
+/// session (`runas`) is let on to the login, where it needs a token.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn judge_windows(
+    pid: Option<u32>,
+    local: bool,
+    session_of: impl FnOnce(u32) -> Option<u32>,
+    from_a_command: impl FnOnce(u32) -> bool,
+    owner_session: impl FnOnce(u32) -> bool,
+) -> WinVerdict {
+    let Some(pid) = pid else {
+        return match local {
+            true => WinVerdict::Closed("a connection of this machine that Windows does not list"),
+            false => WinVerdict::Remote,
+        };
+    };
+    if from_a_command(pid) {
+        return WinVerdict::Closed("a process of a command of the node");
+    }
+    match session_of(pid) {
+        None => WinVerdict::Closed("a process whose session cannot be told"),
+        Some(0) => WinVerdict::Closed("a process of session 0, where the services run"),
+        Some(s) if !owner_session(s) => {
+            WinVerdict::Closed("a process of another account's session")
+        }
+        Some(s) => WinVerdict::Session(s),
+    }
 }
 
 impl Who {
@@ -254,6 +331,7 @@ struct Ctx {
     owners: Owners,
     /// The uid of an owner given by name, once it was found: not looked up
     /// again for every connection.
+    #[cfg_attr(windows, allow(dead_code))]
     named_uid: OnceLock<u32>,
 }
 
@@ -271,6 +349,7 @@ impl Ctx {
     }
 
     /// The local accounts let in: the owner's and root's.
+    #[cfg_attr(windows, allow(dead_code))]
     fn owner_uids(&self) -> Vec<u32> {
         let mut uids = vec![0];
         match &self.owners {
@@ -466,10 +545,10 @@ async fn serve(
     let Ok(local) = listener.local_addr() else {
         return;
     };
-    let how = peer::Lookup::for_listener(local);
+    let how = Lookup::for_listener(local);
     tracing::debug!("web UI: peers are looked up by {how:?}");
     let also = also.map(|l| {
-        let how = l.local_addr().map_or(how, peer::Lookup::for_listener);
+        let how = l.local_addr().map_or(how, Lookup::for_listener);
         (l, how)
     });
     loop {
@@ -510,9 +589,9 @@ async fn serve(
 /// with the way its peers are looked up.
 async fn accept_on(
     listener: &TcpListener,
-    how: peer::Lookup,
-    also: &Option<(TcpListener, peer::Lookup)>,
-) -> (std::io::Result<(TcpStream, SocketAddr)>, peer::Lookup) {
+    how: Lookup,
+    also: &Option<(TcpListener, Lookup)>,
+) -> (std::io::Result<(TcpStream, SocketAddr)>, Lookup) {
     tokio::select! {
         got = listener.accept() => (got, how),
         (got, how) = async {
@@ -531,10 +610,40 @@ fn admit(
     ctx: &Ctx,
     io: &TcpStream,
     peer: SocketAddr,
-    how: peer::Lookup,
+    how: Lookup,
     slots: &Arc<tokio::sync::Semaphore>,
 ) -> Option<(Place, OwnedSemaphorePermit)> {
     let local = io.local_addr().ok()?;
+    #[cfg(windows)]
+    let _ = how;
+    #[cfg(windows)]
+    let who = {
+        let ip = peer.ip().to_canonical();
+        let owners: Vec<String> = match &ctx.owners {
+            Owners::Sids(s) => s.clone(),
+            _ => Vec::new(),
+        };
+        let verdict = judge_windows(
+            nerve_service::win::tcp::client_pid(peer, local),
+            ip.is_loopback() || ip == local.ip().to_canonical(),
+            nerve_service::win::process::session_listed,
+            |pid| crate::win::from_a_command(Some(pid)),
+            |session| {
+                nerve_service::win::process::session_user(session)
+                    .and_then(|sid| nerve_service::win::sid::sid_text(&sid).ok())
+                    .is_some_and(|sid| owners.contains(&sid))
+            },
+        );
+        match verdict {
+            WinVerdict::Session(s) => Who::Session(s),
+            WinVerdict::Remote => Who::remote(peer.ip()),
+            WinVerdict::Closed(why) => {
+                tracing::debug!("web UI: closed a connection from {peer}: {why}");
+                return None;
+            }
+        }
+    };
+    #[cfg(not(windows))]
     let who = match peer::judge_now(peer, local, &ctx.owner_uids(), how) {
         peer::Verdict::Closed => {
             tracing::debug!(

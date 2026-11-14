@@ -544,8 +544,19 @@ fn newest(
     n: usize,
     take: &mut dyn FnMut(&str) -> Option<Value>,
 ) -> std::io::Result<Vec<Value>> {
-    use std::os::unix::fs::MetadataExt;
-    let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+    // The file's identity, which a move to `old` changes: its device and
+    // inode on Unix; on Windows its creation time, which a new file has
+    // anew (a move keeps it).
+    #[cfg(unix)]
+    let id = |p: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+    };
+    #[cfg(windows)]
+    let id = |p: &Path| {
+        use std::os::windows::fs::MetadataExt;
+        std::fs::metadata(p).ok().map(|m| (m.creation_time(), 0u64))
+    };
     let mut tries = 0;
     loop {
         tries += 1;

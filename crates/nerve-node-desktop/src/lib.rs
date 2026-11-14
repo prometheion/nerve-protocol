@@ -7,6 +7,7 @@ slint::include_modules!();
 
 pub mod app;
 pub mod broker;
+pub mod browser;
 pub mod deps;
 pub mod dialog;
 pub mod headless;

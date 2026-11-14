@@ -257,6 +257,16 @@ pub fn refused(cmd: &Cmd) -> Option<String> {
             "setup",
             "it can install a system keyring and restart the service",
         ),
+        // On Windows the web UI beyond loopback is an administrator's step,
+        // as its firewall rule is.
+        Cmd::Ui {
+            cmd: Some(crate::cli::UiCmd::On {
+                listen: Some(at), ..
+            }),
+        } if cfg!(windows) && crate::cli::ui::beyond_loopback(at) => (
+            "ui on --listen",
+            "it opens the node's web UI to other machines",
+        ),
         Cmd::Sudo {
             cmd: Some(SudoCmd::On),
         } => (
@@ -2598,6 +2608,22 @@ mod tests {
             &["sudo", "off"],
             &["backup", "/tmp/b", "--overwrite"],
             &["restore", "/tmp/b"],
+        ] {
+            assert!(!needs_admin(&cli(args).cmd), "{args:?}");
+        }
+    }
+
+    /// On Windows the web UI beyond loopback is an administrator's step, as
+    /// its firewall rule is; on loopback it is the owner's, as on Linux.
+    #[test]
+    fn the_web_ui_beyond_loopback_is_an_administrator_s_on_windows() {
+        let wide = cli(&["ui", "on", "--listen", "0.0.0.0:7470"]);
+        assert_eq!(needs_admin(&wide.cmd), cfg!(windows));
+        for args in [
+            &["ui", "on"][..],
+            &["ui", "on", "--listen", "127.0.0.1:7471"],
+            &["ui", "on", "--listen", "[::1]:7470"],
+            &["ui", "off"],
         ] {
             assert!(!needs_admin(&cli(args).cmd), "{args:?}");
         }

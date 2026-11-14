@@ -135,7 +135,11 @@ and every limit is in
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
-- The node's own web UI on Linux, off until `nerve-node ui on`.
+- The node's own web UI, on Linux and Windows, off until it is turned on in
+  **Settings › Network › Web UI** (or `nerve-node ui on`), with its tokens.
+  **Open** checks first that the node holds the port. On Windows only the
+  owner's own session gets in, and beyond loopback is an administrator's
+  step.
 
 ### On Windows
 
