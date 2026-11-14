@@ -2351,8 +2351,8 @@ export component DetailsPane {
         width: root.width;
         height: root.tall;
         interactive: root.long;
-        viewport-width: self.width;
-        viewport-height: root.natural;
+        content-width: self.width;
+        content-height: root.natural;
         // One card, or a VerticalLayout of a few: a hidden part would
         // still take the spacing of a layout.
         body := VerticalLayout {
@@ -2387,7 +2387,7 @@ export component DetailsPane {
         Rectangle {
             width: parent.width;
             height: max(28px, parent.height * root.tall / max(1px, root.natural));
-            y: (parent.height - self.height) * (-flick.viewport-y / max(1px, root.natural - root.tall));
+            y: (parent.height - self.height) * (-flick.content-y / max(1px, root.natural - root.tall));
             border-radius: self.width / 2;
             background: Theme.text-faint.transparentize(0.3);
         }

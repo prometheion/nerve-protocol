@@ -5,102 +5,110 @@
 // They write the rule `nerve-node rule add --action` writes, the one the
 // center's audit page writes.
 
-import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Theme, Type, Space, Radius, Tone, Shape } from "theme.slint";
 import { Load, AuditRow } from "data.slint";
 import { Store } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, IconTile, Banner, Loading, PageHeader, PageFrame,
-    EmptyState, Divider, Segmented, Code, Reveal, Fit, MoreFoot, TextField, Picker,
+    EmptyState, Segmented, Code, Reveal, MoreFoot, TextField, Picker, Icon, Split, ListPane,
+    DetailsPane, ListCard, ListItem, DetailCard,
 } from "widgets.slint";
 
-component AuditEntry {
+// The icon of an entry, by its kind and its decision.
+global Kinds {
+    public pure function icon(entry: AuditRow) -> image {
+        return entry.kind == "call" ? (entry.tone == Tone.danger ? @image-url("icons/ban.svg") : @image-url("icons/check.svg"))
+        : entry.kind == "settings" ? @image-url("icons/sliders.svg")
+        : entry.kind == "relay" ? @image-url("icons/globe.svg")
+        : entry.kind == "key" ? @image-url("icons/key.svg")
+        : entry.kind == "config" ? @image-url("icons/edit.svg")
+        : entry.kind == "audit" ? @image-url("icons/trash.svg")
+        : @image-url("icons/info.svg");
+    }
+}
+
+// The picked entry whole: what it was about, why, and on a call the
+// buttons that make a rule of it.
+component AuditDetails inherits DetailCard {
     in property <AuditRow> entry;
     property <bool> waiting: Store.busy == "audit-" + root.entry.index;
     // The argument the pin buttons hold the rule to.
     property <int> pin: 0;
     HorizontalLayout {
-        padding-left: Space.xl;
-        padding-right: Space.xl;
-        padding-top: Space.lg;
-        padding-bottom: Space.lg;
-        spacing: Space.lg;
+        spacing: Space.md;
         VerticalLayout {
-            alignment: start;
+            alignment: center;
             IconTile {
-                size: 32px;
+                size: 36px;
                 tone: root.entry.tone;
-                icon: root.entry.kind == "call" ? (root.entry.tone == Tone.danger ? @image-url("icons/ban.svg") : @image-url("icons/check.svg"))
-                    : root.entry.kind == "settings" ? @image-url("icons/sliders.svg")
-                    : root.entry.kind == "relay" ? @image-url("icons/globe.svg")
-                    : root.entry.kind == "key" ? @image-url("icons/key.svg")
-                    : root.entry.kind == "config" ? @image-url("icons/edit.svg")
-                    : root.entry.kind == "audit" ? @image-url("icons/trash.svg")
-                    : @image-url("icons/info.svg");
+                icon: Kinds.icon(root.entry);
             }
         }
-        // Its parts come and go with the entry, each with the gap above it
-        // (see Reveal).
-        VerticalLayout {
+        Text {
+            text: root.entry.title;
+            color: Theme.text;
+            font-size: Type.title;
+            font-weight: Type.semibold;
+            font-family: root.entry.kind == "call" ? Type.mono : "";
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: min(80px, self.preferred-width);
+        }
+        if root.entry.badge != "": VerticalLayout {
+            alignment: center;
+            Pill {
+                text: root.entry.badge;
+                tone: root.entry.tone;
+            }
+        }
+        Rectangle {
             horizontal-stretch: 1;
-            HorizontalLayout {
+        }
+        Text {
+            text: (root.entry.center != "" ? root.entry.center + " · " : "") + root.entry.when;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-label: root.entry.when-exact;
+        }
+    }
+    // Its parts come and go with the entry (see Reveal).
+    VerticalLayout {
+        Reveal {
+            shown: root.entry.target != "";
+            Code {
+                text: root.entry.target;
+            }
+        }
+        Reveal {
+            shown: root.entry.detail != "";
+            gap: root.entry.target != "" ? Space.md : 0px;
+            Text {
+                text: root.entry.detail;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+        Text {
+            text: root.entry.when-exact;
+            color: Theme.text-faint;
+            font-size: Type.caption;
+        }
+        Reveal {
+            shown: root.entry.rules;
+            gap: Space.xl;
+            VerticalLayout {
                 spacing: Space.sm;
                 Text {
-                    text: root.entry.title;
+                    text: "A rule for next time";
                     color: Theme.text;
-                    font-size: Type.body;
+                    font-size: Type.small;
                     font-weight: Type.semibold;
-                    font-family: root.entry.kind == "call" ? Type.mono : "";
-                    vertical-alignment: center;
                 }
-                if root.entry.badge != "": VerticalLayout {
-                    alignment: center;
-                    Pill {
-                        text: root.entry.badge;
-                        tone: root.entry.tone;
-                    }
-                }
-                if root.entry.center != "": Text {
-                    text: root.entry.center;
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    min-width: min(40px, self.preferred-width);
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.entry.when;
-                    color: Theme.text-faint;
-                    font-size: Type.caption;
-                    vertical-alignment: center;
-                    accessible-label: root.entry.when-exact;
-                }
-            }
-            Reveal {
-                shown: root.entry.target != "";
-                gap: Space.sm;
-                Code {
-                    text: root.entry.target;
-                }
-            }
-            Reveal {
-                shown: root.entry.detail != "";
-                gap: Space.sm;
-                Text {
-                    text: root.entry.detail;
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    wrap: word-wrap;
-                }
-            }
-            Reveal {
-                shown: root.entry.rules;
-                gap: Space.sm + 2px;
-                HorizontalLayout {
+                FlexboxLayout {
                     spacing: 6px;
-                    alignment: start;
                     Button {
                         text: "Allow";
                         icon: @image-url("icons/check.svg");
@@ -117,9 +125,6 @@ component AuditEntry {
                         clicked => {
                             Store.audit-rule(root.entry.index, "allow", true);
                         }
-                    }
-                    Rectangle {
-                        width: Space.xs;
                     }
                     Button {
                         text: "Deny";
@@ -142,57 +147,57 @@ component AuditEntry {
                     }
                 }
             }
-            // One argument of the call pinned: the rule holds that value
-            // (lamp.set:room=office).
-            Reveal {
-                shown: root.entry.rules && root.entry.pins.length > 0;
-                gap: Space.sm;
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: start;
-                    Picker {
-                        options: root.entry.pins;
-                        current: min(root.pin, max(0, root.entry.pins.length - 1));
-                        label: "The argument to pin";
-                        chosen(i) => {
-                            root.pin = i;
-                        }
+        }
+        // One argument of the call pinned: the rule holds that value
+        // (lamp.set:room=office).
+        Reveal {
+            shown: root.entry.rules && root.entry.pins.length > 0;
+            gap: Space.sm;
+            FlexboxLayout {
+                spacing: 6px;
+                Picker {
+                    options: root.entry.pins;
+                    current: min(root.pin, max(0, root.entry.pins.length - 1));
+                    label: "The argument to pin";
+                    chosen(i) => {
+                        root.pin = i;
                     }
-                    Button {
-                        text: "Allow with this value";
-                        small: true;
-                        enabled: !root.waiting;
-                        clicked => {
-                            Store.audit-pin(root.entry.index, "allow", root.pin);
-                        }
+                }
+                Button {
+                    text: "Allow with this value";
+                    small: true;
+                    enabled: !root.waiting;
+                    clicked => {
+                        Store.audit-pin(root.entry.index, "allow", root.pin);
                     }
-                    Button {
-                        text: "Deny with this value";
-                        kind: ButtonKind.danger-soft;
-                        small: true;
-                        enabled: !root.waiting;
-                        clicked => {
-                            Store.audit-pin(root.entry.index, "deny", root.pin);
-                        }
+                }
+                Button {
+                    text: "Deny with this value";
+                    kind: ButtonKind.danger-soft;
+                    small: true;
+                    enabled: !root.waiting;
+                    clicked => {
+                        Store.audit-pin(root.entry.index, "deny", root.pin);
                     }
                 }
             }
-            Reveal {
-                shown: !root.entry.rules && root.entry.rules-why != "";
-                gap: Space.sm;
-                Text {
-                    text: root.entry.rules-why;
-                    color: Theme.text-faint;
-                    font-size: Type.caption;
-                    wrap: word-wrap;
-                }
+        }
+        Reveal {
+            shown: !root.entry.rules && root.entry.rules-why != "";
+            gap: Space.lg;
+            Text {
+                text: root.entry.rules-why;
+                color: Theme.text-faint;
+                font-size: Type.caption;
+                wrap: word-wrap;
             }
         }
     }
 }
 
-// The filters of the page: what kind of decision (with its count), the
-// order, words to find, a center and an action. They combine.
+// The filter bar: what kind of decision (with its count), the order,
+// words to find, a center and an action. They combine; a new filter picks
+// the first entry again.
 component AuditFilters inherits VerticalLayout {
     spacing: Space.md;
     HorizontalLayout {
@@ -207,6 +212,7 @@ component AuditFilters inherits VerticalLayout {
             current: Store.audit-decision;
             chosen(i) => {
                 Store.audit-decision = i;
+                Store.audit-pick = 0;
                 Store.audit-filtered();
             }
         }
@@ -218,6 +224,7 @@ component AuditFilters inherits VerticalLayout {
             current: Store.audit-oldest ? 1 : 0;
             chosen(i) => {
                 Store.audit-oldest = i == 1;
+                Store.audit-pick = 0;
                 Store.audit-filtered();
             }
         }
@@ -230,6 +237,7 @@ component AuditFilters inherits VerticalLayout {
             placeholder: "Find in target and reason";
             label: "Find in target and reason";
             edited => {
+                Store.audit-pick = 0;
                 Store.audit-filtered();
             }
         }
@@ -239,6 +247,7 @@ component AuditFilters inherits VerticalLayout {
             label: "Center";
             chosen(i) => {
                 Store.audit-center = i;
+                Store.audit-pick = 0;
                 Store.audit-filtered();
             }
         }
@@ -248,6 +257,7 @@ component AuditFilters inherits VerticalLayout {
             label: "Action";
             chosen(i) => {
                 Store.audit-action = i;
+                Store.audit-pick = 0;
                 Store.audit-filtered();
             }
         }
@@ -257,6 +267,10 @@ component AuditFilters inherits VerticalLayout {
 export component AuditPage inherits PageFrame {
     gap: 0;
     property <bool> filtered: Store.audit-decision != 0 || Store.audit-center != 0 || Store.audit-action != 0 || Store.audit-text != "";
+    property <int> pick: Math.max(0, Math.min(Store.audit-pick, Store.audit.length - 1));
+    init => {
+        Store.details-open = false;
+    }
     PageHeader {
         icon: @image-url("icons/audit.svg");
         title: "Audit";
@@ -316,6 +330,7 @@ export component AuditPage inherits PageFrame {
                     Store.audit-center = 0;
                     Store.audit-action = 0;
                     Store.audit-text = "";
+                    Store.audit-pick = 0;
                     Store.audit-filtered();
                 }
             }
@@ -349,29 +364,89 @@ export component AuditPage inherits PageFrame {
     Reveal {
         shown: Store.audit.length > 0;
         gap: Space.lg;
-        Card {
-            pad: 0;
-            gap: 0;
-            for row[i] in Store.audit: Fit {
-                Divider {
-                    visible: i > 0;
-                    height: i > 0 ? 1px : 0;
-                }
-                AuditEntry {
-                    entry: row;
+        Split {
+            ListPane {
+                open: Store.details-open;
+                stretch: Shape.large ? 1 : 5;
+                least: 320px;
+                most: 100000px;
+                ListCard {
+                    label: "Audit";
+                    step(d) => {
+                        Store.audit-pick = Math.max(0, Math.min(Store.audit.length - 1, root.pick + d));
+                    }
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for row[i] in Store.audit: ListItem {
+                        first: i == 0;
+                        selected: i == root.pick;
+                        label: row.title + " " + row.badge + " " + row.target + ", " + row.when;
+                        clicked => {
+                            Store.audit-pick = i;
+                            Store.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: Kinds.icon(row);
+                                colorize: row.tone == Tone.neutral ? Theme.text-muted : Theme.tone(row.tone);
+                            }
+                        }
+                        Text {
+                            text: row.title;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            font-family: row.kind == "call" ? Type.mono : "";
+                            vertical-alignment: center;
+                            overflow: elide;
+                            min-width: min(60px, self.preferred-width);
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: row.target != "" ? row.target : row.detail;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            font-family: row.target != "" ? Type.mono : "";
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: row.when;
+                            color: Theme.text-faint;
+                            font-size: Type.caption;
+                            vertical-alignment: center;
+                            accessible-label: row.when-exact;
+                        }
+                    }
+                    Reveal {
+                        shown: Store.audit-foot != "";
+                        VerticalLayout {
+                            padding-top: Space.md;
+                            padding-left: Space.lg;
+                            padding-right: Space.lg;
+                            MoreFoot {
+                                text: Store.audit-foot;
+                                more: Store.audit-more-left;
+                                clicked => {
+                                    Store.audit-more();
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        }
-    }
-
-    Reveal {
-        shown: Store.audit-foot != "";
-        gap: Space.lg;
-        MoreFoot {
-            text: Store.audit-foot;
-            more: Store.audit-more-left;
-            clicked => {
-                Store.audit-more();
+            DetailsPane {
+                open: Store.details-open;
+                stretch: Shape.large ? 1 : 6;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Store.details-open = false;
+                }
+                AuditDetails {
+                    entry: Store.audit[root.pick];
+                }
             }
         }
     }
