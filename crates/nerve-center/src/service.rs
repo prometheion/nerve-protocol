@@ -967,6 +967,14 @@ pub fn install_with(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a center where its node is
+    // installed (the terminal's nerve-center may).
+    if layout.word.is_some()
+        && let Some(units) = layout.unit.parent()
+    {
+        let node = nerve_service::role::Roles::in_units(units).node;
+        nerve_service::role::one_role(nerve_service::role::Role::Center, node)?;
+    }
     for (var, value) in set {
         check_setting(var, value)?;
     }
@@ -1918,6 +1926,15 @@ mod tests {
         );
         uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
         assert!(link.is_file());
+        // One role per machine: not where the node's unit is; the terminal
+        // center (no word) may.
+        std::fs::write(l.unit.with_file_name("nerve-node.service"), "").unwrap();
+        let e = install(&l, &sys, &l.bin, &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a node already"), "{e}");
+        assert!(e.contains("nerve-node and nerve-center"), "{e}");
+        assert!(!l.unit.exists());
+        l.word = None;
+        install(&l, &sys, &l.bin, &mut Vec::new()).unwrap();
     }
 
     /// The release files: the terminal center's for Linux on both machines,

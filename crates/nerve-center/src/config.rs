@@ -465,6 +465,19 @@ where
     })
 }
 
+/// The command of the command line `args` (the program's name first) as
+/// clap reads it; `None` where it does not parse or names none: what the
+/// app's broker checks against its list.
+pub fn command_of<I, S>(args: I) -> Option<Cmd>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    use clap::FromArgMatches;
+    let m = command().try_get_matches_from(args).ok()?;
+    Args::from_arg_matches(&m).ok()?.cmd
+}
+
 impl Cmd {
     /// install, set, update, uninstall and service start|stop|restart: they
     /// work on the installed service, as root, not on `--state-dir`.

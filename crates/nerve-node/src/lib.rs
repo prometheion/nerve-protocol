@@ -40,6 +40,7 @@ pub mod pair;
 pub mod paths;
 pub use nerve_service::holder;
 pub use nerve_service::prompt;
+pub use nerve_service::role;
 // The machine's own folders and environment, which the desktop app's
 // elevated parts take too.
 #[cfg(windows)]

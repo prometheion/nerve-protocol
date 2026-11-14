@@ -47,6 +47,9 @@ pub const NOT_INSTALLED: &str = "the center is not installed as a service here; 
 pub trait WinSystem {
     /// Whether this process runs as an administrator, elevated.
     fn is_admin(&self) -> bool;
+    /// Whether the service `name` is registered: the node's, where the app
+    /// would install a second role.
+    fn registered(&self, name: &str) -> bool;
     /// Makes `dir` when it is missing, with the DACL `sddl` from its first
     /// moment, or gives the folder there that DACL; one another account made
     /// is refused, as is a link in its place
@@ -294,6 +297,14 @@ pub fn install(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a center where the node is
+    // installed.
+    if layout.word.is_some() {
+        nerve_service::role::one_role(
+            nerve_service::role::Role::Center,
+            sys.registered(nerve_service::role::Role::Node.service()),
+        )?;
+    }
     for (var, value) in set {
         check_setting(var, value)?;
     }
@@ -715,6 +726,8 @@ mod tests {
         event_source: Cell<bool>,
         /// The machine's `Path`.
         path: RefCell<String>,
+        /// The other services registered: the node's.
+        others: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -731,6 +744,7 @@ mod tests {
                 started: RefCell::new(Vec::new()),
                 event_source: Cell::new(false),
                 path: RefCell::new(r"%SystemRoot%\system32".into()),
+                others: RefCell::new(Vec::new()),
             }
         }
 
@@ -755,6 +769,9 @@ mod tests {
     impl WinSystem for Fake {
         fn is_admin(&self) -> bool {
             self.admin
+        }
+        fn registered(&self, name: &str) -> bool {
+            self.others.borrow().iter().any(|o| o == name)
         }
         fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
             std::fs::create_dir_all(dir).unwrap();
@@ -920,6 +937,11 @@ mod tests {
             "{:?}",
             sys.calls()
         );
+        // One role per machine: not where the node's service is.
+        sys.others.borrow_mut().push("nerve-node".into());
+        let e = install(&l, &sys, &l.bin, &[], &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a node already"), "{e}");
+        assert_eq!(sys.service.get(), None);
     }
 
     /// A downloaded "program" that says `version`.

@@ -1083,6 +1083,14 @@ pub fn install_asking(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a node where its center
+    // is installed (the terminal's nerve-node may).
+    if layout.edition.parts.is_some()
+        && let Some(units) = layout.unit.parent()
+    {
+        let center = nerve_service::role::Roles::in_units(units).center;
+        nerve_service::role::one_role(nerve_service::role::Role::Node, center)?;
+    }
     // Root is the owner only of an install that root runs itself: through
     // sudo the account that ran it becomes the owner. Refused before
     // anything changes.
@@ -4919,6 +4927,30 @@ pub(crate) mod tests {
         program: "nerve",
         parts: Some(&Entry),
     };
+
+    /// The app installs one role per machine: no node where the center's
+    /// unit is; the node alone (the terminal's) may.
+    #[test]
+    fn the_app_installs_no_node_on_a_center() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = Layout {
+            bin: d.path().join("usr/local/bin/nerve"),
+            edition: &DESKTOP,
+            ..layout(d.path())
+        };
+        std::fs::create_dir_all(l.unit.parent().unwrap()).unwrap();
+        std::fs::write(l.unit.with_file_name("nerve-center.service"), "").unwrap();
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a center already"), "{e}");
+        assert!(!l.unit.exists() && !l.bin.exists());
+        let alone = layout(d.path());
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        install(&alone, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+    }
 
     #[tokio::test]
     async fn the_desktop_app_installs_updates_and_uninstalls_its_parts_with_the_node() {

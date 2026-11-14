@@ -841,6 +841,13 @@ pub fn install(
     {
         return Err(not_local(&name));
     }
+    // The app installs one role per machine: not a node where the center is
+    // installed.
+    #[cfg(windows)]
+    nerve_service::role::one_role(
+        nerve_service::role::Role::Node,
+        nerve_service::role::Roles::here().center,
+    )?;
     // Before anything is written, the audit log too: a folder another
     // account owns is not written in.
     check_install_folders(layout, sys)?;

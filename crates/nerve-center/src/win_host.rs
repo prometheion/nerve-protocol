@@ -27,6 +27,10 @@ pub fn system_program(name: &str) -> PathBuf {
 pub struct WinHost;
 
 impl WinSystem for WinHost {
+    fn registered(&self, name: &str) -> bool {
+        svc::registered(name)
+    }
+
     fn is_admin(&self) -> bool {
         nerve_service::win::sid::is_admin()
     }

@@ -21,6 +21,7 @@ pub mod holder;
 pub mod listen;
 pub mod out;
 pub mod prompt;
+pub mod role;
 mod update;
 pub mod win;
 

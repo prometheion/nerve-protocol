@@ -67,6 +67,61 @@ fn output_of(v: &Value) -> Output {
     }
 }
 
+/// Whether the broker runs `args` where `roles` are installed: a closed
+/// list per role, never "any arguments", since a program of the app's user
+/// may reach the app's process and ask through it (design of #232, 3).
+///
+/// - The node's commands: its options first (`--json`), never one of the
+///   helpers this program also is (the exec shim, this broker), and not on
+///   a machine that is a center only.
+/// - The center's (`__center` first): `install` where no center is yet;
+///   where one is installed, its administrator's commands and `status`, and
+///   `update` from the release only (from a file it stays a terminal's: the
+///   file would lie in the user's folders, where a program of the user could
+///   replace it before the broker reads it). Not on a machine that is a
+///   node only.
+pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), String> {
+    use nerve_center::config::Cmd;
+    let first = args.first().map(String::as_str);
+    if first == Some(nerve_center::edition::APP_WORD) {
+        if roles.node && !roles.center {
+            return Err("this machine is a node: the broker runs no center commands here".into());
+        }
+        let argv = std::iter::once(nerve_center::edition::TERMINAL_NAME)
+            .chain(args[1..].iter().map(String::as_str));
+        let cmd = nerve_center::config::command_of(argv);
+        let Some(cmd) = cmd else {
+            return Err("the broker runs the center's administrator commands only".into());
+        };
+        return match cmd {
+            Cmd::Install => Ok(()),
+            _ if !roles.center => {
+                Err("no center is installed here: the broker runs only its install".into())
+            }
+            Cmd::Update { from: Some(_), .. } => Err(
+                "an update from a file is a terminal's; the app updates the center from the release"
+                    .into(),
+            ),
+            Cmd::Update { .. }
+            | Cmd::Uninstall { .. }
+            | Cmd::Service { cmd: Some(_) }
+            | Cmd::Set { .. }
+            | Cmd::OwnerToken { .. }
+            | Cmd::Backup { .. }
+            | Cmd::Restore { .. }
+            | Cmd::Status => Ok(()),
+            _ => Err("the broker runs the center's administrator commands only".into()),
+        };
+    }
+    if !first.is_some_and(|a| a.starts_with("--")) {
+        return Err("the broker runs nerve-node commands only".into());
+    }
+    if roles.center && !roles.node {
+        return Err("this machine is a center: the broker runs no node commands here".into());
+    }
+    Ok(())
+}
+
 /// The broker's side: answers the requests on `input` with `exe`, the
 /// program itself, until `input` ends; then ends what still runs. With the
 /// SID of the app's user (Windows), its commands take that user as the one
@@ -114,11 +169,11 @@ pub fn serve(
             .flatten()
             .filter_map(|a| a.as_str().map(str::to_string))
             .collect();
-        // Commands of the node only: its options first, never one of the
-        // helpers this program also is (the exec shim, this broker).
-        if !args.first().is_some_and(|a| a.starts_with("--")) {
+        // The closed list of the role installed here, read from the
+        // services at each request ([`allowed`]).
+        if let Err(e) = allowed(&args, nerve_node::role::Roles::here()) {
             let refused = Output {
-                stderr: b"the broker runs nerve-node commands only".to_vec(),
+                stderr: e.into_bytes(),
                 ..Output::default()
             };
             send(&out, &json!({ "id": id, "done": done(&refused) }));
@@ -855,6 +910,61 @@ mod tests {
     /// A pipe in memory: what one side writes, the other reads.
     fn pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
         std::io::pipe().unwrap()
+    }
+
+    /// The closed lists: per role installed, the center's administrator
+    /// commands behind `__center`, its install only where none is, never an
+    /// update from a file; the node's commands not on a center; nothing that
+    /// is neither.
+    #[test]
+    fn the_broker_runs_only_the_installed_role_s_list() {
+        use nerve_node::role::Roles;
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let none = Roles::default();
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        let node = Roles {
+            node: true,
+            center: false,
+        };
+        // No role yet: the installs.
+        assert!(allowed(&args(&["__center", "--json", "install"]), none).is_ok());
+        assert!(allowed(&args(&["--json", "install"]), none).is_ok());
+        assert!(allowed(&args(&["__center", "--json", "status"]), none).is_err());
+        // A center.
+        for ok in [
+            &["__center", "--json", "update"][..],
+            &["__center", "--json", "update", "--pre"],
+            &["__center", "--json", "uninstall", "--purge"],
+            &["__center", "--json", "service", "restart"],
+            &["__center", "--json", "set", "ui", "off"],
+            &["__center", "--json", "owner-token"],
+            &["__center", "--json", "backup", "/tmp/b"],
+            &["__center", "--json", "restore", "/tmp/b"],
+            &["__center", "--json", "status"],
+        ] {
+            assert!(allowed(&args(ok), center).is_ok(), "{ok:?}");
+        }
+        for refused in [
+            &["__center", "--json", "update", "--from", "/tmp/x"][..],
+            &["__center", "pair"],
+            &["__center", "token", "new"],
+            &["__center"],
+            &["__center", "--json", "service"],
+            &["--json", "status"],
+        ] {
+            assert!(allowed(&args(refused), center).is_err(), "{refused:?}");
+        }
+        // A node: its commands, no center's.
+        assert!(allowed(&args(&["--json", "sudo", "on"]), node).is_ok());
+        assert!(allowed(&args(&["__center", "--json", "install"]), node).is_err());
+        // Neither: a helper of this program.
+        for role in [none, center, node] {
+            assert!(allowed(&args(&["__exec-shim", "x"]), role).is_err());
+            assert!(allowed(&args(&["__desktop-broker"]), role).is_err());
+        }
     }
 
     #[test]
