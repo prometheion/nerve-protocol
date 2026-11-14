@@ -5,6 +5,8 @@
 //! desktop. The software renderer draws no shadows; the app on a desktop
 //! does. Long pages also come whole, as `<page>-full`.
 //!
+//! `NERVE_DESKTOP_SHOTS_SIZE=WxH` sets the window's size (logical pixels).
+//!
 //! `NERVE_DESKTOP_SHOTS=<folder> cargo test -p nerve-node-desktop --test shots -- --ignored`
 
 use std::path::{Path, PathBuf};
@@ -22,8 +24,7 @@ use nerve_node_desktop::{
 };
 use slint::{ComponentHandle, Model};
 
-const WIDTH: u32 = 1180;
-const HEIGHT: u32 = 700;
+const DEFAULT_SIZE: (u32, u32) = (1180, 700);
 const SCALE: f32 = 2.0;
 /// The installer's window.
 const INSTALLER: (u32, u32) = (760, 700);
@@ -67,6 +68,18 @@ const DEEP: &str =
     "alex/projects/clients/northwind/infrastructure/terraform/modules/networking/vpc-peering";
 const LONG_RULE: &str = "docker compose -f deploy/docker-compose.production.yml --project-name northwind-platform up -d --remove-orphans";
 
+/// The window's size in logical pixels: `NERVE_DESKTOP_SHOTS_SIZE=WxH`, or
+/// [`DEFAULT_SIZE`].
+fn window_size() -> (u32, u32) {
+    std::env::var("NERVE_DESKTOP_SHOTS_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or(DEFAULT_SIZE)
+}
+
 struct Shots<'a> {
     screen: Screen,
     window: &'a AppWindow,
@@ -90,7 +103,8 @@ impl Shots<'_> {
     fn take(&self, name: &str) {
         self.window.global::<Store>().set_toast_shown(false);
         self.take_as_is(name);
-        if ALSO_SMALL.iter().any(|s| name.starts_with(s)) {
+        let sized = std::env::var_os("NERVE_DESKTOP_SHOTS_SIZE").is_some();
+        if !sized && ALSO_SMALL.iter().any(|s| name.starts_with(s)) {
             let size = self.size.get();
             self.resize(SMALL);
             self.take_as_is(&format!("{name}-1280x800"));
@@ -116,9 +130,10 @@ impl Shots<'_> {
 
     /// The page `height` logical pixels high, as `<name>-full`.
     fn take_full(&self, name: &str, height: u32) {
-        self.resize((WIDTH, height));
+        let (width, base) = window_size();
+        self.resize((width, height));
         self.take(&format!("{name}-full"));
-        self.resize((WIDTH, HEIGHT));
+        self.resize((width, base));
     }
 }
 
@@ -173,8 +188,8 @@ fn every_page_light_and_dark() {
     };
     std::fs::create_dir_all(&out).unwrap();
     let screen = Screen::install(
-        (WIDTH as f32 * SCALE) as u32,
-        (HEIGHT as f32 * SCALE) as u32,
+        (window_size().0 as f32 * SCALE) as u32,
+        (window_size().1 as f32 * SCALE) as u32,
         SCALE,
     )
     .unwrap();
@@ -203,7 +218,7 @@ fn every_page_light_and_dark() {
         screen,
         window: &window,
         out,
-        size: std::cell::Cell::new((WIDTH, HEIGHT)),
+        size: std::cell::Cell::new(window_size()),
     };
 
     // Asking: the first moment of the app.
