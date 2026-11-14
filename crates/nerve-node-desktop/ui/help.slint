@@ -6,12 +6,13 @@
 // on its own: opening one leaves the others as they are. On Windows the
 // reference says that the app runs them: there is no terminal for the node.
 
-import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Theme, Type, Space, Radius, Tone, Motion, Curve } from "theme.slint";
 import { Page, RefRow, RefVerb } from "data.slint";
 import { Manual, Store, Prefs, Install } from "store.slint";
 import {
-    Button, ButtonKind, Card, PageHeader, PageFrame, Divider, Code, Fit, Reveal, Expander,
-    TextField, Segmented, Icon, Pill, FocusRing, Fold,
+    Button, ButtonKind, Card, PageHeader, PageFrame, Divider, Code, Fit, Reveal, TextField,
+    Segmented, Icon, Pill, FocusRing, Fold, IconTile, Split, ListPane, DetailsPane, ListCard,
+    ListItem,
 } from "widgets.slint";
 
 // One command inside a card: its words and line, an example, the place in
@@ -376,8 +377,104 @@ component GroupHead inherits Rectangle {
     }
 }
 
+// A group of the task map: its name and count, and its tasks while it is
+// open. Each opens and closes on its own.
+component TaskFold inherits VerticalLayout {
+    in property <string> name;
+    in property <int> count;
+    in property <bool> open;
+    in property <bool> first;
+    callback toggled();
+    Rectangle {
+        height: root.first ? 0px : 1px;
+        background: Theme.border;
+    }
+    Rectangle {
+        accessible-role: button;
+        accessible-label: root.name;
+        accessible-expandable: true;
+        accessible-expanded: root.open;
+        accessible-action-default => {
+            root.toggled();
+        }
+        background: touch.has-hover ? Theme.hover : transparent;
+        forward-focus: focus;
+        FocusRing {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            shown: focus.has-focus;
+            radius: 0;
+        }
+        HorizontalLayout {
+            padding-left: Space.xl;
+            padding-right: Space.xl;
+            padding-top: Space.md;
+            padding-bottom: Space.md;
+            spacing: Space.sm;
+            Text {
+                text: root.name;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.count;
+                color: Theme.text-faint;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: root.open ? @image-url("icons/chev.svg") : @image-url("icons/chev-right.svg");
+                    colorize: Theme.text-muted;
+                }
+            }
+        }
+        touch := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.toggled();
+            }
+        }
+        focus := FocusScope {
+            focus-on-click: false;
+            key-pressed(event) => {
+                if (event.text == " " || event.text == Key.Return) {
+                    root.toggled();
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+    Reveal {
+        shown: root.open;
+        smooth: true;
+        VerticalLayout {
+            padding-left: Space.xl + Space.lg;
+            padding-right: Space.xl;
+            padding-bottom: Space.md;
+            spacing: Space.sm;
+            @children
+        }
+    }
+}
+
 export component HelpPage inherits PageFrame {
-    gap: Space.md;
+    property <[{name: string, icon: image}]> sections: [
+        { name: "Tasks", icon: @image-url("icons/check.svg") },
+        { name: "Keyboard shortcuts", icon: @image-url("icons/keyboard.svg") },
+        { name: "Command reference", icon: @image-url("icons/terminal.svg") },
+    ];
+    gap: 0;
+    init => {
+        Store.details-open = false;
+    }
     PageHeader {
         icon: @image-url("icons/help.svg");
         title: "Help";
@@ -391,226 +488,335 @@ export component HelpPage inherits PageFrame {
         }
     }
     Rectangle {
-        height: Space.xs;
+        height: Space.xl;
     }
-    Expander {
-        title: "Tasks";
-        open: Manual.tasks-open;
-        toggled => {
-            Manual.tasks-open = !Manual.tasks-open;
-        }
-        icon: @image-url("icons/check.svg");
-        // On Windows the user guide's page for this machine, which holds the
-        // same map with more on each row.
-        if Install.windows: HorizontalLayout {
-            Button {
-                text: "Nerve on Windows";
-                icon: @image-url("icons/external.svg");
-                kind: ButtonKind.ghost;
-                small: true;
-                clicked => {
-                    Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/windows.md#where-each-task-is");
+    Split {
+        ListPane {
+            open: Store.details-open;
+            ListCard {
+                label: "Help";
+                step(d) => {
+                    Manual.section = Math.max(0, Math.min(root.sections.length - 1, Manual.section + d));
                 }
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-        }
-        TaskRow {
-            task: "Pair a center";
-            where: "Centers › Pair";
-            differs: "";
-        }
-        TaskRow {
-            task: "Choose what it may do";
-            where: "Permissions › Mode";
-            differs: Install.windows ? "User mode and allowlist as you need your Windows password." : "";
-        }
-        TaskRow {
-            task: "Give it a folder";
-            where: "Permissions › Folders";
-            differs: Install.windows ? "Its commands run in an AppContainer of their own." : "";
-        }
-        TaskRow {
-            task: "Give moved files their access";
-            where: "Permissions › Folders › Sync folders";
-            differs: "Only for a folder the node does not watch.";
-        }
-        TaskRow {
-            task: "Allow one command";
-            where: "Permissions › Allow";
-            differs: "";
-        }
-        TaskRow {
-            task: "Run commands with sudo";
-            where: "Permissions › Sudo";
-            differs: Install.windows ? "Your Windows password; only here, not from a center." : "";
-        }
-        TaskRow {
-            task: "Keep commands off the network";
-            where: "Permissions › Mode › No network for its commands";
-            differs: Install.windows ? "Name lookups fail too." : "";
-        }
-        TaskRow {
-            task: "Limit what a command uses";
-            where: "Settings › Limits";
-            differs: Install.windows ? "Held by the command's job object." : "";
-        }
-        TaskRow {
-            task: "Who runs the commands";
-            where: "Settings › General › Account for commands";
-            differs: Install.windows ? "Save your new Windows password here when it changed." : "";
-        }
-        TaskRow {
-            task: "Add a program's capabilities";
-            where: "Capabilities › Programs";
-            differs: "";
-        }
-        TaskRow {
-            task: "Use a proxy or a relay";
-            where: "Settings › Network, Relay";
-            differs: "";
-        }
-        TaskRow {
-            task: "Where the keys live";
-            where: "Settings › Keys";
-            differs: Install.windows ? "The keyring is the service's Credential Manager." : "";
-        }
-        TaskRow {
-            task: "Rotate a center's key";
-            where: "Centers › New key…";
-            differs: "";
-        }
-        TaskRow {
-            task: "Back up, restore";
-            where: "Settings › Backup";
-            differs: "";
-        }
-        TaskRow {
-            task: "See what happened";
-            where: "Audit, Log";
-            differs: "";
-        }
-        TaskRow {
-            task: "Stop everything at once";
-            where: "Overview › Panic";
-            differs: "";
-        }
-        TaskRow {
-            task: "Update, uninstall";
-            where: "Settings › App";
-            differs: Install.windows ? "Also in Apps & features." : "";
-        }
-    }
-    Expander {
-        title: "Keyboard shortcuts";
-        open: Manual.keys-open;
-        toggled => {
-            Manual.keys-open = !Manual.keys-open;
-        }
-        icon: @image-url("icons/keyboard.svg");
-        KeyRow {
-            keys: "Ctrl+1 … Ctrl+9";
-            does: "Overview, Centers, Relay, Permissions, Audit, Log, Settings, Help, Capabilities";
-        }
-        KeyRow {
-            keys: "Ctrl+R, F5";
-            does: "Read the page again";
-        }
-        KeyRow {
-            keys: "Esc";
-            does: "Close a dialog";
-        }
-        KeyRow {
-            keys: "Enter";
-            does: "The dialog's main button";
-        }
-        KeyRow {
-            keys: "Tab, Shift+Tab";
-            does: "The next or the last control";
-        }
-        KeyRow {
-            keys: "Space";
-            does: "Press a button, tick a box";
-        }
-        KeyRow {
-            keys: "← →";
-            does: "Choose in a row of choices or tabs";
-        }
-    }
-    // Wrapping text that comes and goes sits in a Reveal (widgets.slint).
-    Reveal {
-        shown: true;
-        Expander {
-            title: "Command reference";
-            open: Manual.commands-open;
-            toggled => {
-                Manual.commands-open = !Manual.commands-open;
-            }
-            icon: @image-url("icons/terminal.svg");
-            Answer {
-                text: Install.windows ? "Every action here runs one of these commands for you, with the same checks and audit records. There is nothing to type." : "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
-            }
-            HorizontalLayout {
-                spacing: Space.md;
-                padding-top: Space.xs;
-                TextField {
-                    horizontal-stretch: 1;
-                    text <=> Manual.ref-filter;
-                    placeholder: "Filter: pair, folder, sudo…";
-                    label: "Filter the commands";
-                    edited => {
-                        Manual.ref-update();
+                Rectangle {
+                    height: 6px;
+                }
+                for section[i] in root.sections: ListItem {
+                    first: i == 0;
+                    selected: i == Manual.section;
+                    label: section.name;
+                    clicked => {
+                        Manual.section = i;
+                        Store.details-open = true;
                     }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Segmented {
-                        options: ["By topic", "A to Z"];
-                        current: Manual.ref-by-name ? 1 : 0;
-                        chosen(i) => {
-                            Manual.ref-by-name = i == 1;
-                            Manual.ref-update();
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: section.icon;
+                            colorize: i == Manual.section ? Theme.accent-text : Theme.text-muted;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: section.name;
+                        color: i == Manual.section ? Theme.accent-text : Theme.text;
+                        font-size: Type.body;
+                        font-weight: i == Manual.section ? Type.semibold : Type.regular;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/chev-right.svg");
+                            colorize: Theme.text-faint;
                         }
                     }
                 }
             }
-            Text {
-                text: "A command about one center takes --center <CENTER> when more than one is paired.";
-                color: Theme.text-muted;
-                font-size: Type.caption;
-                wrap: word-wrap;
+        }
+        DetailsPane {
+            open: Store.details-open;
+            view-top: root.view-top;
+            view-height: root.view-height;
+            back => {
+                Store.details-open = false;
             }
-            Reveal {
-                shown: Manual.ref-groups.length == 0;
-                Text {
-                    text: "No command matches.";
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                }
-            }
-            for g in Manual.ref-groups: Fit {
-                VerticalLayout {
-                    padding-top: Space.sm;
-                    Reveal {
-                        shown: g.name != "";
-                        GroupHead {
-                            name: g.name;
-                            count: g.rows.length;
-                            open: g.open;
-                            toggled => {
-                                Manual.ref-group-toggle(g.name);
+            Card {
+                pad: 0;
+                gap: 0;
+                HorizontalLayout {
+                    padding-left: Space.xl;
+                    padding-right: Space.xl;
+                    padding-top: Space.lg;
+                    padding-bottom: Space.lg;
+                    spacing: Space.md;
+                    IconTile {
+                        icon: root.sections[Manual.section].icon;
+                        size: 28px;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.sections[Manual.section].name;
+                        color: Theme.text;
+                        font-size: Type.heading;
+                        font-weight: Type.semibold;
+                        vertical-alignment: center;
+                    }
+                    // On Windows the user guide's page for this machine,
+                    // which holds the same map with more on each row.
+                    if Install.windows && Manual.section == 0: HorizontalLayout {
+                        Button {
+                            text: "Nerve on Windows";
+                            icon: @image-url("icons/external.svg");
+                            kind: ButtonKind.ghost;
+                            small: true;
+                            clicked => {
+                                Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/windows.md#where-each-task-is");
                             }
                         }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
                     }
-                    Reveal {
-                        shown: g.open;
-                        gap: g.name != "" ? 6px : 0px;
-                        VerticalLayout {
-                            spacing: 6px;
-                            for r in g.rows: CommandRow {
-                                item: r;
-                                topic: g.name == "";
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+                // The task map, in groups.
+                Reveal {
+                    shown: Manual.section == 0;
+                    fade: true;
+                    TaskFold {
+                        name: "Centers";
+                        count: 2;
+                        first: true;
+                        open: Manual.tasks-open[0];
+                        toggled => {
+                            Manual.tasks-open[0] = !Manual.tasks-open[0];
+                        }
+                        TaskRow {
+                            task: "Pair a center";
+                            where: "Centers › Pair";
+                            differs: "";
+                        }
+                        TaskRow {
+                            task: "Rotate a center's key";
+                            where: "Centers › New key…";
+                            differs: "";
+                        }
+                    }
+                    TaskFold {
+                        name: "What a center may do";
+                        count: 7;
+                        first: false;
+                        open: Manual.tasks-open[1];
+                        toggled => {
+                            Manual.tasks-open[1] = !Manual.tasks-open[1];
+                        }
+                        TaskRow {
+                            task: "Choose what it may do";
+                            where: "Permissions › Mode";
+                            differs: Install.windows ? "User mode and allowlist as you need your Windows password." : "";
+                        }
+                        TaskRow {
+                            task: "Give it a folder";
+                            where: "Permissions › Folders";
+                            differs: Install.windows ? "Its commands run in an AppContainer of their own." : "";
+                        }
+                        TaskRow {
+                            task: "Give moved files their access";
+                            where: "Permissions › Folders › Sync folders";
+                            differs: "Only for a folder the node does not watch.";
+                        }
+                        TaskRow {
+                            task: "Allow one command";
+                            where: "Permissions › Allow";
+                            differs: "";
+                        }
+                        TaskRow {
+                            task: "Run commands with sudo";
+                            where: "Permissions › Sudo";
+                            differs: Install.windows ? "Your Windows password; only here, not from a center." : "";
+                        }
+                        TaskRow {
+                            task: "Keep commands off the network";
+                            where: "Permissions › Mode › No network for its commands";
+                            differs: Install.windows ? "Name lookups fail too." : "";
+                        }
+                        TaskRow {
+                            task: "Add a program's capabilities";
+                            where: "Capabilities › Programs";
+                            differs: "";
+                        }
+                    }
+                    TaskFold {
+                        name: "This machine";
+                        count: 6;
+                        first: false;
+                        open: Manual.tasks-open[2];
+                        toggled => {
+                            Manual.tasks-open[2] = !Manual.tasks-open[2];
+                        }
+                        TaskRow {
+                            task: "Limit what a command uses";
+                            where: "Settings › Limits";
+                            differs: Install.windows ? "Held by the command's job object." : "";
+                        }
+                        TaskRow {
+                            task: "Who runs the commands";
+                            where: "Settings › General › Account for commands";
+                            differs: Install.windows ? "Save your new Windows password here when it changed." : "";
+                        }
+                        TaskRow {
+                            task: "Use a proxy or a relay";
+                            where: "Settings › Network, Relay";
+                            differs: "";
+                        }
+                        TaskRow {
+                            task: "Where the keys live";
+                            where: "Settings › Keys";
+                            differs: Install.windows ? "The keyring is the service's Credential Manager." : "";
+                        }
+                        TaskRow {
+                            task: "Back up, restore";
+                            where: "Settings › Backup";
+                            differs: "";
+                        }
+                        TaskRow {
+                            task: "Update, uninstall";
+                            where: "Settings › App";
+                            differs: Install.windows ? "Also in Apps & features." : "";
+                        }
+                    }
+                    TaskFold {
+                        name: "When something is wrong";
+                        count: 2;
+                        first: false;
+                        open: Manual.tasks-open[3];
+                        toggled => {
+                            Manual.tasks-open[3] = !Manual.tasks-open[3];
+                        }
+                        TaskRow {
+                            task: "See what happened";
+                            where: "Audit, Log";
+                            differs: "";
+                        }
+                        TaskRow {
+                            task: "Stop everything at once";
+                            where: "Overview › Panic";
+                            differs: "";
+                        }
+                    }
+                }
+                Reveal {
+                    shown: Manual.section == 1;
+                    fade: true;
+                    VerticalLayout {
+                        padding: Space.xl;
+                        spacing: Space.md;
+                        KeyRow {
+                            keys: "Ctrl+1 … Ctrl+9";
+                            does: "Overview, Centers, Relay, Permissions, Audit, Log, Settings, Help, Capabilities";
+                        }
+                        KeyRow {
+                            keys: "Ctrl+R, F5";
+                            does: "Read the page again";
+                        }
+                        KeyRow {
+                            keys: "Esc";
+                            does: "Close a dialog";
+                        }
+                        KeyRow {
+                            keys: "Enter";
+                            does: "The dialog's main button";
+                        }
+                        KeyRow {
+                            keys: "Tab, Shift+Tab";
+                            does: "The next or the last control";
+                        }
+                        KeyRow {
+                            keys: "Space";
+                            does: "Press a button, tick a box";
+                        }
+                        KeyRow {
+                            keys: "← →";
+                            does: "Choose in a row of choices or tabs";
+                        }
+                    }
+                }
+                Reveal {
+                    shown: Manual.section == 2;
+                    fade: true;
+                    VerticalLayout {
+                        padding: Space.xl;
+                        spacing: Space.sm;
+                        Answer {
+                            text: Install.windows ? "Every action here runs one of these commands for you, with the same checks and audit records. There is nothing to type." : "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
+                        }
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            padding-top: Space.xs;
+                            TextField {
+                                horizontal-stretch: 1;
+                                text <=> Manual.ref-filter;
+                                placeholder: "Filter: pair, folder, sudo…";
+                                label: "Filter the commands";
+                                edited => {
+                                    Manual.ref-update();
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Segmented {
+                                    options: ["By topic", "A to Z"];
+                                    current: Manual.ref-by-name ? 1 : 0;
+                                    chosen(i) => {
+                                        Manual.ref-by-name = i == 1;
+                                        Manual.ref-update();
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            text: "A command about one center takes --center <CENTER> when more than one is paired.";
+                            color: Theme.text-muted;
+                            font-size: Type.caption;
+                            wrap: word-wrap;
+                        }
+                        Reveal {
+                            shown: Manual.ref-groups.length == 0;
+                            Text {
+                                text: "No command matches.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                            }
+                        }
+                        for g in Manual.ref-groups: Fit {
+                            VerticalLayout {
+                                padding-top: Space.sm;
+                                Reveal {
+                                    shown: g.name != "";
+                                    GroupHead {
+                                        name: g.name;
+                                        count: g.rows.length;
+                                        open: g.open;
+                                        toggled => {
+                                            Manual.ref-group-toggle(g.name);
+                                        }
+                                    }
+                                }
+                                Reveal {
+                                    shown: g.open;
+                                    gap: g.name != "" ? 6px : 0px;
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        for r in g.rows: CommandRow {
+                                            item: r;
+                                            topic: g.name == "";
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

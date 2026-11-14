@@ -394,13 +394,14 @@ export global Logs {
     callback clear();
 }
 
-// The Help page: whether its keys and its command reference are open, and
+// The Help page: its section and the task map's open groups, and
 // the reference (src/reference.rs): what it shows for the filter and the
 // order. Each part, topic and command opens and closes on its own.
 export global Manual {
-    in-out property <bool> tasks-open;
-    in-out property <bool> keys-open;
-    in-out property <bool> commands-open;
+    // The section shown: 0 the tasks, 1 the keys, 2 the commands; and
+    // which groups of the task map are open.
+    in-out property <int> section;
+    in-out property <[bool]> tasks-open: [false, false, false, false];
     in-out property <[RefGroup]> ref-groups;
     in-out property <string> ref-filter;
     in-out property <bool> ref-by-name;

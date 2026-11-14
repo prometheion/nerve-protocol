@@ -1018,12 +1018,15 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Help);
     shots.take("help");
     let manual = window.global::<nerve_node_desktop::Manual>();
-    manual.set_keys_open(true);
-    shots.take_full("help-keys", 1000);
-    // The command reference beside the keys: by topic, two cards open, one
-    // command's options shown, a topic closed, filtered, A to Z.
-    manual.set_commands_open(true);
-    shots.take("help-both");
+    manual.set_tasks_open(slint::ModelRc::new(slint::VecModel::from(vec![
+        true, true, false, false,
+    ])));
+    shots.take_full("help-tasks", 1100);
+    manual.set_section(1);
+    shots.take("help-keys");
+    // The command reference: by topic, two cards open, one command's
+    // options shown, a topic closed, filtered, A to Z.
+    manual.set_section(2);
     shots.take_full("help-commands", 3600);
     manual.invoke_ref_toggle("center".into());
     manual.invoke_ref_toggle("relay".into());
@@ -1043,8 +1046,8 @@ fn every_page_light_and_dark() {
     manual.invoke_ref_toggle("options:center add".into());
     manual.invoke_ref_group_toggle("Install".into());
     manual.invoke_ref_update();
-    manual.set_keys_open(false);
-    manual.set_commands_open(false);
+    manual.set_section(0);
+    manual.set_tasks_open(slint::ModelRc::new(slint::VecModel::from(vec![false; 4])));
     store.invoke_show(Page::Overview);
     store.set_about_open(true);
     shots.take("about");

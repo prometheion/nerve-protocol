@@ -33,6 +33,11 @@ fn same(a: &Shot, b: &Shot) -> bool {
     a.as_slice() == b.as_slice()
 }
 
+/// The task map's groups of Help, the first open or none.
+fn first_group(open: bool) -> slint::ModelRc<bool> {
+    slint::ModelRc::new(slint::VecModel::from(vec![open, false, false, false]))
+}
+
 #[test]
 fn animations_are_short_end_in_place_and_wait_for_nothing() {
     let screen = Screen::install(SIZE.0, SIZE.1, 1.0).unwrap();
@@ -182,13 +187,13 @@ fn animations_are_short_end_in_place_and_wait_for_nothing() {
     at(LATER);
     let manual = window.global::<Manual>();
     let closed = screen.draw();
-    manual.set_keys_open(true);
+    manual.set_tasks_open(first_group(true));
     let start = screen.draw();
     let open = at(LATER);
     assert!(!same(&open, &closed));
-    manual.set_keys_open(false);
+    manual.set_tasks_open(first_group(false));
     at(LATER);
-    manual.set_keys_open(true);
+    manual.set_tasks_open(first_group(true));
     screen.draw();
     let mid = at(BASE / 2);
     assert!(
@@ -199,7 +204,7 @@ fn animations_are_short_end_in_place_and_wait_for_nothing() {
         same(&at(BASE / 2), &open),
         "a section takes longer than BASE"
     );
-    manual.set_keys_open(false);
+    manual.set_tasks_open(first_group(false));
     screen.draw();
     assert!(!same(&at(BASE / 2), &closed), "the section closes at once");
     assert!(

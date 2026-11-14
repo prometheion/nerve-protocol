@@ -32,7 +32,7 @@ fn the_task_map_has_the_places_the_messages_name() {
     let page = include_str!("../../../docs/user/windows.md");
     assert!(page.contains("\n## Where each task is\n"));
     assert!(
-        HELP.contains("if Install.windows: HorizontalLayout {")
+        HELP.contains("if Install.windows && Manual.section == 0: HorizontalLayout {")
             && HELP.contains("/docs/user/windows.md#where-each-task-is\");"),
         "Help links the Windows page on Windows"
     );
