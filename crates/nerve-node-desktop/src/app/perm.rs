@@ -377,10 +377,15 @@ impl Ctl {
                         return;
                     }
                     c.with_perm(|p| {
+                        // Into the open form row, as it is; a new one starts
+                        // with reading only.
+                        if !p.get_folder_open() {
+                            p.set_folder_edit(SharedString::new());
+                            p.set_folder_read(true);
+                            p.set_folder_write(false);
+                            p.set_folder_execute(false);
+                        }
                         p.set_folder_path(path.display().to_string().into());
-                        p.set_folder_read(true);
-                        p.set_folder_write(false);
-                        p.set_folder_execute(false);
                         p.set_folder_error(SharedString::new());
                         p.set_folder_open(true);
                     });
@@ -389,17 +394,24 @@ impl Ctl {
         );
     }
 
+    /// Saves the folder form row: a new folder, or the folder it changes,
+    /// which a new path moves (the new one is added, then the old one goes).
     fn folder_add(self: &Rc<Self>) {
-        let Some((path, r, w, x)) = self.with_perm(|p| {
+        let Some((path, r, w, x, was)) = self.with_perm(|p| {
             (
-                p.get_folder_path().to_string(),
+                p.get_folder_path().trim().to_string(),
                 p.get_folder_read(),
                 p.get_folder_write(),
                 p.get_folder_execute(),
+                p.get_folder_edit().to_string(),
             )
         }) else {
             return;
         };
+        if path.is_empty() {
+            self.with_perm(|p| p.set_folder_error("Choose a folder.".into()));
+            return;
+        }
         // A new folder gets some right; `none` is for closing one inside
         // another, which a folder's row does.
         if !(r || w || x) {
@@ -411,18 +423,32 @@ impl Ctl {
             "add".into(),
             path.clone(),
             view::rights(r, w, x),
+            format!("--center={}", self.perm_center()),
         ];
-        self.perm_change(
-            args,
-            None,
-            format!("{path} is added."),
-            |c| {
-                c.with_perm(|p| p.set_folder_open(false));
-            },
-            |c, e| {
-                c.with_perm(|p| p.set_folder_error(e.into()));
-            },
-        );
+        let said = if was == path {
+            format!("The rights of {path} changed.")
+        } else {
+            format!("{path} is added.")
+        };
+        self.command(args, None, move |c, answer| {
+            match answer {
+                Ok(v) => {
+                    c.with_perm(|p| {
+                        p.set_folder_open(false);
+                        p.set_folder_edit(SharedString::new());
+                    });
+                    c.done(&v, said);
+                    if !was.is_empty() && was != path {
+                        c.folder_remove(&was);
+                    }
+                }
+                Err(e) => {
+                    c.with_perm(|p| p.set_folder_error(e.into()));
+                }
+            }
+            c.refresh_status();
+            c.perm_load();
+        });
     }
 
     /// Walks every folder grant again (`folder sync`), so what was moved
@@ -487,6 +513,7 @@ impl Ctl {
         let cleared: fn(&Ctl) = match list {
             0 => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_allow_text(SharedString::new());
                     p.set_allow_wild(false);
                     p.set_allow_hint(SharedString::new());
@@ -495,6 +522,7 @@ impl Ctl {
             },
             1 => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_deny_text(SharedString::new());
                     p.set_deny_wild(false);
                     p.set_deny_hint(SharedString::new());
@@ -503,6 +531,7 @@ impl Ctl {
             },
             _ => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_sudo_text(SharedString::new());
                     p.set_sudo_wild(false);
                 });

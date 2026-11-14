@@ -255,7 +255,15 @@ export global Perm {
     in-out property <string> user-then: "allowlist";
     in-out property <string> mode-error;
 
+    // The section shown: 0 the folders, 1 the forbidden commands, 2 the
+    // allowed ones, 3 sudo.
+    in-out property <int> section;
+    // A form row in the list: a folder's (folder-open), new or the one
+    // `folder-edit` names, which a save moves to the path typed; a new
+    // rule's, for the list `add-list` (-1: none).
     in-out property <bool> folder-open;
+    in-out property <string> folder-edit;
+    in-out property <int> add-list: -1;
     in-out property <string> folder-path;
     in-out property <bool> folder-read: true;
     in-out property <bool> folder-write;
