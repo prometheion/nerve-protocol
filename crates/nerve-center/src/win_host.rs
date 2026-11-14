@@ -104,6 +104,14 @@ impl WinSystem for WinHost {
         nerve_service::win::event::delete_source(CENTER_SOURCE_KEY, CENTER_SOURCE)
     }
 
+    fn put_on_path(&self, dir: &Path) -> Result<bool, String> {
+        nerve_service::win::machine_path::add(dir)
+    }
+
+    fn remove_from_path(&self, dir: &Path) -> Result<bool, String> {
+        nerve_service::win::machine_path::remove(dir)
+    }
+
     fn version_of(&self, program: &Path) -> Result<String, String> {
         output_of(program, &["--version"])
     }

@@ -15,19 +15,30 @@ pub(super) async fn show_network(
         None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
     };
     if names.is_empty() {
-        w(out, NO_CENTER_PAIRED.into());
+        show(out, &no_center_page());
+        return Ok(());
     }
     let installed = crate::service::is_service_node(&paths);
+    let mut page = page("network");
+    let mut rows = Vec::new();
     for name in names {
         let p = &cfg.center(&name).expect("listed").policy;
-        match p.no_network {
-            true => w(out, format!("{name}: off: {NO_NETWORK_LINE}")),
-            false => w(out, format!("{name}: on")),
+        rows.push(vec![
+            name.clone(),
+            match p.no_network {
+                true => "off".into(),
+                false => "on".into(),
+            },
+        ]);
+        if p.no_network {
+            page.note(format!("Off: {NO_NETWORK_LINE}."));
         }
         if let Some(note) = network_mode_note(p, installed, apart_by_hand_here()) {
-            w(out, note);
+            page.note(format!("{name}: {}", note_text(&note)));
         }
     }
+    page.list(None, rows);
+    show(out, &page);
     Ok(())
 }
 
@@ -153,7 +164,7 @@ fn network_rules_here() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::tests::{json_of, load, run, setup};
+    use crate::cli::tests::{has_row, json_of, load, run, setup};
 
     /// `network off` keeps the center's commands off the network,
     /// `on` lets them on it again, `folder` says which, and a machine
@@ -167,7 +178,11 @@ mod tests {
         let by_hand = "note: this node runs by hand, so its commands run as you";
         let out = run(&paths, &["network", "off"]).unwrap();
         assert!(out.contains(by_hand), "{out}");
-        assert!(run(&paths, &["folder"]).unwrap().contains(by_hand));
+        assert!(
+            run(&paths, &["folder"])
+                .unwrap()
+                .contains("This node runs by hand, so its commands run as you")
+        );
         // The installed node runs them as nerve-run, unless as the owner.
         let mut p = policy();
         assert!(network_mode_note(&p, true, false).is_none());
@@ -196,7 +211,10 @@ mod tests {
         assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
         assert!(policy().no_network);
         let ls = run(&paths, &["folder"]).unwrap();
-        assert!(ls.contains(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
+        assert!(
+            ls.contains(&format!("Network off: {NO_NETWORK_LINE}.")),
+            "{ls}"
+        );
         let out = run(&paths, &["network", "on"]).unwrap();
         assert!(
             out.starts_with("home: its commands may use the network\n"),
@@ -207,11 +225,12 @@ mod tests {
         let e = run(&paths, &["network", "maybe"]).unwrap_err();
         assert!(e.contains("'maybe'"), "{e}");
         // Bare, it shows each center's switch.
-        assert_eq!(run(&paths, &["network"]).unwrap(), "home: on\n");
+        assert!(has_row(&run(&paths, &["network"]).unwrap(), "home on"));
         run(&paths, &["network", "off"]).unwrap();
         let shown = run(&paths, &["network"]).unwrap();
+        assert!(has_row(&shown, "home off"), "{shown}");
         assert!(
-            shown.starts_with(&format!("home: off: {NO_NETWORK_LINE}\n")),
+            shown.contains(&format!("Note  Off: {NO_NETWORK_LINE}.")),
             "{shown}"
         );
         // A mode whose commands run as you says, with the network off, that

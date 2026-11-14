@@ -23,7 +23,7 @@ and its action checker may refuse a call first.
 |---|---|
 | stdio | The harness starts `nerve-center` (`--mcp stdio`, the default) |
 | HTTP | `POST /mcp` with `Authorization: Bearer <token>` (`--mcp http`) |
-| Attach | A second `nerve-center --mcp stdio` on the same state folder relays its stdio over `<state>/run/harness.sock` to the first one. Unix only |
+| Attach | A second `nerve-center --mcp stdio` on the same state folder relays its stdio over `<state>/run/harness.sock` (on Windows a named pipe) to the first one. The owner's commands `pair`, `nodes` and `token` use it too ([the service](service.md#the-owners-commands)) |
 
 The server speaks MCP revision `2025-06-18` and accepts `2025-03-26` and
 `2024-11-05` at `initialize`. Its methods are `initialize`,

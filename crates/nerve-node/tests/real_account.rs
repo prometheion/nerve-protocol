@@ -198,12 +198,12 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
         "{said}"
     );
     assert_eq!(
-        said.contains("this kernel has no Landlock"),
+        said.to_lowercase().contains("this kernel has no landlock"),
         !landlock,
         "{said}"
     );
     let (_, st) = as_owner(&owner, &["status"]);
-    assert_eq!(st.contains(&format!("warning: {told}")), !landlock, "{st}");
+    assert_eq!(st.contains(told), !landlock, "{st}");
     chmod(&home, "750");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains(told), "{st}");
@@ -326,13 +326,13 @@ except OSError as e:
     let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "rwx"]);
     assert!(ok, "{said}");
     assert!(
-        said.contains("warning: nerve-run did not get every folder"),
+        said.contains("nerve-run did not get every folder"),
         "{said}"
     );
     assert!(said.contains("shut"), "{said}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(
-        st.contains("warning: nerve-run did not get every folder") && st.contains("shut"),
+        st.contains("nerve-run did not get every folder") && st.contains("shut"),
         "{st}"
     );
     // Without Landlock, the folder in the home is told: nerve-run passes
@@ -347,7 +347,7 @@ except OSError as e:
     let p = proj.to_str().unwrap();
     assert!(as_owner(&owner, &["folder", "add", p, "rw"]).0);
     let (ok, said) = as_owner(&owner, &["folder", "add", p, "rwx"]);
-    assert!(ok && !said.contains("warning"), "{said}");
+    assert!(ok && !said.to_lowercase().contains("warning"), "{said}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains("did not get every folder"), "{st}");
     let (_, ls) = as_owner(&owner, &["--json", "center"]);
@@ -372,9 +372,9 @@ except OSError as e:
     // `status` says so.
     let (_, st) = as_owner(&owner, &["status"]);
     let line = if landlock {
-        "mode folder, as nerve-run\n"
+        "folder mode · as nerve-run   "
     } else {
-        "mode folder, as nerve-run, without Landlock"
+        "folder mode · as nerve-run, without Landlock"
     };
     assert!(st.contains(line), "{st}");
     let paired = center.paired().expect("paired");
@@ -1279,10 +1279,12 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let (provider, first) = started_as(&owner, &[&python, script, at, log_s]);
     assert!(first.contains("\"ok\""), "{first}");
     let (_, st) = as_owner(&owner, &["status"]);
-    assert!(st.contains("provider pathprov attached: files"), "{st}");
+    assert!(st.contains("  Providers\n    pathprov   files\n"), "{st}");
     let (_, ls) = as_owner(&owner, &["cap"]);
+    let row = format!("pathprov {python} attached");
     assert!(
-        ls.contains(&format!("program pathprov: {python}, attached")),
+        ls.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>().join(" ") == row),
         "{ls}"
     );
     assert!(
@@ -1432,7 +1434,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let gone = std::time::Instant::now();
     while as_owner(&owner, &["status"])
         .1
-        .contains("provider pathprov attached")
+        .contains("    pathprov   files")
     {
         assert!(gone.elapsed() < WAIT, "the provider stays attached");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1639,11 +1641,13 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
             == ["files.show", "read", "config", "conformance-center:", "on"]),
         "{ls}"
     );
-    assert!(ls.contains("capability who.am: id\n"), "{ls}");
-    assert!(
-        ls.contains(r#"capability say.back: printf "[%s]\n" {a} {b}"#),
-        "{ls}"
-    );
+    let has_row = |words: &str| {
+        let words = words.split_whitespace().collect::<Vec<_>>();
+        ls.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == words)
+    };
+    assert!(has_row("who.am id"), "{ls}");
+    assert!(has_row(r#"say.back printf "[%s]\n" {a} {b}"#), "{ls}");
     // There is no other account to run one as.
     let (ok, said) = as_owner(
         &owner,
@@ -1948,13 +1952,13 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     }
     let (_, ls) = as_owner(&owner, &["rule"]);
     for line in [
-        "allow  lamp.set:level<=5",
-        "allow  lamp.set:room=kitchen",
-        "deny  lamp.set:room=bedroom",
+        "  allow   lamp.set:level<=5",
+        "  allow   lamp.set:room=kitchen",
+        "  deny    lamp.set:room=bedroom",
     ] {
         assert!(ls.lines().any(|l| l == line), "{line}: {ls}");
     }
-    assert!(!ls.contains("warning"), "{ls}");
+    assert!(!ls.contains("Warning"), "{ls}");
     assert_eq!(
         config_call(&mut conn, "lamp.set", lamp("office", 3))
             .await
@@ -2034,7 +2038,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert!(ok, "{said}");
     let (_, ls) = as_owner(&owner, &["rule"]);
     assert!(
-        ls.contains("warning: the deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it"),
+        ls.contains("The deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it."),
         "{ls}"
     );
     // It fails closed: a call that cannot give the room is refused by it.
@@ -2298,7 +2302,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
         // The second pairing of nerve-run (a new one is in folder mode) is
         // told that nothing keeps it apart from the first without Landlock.
         assert_eq!(
-            said.contains("Warning: Without Landlock nothing keeps the pairings apart"),
+            said.contains("Without Landlock nothing keeps the pairings apart"),
             name == "home" && !landlock,
             "{name}: {said}"
         );
@@ -2542,7 +2546,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     );
     let (_, text) = as_owner(&owner, &["status"]);
     assert_eq!(
-        text.contains("warning: Without Landlock nothing keeps the pairings apart"),
+        text.contains("Without Landlock nothing keeps the pairings apart"),
         !landlock,
         "{text}"
     );
@@ -2565,7 +2569,8 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     let (ok, said) = as_owner(&owner, &["network", "off", "--center", "lab"]);
     assert!(ok, "{said}");
     assert_eq!(
-        said.contains("warning: the owner turned the network off"),
+        said.to_lowercase()
+            .contains("the owner turned the network off"),
         !filter,
         "{said}"
     );

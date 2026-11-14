@@ -128,6 +128,51 @@ async fn as_the_cli(
     ))
 }
 
+/// A writer whose reader is gone.
+struct Gone;
+
+impl std::io::Write for Gone {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `audit --follow | head -1` through the node ends with its reader: the
+/// session leaves, so the node drops the command (round 5, correctness 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_follow_ends_when_the_owners_output_is_gone() {
+    let d = tempfile::tempdir().unwrap();
+    let (_daemon, at) = node(d.path(), vec![uid()]).await;
+    let (_, _, code) = run(&at, &["config", "set", "log.level", "debug"], "")
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    let args: Vec<String> = ["audit", "--follow"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    let (mut err, mut out) = (Vec::new(), Gone);
+    let mut io = nerve_node::owner::Io {
+        out: &mut out,
+        err: &mut err,
+    };
+    let ask = nerve_node::owner::ask_at(
+        &at,
+        &args,
+        Some("/".into()),
+        nerve_node::owner::Input::None,
+        false,
+        &mut io,
+    );
+    let r = tokio::time::timeout(Duration::from_secs(20), ask)
+        .await
+        .expect("the follow ends once the output is gone");
+    assert_eq!(r, Ok(0));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_changes_the_node_through_it_and_is_audited() {
     let d = tempfile::tempdir().unwrap();

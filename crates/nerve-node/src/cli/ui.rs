@@ -5,6 +5,8 @@
 //! relay's. Tokens are made here only: a browser session must not be able to
 //! give itself a login that outlives it.
 
+use nerve_service::out::Page;
+
 use super::*;
 
 /// The address the web UI listens on unless `ui on --listen` names another.
@@ -105,8 +107,14 @@ pub(super) async fn ui_cmd(
         let (cfg, _) = read_config(paths).await?;
         let live = live_ui(paths).await?;
         let print = current_fingerprint(paths, &cfg);
-        for line in status_lines(&cfg, live.as_ref(), print.as_deref()) {
-            w(out, line);
+        // `--json` keeps its lines; people get the page.
+        match json::active() {
+            true => {
+                for line in status_lines(&cfg, live.as_ref(), print.as_deref()) {
+                    w(out, line);
+                }
+            }
+            false => show(out, &status_page(&cfg, live.as_ref(), print.as_deref())),
         }
         let mut data = status_data(&cfg, live.as_ref());
         data["fingerprint"] = json!(print);
@@ -408,6 +416,47 @@ async fn wait_for_listener(paths: &NodePaths, at: &str) -> Option<String> {
     None
 }
 
+/// What a bare `ui` shows people: whether the web UI is on and where, the
+/// node's word on it, its certificate and its tokens.
+fn status_page(cfg: &NodeConfig, live: Option<&Value>, print: Option<&str>) -> Page {
+    let url = |at: &str| match at.parse::<std::net::SocketAddr>() {
+        Ok(a) if !a.ip().is_loopback() => format!("https://{}", shown_at(a)),
+        _ => format!("http://{at}"),
+    };
+    let mut p = match &cfg.ui.listen {
+        None => page("web UI off"),
+        Some(_) => page("web UI on"),
+    };
+    match (&cfg.ui.listen, live) {
+        (None, _) => {
+            p.next("Turn it on", "nerve-node ui on");
+        }
+        (Some(at), Some(v)) => {
+            p.row("Address", url(at));
+            p.row("State", v["status"].as_str().unwrap_or("not known"));
+        }
+        (Some(at), None) => {
+            p.row("Address", url(at));
+            p.row("State", "once the node runs");
+        }
+    }
+    if let Some(f) = print {
+        p.row("Certificate", format!("SHA-256 {f}"));
+    }
+    if live.is_some_and(|v| v["served"] == false) {
+        p.note(only_installed());
+    }
+    if cfg.ui.tokens.is_empty() {
+        p.row("Tokens", "none");
+        p.next("Make one", "nerve-node ui token add <label>");
+    } else {
+        let labels: Vec<&str> = cfg.ui.tokens.iter().map(|t| t.label.as_str()).collect();
+        p.row("Tokens", labels.join(", "));
+    }
+    p
+}
+
+/// The lines of a bare `ui` for `--json`, which gives them as they were.
 fn status_lines(cfg: &NodeConfig, live: Option<&Value>, print: Option<&str>) -> Vec<String> {
     let mut lines = Vec::new();
     let url = |at: &str| match at.parse::<std::net::SocketAddr>() {

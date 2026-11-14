@@ -1,9 +1,9 @@
-# Windows (until 0.1.0)
+# Windows
 
-The releases before 0.1.0 publish the Linux programs only; Windows comes with 0.1.0.
-The user guide is Linux only until then. This page keeps everything it said
-about Windows, for the work toward 0.1.0. It comes back to the user guide,
-short, with that release.
+How Nerve works on Windows, in depth: the node as a service and its
+accounts, the AppContainer, the folder grants, sudo, the center as a
+service. The user guide's [Windows page](../user/windows.md) is the short
+version, task by task.
 
 ## Linux and Windows
 
@@ -149,27 +149,20 @@ name.
 
 ## Install on Windows
 
-In PowerShell, compare each hash with its line in `SHA256SUMS`:
-
-```powershell
-(Get-FileHash .\nerve-node-desktop-x86_64-windows.exe).Hash
-```
-
-Then double-click `nerve-node-desktop-x86_64-windows.exe`. Its installer
-installs the node as a service that starts with the machine, and the app with
-**Nerve** in the Start menu ([desktop app](desktop.md#install)). The app does
-everything for the node from then on: pairing, settings, folders, rules,
-sudo, backups, update and uninstall. No terminal command is needed or
-offered.
-
-For the center, rename `nerve-center-x86_64-windows.exe` to `nerve-center.exe`
-and put it in a folder on your `PATH`. A harness starts it from there, or it
-runs as a [service](#the-center-as-a-windows-service).
-
-### Let the file run (Windows)
-
-Double-click the file. It is not signed, so Windows may show "Windows
-protected your PC": **More info**, then **Run anyway**.
+The user guide's [Windows page](../user/windows.md) has the download, the
+check with `Get-FileHash`, SmartScreen, the install and the first run. The
+app does everything for the node from then on: pairing, settings, folders,
+rules, sudo, backups, update and uninstall. No terminal command is needed or
+offered. The center's `install` puts it in `%ProgramFiles%\Nerve` as
+`nerve-center.exe` and that folder on the machine's `Path` (its uninstall
+takes it off again), where a harness starts it, and runs it as a
+[service](#the-center-as-a-windows-service). A double-click on the
+downloaded center runs that `install`: with no arguments, its console as
+stdin and alone on that console (`GetConsoleProcessList`), it starts itself
+again as `install` with `runas` (the UAC prompt), and the new window waits
+for Enter at its end (`nerve_service::win::console`). A harness gives a pipe
+on stdin and a terminal shares its console with the shell, so both still
+get the MCP center.
 
 ## The node as a service on Windows
 
@@ -424,6 +417,17 @@ ran from it, or when the Event Log read the text of the node's entries from
 it. An install over an installed node moves the old program aside the same
 way.
 
+A node of 0.0.6 cannot be updated or installed over. Its install wrote the
+account of the commands into `node.toml` (`machine.user`), which this version
+refuses, and the file is signed with a key the installer does not hold. So
+the install and the update refuse before they change anything when
+`node.toml` holds that key (`winsvc::check_not_from_0_0_6`), and say to
+uninstall with **Delete the data** and pair again. The update needs it too:
+the installer opened over 0.0.6 finds a node and offers **Update**, not
+**Install**. The 0.0.6 app's **Update** finds that the new program
+does not start and puts the old one back. 0.0.6 also named its owners in the
+registry value `Owners`, which this version does not read.
+
 **Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
 and removes the service, the service `nerve-run-profile`, the source
 `nerve-node` of the Event Log (its entries stay), the users `nerve` and
@@ -464,7 +468,7 @@ The install does this, and says each step:
    checks the `state` and `settings` folders again at each start.
 2. Makes the owner token in the state folder (one made before is kept) and
    writes `settings\center.env` with a new harness token; `--name`,
-   `--public-url` and `--listen` go into it.
+   `--public-url`, `--listen`, `--ui` and `--mcp` go into it.
 3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
@@ -480,16 +484,20 @@ The install does this, and says each step:
    It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
    the node port (`--listen`, 7443 by default) of that program, and nothing
-   else. The web UI and MCP stay on loopback.
+   else. The web UI and MCP stay on loopback; beyond it their ports need a
+   rule of their own, whose `New-NetFirewallRule` line `set` prints.
 6. Starts the service and waits until the center runs, then says the web
    UI's address, the owner token and where harnesses connect.
 
 The service reads its settings only from `center.env`, the same
 `NERVE_CENTER_*` lines as on Linux; MCP is over HTTP unless the file says
 otherwise, and a file that is missing means the defaults. A center that
-cannot start because the file cannot be read says why in its log. Change them as an administrator, then
-`Restart-Service nerve-center`. After a change of `--listen` run
-`nerve-center install --listen …` again, so the firewall rule follows.
+cannot start because the file cannot be read says why in its log.
+`nerve-center set <name> <value>` in an administrator's terminal changes
+`name`, `public-url`, `listen`, `ui` or `mcp` there and restarts the
+service when it runs; a new `listen` moves the firewall rule to its port
+([how](settings-and-config.md#the-services-settings)). Change the others as
+an administrator, then `Restart-Service nerve-center`.
 
 `nerve-center status` in an administrator's terminal says whether the
 center runs, the service's state, where it is reached, where its owner

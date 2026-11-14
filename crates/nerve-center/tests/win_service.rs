@@ -317,9 +317,31 @@ fn the_center_runs_as_a_windows_service() {
     assert!(ok, "{said}");
     assert!(said.contains("runs as NT SERVICE\\nerve-center"), "{said}");
     assert!(said.contains("the service nerve-center runs"), "{said}");
+    // The program's folder is on the machine's Path, as /usr/local/bin is
+    // on Linux: a terminal opened from now on finds nerve-center.
+    let program_dir = nerve_service::win::folders::program_files().join("Nerve");
+    let on_path = || {
+        let path = system(
+            "reg.exe",
+            &[
+                "query",
+                r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                "/v",
+                "Path",
+            ],
+        );
+        path.to_lowercase().split(';').any(|e| {
+            e.trim().trim_end_matches('\\') == program_dir.display().to_string().to_lowercase()
+        })
+    };
+    assert!(
+        on_path(),
+        "{} is not on the machine's Path",
+        program_dir.display()
+    );
     let token = said
         .lines()
-        .find_map(|l| l.strip_prefix("Owner token: "))
+        .find_map(|l| l.strip_prefix("  Owner token   "))
         .and_then(|l| l.split_whitespace().next())
         .expect("an owner token")
         .to_string();
@@ -328,13 +350,13 @@ fn the_center_runs_as_a_windows_service() {
         // The service runs, and `status` says so as the administrator asks.
         let (ok, said) = center(&["status"]);
         assert!(ok, "{said}");
-        assert!(said.contains("center: running"), "{said}");
+        assert!(said.contains(" · running as a service\n"), "{said}");
         assert!(
-            said.contains("service: running, starts with the machine"),
+            said.contains("Owner token:     nerve-center owner-token\n"),
             "{said}"
         );
         assert!(
-            said.contains("in an administrator's terminal shows it"),
+            said.contains("Run these commands in an administrator's terminal."),
             "{said}"
         );
         // The installed center's folders are the ones Windows keeps, not
@@ -344,7 +366,7 @@ fn the_center_runs_as_a_windows_service() {
         let decoy = tempfile::tempdir().unwrap();
         let (ok, said) = center_with(&["status"], &[("ProgramData", decoy.path())]);
         assert!(ok, "{said}");
-        assert!(said.contains("center: running"), "{said}");
+        assert!(said.contains(" · running as a service\n"), "{said}");
         assert!(!decoy.path().join("nerve-center").exists());
         // An administrator's terminal does not take the state folder from
         // a variable either: `status`, `backup` and `restore` would read
@@ -822,7 +844,7 @@ if ($wait.Wait(40000)) {{
             );
             wait_for_ui();
             let (_, said) = center(&["status"]);
-            assert!(said.contains("center: running"), "{said}");
+            assert!(said.contains(" · running as a service\n"), "{said}");
             let acl = system("icacls.exe", &[&state.display().to_string()]);
             assert!(
                 acl.contains("NT SERVICE\\nerve-center:(OI)(CI)(F)"),
@@ -990,8 +1012,17 @@ if ($wait.Wait(40000)) {{
     );
     assert!(said.contains("removed the Windows Firewall rule"), "{said}");
     assert!(said.contains("removed the source nerve-center"), "{said}");
+    assert!(said.contains("off the machine's Path"), "{said}");
+    assert!(
+        !on_path(),
+        "{} stays on the machine's Path",
+        program_dir.display()
+    );
     let (_, said) = center(&["status"]);
-    assert!(said.contains("service: not installed"), "{said}");
+    assert!(
+        said.contains("  Service     none, a harness starts it\n"),
+        "{said}"
+    );
     let rule = system(
         "netsh.exe",
         &[

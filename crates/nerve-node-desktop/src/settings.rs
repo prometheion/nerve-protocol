@@ -1,5 +1,6 @@
 //! The app's own settings, kept for each user apart from the node's: the
-//! appearance the owner chose (system, light or dark). A small JSON file in
+//! appearance the owner chose (system, light or dark), and whether Update
+//! takes the pre-releases too. A small JSON file in
 //! the user's config folder, `nerve-node-desktop/settings.json`; the node's
 //! settings stay the node's (`nerve-node config`).
 
@@ -44,6 +45,18 @@ pub fn save_appearance(path: &Path, appearance: i32) -> Result<(), String> {
     change(path, |v| v["appearance"] = json!(word))
 }
 
+/// Whether Update takes the pre-releases too, as saved in `path`: off
+/// unless the owner turned it on.
+pub fn pre_releases(path: &Path) -> bool {
+    read(path).is_some_and(|v| v["pre_releases"] == true)
+}
+
+/// Saves whether Update takes the pre-releases in `path`, the rest of the
+/// file as it was.
+pub fn save_pre_releases(path: &Path, on: bool) -> Result<(), String> {
+    change(path, |v| v["pre_releases"] = json!(on))
+}
+
 /// The file at `path` with `f` applied, the rest as it was.
 fn change(path: &Path, f: impl FnOnce(&mut Value)) -> Result<(), String> {
     let mut v = read(path)
@@ -79,5 +92,20 @@ mod tests {
         assert_eq!(v, json!({"appearance": "system", "later": 1}));
         std::fs::write(&f, "not json").unwrap();
         assert_eq!(appearance(&f), 0);
+    }
+
+    /// Pre-releases are off until the owner turns them on, and the switch
+    /// keeps the rest of the file (#213).
+    #[test]
+    fn pre_releases_are_off_until_turned_on() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("nerve-node-desktop/settings.json");
+        assert!(!pre_releases(&f));
+        save_appearance(&f, 2).unwrap();
+        save_pre_releases(&f, true).unwrap();
+        assert!(pre_releases(&f));
+        assert_eq!(appearance(&f), 2);
+        save_pre_releases(&f, false).unwrap();
+        assert!(!pre_releases(&f));
     }
 }

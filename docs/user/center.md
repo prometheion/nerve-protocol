@@ -8,8 +8,29 @@ sudo ./nerve-center-x86_64-linux install --name lab
 nerve-center status
 ```
 
-`status` says whether it runs, its addresses and its machines, and ends
-with its log command, `journalctl -u nerve-center`.
+`status` says whether it runs, its addresses and its machines, and what to
+do next. `sudo nerve-center service start|stop|restart` starts and stops
+it. On Windows, run these in an administrator's terminal
+([Windows](windows.md#the-center-as-a-service)).
+
+## In the terminal
+
+What the web UI does for machines and harnesses, the terminal does too,
+also with the web UI off:
+
+```sh
+sudo nerve-center pair                  # a link that pairs a new machine
+sudo nerve-center nodes                 # the paired machines
+sudo nerve-center nodes disable lab     # off: the agent cannot use it
+sudo nerve-center nodes rm lab          # unpaired
+sudo nerve-center token new laptop      # a harness token, shown once
+sudo nerve-center token list
+sudo nerve-center token rm laptop
+sudo nerve-center log --problems
+```
+
+They ask the running center through its own socket, which only root and
+the center's account may use (on Windows, an administrator's terminal).
 
 ## Log in to the web UI
 
@@ -53,6 +74,11 @@ Allowing `execute` allows all a machine lets this center do, so decide that
 on the machine: its [mode](folders-and-modes.md) and [rules](rules.md)
 ([the tools](../dev/mcp-surface.md#the-tools-the-model-gets)).
 
+A call still running after 20 seconds becomes a job: `execute` answers its
+id at once, and `job.status` gives the result later. `--call-wait` changes
+the 20 seconds; keep it below your harness's own timeout for a tool call
+([jobs](../dev/mcp-surface.md#long-calls-become-jobs)).
+
 ## Ports
 
 | Port | For | Setting |
@@ -62,10 +88,24 @@ on the machine: its [mode](folders-and-modes.md) and [rules](rules.md)
 | 7481 | harnesses over HTTP, this machine only | `--mcp`, `NERVE_CENTER_MCP` |
 
 Set `--public-url` when nodes reach the center under another name than its
-host name, such as a DNS name or a forwarded port. `nerve-center --help`
-lists every setting. For the service they live in
-`/etc/nerve-center/center.env`; change them there, then
-`sudo systemctl restart nerve-center`.
+host name, such as a DNS name or a forwarded port.
+`NERVE_CENTER_HARNESS_TOKEN` adds a fixed harness token, for a harness a
+script sets up; `--harness-token` does too, but shows it in the process
+list. `nerve-center --help`
+lists every setting.
+
+The service keeps its settings in `/etc/nerve-center/center.env` (on
+Windows `C:\ProgramData\nerve-center\settings\center.env`). `set` changes
+`name`, `public-url`, `listen`, `ui` or `mcp` there and restarts the
+service; `install` takes them as flags (`--ui 0.0.0.0:7480`):
+
+```sh
+sudo nerve-center set                   # shows them
+sudo nerve-center set ui 0.0.0.0:7480   # the web UI for other machines
+```
+
+Change the others in that file, then `sudo systemctl restart nerve-center`.
+On Windows, run `set` in an administrator's terminal.
 
 ### Which setting wins
 
@@ -84,8 +124,8 @@ The center on a server, the harness on your laptop:
   ssh -L 7480:127.0.0.1:7480 -L 7481:127.0.0.1:7481 you@center-host
   ```
 
-- **Beyond loopback**: set `NERVE_CENTER_MCP=0.0.0.0:7481` (and
-  `NERVE_CENTER_UI` for the web UI). They then use TLS with the center's
+- **Beyond loopback**: `sudo nerve-center set mcp 0.0.0.0:7481` (and
+  `set ui 0.0.0.0:7480` for the web UI). They then use TLS with the center's
   self-signed certificate. The Connect a harness card shows its fingerprint:
   let the harness and the browser trust that certificate, and compare the
   fingerprint before you log in
@@ -117,9 +157,14 @@ A harness may start `nerve-center` itself, over stdio:
 
 Then the center runs as you, with its state in
 `~/.local/state/nerve-center`. `nerve-center owner-token` shows its owner
-token, without `sudo`. An agent with file or shell tools can read that
+token, without `sudo`. Started by hand at a terminal, the center waits for a
+harness there and takes what you type as MCP: run commands in another
+terminal. An agent with file or shell tools can read that
 token and log in to the web UI. Run the center as the service to keep the
 agent out.
+
+The commands of [In the terminal](#in-the-terminal) work on it without
+`sudo`.
 
 Several harnesses on one machine share one such center: a second
 `nerve-center` attaches to the first. A harness cannot start its own center
@@ -129,7 +174,9 @@ yourself into the service, with its pairings, see [backup](backup.md#move).
 ## Its log
 
 ```sh
-journalctl -u nerve-center
+sudo nerve-center log                   # its log file, the older one first
+sudo nerve-center log --problems --last 50
+journalctl -u nerve-center              # what the service printed
 ```
 
 The web UI's **Log** page shows the same log, with links, pairings,

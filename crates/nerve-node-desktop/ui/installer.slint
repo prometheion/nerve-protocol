@@ -148,7 +148,7 @@ export component UninstallChoice {
         OptionTile {
             icon: @image-url("icons/archive.svg");
             title: "Keep the data";
-            text: "Settings, pairings, keys and the audit log stay for a new install.";
+            text: Install.windows ? "Settings, pairings, keys, your stored Windows password and the audit log stay for a new install." : "Settings, pairings, keys and the audit log stay for a new install.";
             selected: !Install.purge;
             clicked => {
                 Install.purge = false;
@@ -174,7 +174,7 @@ export component UpdateChoice {
             spacing: Space.md;
             OptionTile {
                 icon: @image-url("icons/download.svg");
-                title: "Latest release";
+                title: Install.pre-releases ? "Newest pre-release" : "Latest release";
                 text: "From GitHub, checked against its SHA256SUMS.";
                 selected: Install.source == 0;
                 clicked => {

@@ -11,7 +11,22 @@ nerve-node log --problems --last 20
 The refusal in the audit log is the text the agent saw. One that starts with
 `the center's action checker` comes from the center: look at the center's
 Audit and Log pages. Every message, with its cause and fix, is in
-[messages](../dev/messages.md).
+[messages](../dev/messages.md). On Windows the app's **Overview**, **Audit**
+and **Log** pages show the same.
+
+<details>
+<summary>On Windows</summary>
+
+| What you see | Fix |
+|---|---|
+| "Windows protected your PC" | **More info**, then **Run anyway**: the programs are not signed |
+| Smart App Control blocks the installer | None yet: it lets no unsigned program run, and signed ones come later |
+| The app asks for your Windows password again | Save the new one under **Settings › General › Account for commands** |
+| A pairing with the network off runs nothing | Start the Windows Firewall service |
+
+More messages: [Windows](windows.md#when-something-fails).
+
+</details>
 
 <details>
 <summary>The agent sees <code>forbidden</code></summary>
@@ -65,17 +80,17 @@ or run `nerve-node folder sync`.
 <details>
 <summary>The machine shows offline</summary>
 
-`nerve-node center` shows a flag:
+`nerve-node center` shows a state:
 
-| Flag | Fix |
+| State | Fix |
 |---|---|
-| `[paused]` | `nerve-node center resume <name>` |
-| `[revoked]` or `[unknown]` | `nerve-node center rm <name>`, then pair again |
-| none | The node is dialling, with a wait of up to 60 seconds |
+| `paused` | `nerve-node center resume <name>` |
+| `revoked` or `unknown` | `nerve-node center rm <name>`, then pair again |
+| `-` | The node is dialling, with a wait of up to 60 seconds |
 
-- `status` says `LOCKED (panic)`: `nerve-node unlock`.
+- `status` says `locked` (panic): `nerve-node unlock`.
 - `status` says the center is older than this node: update the center first.
-- `node: not running`: `nerve-node service start`.
+- `status` says `stopped` or `not running`: its `Next` names the command.
 
 </details>
 

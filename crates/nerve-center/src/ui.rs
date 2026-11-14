@@ -129,34 +129,47 @@ pub(crate) fn token_command_of(
     local: bool,
     windows: bool,
 ) -> String {
+    command_of("owner-token", state, installed, default, local, windows)
+}
+
+/// The owner's command `what` for the center in `state`, as
+/// [`token_command_of`] names `owner-token`.
+pub(crate) fn command_of(
+    what: &str,
+    state: &std::path::Path,
+    installed: Option<&std::path::Path>,
+    default: &std::path::Path,
+    local: bool,
+    windows: bool,
+) -> String {
     if installed == Some(state) {
         return match windows {
-            true => "nerve-center owner-token".into(),
-            false => "sudo nerve-center owner-token".into(),
+            true => format!("nerve-center {what}"),
+            false => format!("sudo nerve-center {what}"),
         };
     }
     if installed.is_none() && state == default {
-        return "nerve-center owner-token".into();
+        return format!("nerve-center {what}");
     }
     if !local {
-        return "nerve-center owner-token --state-dir <this center's folder>".into();
+        return format!("nerve-center {what} --state-dir <this center's folder>");
     }
     let dir = state.display().to_string();
     let plain = dir
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._-~:\\".contains(c));
     match (plain, windows) {
-        (true, _) => format!("nerve-center owner-token --state-dir {dir}"),
+        (true, _) => format!("nerve-center {what} --state-dir {dir}"),
         // A Windows path holds no double quote.
         (false, true) if !dir.contains(['$', '`', '%']) => {
-            format!("nerve-center owner-token --state-dir \"{dir}\"")
+            format!("nerve-center {what} --state-dir \"{dir}\"")
         }
         // PowerShell expands `$` and the backtick inside double quotes and
         // cmd expands `%name%`, and no quoting suits both: the folder is
         // not named, so the copied command never names another one.
-        (false, true) => "nerve-center owner-token --state-dir <this center's folder>".into(),
+        (false, true) => format!("nerve-center {what} --state-dir <this center's folder>"),
         (false, false) => format!(
-            "nerve-center owner-token --state-dir '{}'",
+            "nerve-center {what} --state-dir '{}'",
             dir.replace('\'', "'\\''")
         ),
     }
@@ -172,6 +185,18 @@ fn html_text(text: &str) -> String {
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
+
+/// The requests of the web UI the owner's commands in the terminal make
+/// ([`Ui::owner_call`]).
+pub const OWNER_CALLS: &[(&str, &str)] = &[
+    ("GET", "/api/overview"),
+    ("POST", "/api/pair"),
+    ("POST", "/api/nodes/disable"),
+    ("POST", "/api/nodes/remove"),
+    ("GET", "/api/tokens"),
+    ("POST", "/api/tokens/create"),
+    ("POST", "/api/tokens/delete"),
+];
 /// How many log entries a view gets unless it asks for another number, and
 /// the most it may ask for.
 const LOG_PAGE: usize = 500;
@@ -207,6 +232,33 @@ impl Ui {
             wrong: webui::WrongSecrets::default(),
             mcp: std::sync::OnceLock::new(),
         })
+    }
+
+    /// One request of the owner's commands in the terminal (`pair`,
+    /// `nodes`, `token`), which come over the attach socket or pipe
+    /// (crate::attach): the web UI's own handlers answer them ([`Ui::api`]),
+    /// so they take the same checks and limits and leave the same log
+    /// lines. Only these requests; nothing else of the web UI.
+    pub async fn owner_call(
+        &self,
+        method: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, (u16, Value)> {
+        if !OWNER_CALLS.contains(&(method, path)) {
+            return Err((
+                404,
+                json!({"error": format!("{method} {path} is none of the owner's commands")}),
+            ));
+        }
+        let req = Request {
+            method: method.into(),
+            path: path.into(),
+            query: String::new(),
+            headers: Default::default(),
+            body: Vec::new(),
+        };
+        self.api(&req, body).await
     }
 
     /// Says how this center serves MCP: `mode` stdio, http or off, and for
@@ -1026,6 +1078,53 @@ mod tests {
         );
     }
 
+    /// The owner's commands in the terminal reach only their own requests
+    /// of the web UI (round 1 of #213's second pass, spec 1 and security
+    /// 5): each listed one is a route the web UI answers; any other, which
+    /// the web UI would take from a logged-in owner, is refused over the
+    /// attach socket or pipe and changes nothing.
+    #[tokio::test]
+    async fn the_owner_channel_takes_only_the_owners_requests() {
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let ui = Ui::new(&c, None, true);
+        let refused = "is none of the owner's commands";
+        for (method, path) in OWNER_CALLS {
+            if let Err((_, e)) = ui.owner_call(method, path, &json!({})).await {
+                assert!(!e.to_string().contains(refused), "{method} {path}: {e}");
+            }
+        }
+        let center_before = ui
+            .api(&req("GET", "/api/center", &[], ""), &json!({}))
+            .await
+            .unwrap();
+        let pin = c.pin();
+        for (method, path, body) in [
+            ("POST", "/api/center", json!({"name": "other"})),
+            ("POST", "/api/center/key/rotate", json!({})),
+            ("POST", "/api/checker", json!({})),
+            ("POST", "/api/nodes/rename", json!({"id": "x", "name": "y"})),
+            ("GET", "/api/stats", json!({})),
+            ("GET", "/api/center", json!({})),
+        ] {
+            let (code, e) = ui.owner_call(method, path, &body).await.unwrap_err();
+            assert_eq!(code, 404, "{method} {path}");
+            assert!(e.to_string().contains(refused), "{method} {path}: {e}");
+        }
+        // The web UI itself answers them.
+        assert!(
+            ui.api(&req("GET", "/api/stats", &[], ""), &json!({}))
+                .await
+                .is_ok()
+        );
+        let center_after = ui
+            .api(&req("GET", "/api/center", &[], ""), &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(center_after, center_before);
+        assert_eq!(c.pin(), pin);
+    }
+
     async fn pair_status(ui: &Ui, code: &str) -> Value {
         ui.api(
             &req("POST", "/api/pair/status", &[], ""),
@@ -1826,6 +1925,37 @@ mod tests {
         ] {
             assert!(APP_JS.contains(text), "{text}");
         }
+    }
+
+    /// Help says that a Windows machine has no `nerve-node` where one is
+    /// paired, and links the Windows page; with Linux machines only, or none
+    /// yet, it says nothing (docs-13). Runs the page's function with `node`
+    /// where it is there.
+    #[test]
+    fn help_tells_a_windows_machine_it_has_no_nerve_node() {
+        let from = APP_JS.find("function windowsHelpNote(").unwrap();
+        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
+        let script = format!(
+            "{func}\nconst n = (p) => ({{nodes: p.map((platform) => ({{platform}}))}});\nconsole.log(JSON.stringify([windowsHelpNote(n([\"linux\", \"windows\"])), windowsHelpNote(n([\"linux\"])), windowsHelpNote(n([])), windowsHelpNote(null)]));"
+        );
+        let out = match std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => {
+                eprintln!("skipped: no node here");
+                return;
+            }
+        };
+        let notes: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
+        assert!(
+            notes[0].as_deref().unwrap().contains("has no nerve-node"),
+            "{notes:?}"
+        );
+        assert_eq!(notes[1..], [None, None, None]);
+        assert!(APP_JS.contains("href: `${GUIDE}/windows.md`"));
     }
 
     /// The line the Audit page offers for a sudo command is the exact rule

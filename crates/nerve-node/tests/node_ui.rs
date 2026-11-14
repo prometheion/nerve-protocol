@@ -643,7 +643,7 @@ async fn a_taken_port_is_told() {
     assert!(out.contains(&format!("cannot listen on {listen}")), "{out}");
     let (out, _) = cli(&at, &["ui"]).await;
     assert!(out.contains("cannot listen"), "{out}");
-    assert!(out.contains("tokens: first"), "{out}");
+    assert!(out.contains("\n  Tokens      first\n"), "{out}");
     // Free again, the node listens there at its next try.
     drop(taken);
     wait_until("the node listens once the port is free", || {

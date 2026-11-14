@@ -17,8 +17,8 @@ A center and a node can share a machine.
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has these files and a `SHA256SUMS` file (seven for Linux, two more
-with Windows).
+release has these nine files, seven for Linux and two for Windows, and a
+`SHA256SUMS` file.
 
 | System | Files |
 |---|---|
@@ -414,6 +414,16 @@ GitHub (`nerve-node-x86_64-linux` or `nerve-node-aarch64-linux`, the names
 `install` takes too), checks it against the release's `SHA256SUMS`, puts it
 in place as `/usr/local/bin/nerve-node` and restarts the service. `HTTPS_PROXY` is used when it is set.
 `--from <file>` takes a program you downloaded and checked yourself.
+`--pre` takes the newest release, a pre-release too: GitHub's API
+(`api.github.com/repos/<owner>/<repo>/releases`, without a login, 60 calls
+an hour per address) names its tag, and its files come from
+`releases/download/<tag>/`, checked against that release's `SHA256SUMS`.
+When GitHub refuses (HTTP 403 or 429), `update` says so and names `--tag`.
+`--tag <tag>` takes that release the same way without asking the API. An
+older version is refused; the same version is taken when the program
+differs, so a pre-release gives way to its release. The app from a `.deb` or
+`.rpm` has its package manager install the same version again (`apt-get
+install --reinstall`, `dnf reinstall`).
 
 `update` also writes the service unit, the polkit files and the helper that
 starts and stops the service as the new program has them, for the owner the
@@ -565,9 +575,13 @@ Stop the center you ran yourself for good: the service has its key now.
 ### Settings of the service
 
 The settings are the variables of the [table above](settings-and-config.md#the-centers-settings), in
-`/etc/nerve-center/center.env`. Change them there and restart the service:
+`/etc/nerve-center/center.env`. `set` changes `name`, `public-url`,
+`listen`, `ui` and `mcp` there and restarts the service when it runs
+([how](settings-and-config.md#the-services-settings)); change the others
+there by hand and restart the service:
 
 ```sh
+sudo nerve-center set ui 0.0.0.0:7480
 sudo nano /etc/nerve-center/center.env
 sudo systemctl restart nerve-center
 ```
@@ -588,6 +602,32 @@ see other processes or change kernel settings, the clock or the host name.
 A `NERVE_CENTER_LISTEN` on a port below 1024 fails; use a higher port, or forward
 one to it.
 
+### The owner's commands
+
+`sudo nerve-center service start|stop|restart` runs `systemctl` on the unit
+(on Windows the service control manager); a start waits until the center
+answers. `pair`, `nodes`, `token` and `log` work as they do for a center a
+harness started ([in the terminal](../user/center.md#in-the-terminal)).
+
+`pair`, `nodes` and `token` ask the running center over its attach socket,
+`run/harness.sock` in the state folder (on Windows its attach pipe), with
+the line `{"role":"owner"}` and then one request as the web UI would send
+it. The center answers it with the web UI's own handler, so the checks,
+limits and log lines are the same; only those requests are taken. This
+way was chosen over the owner token and the web UI's port: it works with
+the web UI off, and it adds no way in for another account. The socket is
+mode 0600 in a 0700 folder and takes root and the center's account; root's
+command first becomes the folder's owner, as `owner-token` does, so it
+follows no link put there. The pipe lets in the center's account, SYSTEM
+and the administrators; an administrator other than the center's account
+may make the owner's requests only, not attach a harness. The command
+checks that the pipe belongs to SYSTEM, the administrators or the
+center's account before it sends anything: for the installed center that
+is the service's account, not the caller's own (an administrator's
+unelevated programs run as it, and one could make the pipe while the
+service is stopped); for a center run by hand it is the caller's. `log` reads `log.jsonl` (and
+`log.jsonl.1`) in the state folder, so it works with the center stopped.
+
 ### Update
 
 ```sh
@@ -599,7 +639,8 @@ sudo nerve-center update
 against the release's `SHA256SUMS`, puts it in place as
 `/usr/local/bin/nerve-center` and restarts the service. `HTTPS_PROXY` is used
 when it is set. `--from <file>` takes a program you downloaded and checked
-yourself.
+yourself; `--pre` and `--tag <tag>` take a pre-release as the node's
+`update` does ([update the node](#update-the-node)).
 
 `update` also writes the service unit as the new program has it, so a
 release that changes it needs no `install` again, and its steps go to the
@@ -616,10 +657,9 @@ when) run `sudo nerve-center install` once, or `update` again.
 The state folder and the settings are not touched. `update` refuses a file
 that is not `nerve-center` and a program older than the installed one. If the
 new program does not start, the old one is put back with the old unit and
-started again. Its
-last line says where the owner token is: a center installed before there
-was one makes it at this start, and its web UI no longer takes the harness
-token (`sudo cat /var/lib/nerve-center/owner-token`).
+started again. It ends
+with the page `status` shows, of the new program, with the command that
+shows the owner token.
 
 ### Uninstall
 

@@ -17,6 +17,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use nerve_service::Version;
 use nerve_service::win::service::{Settings, settings_text};
 use nerve_service::win::update::{clean_aside, previous, staged};
 
@@ -401,6 +402,36 @@ fn check_install_folders(layout: &Layout, sys: &dyn WinSystem) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Why an install over a node of 0.0.6 is refused, and the way that works.
+pub const FROM_0_0_6: &str = "this node was installed by Nerve 0.0.6, whose settings this version cannot read: uninstall it with Delete the data (Apps & features), then install again and pair the node with its centers again";
+
+/// Refuses the install or update before it changes anything over a node of
+/// 0.0.6: its install wrote the account of the commands into `node.toml`
+/// (`machine.user`), which this version refuses, so the service it starts
+/// would not start, and nothing here can sign the file anew without it.
+/// A 0.0.6 node whose commands never got an account has no such key, so
+/// the installed program's version says it too (0.0.7 and 0.0.8 published
+/// no Windows program). The file's MAC line is a TOML comment, so the text
+/// is read as it is.
+fn check_not_from_0_0_6(layout: &Layout, sys: &dyn WinSystem) -> Result<(), String> {
+    let user = std::fs::read_to_string(layout.paths.config_file())
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .is_some_and(|doc| doc.get("machine").and_then(|m| m.get("user")).is_some());
+    let old = layout.bin.is_file()
+        && sys
+            .version_of(&layout.bin)
+            .ok()
+            .and_then(|said| Version::parse_of("nerve-node", &said))
+            .zip(Version::parse_of("nerve-node", "nerve-node 0.1.0"))
+            .is_some_and(|(v, first)| v < first);
+    if user || old {
+        Err(FROM_0_0_6.into())
+    } else {
+        Ok(())
+    }
 }
 
 /// The service's DACL in SDDL: what Windows gives a new service (SYSTEM,
@@ -813,6 +844,7 @@ pub fn install(
     // Before anything is written, the audit log too: a folder another
     // account owns is not written in.
     check_install_folders(layout, sys)?;
+    check_not_from_0_0_6(layout, sys)?;
     let mut steps = Steps {
         done: Vec::new(),
         out,
@@ -1287,6 +1319,9 @@ pub async fn update(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "update")?;
+    // The installer opened over 0.0.6 offers Update, not Install, so the
+    // update refuses that node the same way, before anything is staged.
+    check_not_from_0_0_6(layout, sys)?;
     if sys.service()?.is_none() || !layout.bin.is_file() {
         return Err(NOT_INSTALLED.into());
     }
@@ -2765,6 +2800,35 @@ pub(crate) mod tests {
         assert!(!old.exists());
     }
 
+    /// An install over a node of 0.0.6, whose `node.toml` names the account
+    /// of the commands, is refused before it changes anything, with the way
+    /// that works; one over a node of this version is not.
+    #[test]
+    fn an_install_over_a_node_of_0_0_6_is_refused_before_it_changes_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        std::fs::create_dir_all(&l.paths.config_dir).unwrap();
+        let old = "# mac hmac-sha256 00 (nerve-node refuses this file once it is changed outside nerve-node)\n[machine]\nuser = \"alice\"\n";
+        std::fs::write(l.paths.config_file(), old).unwrap();
+        sys.types("alice's");
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls().is_empty(), "{:?}", sys.calls());
+        assert!(!l.bin.exists());
+        assert_eq!(std::fs::read_to_string(l.paths.config_file()).unwrap(), old);
+        // Without the key the install goes on.
+        std::fs::write(
+            l.paths.config_file(),
+            "# mac hmac-sha256 00\n[machine]\nshell = \"pwsh\"\n",
+        )
+        .unwrap();
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+    }
+
     /// The SID decides who is local: this machine's and one number more.
     #[test]
     fn a_local_sid_is_the_machine_s_and_a_number() {
@@ -3732,6 +3796,49 @@ pub(crate) mod tests {
             "nerve-node 1.0.0\n"
         );
         assert_eq!(*sys.program.borrow(), Some(l.bin.clone()));
+    }
+
+    /// The installer opened over a node of 0.0.6 offers Update: the update
+    /// is refused like the install, before it changes anything.
+    #[tokio::test]
+    async fn an_update_over_a_node_of_0_0_6_is_refused_before_it_changes_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "0.0.6");
+        let old = "# mac hmac-sha256 00 (nerve-node refuses this file once it is changed outside nerve-node)\n[machine]\nuser = \"alice\"\n";
+        std::fs::write(l.paths.config_file(), old).unwrap();
+        let events = audit_events(&l).len();
+        let new = d.path().join("new.exe");
+        std::fs::write(&new, "nerve-node 1.2.0\n").unwrap();
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls()[calls..].is_empty(), "{:?}", sys.calls());
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 0.0.6\n");
+        assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
+        assert_eq!(audit_events(&l).len(), events);
+        assert_eq!(std::fs::read_to_string(l.paths.config_file()).unwrap(), old);
+    }
+
+    /// A 0.0.6 node whose commands never got an account has no
+    /// `machine.user`; the program's version still says it is from 0.0.6.
+    #[tokio::test]
+    async fn an_update_over_a_node_of_0_0_6_without_an_account_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "0.0.6");
+        let new = d.path().join("new.exe");
+        std::fs::write(&new, "nerve-node 1.2.0\n").unwrap();
+        let calls = sys.calls().len();
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(e, FROM_0_0_6);
+        assert!(sys.calls()[calls..].is_empty(), "{:?}", sys.calls());
+        assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-node 0.0.6\n");
+        assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
     }
 
     #[tokio::test]

@@ -121,7 +121,7 @@ async fn the_service_keeps_its_secrets_in_its_own_credential_manager() {
     ok(&layout, &["proxy", "set", &url], "");
     let shown = ok(&layout, &["proxy"], "");
     assert!(
-        shown.contains("its value is in the system keyring"),
+        shown.contains("The header values are in the system keyring."),
         "{shown}"
     );
     assert!(!shown.contains(PASSWORD), "{shown}");
@@ -171,7 +171,7 @@ async fn the_service_keeps_its_secrets_in_its_own_credential_manager() {
     }
     let shown = ok(&layout, &["proxy"], "");
     assert!(
-        shown.contains("its value is in the system keyring"),
+        shown.contains("The header values are in the system keyring."),
         "{shown}"
     );
     assert!(shown.contains("127.0.0.1:9"), "{shown}");

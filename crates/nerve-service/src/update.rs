@@ -15,6 +15,9 @@ use crate::{System, write_file};
 const PROGRAM_MAX: usize = 256 * 1024 * 1024;
 /// The longest `SHA256SUMS` a download takes.
 const SUMS_MAX: usize = 64 * 1024;
+/// The largest list of releases read from GitHub's API: a few releases,
+/// each with its files.
+const LIST_MAX: usize = 4 * 1024 * 1024;
 
 /// The steps a command did, shown as they are done; the node audits them at
 /// its end.
@@ -474,6 +477,104 @@ pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
         .map(|(_, b)| b)
 }
 
+/// Which release `update` takes: the latest (GitHub's latest leaves the
+/// pre-releases out), the newest one with the pre-releases (`--pre`), or the
+/// one of a tag (`--tag`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Release {
+    #[default]
+    Latest,
+    Pre,
+    Tag(String),
+}
+
+/// The end of where the latest release's files are, after the repository.
+const LATEST: &str = "/releases/latest/download";
+
+impl Release {
+    /// The release `--pre` and `--tag` choose.
+    pub fn of(pre: bool, tag: Option<String>) -> Release {
+        match (pre, tag) {
+            (_, Some(t)) => Release::Tag(t),
+            (true, None) => Release::Pre,
+            (false, None) => Release::Latest,
+        }
+    }
+
+    /// Where this release's files are, from `latest`, where the latest
+    /// release's are (`<repository>/releases/latest/download`): a tag's in
+    /// `<repository>/releases/download/<tag>`; with the pre-releases, the
+    /// newest release's, which GitHub's API names.
+    pub async fn base(&self, latest: &str) -> Result<String, String> {
+        match self {
+            Release::Latest => Ok(latest.to_string()),
+            Release::Tag(t) => tag_base(latest, t),
+            Release::Pre => {
+                nerve_transport::init_crypto();
+                let list = download(&api_of(latest)?, LIST_MAX)
+                    .await
+                    .map_err(|e| refused_list(&e))?;
+                tag_base(latest, &newest_tag(&list)?)
+            }
+        }
+    }
+}
+
+/// Where the files of the release `tag` are, beside the latest's.
+fn tag_base(latest: &str, tag: &str) -> Result<String, String> {
+    let ok = !tag.is_empty()
+        && tag.len() <= 100
+        && !tag.contains("..")
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-+".contains(c));
+    if !ok {
+        return Err(format!(
+            "{tag:?} is no release tag: letters, digits, `.`, `-`, `_` and `+`, like pre2-v0.1.0"
+        ));
+    }
+    let repo = latest
+        .strip_suffix(LATEST)
+        .ok_or_else(|| format!("{latest} is not where a release's files are"))?;
+    Ok(format!("{repo}/releases/download/{tag}"))
+}
+
+/// The list of the releases, newest first, of the repository whose latest
+/// release's files are at `latest`: GitHub's API for a repository there;
+/// elsewhere (a mirror, a test's server) `<repository>/api/releases`.
+fn api_of(latest: &str) -> Result<String, String> {
+    let repo = latest
+        .strip_suffix(LATEST)
+        .ok_or_else(|| format!("{latest} is not where a release's files are"))?;
+    Ok(match repo.strip_prefix("https://github.com/") {
+        Some(path) => format!("https://api.github.com/repos/{path}/releases?per_page=5"),
+        None => format!("{repo}/api/releases"),
+    })
+}
+
+/// The tag of the newest release in GitHub's list of releases (newest
+/// first), pre-releases too; drafts are left out.
+fn newest_tag(list: &[u8]) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_slice(list)
+        .map_err(|e| format!("GitHub's list of releases is no JSON: {e}"))?;
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["draft"] != true)
+        .find_map(|r| r["tag_name"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub's list of releases names none".to_string())
+}
+
+/// What a refused list of the releases means. Without a login GitHub's API
+/// answers a machine 60 times an hour, then 403 or 429.
+fn refused_list(e: &str) -> String {
+    if e.contains("HTTP 403") || e.contains("HTTP 429") {
+        return "GitHub did not say which release is the newest: it answers 60 such questions an hour from a machine without a login. Try again later, or name the release with --tag <tag> (its releases page lists them)".into();
+    }
+    format!("cannot ask GitHub for the newest release: {e}")
+}
+
 /// [`fetch_release`] of the first file `SHA256SUMS` lists that `pick`
 /// takes (a package, whose name holds the release's version): its name
 /// and bytes. `what` names it where the list has none.
@@ -483,7 +584,13 @@ pub async fn fetch_release_where(
     pick: &dyn Fn(&str) -> bool,
 ) -> Result<(String, Vec<u8>), String> {
     nerve_transport::init_crypto();
-    let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX).await?;
+    // A tag with no release (`--tag` mistyped) has no SHA256SUMS either.
+    let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX)
+        .await
+        .map_err(|e| match e.contains("HTTP 404") {
+            true => format!("no release is at {base}: {e}"),
+            false => e,
+        })?;
     let (asset, want) = String::from_utf8_lossy(&sums)
         .lines()
         .find_map(|l| {
@@ -525,6 +632,57 @@ mod tests {
     use super::*;
     use crate::fake::Fake;
     use std::os::unix::fs::PermissionsExt;
+
+    /// `--tag` takes the files of that release, beside the latest's;
+    /// `--pre` the newest release's that the list of releases names, a
+    /// pre-release too and no draft (#213). A tag that is not one is
+    /// refused, and a refused list says how to go on.
+    #[tokio::test]
+    async fn a_release_is_the_latest_a_tag_or_the_newest_with_the_pre_releases() {
+        let latest = "https://github.com/o/r/releases/latest/download";
+        assert_eq!(Release::Latest.base(latest).await.unwrap(), latest);
+        assert_eq!(
+            Release::of(false, Some("pre2-v0.1.0".into()))
+                .base(latest)
+                .await
+                .unwrap(),
+            "https://github.com/o/r/releases/download/pre2-v0.1.0"
+        );
+        for bad in ["", "../x", "a..b", "a/b", "v1 2", "x?y"] {
+            assert!(tag_base(latest, bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            api_of(latest).unwrap(),
+            "https://api.github.com/repos/o/r/releases?per_page=5"
+        );
+        assert!(api_of("https://example.org/files").is_err());
+        let list = br#"[{"tag_name": "pre3-v0.1.1", "draft": true, "prerelease": true},
+                        {"tag_name": "pre2-v0.1.1", "draft": false, "prerelease": true},
+                        {"tag_name": "v0.1.0", "draft": false, "prerelease": false}]"#;
+        assert_eq!(newest_tag(list).unwrap(), "pre2-v0.1.1");
+        assert!(newest_tag(b"[]").is_err());
+        assert!(newest_tag(b"{\"message\": \"x\"}").is_err());
+        assert!(refused_list("api.github.com answered HTTP 403").contains("--tag <tag>"));
+        // `--pre` asks the list and takes the newest tag's files.
+        use nerve_transport::http::{Response, read_request};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = listener.accept().await {
+                let req = read_request(&mut io, 0).await.unwrap();
+                let r = match req.path.as_str() {
+                    "/o/r/api/releases" => Response::new(200, "application/json", &list[..]),
+                    _ => Response::text(404, "no"),
+                };
+                let _ = r.write(&mut io).await;
+            }
+        });
+        let here = format!("http://127.0.0.1:{port}/o/r/releases/latest/download");
+        assert_eq!(
+            Release::Pre.base(&here).await.unwrap(),
+            format!("http://127.0.0.1:{port}/o/r/releases/download/pre2-v0.1.1")
+        );
+    }
 
     struct At {
         _dir: tempfile::TempDir,
@@ -602,6 +760,53 @@ mod tests {
 
     fn read(p: &Path) -> Option<String> {
         std::fs::read_to_string(p).ok()
+    }
+
+    /// The same version from another release (a pre-release of 0.1.0, then
+    /// the release) is another program, and is taken; an older one stays
+    /// refused (#213).
+    #[tokio::test]
+    async fn the_same_version_of_another_release_is_taken_an_older_one_not() {
+        let sys = Fake::new("svc", "Svc", "/var/lib/svc");
+        let at = installed(&sys);
+        let files = files_text(&[("unit", Some("new unit".into()))]);
+        let same = at.bin.with_file_name("same");
+        std::fs::write(&same, format!("svc 1.0.0\n{files}\n")).unwrap();
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let r = update(
+            &program(&at),
+            &sys,
+            Some(&same),
+            &|| sys.started(),
+            &mut steps,
+        )
+        .await;
+        assert_eq!(r, Ok(true), "{:?}", steps.done);
+        assert!(
+            steps
+                .done
+                .iter()
+                .any(|d| d == "replaced svc 1.0.0 with 1.0.0"),
+            "{:?}",
+            steps.done
+        );
+        assert_eq!(read(&at.bin), read(&same));
+        let older = at.bin.with_file_name("older");
+        std::fs::write(&older, format!("svc 0.9.0\n{files}\n")).unwrap();
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let e = update(
+            &program(&at),
+            &sys,
+            Some(&older),
+            &|| sys.started(),
+            &mut steps,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("older than the installed 1.0.0"), "{e}");
+        assert_eq!(read(&at.bin), read(&same));
     }
 
     /// `update` writes the unit and the other files as the new program

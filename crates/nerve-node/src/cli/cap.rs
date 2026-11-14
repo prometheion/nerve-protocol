@@ -33,9 +33,7 @@ pub(super) async fn show_caps(
         cfg.center(c).ok_or_else(|| no_center_named(&cfg, c))?;
     }
     let v = cap_listing(&paths, &cfg).await?;
-    for l in cap_lines(&cfg, &v, center.as_deref()) {
-        w(out, l);
-    }
+    show(out, &cap_page(&cfg, &v, center.as_deref()));
     Ok(())
 }
 
@@ -231,7 +229,7 @@ pub(super) async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<V
 /// or stream, with its kind), with its effect, where it comes
 /// from and each center's setting (`center` only), the settings that name
 /// no action offered now, and the programs.
-fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
+fn cap_page(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> nerve_service::out::Page {
     let mut rows = v["capabilities"].as_array().cloned().unwrap_or_default();
     // What a center added is offered to it alone: one center's view leaves
     // out what the others added.
@@ -244,9 +242,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
         Some(kind) => format!("{} {kind}", text(r, "effect")),
         None => text(r, "effect"),
     };
-    let width = |k: &str| rows.iter().map(|r| text(r, k).len()).max().unwrap_or(0);
-    let (wn, ws) = (width("name"), width("source"));
-    let we = rows.iter().map(|r| effect(r).len()).max().unwrap_or(0);
+    let mut p = page("capabilities");
     let mut lines = Vec::new();
     for r in &rows {
         let what = match r["broken"].as_str().or(r["left_out"].as_str()) {
@@ -272,14 +268,9 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
-        let line = format!(
-            "{:wn$}  {:we$}  {:ws$}  {what}",
-            text(r, "name"),
-            effect(r),
-            text(r, "source"),
-        );
-        lines.push(line.trim_end().to_string());
+        lines.push(vec![text(r, "name"), effect(r), text(r, "source"), what]);
     }
+    p.list(None, lines);
     // A setting for a capability or action that nothing offers now still
     // counts once something does.
     for c in &cfg.centers {
@@ -296,7 +287,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .iter()
                 .any(|n| n == key || n.split_once('.').is_some_and(|(cap, _)| cap == key));
             if !offered {
-                lines.push(format!(
+                p.note(format!(
                     "{}: {key} {} (offered by nothing now)",
                     c.name,
                     enum_str(set)
@@ -305,14 +296,13 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
         }
     }
     if v["running"] == false {
-        lines.push(
-            "the node does not run: each center's switch shows (cap set); whether it may use an action now, and the programs' capabilities, show while the node runs"
-                .into(),
+        p.note(
+            "The node does not run: each center's switch shows (cap set); whether it may use an action now, and the programs' capabilities, show while the node runs.",
         );
     }
-    lines.extend(config_lines(v, center));
-    lines.extend(program_lines(v));
-    lines
+    p.list(Some("Your capabilities"), config_rows(v, center));
+    p.list(Some("Providers"), program_rows(v));
+    p
 }
 
 /// Whether the row `r` of `cap --json` is of a capability a center other
@@ -512,7 +502,7 @@ impl CapNotes {
 /// The lines of `cap` for the capabilities of node.toml: each one's
 /// command and what else the owner set. Of those the centers added, only
 /// `center`'s where one is given.
-fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
+fn config_rows(v: &Value, center: Option<&str>) -> Vec<Vec<String>> {
     let added = v["added"]
         .as_array()
         .into_iter()
@@ -549,7 +539,7 @@ fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
                 timeout_secs: e.timeout_secs,
                 platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
             };
-            format!("capability {}{by}: {}", c.name, cap_line(&c))
+            vec![format!("{}{by}", c.name), cap_line(&c)]
         })
         .collect()
 }
@@ -570,7 +560,7 @@ struct ConfigEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::tests::{json_of, load, program_path, run, setup};
+    use crate::cli::tests::{has_row, json_of, load, program_path, run, setup};
 
     /// `cap` lists every action of the node's own capabilities with its
     /// effect, where it comes from and each center's setting (`--center`:
@@ -611,9 +601,9 @@ mod tests {
             "settings.set write built-in home: not granted, lab: granted"
         );
         assert!(ls.contains("lab: lamp on (offered by nothing now)"), "{ls}");
-        assert!(ls.contains("the node does not run"), "{ls}");
+        assert!(ls.contains("The node does not run"), "{ls}");
         assert!(
-            ls.contains(&format!("program desk: {desk}, the node does not run")),
+            has_row(&ls, &format!("desk {desk} node not running")),
             "{ls}"
         );
         let one = run(&paths, &["cap", "--center", "lab"]).unwrap();
@@ -1000,11 +990,8 @@ mod tests {
                 "{ls}"
             );
         }
-        assert!(ls.contains("capability logs.tail: uptime\n"), "{ls}");
-        assert!(
-            ls.contains("capability win.who: whoami; windows only"),
-            "{ls}"
-        );
+        assert!(has_row(&ls, "logs.tail uptime"), "{ls}");
+        assert!(has_row(&ls, "win.who whoami; windows only"), "{ls}");
         let v = json_of(&paths, &["cap"]);
         assert_eq!(
             v["config"][1],
@@ -1048,10 +1035,7 @@ mod tests {
         let daemon = rt.block_on(Daemon::start(opts)).unwrap();
         let ls = run(&paths, &["cap"]).unwrap();
         assert!(!ls.contains("does not run"), "{ls}");
-        assert!(
-            ls.contains(&format!("program desk: {desk}, not attached")),
-            "{ls}"
-        );
+        assert!(has_row(&ls, &format!("desk {desk} not attached")), "{ls}");
         let v = json_of(&paths, &["cap"]);
         assert_eq!(v["running"], true, "{v}");
         let read = v["capabilities"]
@@ -1064,7 +1048,7 @@ mod tests {
         // `settings` says what the grant leaves the center now.
         let settings = |ls: &str| {
             ls.lines()
-                .find(|l| l.starts_with("settings.set "))
+                .find(|l| l.trim_start().starts_with("settings.set "))
                 .unwrap_or_else(|| panic!("no settings.set: {ls}"))
                 .split_whitespace()
                 .collect::<Vec<_>>()

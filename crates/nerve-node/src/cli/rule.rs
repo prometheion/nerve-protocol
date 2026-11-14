@@ -536,14 +536,6 @@ pub(super) async fn rule_cmd(
     Ok(())
 }
 
-/// How `rule` shows the guard, which every pairing has built in.
-fn guard_line() -> String {
-    format!(
-        "guard: {} rules, built in, that keep the commands off Nerve itself (they catch mistakes, not someone who hides the name)",
-        rules::GUARD.len()
-    )
-}
-
 /// `rule [LIST]`: one list of a center, or all three.
 async fn show_rules(
     paths: &NodePaths,
@@ -572,60 +564,54 @@ async fn show_rules(
     })
     .collect();
     let stale = stale_rules(paths, &cfg, &name, shown.iter().map(|(_, r)| r)).await?;
-    let warn = |out: &mut dyn Write| {
-        for (rule, why) in &stale {
-            let Some((l, _)) = shown.iter().find(|(_, r)| r == rule) else {
-                continue;
-            };
-            let scope = rules::scope_of(rule);
-            let does = match l {
-                // What it does depends on why it no longer fits: a
-                // gone argument refuses every call, a value the action
-                // no longer takes may refuse none.
-                List::Deny => {
-                    format!("as a deny rule it may refuse calls of {scope} it was not meant for")
-                }
-                _ => format!(
-                    "as an allow rule it may not cover the calls of {scope} it was meant for"
-                ),
-            };
-            let _ = writeln!(
-                out,
-                "warning: the {} {rule:?} no longer fits: {why}; {does} until you change it",
-                l.label()
-            );
-        }
-    };
-    if let Some(list) = list {
-        if list == List::Deny {
-            let _ = writeln!(out, "{}", guard_line());
-        }
-        let entries = list.of(&mut policy);
-        if entries.is_empty() {
-            let more = if list == List::Deny { " else" } else { "" };
-            let _ = writeln!(out, "{name}: nothing{more} on the {}", list.label());
-        }
-        for r in entries.iter() {
-            let _ = writeln!(out, "{}", rules::escape_controls(r));
-        }
-        warn(out);
-    } else {
-        // All three: each line says which list it is on.
-        let mut any = false;
-        for list in [List::Allow, List::Deny, List::Sudo] {
-            if list == List::Deny {
-                let _ = writeln!(out, "deny  {}", guard_line());
+    let mut page = page(&format!("rules of {name}"));
+    for (rule, why) in &stale {
+        let Some((l, _)) = shown.iter().find(|(_, r)| r == rule) else {
+            continue;
+        };
+        let scope = rules::scope_of(rule);
+        let does = match l {
+            // What it does depends on why it no longer fits: a gone
+            // argument refuses every call, a value the action no longer
+            // takes may refuse none.
+            List::Deny => {
+                format!("as a deny rule it may refuse calls of {scope} it was not meant for")
             }
-            for r in list.of(&mut policy).iter() {
-                any = true;
-                let _ = writeln!(out, "{}  {}", list.word(), rules::escape_controls(r));
-            }
-        }
-        if !any {
-            let _ = writeln!(out, "{name}: nothing else on any rule list");
-        }
-        warn(out);
+            _ => format!("as an allow rule it may not cover the calls of {scope} it was meant for"),
+        };
+        page.warn(format!(
+            "The {} {rule:?} no longer fits: {why}; {does} until you change it.",
+            l.label()
+        ));
     }
+    // Each row is one rule `rule rm` takes, after its list.
+    let lists = match list {
+        Some(l) => vec![l],
+        None => vec![List::Allow, List::Deny, List::Sudo],
+    };
+    let mut rows = Vec::new();
+    for l in &lists {
+        for r in l.of(&mut policy).iter() {
+            rows.push(vec![l.word().to_string(), rules::escape_controls(r)]);
+        }
+    }
+    match (rows.is_empty(), list) {
+        (true, Some(l)) => {
+            page.row(nerve_service::out::capital(l.word()), "nothing");
+        }
+        (true, None) => {
+            page.row("Rules", "none");
+        }
+        _ => {}
+    }
+    page.list(None, rows);
+    if lists.contains(&List::Deny) {
+        page.note(format!(
+            "The guard: {} rules, built in, keep the commands off Nerve itself. They catch mistakes, not someone who hides the name.",
+            rules::GUARD.len()
+        ));
+    }
+    show(out, &page);
     Ok(())
 }
 
@@ -633,6 +619,16 @@ async fn show_rules(
 mod tests {
     use super::*;
     use crate::cli::tests::{json_of, load, run, setup};
+
+    /// The rules `rule` shows in `out`, with their list, a row each.
+    fn rows(out: &str) -> Vec<(String, String)> {
+        out.lines()
+            .filter_map(|l| l.strip_prefix("  "))
+            .filter_map(|l| l.split_once(' '))
+            .filter(|(list, _)| ["allow", "deny", "sudo"].contains(list))
+            .map(|(list, rule)| (list.to_string(), rule.trim_start().to_string()))
+            .collect()
+    }
 
     /// An allow rule added where the center is not in allowlist mode is
     /// said not to count, with the command that makes it count.
@@ -811,7 +807,7 @@ mod tests {
             .is_err()
         );
         let ls = run(&paths, &["rule", "allow"]).unwrap();
-        assert_eq!(ls.lines().count(), 3, "{ls}");
+        assert_eq!(rows(&ls).len(), 3, "{ls}");
         assert!(ls.contains("fs.read:~/notes/*"), "{ls}");
         // An entry on two lists needs the list named.
         let e = run(&paths, &["rule", "rm", "git status"]).unwrap_err();
@@ -838,17 +834,23 @@ mod tests {
         let e = run(&paths, &["rule", "rm", "deny", "ls"]).unwrap_err();
         assert!(e.contains("not on the deny rule"), "{e}");
         let ls = run(&paths, &["rule", "sudo"]).unwrap();
-        assert_eq!(ls, "sudo systemctl restart nginx\n");
-        // Without a list, `ls` shows all three, each line with its list.
+        assert_eq!(
+            rows(&ls),
+            [(
+                "sudo".to_string(),
+                "sudo systemctl restart nginx".to_string()
+            )]
+        );
+        // Without a list, `ls` shows all three, each row with its list.
         let all = run(&paths, &["rule"]).unwrap();
-        assert!(all.contains("deny  exec.run:git status\n"), "{all}");
+        assert!(all.contains("\n  deny    exec.run:git status\n"), "{all}");
         assert!(
-            all.contains("sudo  sudo systemctl restart nginx\n"),
+            all.contains("\n  sudo    sudo systemctl restart nginx\n"),
             "{all}"
         );
         run(&paths, &["rule", "rm", "sudo", "systemctl restart nginx"]).unwrap();
         let ls = run(&paths, &["rule", "sudo"]).unwrap();
-        assert!(ls.contains("nothing on the sudo allow list"), "{ls}");
+        assert!(ls.contains("\n  Sudo        nothing\n"), "{ls}");
     }
 
     /// The guard is built in: `rule` shows it as one line and hides a stored
@@ -861,17 +863,17 @@ mod tests {
         let guard = nerve_policy::rules::GUARD[2];
         run(&paths, &["config", "add", "center.home.policy.deny", guard]).unwrap();
         let deny = run(&paths, &["rule", "deny"]).unwrap();
-        assert_eq!(
-            deny,
-            format!("{}\nexec.run:rm *\n", guard_line()),
-            "the stored copy is not shown"
-        );
-        assert!(guard_line().starts_with(&format!(
-            "guard: {} rules, built in",
+        let guard_note = format!(
+            "Note  The guard: {} rules, built in, keep the commands off Nerve itself.",
             nerve_policy::rules::GUARD.len()
-        )));
+        );
+        assert!(
+            deny.contains("\n\n  deny   exec.run:rm *\n\nNote "),
+            "the stored copy is not shown: {deny}"
+        );
+        assert!(deny.contains(&guard_note), "{deny}");
         let all = run(&paths, &["rule"]).unwrap();
-        assert!(all.contains(&format!("deny  {}\n", guard_line())), "{all}");
+        assert!(all.contains(&guard_note), "{all}");
         let v = json_of(&paths, &["rule"]);
         assert_eq!(v["deny"], json!(["exec.run:rm *"]), "{v}");
         assert_eq!(v["guard"], json!(nerve_policy::rules::GUARD), "{v}");
@@ -1046,16 +1048,16 @@ mod tests {
             run(&paths, &["config", "add", "center.home.policy.deny", old]).unwrap();
         }
         let ls = run(&paths, &["rule", "deny"]).unwrap();
-        // The guard's own line comes first.
-        assert_eq!(ls.lines().count(), deny().len() + 1, "{ls}");
-        for (line, rule) in ls.lines().skip(1).zip(deny()) {
+        // A row a rule.
+        assert_eq!(rows(&ls).len(), deny().len(), "{ls}");
+        for ((_, line), rule) in rows(&ls).into_iter().zip(deny()) {
             assert_eq!(line, nerve_policy::rules::escape_controls(&rule));
             assert!(!line.contains(['\t', '\r']), "{line:?}");
         }
         assert!(ls.contains("\\r\\n"), "{ls}");
         let all = run(&paths, &["rule"]).unwrap();
-        assert_eq!(all.lines().count(), deny().len() + 1, "{all}");
-        assert!(all.lines().all(|l| l.starts_with("deny  ")), "{all}");
+        assert_eq!(rows(&all).len(), deny().len(), "{all}");
+        assert!(rows(&all).iter().all(|(l, _)| l == "deny"), "{all}");
         // The entry as `ls` printed it is removed; the raw one too.
         let shown = nerve_policy::rules::escape_controls(guard[9]);
         assert_ne!(shown, guard[9]);
@@ -1087,7 +1089,7 @@ mod tests {
         for own in paths_rules {
             run(&paths, &["config", "add", "center.home.policy.deny", own]).unwrap();
             let ls = run(&paths, &["rule", "deny"]).unwrap();
-            assert!(ls.lines().any(|l| l == own), "{ls}");
+            assert!(rows(&ls).iter().any(|(_, r)| r == own), "{ls}");
         }
         run(
             &paths,
@@ -1261,12 +1263,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
-        let warning = "warning: the deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it";
+        let warning = "Warning  The deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it.";
         for args in [&["rule"][..], &["rule", "deny"]] {
             let out = run(&paths, args).unwrap();
             assert!(out.lines().any(|l| l == warning), "{out}");
         }
-        assert!(!run(&paths, &["rule", "allow"]).unwrap().contains("warning"));
+        assert!(!run(&paths, &["rule", "allow"]).unwrap().contains("Warning"));
         assert_eq!(
             json_of(&paths, &["rule"])["stale"],
             json!({"lamp.set:room=bedroom,level>50": "lamp.set has no argument room; it takes level"})

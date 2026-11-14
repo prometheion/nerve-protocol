@@ -123,10 +123,22 @@
                   "more": "",
                   "name": "--from <FILE>",
                   "optional": true
+                },
+                {
+                  "line": "Take the newest release, a pre-release too",
+                  "more": "Take the newest release, a pre-release too, as GitHub's list of releases names it.",
+                  "name": "--pre",
+                  "optional": true
+                },
+                {
+                  "line": "Take the release of this tag, like pre2-v0.1.0",
+                  "more": "",
+                  "name": "--tag <TAG>",
+                  "optional": true
                 }
               ],
               "line": "Update to the latest release; config, keys and audit stay",
-              "more": "Replace the installed program with the latest release and restart the service; config, keys and audit log stay.",
+              "more": "Replace the installed program with the latest release and restart the service; config, keys and audit log stay. An older version is refused; the same version from another release is taken.",
               "name": "update",
               "usage": "nerve-node update [OPTIONS]"
             }

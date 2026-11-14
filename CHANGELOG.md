@@ -1,90 +1,182 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
-### New
+The first release of Nerve for Linux and Windows: `nerve-center` and
+`nerve-node` for Linux x86_64 and aarch64, the desktop app for Linux x86_64
+(also as a `.deb` and an `.rpm`) and Windows x64, and `nerve-center` for
+Windows x64. It is a beta, not 1.0.0.
 
-- The Linux desktop app comes as a package too: `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm`, listed in `SHA256SUMS` ([#212](https://github.com/prometheion/nerve-protocol/issues/212)). A double-click installs it with its menu entry and icon, no `chmod` needed. The app from a package updates by installing the release's newer package with `apt` or `dnf`, and a newer package installed by hand brings the node's service to it; **Uninstall** removes the node, and the package manager removes the app.
-- `--public-url` of the center takes `{port}` for the port it listens on for nodes, for a `--listen` with port 0. Its start line in the log also names that address and the HTTP MCP URL.
-- The node and the center are installed and tested on Ubuntu 26.04 and Debian 13 too, before each release.
-- The installed Linux node watches the folders it gives `nerve-run`: a file or folder you move or copy into one (`mv` of a download or a clone, `cp -a`, also from another file system) gets the folder's access entries a few seconds later by itself, as on Windows. **Sync folders** (`nerve-node folder sync`) is a step by hand only now, for a folder too large to watch (the log says so).
-- `nerve-node folder sync --json` gives what the sync left as data, and `folder.grants` answers it, the same on Linux and Windows: `errors`, `stale`, `unclosed`, `failed`, `skipped`, `walked`; so does `status`'s `folder_access`.
+**Update the center first, then the nodes.** A 0.0.8 node still talks to a
+0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
+(Apps & features), install 0.1.0, and pair the node again. The installer
+refuses to install or update over 0.0.6, whose settings 0.1.0 cannot read,
+and the app's **Update** of 0.0.6 puts the old program back.
 
-### Fixed
+From 0.1.0 on, the wire protocol, the files the node and the center keep,
+the backup file and `--json` output change only with a migration
+([what stays stable](https://github.com/prometheion/nerve-protocol/blob/v0.1.0/docs/dev/spec/README.md#what-stays-stable-from-010)).
+The user guide has a page for
+[Windows](https://github.com/prometheion/nerve-protocol/blob/v0.1.0/docs/user/windows.md),
+and every limit is in
+[safety](https://github.com/prometheion/nerve-protocol/blob/v0.1.0/docs/user/safety.md).
 
-- A center started by a harness exits when the harness closes the pipe right after a request; it ran on with a session nobody ended, and kept its ports and its state folder.
-- SIGTERM or Ctrl+C stops a center started by a harness cleanly: a bye to the nodes, the statistics written. On Linux the action checker's local model (`llama-server`) ends with the center, also when the center is killed.
-- Stopping the center, removing a node and a node's reconnect no longer wait without end for a node that stops reading.
-- A change in the center's web UI that the state file cannot take (a node's name or switch, the action checker's settings and allow rules, the center's settings and log level) is an error, not "saved".
-- `nerve-node update`, `install` and `uninstall` without root say that they need it (`sudo nerve-node …`) instead of "Permission denied" from the node's control socket.
-- An owner's `nerve-node restore` ends once the node runs again; a command right after it was told that the node does not run.
-- A command right after a node was started by hand is no longer refused for want of the control socket's token: the node writes the token before its socket takes a connection.
-- The center stays responsive while it installs the local model (the hash and the unpack run off its workers), and its harness socket no longer spins a CPU when the center runs out of file descriptors.
+### The center
+
+- An MCP server with two tools, `list` and `execute`, for every machine; the
+  tools never change as machines come and go.
+- A call still running after 20 seconds becomes a job; a command's output
+  streams while it runs.
+- A web UI behind the owner token: Get started, **Connect a harness** (a
+  harness token and its entry), the machines, Audit, Log, Statistics,
+  Capabilities, Settings and Help.
+- Runs as a service (systemd on Linux, the service `nerve-center` on
+  Windows), or started by a harness over stdio; a second center attaches to
+  the first.
+- `nerve-center set` shows the service's settings and changes one, such as
+  `set ui 0.0.0.0:7480`, then restarts it; `install` takes them as flags.
+- The center's owner commands in the terminal, also with the web UI off:
+  `service start|stop|restart`, `pair`, `nodes list|disable|enable|rm`,
+  `token new|list|rm` and `log`. They ask the running center through
+  its own socket or pipe, which only root, an administrator and the center's
+  account may use.
+- The action checker: a blocklist of dangerous commands and paths, allow
+  rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
+  fails closed by default.
+- Backup and restore, and a rotation of its key that the machines follow.
+
+### Machines and pairing
+
+- A pairing link with a one-time code and the center's pin, pasted on stdin
+  or opened in the desktop app; the node always dials the center.
+- Several centers per machine, each with its own key, mode, folders, rules
+  and audit entries; pause, resume, unpair and key rotation.
+- An HTTP proxy, with its login kept with the node's keys, and a relay: a
+  node that carries other nodes' links to their centers.
+- The keys in files or in the system keyring (on Windows the service's own
+  Credential Manager).
+
+### What a center may do
+
+- Three modes: `folder` (only the folders you give, with `r`, `w`, `x` or
+  none), `allowlist` (only the commands you allow) and `user` (as you);
+  each also for a time (`--for`).
+- Allow and deny rules, with a trailing `*` and with conditions on an
+  action's arguments (`lamp.set:room=office`).
+- A built-in guard against changing the node by mistake, and protected paths.
+- A sudo list only the owner fills, behind a switch.
+- The settings grant, which lets a center change its own settings, and
+  `center settings off`, which says what stays.
+- A network switch per center, and limits per command: memory, CPU and
+  processes.
+
+### How the commands are held
+
+- On Linux, `folder` and `allowlist` mode run commands as the account
+  `nerve-run`, held by Landlock, each with a `/proc` and a home of its own;
+  the network switch is a seccomp filter; the limits are a cgroup.
+- On Windows they run as `nerve-run` in an AppContainer of each pairing's
+  own; each command is in a job object, which holds its limits; the network
+  switch needs the Windows Firewall service.
+- `user` mode and allowlist as you run as the owner; root may be the owner
+  on Linux, and an administrator on Windows, with a warning.
+
+### Capabilities
+
+- `fs` and `exec` built in; commands of your own in `node.toml`
+  (`cap add`), on both systems; programs that attach as providers (a socket
+  on Linux, a pipe on Windows) and add actions, state, events and streams.
+- Capabilities a center adds; one that senses or acts waits for your `on`.
+- On, off and hidden switches per center, per capability or per action.
+
+### Watch and stop
+
+- `status`, the one place to look, also as `--json`; the audit log and the
+  log, in the terminal, the web UIs and the desktop app.
+- One output style for both programs' commands: a head line with the
+  program, its version and its state, short aligned lines, lists as
+  columns, and a `Next` block with the commands to run. Colour only on a
+  terminal (never with `NO_COLOR`); `--json` stays as it is, and the audit
+  and the log show their times as dates (UTC). What a center sent into an
+  audit entry (a command's line breaks and control characters) is written
+  out, so an entry stays one line.
+- Panic stops every link and command at once; unlock lets the node work
+  again.
+- On Windows the node and the center also write to the Event Log.
+
+### Install and update
+
+- Linux: `sudo nerve-node install` and `sudo nerve-center install` as
+  services, which ask the first questions; tested on Ubuntu 22.04, 24.04 and
+  26.04 and Debian 12 and 13 (x86_64), and Ubuntu 24.04 (aarch64).
+- Windows: the desktop app's installer (also `--silent`, and a quiet
+  uninstall that keeps the data), and the center by a double-click (or
+  `nerve-center install` in an administrator's terminal), which installs it
+  as a service and puts it on the machine's `Path`;
+  tested on Windows 11 Pro and Windows Server 2025.
+- `update` checks the download against the release's `SHA256SUMS` and puts
+  the old program back if the new one does not start. The programs are not
+  signed yet.
+- `update --pre` takes the newest release, a pre-release too, and
+  `update --tag <tag>` one release, for the center and the node; the same
+  version from another release is taken (a pre-release, then its release).
+  The desktop app's **Settings › App › Pre-releases** does it there, on Linux
+  and Windows.
+- `uninstall` keeps the data, or deletes it with `--purge` (**Delete the
+  data** in the app).
+
+### The desktop app
+
+- The node with a window: Overview, Centers, Relay, Permissions,
+  Capabilities, Audit, Log, Settings and Help, which opens on a task map.
+- On Windows it is the only way to the node: no message sends you to a
+  terminal.
+- The node's own web UI on Linux, off until `nerve-node ui on`.
+
+### On Windows
+
+- The owner is the local account that installs, known by its SID (a name
+  with a blank or an umlaut works); a domain or Microsoft Entra ID account
+  is refused for now.
+- Your Windows password is stored for the commands that run as you, sealed
+  with DPAPI; the app asks for it where it is needed.
+- The node syncs the granted folders by itself: what you move, install or
+  clone into one gets its access seconds later. Hard-linked files
+  (`node_modules`, `.venv`) are readable, not writable, for commands.
+- Network folders and mapped drives are refused.
+- Sudo holds your password in memory only, so it is off after a restart, and
+  only the app turns it on.
+- A capability's template whose program reads its line again as commands
+  (`cmd`, a `.bat` file, PowerShell without `-File`) is refused.
+
+### Since 0.0.8
+
+- The Linux node watches its granted folders too: a file moved in gets its
+  access by itself. **Sync folders** is a step by hand only.
+- `nerve-node folder sync --json`, and `status`'s `folder_access` on Windows.
+- `--public-url` takes `{port}`.
+- A center started by a harness exits when the harness closes the pipe, and
+  stops cleanly on SIGTERM or Ctrl+C, its local model too.
+- Stopping the center, removing a node and a reconnect no longer wait without
+  end for a node that stops reading.
+- A web UI change the center cannot save is an error, not "saved".
+- `nerve-node update`, `install` and `uninstall` without root say that they
+  need it; `restore` ends once the node runs again.
+- The center stays responsive while it installs the local model.
 
 ### Breaks
 
-- `nerve-node status --json` names what Linux and Windows both have the same, before 0.1.0 freezes the names: each center's `landlock` is `confined`, with `confinement` (`"landlock"`, `"appcontainer"` or `null`); `command_limits.cgroup` is `command_limits.held_by`; `owner_is_root` and `owner_is_admin` are one `owner_full_rights` (root as the owner on Linux, an administrator as the owner on Windows).
-- Nerve builds for Linux and Windows only. The code for other systems, which no release built and no test ran, is gone, and with it the refusals "Linux and Windows only for now" of capabilities, providers, the sudo switch and commands as another account: a build for another system now stops when it compiles.
-
-### Windows (with 0.1.0)
-
-Built and tested, not released: the releases before 0.1.0 publish the Linux programs only.
-
-- On Windows the install refuses a node folder that another account than SYSTEM or the administrators owns (any standard account may make one in `C:\ProgramData`), before it changes anything, and says to delete it. The administrators own the node's folders now, the service checks them at each start, and so does an uninstall that keeps the data (before it removes anything). The install also refuses something a standard account put into a folder made by hand before. Such a folder stayed its maker's, who could open what the node wrote there, your stored password among it.
-- On Windows an owner whose account name has a blank or a letter beyond ASCII (`Max Müller`, `Jürgen`) gets user mode, sudo and folder grants on their own folders; the node refused such a name, and the app asked for the password again and again. The node knows the owner by its SID, so an account that only has the owner's name is not taken for it.
-- On Windows an owner that is no local account of the machine (a domain or Microsoft Entra ID account, or SYSTEM) is refused by its SID with a clear sentence, in the install and in the app: for now the owner must be a local account. A local account of the same name was taken in its place.
-- On Windows a blank password for the owner says that Windows lets no program log on to an account without one, in the app and in the install. An install with no input (a silent one) says that no password was given.
-- On Windows a capability of `node.toml`, or one a center adds, whose program is `cmd`, a `.bat` or `.cmd` file, or PowerShell without `-File` is refused when a `{field}` goes into it, with the safe form `powershell -NoProfile -File script.ps1 {field}`: those read a value again as commands, so `&` or `;` in it ran more than the capability.
-- On Windows the file with your stored password is `owner-password.dpapi` (it was `command-account.dpapi`, which the install now deletes); it, `run-account.dpapi` and `keys\vault.pending` hold their format inside the seal, and one of another format is refused.
-- On Windows install, update, uninstall and restore, and every command of the app's elevated broker, take `C:\ProgramData`, `C:\Program Files`, the proxy and the trusted certificates from the machine, not from your account's variables, which any program of yours may set; an elevated command refuses `NERVE_NODE_CONFIG_DIR` and `NERVE_NODE_STATE_DIR`. The app's user comes to the broker's commands as an argument, no longer as a variable.
-- On Windows the app's **Permissions** page shows a folder grant that failed or stayed on, as on Linux: `status --json`'s `folder_access` says what the last sync of the grants left (`errors`, `stale`, `unclosed`); it was `null` on Windows.
-- On Windows the node's service starts again after every failure, as the center's and the Linux unit do: 5 seconds after the first two, then every minute, and also after a stop with an error (a start that failed). It gave up after three failures a day, and a start that failed was not tried again.
-- On Windows **Update** in the app also gives the services the settings the new program names (their privileges, who may start and stop them, what follows a failure, what they need first), and a new program that does not start goes back with the old ones, as the Linux update does with the service's files. `nerve-center update` does the same.
-- The center installed on Windows writes its start, its stop and its failures to the Windows Event Log too, as the source `nerve-center`.
-- On Windows the node is the desktop app, `nerve-node-desktop-x86_64-windows.exe`: the release has no `nerve-node-x86_64-windows.exe` any more, and Windows gets the app and `nerve-center-x86_64-windows.exe` (seven programs in all). Started with arguments, the app's program is the app's interface to the node and takes no terminal's console.
-- `nerve-node run` on Windows starts the node only as the installed service: from a terminal or a script it is refused, on any folders, and says that the app's installer installs the node and **Start** on the Overview starts it.
-- No message of the node on Windows sends the owner to a terminal any more (`Restart-Service nerve-node`, "Run as administrator", `nerve-node.exe setup`, the CLI edition): each says where in the app to do it (Settings › App › Update, Permissions › Sudo, Settings › General › Account for commands, Start or Restart on the Overview). The app shows every `nerve-node …` command a message or a log line names as the place in the app that does it, and the options of `restore` as the boxes of its restore.
-- The user docs name no terminal command for the node on Windows: installing, the service, sudo, the relay, the proxy, backups, logs and troubleshooting say where in the app each is done.
-- The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
-- On Windows the guard also refuses the node's service by its display name (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`), `reg add`, `delete`, `copy` and `restore` on the service's key and the keys below it (`Parameters` holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and kin on them; only keys of the registry count, a folder `C:\Services\nerve-node` is a folder. `pkill` and `killall` see an alternative in their pattern (`pkill -f 'nerve-node|nerve-center'`), and cmd's `/c` text is read from the line, also with the doubled quotes a program path with a blank needs (`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`).
-- On Windows every change from the app reaches the running node at once over its control pipe, as on Linux over its socket: pairings, pause, rules, modes, the proxy, the relay (a removed token stops working now), sudo on and off, panic and unlock. The app no longer restarts the service for a change, so running commands go on.
-- Panic on Windows locks the running node at once. When the node does not take it (it does not answer within 90 seconds, or it runs without its control pipe), the app stops the service, says that every link ended only once it has stopped, and saves the lock for its next start. A node that runs without its pipe is an error to every change, so nothing is written behind it.
-- A panic that locks over a change waiting in `node.toml` (made while no node answered) says so, in the app, in `panic` and in the audit log (`replaced`): make the change again if you still want it.
-- On Windows `config accept` (**Take node.toml as it is…** in the app) is taken by the running node, as on Linux, instead of signing the file behind it.
-- The running node saves nothing over a `node.toml` it signed that is newer than the config it runs (a change made while it was thought stopped), on Linux too: a center's write, a timed mode or a key rotation can no longer undo such a change, and the change says so instead of "keeps changing". A panic still locks at once, over such a file, and a file nobody signed holds no change of yours and blocks nothing.
-- On Windows each command is held to its limits (Settings › Limits › Each command) by its job object, as by its cgroup on Linux: past its memory the node ends it and the result says `killed: "memory"`, its CPU is capped (the limit stays in percent of one CPU), and it starts no more processes past its limit, which on Windows counts processes, not threads. `status` and the app say the limits hold.
-- In folder mode on Windows, PowerShell loads modules only from its own folders (Program Files' and Windows'), and each command imports its two core modules first: on a machine whose module path holds PowerShell 7's, SQL Server's or Azure's folders, or where a container does not load modules on its own, `Get-Content`, `Set-Location` and the like were "not recognized".
-- On Windows the guard also refuses a change of the registry keys that start a program at sign-in or boot (`Run`, `RunOnce`, `Winlogon`, `Image File Execution Options`, the task scheduler's cache) and of the node's Event Log source, with `reg` or PowerShell's item cmdlets (`-Path:HKCU:\…` too), and making a service or a scheduled task (`sc create`, `New-Service`, `schtasks /create`, `Register-ScheduledTask`). A service or a task made by writing the registry or the Tasks folder directly, and the other places a program starts from (the Startup folder, WMI), are not covered.
-- On Windows a network folder (`\\server\share`) or a folder on a network drive is refused at once, with the reason, by the folder picker and by the node: the node runs in a session of its own, where a drive mapped at your sign-in does not exist.
-- A folder's `w` reads too, on Linux and Windows: `w` alone is read as `rw`, also in a `node.toml` that says `w`, and in the app checking Write checks Read. A folder a command could write but not read made no sense (it could not look at what it changes), and on Windows it needed a record of its own for files linked out of it.
-- **Sync folders** under Permissions › Folders, in the app on Linux and Windows: the node gives the folders' entries again to what was moved into them (`folder sync`). On Windows `folder sync` now walks every folder grant of the pairings again, where it did nothing before.
-- On Windows `folder` mode runs on the installed node, and `allowlist` mode too: commands run as `nerve-run`, an account the install makes (no administrator, a random password, batch and service logon only), each pairing's in an AppContainer of its own. Until now the installed node ran no `folder` mode command and every other one as you. `user` mode and `--as-owner` run as you ([#149](https://github.com/prometheion/nerve-protocol/issues/149)).
-- The install also registers the service `nerve-run-profile`, which keeps `nerve-run`'s profile loaded for the AppContainers; uninstall removes it, the account, its profile and its entries on your folders.
-- One owner on Windows, as on Linux: the account that installs, named in the service's key (`Owner`). Another user who installs over it takes its place. `machine.user` is gone, on every platform; a `node.toml` that sets it is refused. Your stored password now serves `user` mode, `--as-owner` and sudo, and the node changes your folders' permissions for `folder` and `allowlist` mode as you with it: while it does not work, a folder you add gives no access and one you remove stops the pairing's commands. The node tries a stored password that failed once, not on every call, until you save a new one, and so for the password sudo keeps (turn sudo off and on again after a password change), so a changed password cannot lock your account.
-- On Windows each pairing's commands have their home in their container's own folder (`USERPROFILE`, `HOME`, `APPDATA`; Windows puts `TEMP` and `LOCALAPPDATA` there), get `nerve-run`'s environment and the names of `machine.command_env` (but for the home, which stays theirs), and cannot see or open another pairing's processes. The home stays while the pairing does, also without folders, and goes with the pairing.
-- A command whose working folder does not resolve as the account it runs as (one that is not there, or on Windows one its pairing's container may not look into, another pairing's) is in the audit log as refused, with the reason, as a file call's path is; it was refused without an entry. On Windows such a refusal with "Access is denied", and the same refusal of a file call's path, says which account in which pairing's container may not open the path, whether it is in the pairing's folders (or a protected entry their grant leaves out, or a level around one) and their grant is on (by the node's record and by the folder's permission list), and what to do, not only "Access is denied". The node never opens a path to find out where a link on its way may lead to another machine.
-- On Windows the node's file calls in `folder` mode read outside the folders only what the pairing's container may read, checked with the container's token. They wait for the folders' entries to follow the config, and stop, as the pairing's commands do, while an entry the pairing should have lost is still on.
-- On Windows a folder without flags inside a granted folder is closed to that pairing's container, whatever it inherits from the folder around, also when a command renames it or puts a link at its path, and inside a granted folder that holds a protected entry (your home); where the node cannot close it (a command moved it onto or above a place the pairing is granted), the pairing's commands do not run. A tool that passes the permissions of the folder around it down again (Explorer's "replace child permissions", `icacls`) opens it again until the pairing's next call, which closes it.
-- On the installed Windows node your PowerShell profiles are protected in your own Documents folder where Windows has it (OneDrive's backup, a redirect), read from your registry and remembered for when you are signed out; the node used the service account's, so only `%USERPROFILE%\Documents` counted. A Documents folder on a share is not looked at.
-- On Windows `folder` mode works on projects with hard links (pnpm's `node_modules`, a uv `.venv`, a local `git clone`): such files are readable but not writable for commands, as on Linux (a tool that passes the folder's permissions down again, Explorer's "replace child permissions" or `icacls`, opens such a file for writing until the pairing's next call). Until now the node refused the folder's grant, and closing a folder that held one stopped the pairing's commands.
-- On Windows a walk of a folder with two grants (a pairing's container and `nerve-run`, as on every folder of the installed node) no longer rewrites the permissions of every file and folder below it, twice: putting one grant on again swapped their order.
-- On Windows the node syncs the granted folders by itself: it watches them for new names and walks a folder a few seconds after names in it change (and every grant once after it starts), so what you or an agent install or clone into one (`pnpm install`, `uv sync`, `git clone --local`) or move into it gets its entries without **Sync folders**. A walk does not hold up commands, unless a granted or closed folder, or your Documents folder, was moved or made meanwhile. (A folder made anew in a granted home, which is granted by its entries, is reached only after a running walk: a command in it may fail once, so run it again.) A folder you rename away and make again at its path (a fresh clone) is watched again. While a folder is granted, the folders above it cannot be renamed or moved, and an external hard disk or SSD that holds it cannot be removed safely (remove the grant first); a stick is not watched. On Linux a file moved in still needs **Sync folders**.
-- The node never follows a link to another machine (a symbolic link to `\\server\share`, or to any target that is not on a drive of this machine or relative to the link) on Windows, also when it changes the folders' entries or adds a folder: following it would send the NTLM answer of the account the node acts as there. A path whose links the node cannot look at to the end (the service's own account may not look into your folders) is not followed either, so a granted folder that has become a link to a machine that does not answer no longer holds up the pairing's calls, also while the node cannot log on as you.
-- On Windows the network switch holds: with a pairing's network off its commands run in a container without network capabilities, while the Windows Firewall service runs. Commands that run as you and sudo commands do not run while it is off.
-- Capabilities of `node.toml` run on Windows, as `nerve-run` in the pairing's AppContainer, and the app's Capabilities page shows them.
-- `nerve-center install`, `update`, `uninstall` and `status` on Windows, in an administrator's terminal: the center runs as the service `nerve-center` under its virtual account `NT SERVICE\nerve-center`, with its state in `C:\ProgramData\nerve-center\state` (open to that account and the administrators only) and its settings in `C:\ProgramData\nerve-center\settings\center.env`, which the service only reads. The administrators own these folders; one there already that another owner holds, also one a program of yours made without administrator rights, is refused. It starts with the machine, and starts again after it failed, also when it failed at its start (a listen address that is not there yet): after 5 seconds twice, then every minute. A value mistyped in `center.env` is named in the log in the state folder, which `install` and `update` point to when the service does not start. A Windows Firewall rule lets other machines reach the node port only. A restore into the installed center stops and starts its service. These commands take `C:\ProgramData`, `C:\Program Files` and the system folder from Windows, never from the variables your account may set, and `update` takes the proxy and the trusted certificates from the machine's environment, not from the account's. In an administrator's terminal `status`, `owner-token`, `backup` and `restore` refuse a state folder given by `NERVE_CENTER_STATE_DIR` (use `--state-dir`), and `backup` and `restore` say the folder they used.
-- A second `nerve-center` a harness starts on the same state folder attaches to the first on Windows too, over a named pipe only its account may use, where it failed at the node port before. `status` and a restore tell a running center on Windows.
-- On Windows a center's state folder (the owner token, the TLS key) is open to its account, SYSTEM and the administrators only, also one given with `--state-dir`, and so is a backup file it writes, from its first moment. `owner-token` and `install` no longer read a link put in the place of the owner token. The installed center's state folder is the administrators' alone while no service is registered. A OneDrive folder is no link, and a backup to a FAT32 or exFAT stick works, as does one to a network share (the share's own permissions govern there). A state folder on a FAT32 or exFAT drive is refused, since every account reads such a drive.
-- On Windows the center counts its loopback connections per person signed in, and per account where it can read that: a program of another sign-in can no longer take the places of your browser's or your harness's. Accounts in one sign-in (a program started as another account) share their places.
-- On Windows the action checker's local model ends with the center also when the center is killed, unpacks with Windows' own `tar`, and runs on the CPU only in the installed service.
-- The center's commands and web UI say an administrator's terminal, not `sudo`, on Windows, and name the Nerve app's places (Permissions › Folders, Centers, Capabilities) for a Windows machine instead of `nerve-node` commands.
-- Sudo on Windows works as on Linux: the node holds your Windows password in its memory only, so sudo is off after a restart of the node or of Windows (`sudo.dpapi` is gone). Only the app on the machine turns it on: the node refuses sudo on from a center for a Windows machine, and the center's page says to use the app.
-- Where the node on Windows has no password of yours that works (none stored, or Windows refused it), the app asks for it where it is needed: switching a pairing to user mode or to allowlist mode as you (also in the first-run steps, before user mode and before a folder), turning sudo on, and the folder grants' warning. The running node checks it and keeps it at once, without a new install.
-- Providers on Windows: a program you allow under Capabilities › Programs attaches to the installed service over its provider pipe, as on Linux over the provider socket. Only your programs and an elevated administrator's get in. Your programs read and write on the pipe and cannot make instances of it, so none of them passes for the node; an elevated administrator can, as with everything on the machine. The node checks the program by the image Windows names for it, and clients from the network and the node's own commands are refused. A node that could not make its pipe says so on the Overview and in `status`.
-- On Windows the keys can live in the Credential Manager (Settings › Keys), and a proxy with a login or header values works: the service keeps them in its own account's Credential Manager and writes and reads them itself; the app and the CLI ask the running service. Files stay the default. A backup carries them, and a restore puts them back there when the node starts. Installing again starts a stopped node to put them aside, and changes nothing where it cannot; where the node cannot start, the installer offers to go on without them (`--forget-secrets`). Uninstalling with Keep the data does the same for a node that runs, never starts one you stopped, and offers the same choice.
-- Help opens on a short task map (task, where in the app, what differs on this machine), folded, and shows the command reference on Windows too, saying that the app runs those commands.
-- The app's first-run steps also ask whether the first center's commands may use the network and, in folder mode, for a first folder, as `nerve-node setup` does.
-- `nerve-node-desktop.exe --silent` installs on Windows without a window or a question (for winget), and Apps & features has a quiet uninstall that keeps the data.
+- `nerve-node status --json`: each center's `landlock` is `confined`, with
+  `confinement` (`"landlock"`, `"appcontainer"` or `null`);
+  `command_limits.cgroup` is `command_limits.held_by`; `owner_is_root` and
+  `owner_is_admin` are one `owner_full_rights`.
+- Nerve builds for Linux and Windows only.
+- On Windows the stored password is `owner-password.dpapi` (the install
+  deletes `command-account.dpapi`); `machine.user` is gone, and a
+  `node.toml` that sets it is refused.
+- The app no longer takes over a node installed with the plain
+  `nerve-node.exe`: uninstall that one first (`nerve-node.exe uninstall`, as
+  an administrator).
 - Building needs Rust 1.89 or newer.
 
 ## 0.0.8

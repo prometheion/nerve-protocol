@@ -329,9 +329,6 @@ pub(super) async fn relay_cmd(
 /// `relay`: the relay, the nodes that may use it and, on a running node,
 /// who is connected.
 async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
-    let w = |out: &mut dyn Write, s: String| {
-        let _ = writeln!(out, "{s}");
-    };
     let (cfg, _) = read_config(paths).await?;
     let r = &cfg.relay;
     // Only a node that is not there means no node runs; any other error
@@ -341,63 +338,81 @@ async fn show_relay(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
         Err(e) if crate::cli::no_node(paths, &e) => None,
         Err(e) => return Err(format!("cannot ask the running node: {e}")),
     };
-    match (&r.listen, &live) {
-        (None, _) => w(out, "relay off".into()),
-        (Some(l), Some(v)) => w(
-            out,
-            format!(
-                "relay on {l}: {}",
-                v["status"].as_str().unwrap_or("not known")
-            ),
-        ),
-        (Some(l), None) => w(out, format!("relay on {l}")),
+    let mut p = match &r.listen {
+        Some(listen) => {
+            let mut p = page("relay on");
+            p.row("Listens on", listen.clone());
+            if let Some(v) = &live {
+                p.row("State", v["status"].as_str().unwrap_or("not known"));
+            }
+            p
+        }
+        None => {
+            let mut p = page("relay off");
+            p.next("Turn it on", "nerve-node relay on 0.0.0.0:7490");
+            p
+        }
+    };
+    if let Some(pin) = &r.pin {
+        p.row("Pin", pin.clone());
     }
-    w(
-        out,
+    p.row(
+        "Limits",
         format!(
-            "at most {} tunnels, {} per node, {} opened a minute per node",
+            "{} tunnels · {} per node · {} opened a minute per node",
             r.max_links, r.max_links_per_node, r.max_opens_per_minute
         ),
     );
-    if let Some(pin) = &r.pin {
-        w(out, format!("pin {pin}"));
+    let nodes = r
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut row = vec![n.name.clone(), reach_of(&n.centers)];
+            if n.max_links.is_some() || n.max_opens_per_minute.is_some() {
+                row.push(format!(
+                    "own limits: {} tunnels · {} a minute",
+                    n.links(r),
+                    n.opens(r)
+                ));
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    if nodes.is_empty() {
+        p.row("Nodes", "none may use it");
+        p.next("Let one in", "nerve-node relay add <name>");
     }
-    if r.nodes.is_empty() {
-        w(out, "no node may use it".into());
-    }
-    for n in &r.nodes {
-        let mut line = format!("node {}: {}", n.name, reach_of(&n.centers));
-        if n.max_links.is_some() || n.max_opens_per_minute.is_some() {
-            line.push_str(&format!(
-                "; its own limits: {} tunnels at once, {} opened a minute",
-                n.links(r),
-                n.opens(r)
-            ));
-        }
-        w(out, line);
-    }
+    p.list(Some("Nodes"), nodes);
     match live {
         Some(v) => {
             let now = crate::now_ms();
-            for t in v["tunnels"].as_array().into_iter().flatten() {
-                let since = t["since_ms"].as_u64().unwrap_or(now);
-                w(
-                    out,
-                    format!(
-                        "tunnel {} from {} to center {} for {}",
-                        t["node"].as_str().unwrap_or_default(),
-                        t["from"].as_str().unwrap_or_default(),
-                        t["center"].as_str().unwrap_or_default(),
-                        nerve_transport::log::span(std::time::Duration::from_millis(
-                            now.saturating_sub(since)
-                        )),
-                    ),
-                );
-            }
+            let tunnels = v["tunnels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|t| {
+                    let since = t["since_ms"].as_u64().unwrap_or(now);
+                    vec![
+                        t["node"].as_str().unwrap_or_default().to_string(),
+                        format!("from {}", t["from"].as_str().unwrap_or_default()),
+                        format!("to {}", t["center"].as_str().unwrap_or_default()),
+                        format!(
+                            "for {}",
+                            nerve_transport::log::span(std::time::Duration::from_millis(
+                                now.saturating_sub(since)
+                            ))
+                        ),
+                    ]
+                })
+                .collect();
+            p.list(Some("Tunnels"), tunnels);
         }
-        None if r.listen.is_some() => w(out, "no node runs here, so no tunnel is open".into()),
+        None if r.listen.is_some() => {
+            p.note("No node runs here, so no tunnel is open.");
+        }
         None => {}
     }
+    show(out, &p);
     Ok(())
 }
 
@@ -572,7 +587,7 @@ fn link_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::tests::{entry, load, run, setup};
+    use crate::cli::tests::{entry, has_row, load, run, setup};
 
     /// `relay add` shows a node's token once, with the line its node runs
     /// (an https:// proxy with the relay's pin), and `node.toml` keeps only
@@ -773,7 +788,10 @@ mod tests {
         assert!(run(&paths, &["relay", "set", "nobody", "--max-links", "2"]).is_err());
         let ls = run(&paths, &["relay"]).unwrap();
         assert!(
-            ls.contains("node lab-2: the centers work, home, home-b; its own limits: 12 tunnels at once, 300 opened a minute\n"),
+            has_row(
+                &ls,
+                "lab-2 the centers work, home, home-b own limits: 12 tunnels · 300 a minute"
+            ),
             "{ls}"
         );
         // Nothing named to change is an error; `default` gives the relay's
@@ -800,8 +818,19 @@ mod tests {
 
         let ls = run(&paths, &["relay"]).unwrap();
         assert!(
-            ls.starts_with(&format!(
-                "relay on 0.0.0.0:7491\nat most 8 tunnels, 4 per node, 300 opened a minute per node\npin {pin}\nnode lab-pc: every https center of this node\nnode lab-2: the centers work, home, home-b\n"
+            ls.ends_with(&format!(
+                " · relay on
+
+  Listens on   0.0.0.0:7491
+  Pin          {pin}
+  Limits       8 tunnels · 4 per node · 300 opened a minute per node
+
+  Nodes
+    lab-pc   every https center of this node
+    lab-2    the centers work, home, home-b
+
+Note  No node runs here, so no tunnel is open.
+"
             )),
             "{ls}"
         );
@@ -839,6 +868,6 @@ mod tests {
         let cfg = load(&paths);
         assert_eq!(cfg.relay.listen, None);
         assert_eq!(cfg.relay.max_links, 8);
-        assert!(run(&paths, &["relay"]).unwrap().starts_with("relay off\n"));
+        assert!(run(&paths, &["relay"]).unwrap().contains(" · relay off\n"));
     }
 }

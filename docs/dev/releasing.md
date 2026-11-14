@@ -12,10 +12,8 @@ workflow from" too: GitHub takes the workflow file from there, not from
 | `branch` | The branch to build from. Default `main` |
 | `kind` | `pre-release` or `release` |
 | `version` | `x.y.z`, the version of `nerve-center`, `nerve-node` and `nerve-node-desktop` in the workspace `Cargo.toml` |
-| `windows` | Build and publish the Windows programs too. Off by default |
 
-Windows comes with 0.1.0: until then a release publishes the Linux programs
-only, and the `windows` input stays off. 0.1.0 turns it on.
+Every run builds and publishes the Linux and the Windows programs.
 
 ## Rules
 
@@ -32,6 +30,12 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
 - A release needs a `## <version>` section with entries in `CHANGELOG.md`. The
   section becomes its release notes. A pre-release never reads that file. Its
   text is one line about the binaries and their checksums.
+- `update --pre` on a machine takes the newest release, pre-releases too
+  (GitHub's API names it), and `update --tag pre<N>-v<version>` that one, from
+  `releases/download/<tag>/`; plain `update` takes `releases/latest/`, which
+  skips pre-releases. A pre-release and its release of one version are
+  different programs: `update` takes the release over the pre-release. The
+  desktop app's **Settings › App › Pre-releases** passes `--pre`.
 - The run builds the commit the branch is at when it starts. It tags that
   commit in its last job, after the checks and every build passed.
 - One run at a time. A second run waits for the first. While one run waits, a
@@ -49,10 +53,10 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
    one given. It also builds the desktop app `nerve-node-desktop` for Linux
    x86_64 on Ubuntu 22.04, the oldest runner (it links glibc and fontconfig,
    so it runs where glibc is 2.35 or newer; the run's summary says the glibc
-   it needs). It must print `nerve-node-desktop <version>`. With `windows`,
-   the `windows` job also builds `nerve-center` and `nerve-node-desktop` for
-   `x86_64-pc-windows-msvc` (static C runtime); without it that job is
-   skipped.
+   it needs). It must print `nerve-node-desktop <version>`. The `windows`
+   job builds `nerve-center` and `nerve-node-desktop` for
+   `x86_64-pc-windows-msvc` (static C runtime), with no Visual C++ runtime
+   and the version given.
 3. Runs the conformance suite (`cargo test -p nerve-conformance`) against the
    Linux binaries that were just built, the ones to be released, with
    `NERVE_CENTER_BIN` and `NERVE_NODE_BIN` set to them. `x86_64` runs on an
@@ -60,24 +64,23 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
    Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04), Ubuntu 26.04 and
    Debian 12 and 13, and runs the real-machine tests, the keyring path and
    the center as a service there, as CI does
-   (`.github/workflows/installed.yml`, [building](building.md#checks)). With
-   `windows`, `windows-installed` does the same with the Windows programs it
-   built, as CI's `windows-installed` does with debug ones
+   (`.github/workflows/installed.yml`, [building](building.md#checks)).
+   `windows-installed` does the same with the Windows programs it built, as CI's `windows-installed` does with debug ones
    (`.github/workflows/installed-windows.yml`); its test programs are debug
    builds of the same commit (`.github/scripts/windows-test-programs.sh`).
    The release's Windows tests are these installed ones, not the whole
    `cargo test --workspace` of CI's `windows` job.
-4. Publishes, only once every job above passed (the Windows ones too, with
-   `windows`), a GitHub Release with `SHA256SUMS` and the five Linux binaries:
+4. Publishes, only once every job above passed, a GitHub Release with
+   `SHA256SUMS` and nine files. The five Linux binaries:
    `nerve-center` and `nerve-node` for each machine, and
    `nerve-node-desktop-x86_64-linux`, which also comes as
    `nerve-node-desktop_<version>_amd64.deb` and
    `nerve-node-desktop-<version>.x86_64.rpm`: packed from that program with
    `dpkg-deb` and `rpmbuild` (`.github/scripts/desktop-packages.sh`) and
    installed on Ubuntu 22.04 and 24.04 and Fedora in containers first
-   (`desktop-packages-test`). With `windows` there are two more:
+   (`desktop-packages-test`). And the two for Windows:
    `nerve-center-x86_64-windows.exe` and
-   `nerve-node-desktop-x86_64-windows.exe` too (Windows has no `nerve-node` of
+   `nerve-node-desktop-x86_64-windows.exe` (Windows has no `nerve-node` of
    its own: the desktop app is the node there). The release text ends with a
    footer that names the programs it has. The desktop app's update takes its
    own file from there, as `nerve-node update` takes `nerve-node-*`. A release
@@ -111,9 +114,7 @@ run again.
 1. Set the version in the workspace `Cargo.toml`, in the `version` of the path
    dependencies in `[workspace.dependencies]`, and in `Cargo.lock` (run
    `cargo build`). Rename the `## Unreleased` section of `CHANGELOG.md`, where
-   the changes since the last release collect, to `## <version>`. Until 0.1.0
-   the Windows items stay under `## Unreleased`, as the release has no Windows
-   program.
+   the changes since the last release collect, to `## <version>`.
 2. Merge that to `main`.
 3. Run the workflow with kind `release` and that version.
 

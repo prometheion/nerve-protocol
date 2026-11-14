@@ -19,7 +19,10 @@
       <h1>Nerve</h1>
       <p>{{TAGLINE}}</p>
     </div>
-    <input class="login-input" type="password" name="token" placeholder="{{SECRET}}" aria-label="{{SECRET}}" aria-describedby="login-error" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus required>
+    <span class="secret">
+      <input class="login-input" type="password" name="token" placeholder="{{SECRET}}" aria-label="{{SECRET}}" aria-describedby="login-error" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus required>
+      <button class="reveal" type="button" aria-label="Show" title="Show" aria-pressed="false"><svg class="reveal-show" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg><svg class="reveal-hide" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg></button>
+    </span>
     <p id="login-error" class="login-error" role="alert" hidden></p>
     <button class="login-submit" type="submit">Sign in</button>
   </form>

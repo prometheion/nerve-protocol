@@ -920,6 +920,25 @@ pub fn escape_controls(rule: &str) -> String {
     out
 }
 
+/// `text` with every character that would hide what it says written out:
+/// tabs and line breaks as [`escape_controls`] writes them, any other
+/// control or direction mark as `\u{…}`. For what a center or a model sent,
+/// where it reaches the owner's eyes: one line stays one line, and nothing
+/// in it acts on a terminal.
+pub fn visible(text: &str) -> String {
+    escape_controls(text)
+        .chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Refuses `rule` if it is the listed form ([`escape_controls`]) of a rule
 /// with a tab or line break: of one of the guard's (also an older text) or of
 /// an entry of `listed`, the list it goes on. A rule pasted from `rule` so

@@ -586,6 +586,9 @@ export global Install {
     in-out property <bool> purge;
     // Update: 0 the latest release, 1 a file.
     in-out property <int> source;
+    // The latest release takes the pre-releases too (Settings › App).
+    in-out property <bool> pre-releases;
+    callback set-pre-releases(bool);
     in-out property <string> file;
     // The system's question for the rights is open.
     in-out property <bool> asking;

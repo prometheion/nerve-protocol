@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 /// Each user page and its budget in words. A new page needs a line here.
 const BUDGETS: &[(&str, usize)] = &[
     ("README.md", 900),
-    ("docs/user/README.md", 250),
+    ("docs/user/README.md", 300),
     ("docs/user/install.md", 1500),
+    ("docs/user/windows.md", 1400),
     ("docs/user/center.md", 1200),
     ("docs/user/pair.md", 1200),
     ("docs/user/folders-and-modes.md", 1800),
@@ -23,7 +24,7 @@ const BUDGETS: &[(&str, usize)] = &[
     ("docs/user/watch-and-stop.md", 900),
     ("docs/user/troubleshooting.md", 1500),
     ("docs/user/commands.md", 600),
-    ("docs/user/safety.md", 950),
+    ("docs/user/safety.md", 1200),
 ];
 
 /// The most words a table cell may have.
@@ -266,6 +267,105 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
+        // The Windows limits (R): each on the Windows page, in safety.md,
+        // and the policy's.
+        ("docs/user/safety.md", "UAC is no boundary"),
+        ("docs/user/windows.md", "UAC is no boundary"),
+        (
+            "docs/user/safety.md",
+            "Your Windows password is stored on disk, sealed for this machine (DPAPI); only the folder's access list guards it",
+        ),
+        (
+            "docs/user/windows.md",
+            "Your Windows password is stored on disk, sealed for this machine (DPAPI); only the folder's access list guards it",
+        ),
+        (
+            "docs/user/safety.md",
+            "The administrators and the Backup Operators can read the node's keys and your stored password",
+        ),
+        (
+            "docs/user/windows.md",
+            "The administrators and the Backup Operators can read the node's keys and your stored password",
+        ),
+        (
+            "docs/user/safety.md",
+            "A folder mode command reads the Windows folder and Program Files",
+        ),
+        (
+            "docs/user/windows.md",
+            "A folder mode command reads the Windows folder and Program Files",
+        ),
+        (
+            "docs/user/safety.md",
+            "Pipes, RPC and COM servers open to every AppContainer are open to the commands",
+        ),
+        (
+            "docs/user/windows.md",
+            "Pipes, RPC and COM servers open to every AppContainer are open to the commands",
+        ),
+        (
+            "docs/user/safety.md",
+            "Work started through WMI, the task scheduler or a service runs outside the command's job",
+        ),
+        (
+            "docs/user/windows.md",
+            "Work started through WMI, the task scheduler or a service runs outside the command's job",
+        ),
+        (
+            "docs/user/safety.md",
+            "Sudo commands run as you with your administrator rights, outside the container and the folders",
+        ),
+        (
+            "docs/user/windows.md",
+            "Sudo commands run as you with your administrator rights, outside the container and the folders",
+        ),
+        (
+            "docs/user/safety.md",
+            "With the Firewall service stopped, a pairing whose network is off runs no command",
+        ),
+        (
+            "docs/user/windows.md",
+            "With the Firewall service stopped, a pairing whose network is off runs no command",
+        ),
+        (
+            "docs/user/safety.md",
+            "The guard does not catch a service or task made by writing the registry or the Tasks folder directly, the Startup folder, or WMI",
+        ),
+        (
+            "docs/user/windows.md",
+            "The guard does not catch a service or task made by writing the registry or the Tasks folder directly, the Startup folder, or WMI",
+        ),
+        ("docs/user/safety.md", "The programs are not signed"),
+        // What an uninstall that keeps the data keeps.
+        (
+            "docs/user/windows.md",
+            "The data holds your stored Windows password too, open to the administrators: **Delete the data** deletes it",
+        ),
+        // The settings grant reaches an administrator owner's rights.
+        (
+            "docs/user/safety.md",
+            "With root as the owner (on Windows an administrator), a center with the settings grant can switch itself to `user` mode",
+        ),
+        // A harness token in a flag is in the process list.
+        (
+            "docs/user/center.md",
+            "`--harness-token` does too, but shows it in the process list",
+        ),
+        ("docs/user/windows.md", "The programs are not signed"),
+        ("SECURITY.md", "UAC is no boundary"),
+        (
+            "SECURITY.md",
+            "the config folder's access list is its only guard",
+        ),
+        ("SECURITY.md", "an administrator or a Backup Operator"),
+        ("SECURITY.md", "The guard has named holes"),
+        ("SECURITY.md", "The programs are not signed"),
+        // Work done for a command leaves its job, not a folder mode
+        // command's container: a way out of the container is in scope.
+        (
+            "SECURITY.md",
+            "runs outside its job and its limits. A `folder` mode command's container keeps the usual tools from them",
+        ),
     ];
     let mut missing = Vec::new();
     for (name, text) in KEPT {
@@ -297,8 +397,8 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
 }
 
 /// Every page of the docs that the code and the dev docs name (a comment, a
-/// message, a help link, a spec's reference) is there: a page that moves
-/// takes its names along.
+/// message, a help link, a spec's reference) is there, and so is a heading
+/// named with it: a page or section that moves takes its names along.
 #[test]
 fn every_doc_page_the_code_names_exists() {
     fn walk(dir: &Path, found: &mut Vec<String>) {
@@ -328,6 +428,29 @@ fn every_doc_page_the_code_names_exists() {
                         }
                         if !root().join(name).exists() {
                             found.push(format!("{}:{}: {name}", path.display(), i + 1));
+                            continue;
+                        }
+                        // A section named after the page, `page.md, "Heading"`
+                        // (in a Rust string `\"`), whole on this line, is there,
+                        // as a heading or a paragraph's bold lead: a message
+                        // sends the owner to it.
+                        let rest = &line[at + name.len()..];
+                        let named = rest
+                            .strip_prefix(", \\\"")
+                            .and_then(|r| r.split_once("\\\""))
+                            .or_else(|| rest.strip_prefix(", \"").and_then(|r| r.split_once('"')));
+                        if let Some((heading, _)) = named {
+                            let page = std::fs::read_to_string(root().join(name)).unwrap();
+                            let there = page.lines().any(|l| {
+                                l.starts_with('#') && l.trim_start_matches('#').trim() == heading
+                            }) || page.contains(&format!("**{heading}.**"));
+                            if !there {
+                                found.push(format!(
+                                    "{}:{}: {name} has no heading {heading:?}",
+                                    path.display(),
+                                    i + 1
+                                ));
+                            }
                         }
                     }
                 }
@@ -340,6 +463,117 @@ fn every_doc_page_the_code_names_exists() {
     // A test that feeds a made-up command its own path of the docs.
     found.retain(|f| !f.contains("nerve-policy/tests/guard.rs"));
     assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The anchors GitHub gives the headings of a Markdown page: the heading in
+/// lower case, without its punctuation, a blank as `-`, and `-1`, `-2` after
+/// a heading that came before.
+fn anchors(page: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let mut fence = false;
+    for line in page.lines() {
+        if line.starts_with("```") {
+            fence = !fence;
+        }
+        let Some(heading) = line.trim_start_matches('#').strip_prefix(' ') else {
+            continue;
+        };
+        if fence || !line.starts_with('#') {
+            continue;
+        }
+        let slug: String = heading
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
+            .map(|c| if c == ' ' { '-' } else { c })
+            .collect();
+        let n = seen.iter().filter(|s| **s == slug).count();
+        out.push(if n == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{n}")
+        });
+        seen.push(slug);
+    }
+    out
+}
+
+/// Every link of the guide, the README, the policy and the dev docs to
+/// another page of the repository leads to a file that is there, and to a
+/// heading of it that is there: the Windows page and the limits link into
+/// the dev pages by their headings, which move.
+#[test]
+fn every_link_of_the_docs_leads_to_a_page_and_heading_that_exist() {
+    let mut pages = vec![
+        root().join("README.md"),
+        root().join("SECURITY.md"),
+        root().join("CONTRIBUTING.md"),
+    ];
+    fn md(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                md(&p, out);
+            } else if p.extension().is_some_and(|e| e == "md") {
+                out.push(p);
+            }
+        }
+    }
+    md(&root().join("docs"), &mut pages);
+    let mut found = Vec::new();
+    for page in &pages {
+        let text = std::fs::read_to_string(page).unwrap();
+        let mut fence = false;
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with("```") {
+                fence = !fence;
+            }
+            if fence {
+                continue;
+            }
+            for (at, _) in line.match_indices("](") {
+                let link: String = line[at + 2..]
+                    .chars()
+                    .take_while(|c| *c != ')' && !c.is_whitespace())
+                    .collect();
+                if link.contains(':') && !link.starts_with('#') {
+                    continue;
+                }
+                let (file, anchor) = link.split_once('#').unwrap_or((&link, ""));
+                let target = if file.is_empty() {
+                    page.clone()
+                } else {
+                    page.parent().unwrap().join(file)
+                };
+                let at = format!("{}:{}: {link}", page.display(), i + 1);
+                if !target.exists() {
+                    found.push(format!("{at}: no such file"));
+                } else if !anchor.is_empty()
+                    && target.extension().is_some_and(|e| e == "md")
+                    && !anchors(&std::fs::read_to_string(&target).unwrap())
+                        .iter()
+                        .any(|a| a == anchor)
+                {
+                    found.push(format!("{at}: no such heading"));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+    // The rule for a heading's anchor, on the forms these pages use.
+    assert_eq!(
+        anchors(
+            "# The control pipe is not the node's (Windows)\n## `nerve-run`, a home\n## A\n## A\n"
+        ),
+        [
+            "the-control-pipe-is-not-the-nodes-windows",
+            "nerve-run-a-home",
+            "a",
+            "a-1"
+        ]
+    );
 }
 
 /// Every `.rs`, `.js`, `.md` and `.json` file below `dir`, except build

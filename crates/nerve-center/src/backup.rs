@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+use nerve_service::out::{Page, Style, Tone};
+
 use nerve_transport::backup::{self, Contents, Kind, Passphrase};
 use nerve_transport::tls::ServerIdentity;
 
@@ -545,11 +547,13 @@ fn denied(path: &Path, how: Access) -> bool {
 /// owner) and says whether it switched to that owner. A restore reads the
 /// backup and the passphrase before it, as the caller, so that they may be
 /// where only root can read. A backup is written as the owner: what that
-/// user may not reach is said first ([`as_owner_may_reach`]).
+/// user may not reach is said first ([`as_owner_may_reach`]). `restarts`
+/// says that the installed service starts again after a restore.
 pub fn run(
     state: &Path,
     cmd: &crate::config::Cmd,
     settle: &dyn Fn(&Path) -> Result<bool, String>,
+    restarts: bool,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     use crate::config::Cmd;
@@ -564,10 +568,10 @@ pub fn run(
             }
             let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
-            print_backup(&r, file, out);
             // Which center it is, since an owner command may take another
             // folder than the installed one (round 7, security 2).
-            let _ = writeln!(out, "The state folder: {}", state.display());
+            let page = backup_page(&r, file, state);
+            let _ = out.write_all(page.render(Style::stdout()).as_bytes());
         }
         Cmd::Restore {
             file,
@@ -586,67 +590,74 @@ pub fn run(
             let parsed = open(&bytes, &pass)?;
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
-            print_restore(&r, &parsed, out);
-            let _ = writeln!(out, "The state folder: {}", state.display());
+            let start = start_after(&crate::service::Layout::system(), state, restarts);
+            let page = restore_page(&r, &parsed, state, start);
+            let _ = out.write_all(page.render(Style::stdout()).as_bytes());
         }
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.
         Cmd::Install
+        | Cmd::Set { .. }
         | Cmd::Update { .. }
         | Cmd::Uninstall { .. }
         | Cmd::OwnerToken { .. }
         | Cmd::Status
-        | Cmd::Service
+        | Cmd::Service { .. }
+        | Cmd::Pair
+        | Cmd::Nodes { .. }
+        | Cmd::Token(_)
+        | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
-            return Err(
-                "install, update, uninstall, owner-token, status and service-files are not backup commands"
-                    .into(),
-            );
+            return Err("only backup and restore are backup commands".into());
         }
     }
     Ok(())
 }
 
-/// Says what a backup did.
-pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn Write) {
-    let _ = writeln!(out, "backed up to {}", file.display());
-    let _ = writeln!(
-        out,
-        "  the center {} ({}), pin {}, with {} paired {}",
-        r.name,
-        r.id,
-        r.pin,
-        r.nodes,
-        if r.nodes == 1 { "node" } else { "nodes" }
-    );
-    let _ = writeln!(out, "  its certificate and private key, and its state");
-    let _ = writeln!(
-        out,
-        "The file is encrypted with your passphrase. Keep both; nobody can recover the file without it."
-    );
+/// What a backup did, of the center in `state`.
+pub fn backup_page(r: &BackupReport, file: &Path, state: &Path) -> Page {
+    let mut p = crate::service::page().state("backed up", Tone::Good);
+    p.row("File", file.display().to_string())
+        .row("Center", format!("{} ({})", r.name, r.id))
+        .row("Pin", r.pin.clone())
+        .row("Machines", r.nodes.to_string())
+        .row("Folder", state.display().to_string());
+    p.note("The file holds the center's certificate, its private key and its state.");
+    p.note("A passphrase encrypts it. Keep both: nobody can open the file without it.");
+    p
 }
 
-/// Says what a restore did and what comes next.
-pub fn print_restore(r: &RestoreReport, b: &Parsed, out: &mut dyn Write) {
-    let _ = writeln!(
-        out,
-        "restored the center {} ({}), pin {} (backup made by {})",
-        b.name(),
-        b.store.center_id,
-        if r.pin.is_empty() {
-            b.pin()
-        } else {
-            r.pin.clone()
-        },
-        b.program
-    );
+/// The command that starts the center after a restore into `state`, where
+/// there is one to name: the installed center's service, unless `restarts`
+/// (the restore runs inside a stop and start of the service). A center
+/// restored into a folder of its own is started the way it was before.
+fn start_after(layout: &crate::service::Layout, state: &Path, restarts: bool) -> Option<String> {
+    (!restarts && layout.installed() && layout.is_state(state))
+        .then(|| crate::service::admin("service start"))
+}
+
+/// What a restore did into `state`; `start` is the command that starts the
+/// center, where there is one to name (a center restored into its own
+/// folder by hand is started the way it was before, and the installed one
+/// that starts again by itself needs none).
+pub fn restore_page(r: &RestoreReport, b: &Parsed, state: &Path, start: Option<String>) -> Page {
+    let mut p = crate::service::page().state("restored", Tone::Good);
+    let pin = match r.pin.is_empty() {
+        true => b.pin(),
+        false => r.pin.clone(),
+    };
+    p.row("Center", format!("{} ({})", b.name(), b.store.center_id))
+        .row("Pin", pin)
+        .row("Backup of", b.program.clone())
+        .row("Folder", state.display().to_string());
     for n in &r.notes {
-        let _ = writeln!(out, "  {n}");
+        p.note(n.clone());
     }
-    let _ = writeln!(
-        out,
-        "Start the center. The nodes that paired with it find it again by the same pin; if it now answers under another address, set --public-url and change `center.<name>.url` on each node (docs/user/backup.md)."
-    );
+    p.note("The machines paired with it find it again by its pin. Where its address changed, set its public-url and each node's `center.<name>.url` (docs/user/backup.md).");
+    if let Some(start) = start {
+        p.next("Start it", start);
+    }
+    p
 }
 
 #[cfg(test)]
@@ -709,7 +720,7 @@ mod tests {
             passphrase_file: Some(pass.into()),
         };
         // A backup settles first: refused there, nothing is read or written.
-        let e = run(&state, &backup(&right), &refuse, &mut Vec::new()).unwrap_err();
+        let e = run(&state, &backup(&right), &refuse, false, &mut Vec::new()).unwrap_err();
         assert_eq!(e, "settled");
         assert_eq!(*settled.borrow(), std::slice::from_ref(&state));
         assert!(!file.exists());
@@ -726,18 +737,34 @@ mod tests {
             &state,
             &to(&d.path().join("no/such/c.bak"), &right),
             &|_| Ok(true),
+            false,
             &mut Vec::new(),
         )
         .unwrap_err();
         assert!(e.contains("does not exist") && !e.contains(advice), "{e}");
-        run(&state, &backup(&right), &|_| Ok(false), &mut Vec::new()).unwrap();
-        let e = run(&state, &backup(&right), &|_| Ok(true), &mut Vec::new()).unwrap_err();
+        run(
+            &state,
+            &backup(&right),
+            &|_| Ok(false),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let e = run(
+            &state,
+            &backup(&right),
+            &|_| Ok(true),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(e.contains("exists already") && !e.contains(advice), "{e}");
         let short = pass_file("short", "short");
         let e = run(
             &state,
             &to(&d.path().join("s.bak"), &short),
             &|_| Ok(true),
+            false,
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -748,10 +775,10 @@ mod tests {
             passphrase_file: Some(pass.into()),
         };
         // A restore opens the backup before it settles.
-        let e = run(&state, &restore(&wrong), &refuse, &mut Vec::new()).unwrap_err();
+        let e = run(&state, &restore(&wrong), &refuse, false, &mut Vec::new()).unwrap_err();
         assert!(e.contains("passphrase"), "{e}");
         assert_eq!(settled.borrow().len(), 1);
-        let e = run(&state, &restore(&right), &refuse, &mut Vec::new()).unwrap_err();
+        let e = run(&state, &restore(&right), &refuse, false, &mut Vec::new()).unwrap_err();
         assert_eq!(e, "settled");
         assert_eq!(settled.borrow().len(), 2);
     }
@@ -793,6 +820,7 @@ mod tests {
                     passphrase_file: Some(pass.into()),
                 },
                 &|_| Ok(switched),
+                false,
                 &mut Vec::new(),
             )
         };
@@ -823,6 +851,79 @@ mod tests {
             e.starts_with("cannot open") && !e.contains("read as the owner"),
             "{e}"
         );
+    }
+
+    /// The page after a restore names the command that starts the center
+    /// only where there is one: not for a center in a folder of its own,
+    /// not where the service starts again by itself (round 3, correctness 2).
+    #[test]
+    fn a_restore_says_to_start_the_service_only_where_that_is_the_next_step() {
+        use crate::config::Cmd;
+        let a = tempfile::tempdir().unwrap();
+        center(a.path(), "c1");
+        let (kept, parsed, _) = backup_of(a.path());
+        let pass = a.path().join("pass");
+        nerve_transport::files::write_private(&pass, PASS.as_bytes()).unwrap();
+        let file = a.path().join("again.bak");
+        std::fs::copy(kept.path().join("c.bak"), &file).unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let state = b.path().join("state");
+        let mut out = Vec::new();
+        run(
+            &state,
+            &Cmd::Restore {
+                file,
+                replace: false,
+                passphrase_file: Some(pass),
+            },
+            &|_| Ok(false),
+            false,
+            &mut out,
+        )
+        .unwrap();
+        let page = String::from_utf8(out).unwrap();
+        assert!(page.contains(" · restored\n"), "{page}");
+        assert!(
+            !page.contains("Next") && !page.contains("service start"),
+            "{page}"
+        );
+
+        let r = RestoreReport {
+            notes: Vec::new(),
+            pin: String::new(),
+        };
+        let text = |start: Option<String>| {
+            restore_page(&r, &parsed, &state, start).render(nerve_service::out::Style::PLAIN)
+        };
+        assert!(
+            text(Some("sudo nerve-center service start".into()))
+                .contains("Next  Start it:  sudo nerve-center service start\n")
+        );
+        assert!(!text(None).contains("Next"));
+    }
+
+    /// Of the folders, the installed center's alone has a command to start
+    /// it, and not while the service starts again by itself.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_the_installed_center_is_started_by_the_service_command() {
+        let d = tempfile::tempdir().unwrap();
+        let l = crate::service::Layout {
+            unit: d.path().join("nerve-center.service"),
+            bin: d.path().join("nerve-center"),
+            state: d.path().join("state"),
+            settings_dir: d.path().join("etc"),
+            release: String::new(),
+        };
+        // Nothing is installed: no command, whatever the folder.
+        assert_eq!(start_after(&l, &l.state, false), None);
+        std::fs::write(&l.unit, "").unwrap();
+        assert_eq!(
+            start_after(&l, &l.state, false).as_deref(),
+            Some("sudo nerve-center service start")
+        );
+        assert_eq!(start_after(&l, &l.state, true), None);
+        assert_eq!(start_after(&l, &d.path().join("other"), false), None);
     }
 
     /// A state folder of a center that has run: its identity, a paired node

@@ -19,6 +19,8 @@ const ICONS = {
   moon: "<path d=\"M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z\"/>",
   monitor: "<rect width=\"20\" height=\"14\" x=\"2\" y=\"3\" rx=\"2\"/><line x1=\"8\" x2=\"16\" y1=\"21\" y2=\"21\"/><line x1=\"12\" x2=\"12\" y1=\"17\" y2=\"21\"/>",
   logout: "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><polyline points=\"16 17 21 12 16 7\"/><line x1=\"21\" x2=\"9\" y1=\"12\" y2=\"12\"/>",
+  eye: "<path d=\"M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>",
+  "eye-off": "<path d=\"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49\"/><path d=\"M14.084 14.158a3 3 0 0 1-4.242-4.242\"/><path d=\"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143\"/><path d=\"m2 2 20 20\"/>",
   copy: "<rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"/><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"/>",
   check: "<path d=\"M20 6 9 17l-5-5\"/>",
   alert: "<circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"12\" x2=\"12\" y1=\"8\" y2=\"12\"/><line x1=\"12\" x2=\"12.01\" y1=\"16\" y2=\"16\"/>",
@@ -66,6 +68,24 @@ function el(tag, attrs, ...kids) {
     e.append(typeof k === "string" || typeof k === "number" ? document.createTextNode(String(k)) : k);
   }
   return e;
+}
+
+// A password, token or passphrase field with a button that shows what was
+// typed and hides it again: [the input, what goes on the page].
+function secret(attrs) {
+  const input = el("input", Object.assign({ class: "input", autocomplete: "off", spellcheck: "false" }, attrs, { type: "password" }));
+  const glyph = icon("eye");
+  const eye = el("button", { type: "button", class: "reveal", "aria-label": "Show", title: "Show", "aria-pressed": "false" }, glyph);
+  eye.addEventListener("click", () => {
+    const shown = input.type === "password";
+    input.type = shown ? "text" : "password";
+    const say = shown ? "Hide" : "Show";
+    eye.setAttribute("aria-label", say);
+    eye.title = say;
+    eye.setAttribute("aria-pressed", String(shown));
+    fillIcon(glyph, shown ? "eye-off" : "eye");
+  });
+  return [input, el("span", { class: "secret" }, input, eye)];
 }
 
 function icon(name, cls) {

@@ -5,12 +5,17 @@
 //! runs in ([`job_object`], with its plain logic in [`job`]). Both services
 //! are registered with the manager ([`service`]), run under its dispatcher
 //! ([`dispatch`]), replace their program in `update` ([`update`]) and run a
-//! program without the administrators' rights ([`restricted`]). The center
+//! program without the administrators' rights ([`restricted`]); a program
+//! a double-click started installs itself with them ([`console`]). The center
 //! also asks who runs a process ([`process`]) and which process holds a
 //! loopback connection ([`tcp`]). The machine's own
-//! folders come from Windows, not from the environment ([`folders`]). What
+//! folders come from Windows, not from the environment ([`folders`]), and
+//! the center's install puts its folder on the machine's `Path`
+//! ([`machine_path`]). What
 //! is plain logic is compiled and tested on every platform.
 
+#[cfg(windows)]
+pub mod console;
 pub mod dacl;
 #[cfg(windows)]
 pub mod dispatch;
@@ -20,6 +25,7 @@ pub mod folders;
 pub mod job;
 #[cfg(windows)]
 pub mod job_object;
+pub mod machine_path;
 pub mod pipe;
 #[cfg(windows)]
 pub mod process;

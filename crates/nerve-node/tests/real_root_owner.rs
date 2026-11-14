@@ -154,7 +154,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let (ok, said) = typing(Command::new(&exe).arg("install"), "y\n");
     assert!(ok, "{said}");
     assert!(!said.contains(question), "{said}");
-    assert!(said.contains("Warning: no owner"), "{said}");
+    assert!(said.contains("No owner: "), "{said}");
     assert!(said.contains("--owner=root --accept-root-owner"), "{said}");
     assert_eq!(owner_in_unit(), None);
     // With --json, or with its output in a file, install asks nothing even
@@ -176,7 +176,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(said.contains(no_question), "{said}");
     let logged = std::fs::read_to_string(log).unwrap();
     assert!(!logged.contains(question), "{logged}");
-    assert!(logged.contains("Warning: no owner"), "{logged}");
+    assert!(logged.contains("No owner: "), "{logged}");
     let _ = std::fs::remove_file(log);
     assert!(started.elapsed() < Duration::from_secs(50), "it waited");
     assert_eq!(owner_in_unit(), None);
@@ -188,7 +188,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
         said.contains("nothing in Nerve can hold them back"),
         "{said}"
     );
-    assert!(said.contains("Warning: no owner"), "{said}");
+    assert!(said.contains("No owner: "), "{said}");
     assert_eq!(owner_in_unit(), None);
     assert_eq!(status()["owner_full_rights"], false);
 
@@ -226,7 +226,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert!(ok, "{said}");
     assert!(said.contains(question), "{said}");
     assert!(
-        said.contains("Warning: root is the owner of the node, as you confirmed"),
+        said.contains("Root is the owner of the node, as you confirmed"),
         "{said}"
     );
     assert_eq!(owner_in_unit().as_deref(), Some("root"));
@@ -237,12 +237,12 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("owner: root is the owner: commands of user mode"),
+        text.contains("Warning  root is the owner: commands of user mode"),
         "{text}"
     );
-    assert!(text.contains("mode user, as root"), "{text}");
+    assert!(text.contains("user mode · as root"), "{text}");
     // The settings grant gives a center root here, and says so.
-    let warning = "Warning: root is the owner of this node, so";
+    let warning = "Root is the owner of this node, so";
     let (ok, said) = sh(Command::new(BIN).args(["center", "settings", "on"]));
     assert!(ok && said.contains(warning), "{said}");
     assert!(sh(Command::new(BIN).args(["center", "settings", "off"])).0);
@@ -314,8 +314,8 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_full_rights"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("node: not running")
-            && text.contains("owner: root is the owner: commands of user mode"),
+        text.contains(" · stopped\n")
+            && text.contains("Warning  root is the owner: commands of user mode"),
         "{text}"
     );
     assert!(sh(Command::new(BIN).args(["service", "start"])).0);
@@ -567,7 +567,7 @@ async fn a_program_of_root_attaches_as_a_provider() {
     let (provider, first) = started(None, &[&python, script, at]);
     assert!(first.contains("\"ok\""), "{first}");
     let (_, st) = sh(Command::new(BIN).arg("status"));
-    assert!(st.contains("provider rootprov attached: files"), "{st}");
+    assert!(st.contains("  Providers\n    rootprov   files\n"), "{st}");
     let r = conn
         .call(
             "invoke",

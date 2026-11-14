@@ -11,6 +11,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use nerve_policy::audit::AuditLog;
+use nerve_policy::rules::visible;
 use nerve_transport::http::Request;
 
 use super::{ApiResult, Call, command, text};
@@ -676,23 +677,6 @@ fn list_word(list: List) -> &'static str {
         List::Deny => "deny",
         List::Sudo => "sudo",
     }
-}
-
-/// `text` with every character that would hide what it says written out:
-/// tabs and line breaks as `rule` writes them, any other control or
-/// direction mark as `\u{…}`.
-fn visible(text: &str) -> String {
-    nerve_policy::rules::escape_controls(text)
-        .chars()
-        .map(|c| {
-            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-            if c.is_control() || bidi {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 /// The `rule add` an audit entry's button runs: its action, target and

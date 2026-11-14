@@ -13,7 +13,8 @@ nerve-node restore ~/nerve-node.bak
 ```
 
 The owner of the installed node needs no `sudo`. There a restore stops the
-node, restores and starts it again; stop a node you run by hand first. The backup holds `node.toml` with its
+node, restores and starts it again; stop a node you run by hand first. On
+Windows, **Settings › Backup** does both. The backup holds `node.toml` with its
 pairings, modes, folders and rules, and the keys in files. Not the audit
 log, the log or the sudo password: a restored node has sudo off.
 
@@ -26,6 +27,7 @@ and allowed programs ([restore](../dev/backup.md#restore)).
 | `--overwrite` | Replaces a backup file that exists |
 | `--passphrase-file F` | Reads the passphrase from a file, or stdin with `-` |
 | `--replace` (restore) | Replaces a node here that is not the one the backup is of |
+| `--secret-storage file` (restore) | Keeps the keys in files here, whatever the backup says: for a machine without a keyring |
 
 - The keys stay in the keyring unless you add `--include-keyring`. A node
   restored without them has pairings without their keys

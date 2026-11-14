@@ -422,7 +422,7 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     let stdout = String::from_utf8_lossy(&made.stdout);
     assert!(made.status.success(), "{made:?}");
     assert!(
-        stdout.contains("backed up") && stdout.contains("pin"),
+        stdout.contains(" · backed up\n") && stdout.contains("\n  Pin "),
         "{stdout}"
     );
     // The private key is nowhere in what the program said.
@@ -771,4 +771,119 @@ mod running {
         assert_eq!(unsafe { libc::kill(c.id() as i32, libc::SIGTERM) }, 0);
         assert!(wait(&mut c, Duration::from_secs(10)), "it still runs");
     }
+}
+
+/// The owner's commands in the terminal ask the running center over its
+/// attach socket or pipe, with the web UI off (#213): `pair` makes a link,
+/// `nodes` lists the machines, `token` makes, lists and removes harness
+/// tokens; a center that does not run is said plainly.
+#[test]
+fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let stopped = owner(&["pair"], Some(&state));
+    assert!(!stopped.status.success());
+    let err = String::from_utf8_lossy(&stopped.stderr);
+    assert!(err.contains("no center runs in "), "{err}");
+
+    let mut center = spawn(&state);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    let said = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert!(
+            o.status.success(),
+            "{args:?}: {text}{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        text
+    };
+    let pair = said(&["pair"]);
+    assert!(pair.contains(" · pairing link\n"), "{pair}");
+    assert!(pair.contains("\n  Link        nerve://"), "{pair}");
+    assert!(pair.contains("nerve-node center add -"), "{pair}");
+    let nodes = said(&["nodes"]);
+    assert!(nodes.contains(" · no machine paired\n"), "{nodes}");
+    assert_eq!(said(&["nodes", "list"]), nodes);
+    let made = said(&["token", "new", "ci"]);
+    let token = made
+        .lines()
+        .find_map(|l| l.strip_prefix("  Token       "))
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_string();
+    assert!(token.starts_with("nrv_"), "{made}");
+    let list = said(&["token", "list"]);
+    assert!(list.contains(" · 1 harness token\n"), "{list}");
+    assert!(list.contains("\n  ci   made "), "{list}");
+    assert!(!list.contains(&token), "{list}");
+    let rm = said(&["token", "rm", "ci"]);
+    assert!(rm.starts_with("removed the harness token ci\n"), "{rm}");
+    assert!(rm.contains(" · no harness token\n"), "{rm}");
+    let gone = owner(&["nodes", "rm", "nope"], Some(&state));
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("no machine named nope"));
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+}
+
+/// With the web UI off and MCP over HTTP on, `token new` in the terminal
+/// shows how a harness reaches the endpoint, as the web UI's card does
+/// (round 1 of #213's second pass, correctness 5: it said to turn on MCP
+/// over HTTP, which was on).
+#[test]
+fn a_new_token_names_the_mcp_endpoint_with_the_web_ui_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut center = bare(&mut Command::new(env!("CARGO_BIN_EXE_nerve-center")))
+        .env("NERVE_CENTER_STATE_DIR", &state)
+        .env("NERVE_CENTER_LISTEN", "127.0.0.1:0")
+        .env("NERVE_CENTER_PLAIN_LOOPBACK", "true")
+        .env("NERVE_CENTER_UI", "off")
+        .env("NERVE_CENTER_MCP", "127.0.0.1:0")
+        .env("NERVE_CENTER_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let made = loop {
+        let o = owner(&["token", "new", "ci"], Some(&state));
+        if o.status.success() {
+            break String::from_utf8_lossy(&o.stdout).into_owned();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    // A long label is cut by the center; the page shows the cut one, which
+    // `token rm` finds the token by (round 2 of #213's second pass,
+    // correctness 6).
+    let long = "l".repeat(70);
+    let long_made = owner(&["token", "new", &long], Some(&state));
+    let long_made = String::from_utf8_lossy(&long_made.stdout).into_owned();
+    let shown = long_made
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Label"))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let removed = owner(&["token", "rm", &shown], Some(&state));
+    let _ = center.kill();
+    let _ = center.wait();
+    // Cut by the center, and the cut label found again.
+    assert!(shown.starts_with("lll") && shown.len() <= 63, "{long_made}");
+    assert_ne!(shown, long, "{long_made}");
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(made.contains("\n  URL         http://127.0.0.1:"), "{made}");
+    assert!(made.contains("Claude Code:"), "{made}");
+    assert!(!made.contains("Turn on MCP over HTTP"), "{made}");
 }

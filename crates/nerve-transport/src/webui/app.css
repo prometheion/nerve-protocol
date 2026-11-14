@@ -2660,3 +2660,52 @@ dialog.dlg .foot {
     transform: rotate(360deg);
   }
 }
+
+/* A password, token or passphrase field with its show button (kit.js
+   secret(), and the sign-in page). */
+.secret {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.secret > input {
+  width: 100%;
+  padding-right: 44px;
+}
+
+.secret > .reveal {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.secret > .reveal:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.secret > .reveal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.secret > .reveal svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

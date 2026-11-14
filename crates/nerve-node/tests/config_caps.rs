@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::{linked, owner_edit};
+use common::{linked, owner_edit, rows};
 use nerve_conformance::fake_center::FakeCenter;
 use nerve_conformance::wire::{Conn, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
@@ -864,10 +864,10 @@ command = ["id"]"#);
     let ls = cli(&paths, &["cap"]).await;
     let row = ls
         .lines()
-        .find(|l| l.starts_with("who.am"))
+        .find(|l| l.starts_with("  who.am"))
         .unwrap_or_else(|| panic!("{ls}"));
     assert!(row.ends_with(&why), "{ls}");
-    assert!(ls.contains("capability who.am: id\n"), "{ls}");
+    assert!(rows(&ls).contains(&"who.am id".to_string()), "{ls}");
     // So does the CLI while no node runs.
     daemon.stop().await;
     let ls = cli(&paths, &["cap"]).await;
@@ -1373,7 +1373,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
     let ls = cli(&paths, &["cap"]).await;
     let row = ls
         .lines()
-        .find(|l| l.starts_with("say.word"))
+        .find(|l| l.starts_with("  say.word"))
         .unwrap_or_else(|| panic!("{ls}"));
     assert_eq!(
         row.split_whitespace().collect::<Vec<_>>(),
@@ -1381,7 +1381,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
         "{ls}"
     );
     assert!(
-        ls.contains("capability say.word: printf %s {word}\n"),
+        rows(&ls).contains(&"say.word printf %s {word}".to_string()),
         "{ls}"
     );
     daemon.stop().await;

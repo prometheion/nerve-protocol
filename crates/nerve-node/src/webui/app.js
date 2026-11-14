@@ -361,6 +361,10 @@ function pageCaps() {
 }
 
 function field(label, attrs) {
+  if (attrs && attrs.type === "password") {
+    const [input, box] = secret(attrs);
+    return [input, el("label", { class: "field" }, el("span", { class: "label" }, label), box)];
+  }
   const input = el("input", Object.assign({ class: "input", type: "text", autocomplete: "off", spellcheck: "false" }, attrs));
   return [input, el("label", { class: "field" }, el("span", { class: "label" }, label), input)];
 }

@@ -196,9 +196,20 @@ pub(super) async fn rm(
 pub(super) async fn list(paths: NodePaths, out: &mut dyn Write) -> Result<(), String> {
     let (cfg, _) = read_config(&paths).await?;
     if cfg.centers.is_empty() {
-        w(out, NO_CENTER_PAIRED.into());
+        show(out, &no_center_page());
+        return Ok(());
     }
     let now = crate::now_ms();
+    let mut rows = vec![
+        ["NAME", "ADDRESS", "MODE", "SETTINGS", "STATE"]
+            .map(String::from)
+            .to_vec(),
+    ];
+    // Which `nerve.*` profile is each pairing's: the others belong to
+    // other nodes or are left over (docs/dev/windows.md).
+    if cfg!(windows) {
+        rows[0].push("APPCONTAINER".into());
+    }
     for c in &cfg.centers {
         let mut flags = Vec::new();
         for (on, f) in [
@@ -210,33 +221,27 @@ pub(super) async fn list(paths: NodePaths, out: &mut dyn Write) -> Result<(), St
                 flags.push(f);
             }
         }
-        w(
-            out,
-            format!(
-                "{}  {}  mode {}  settings {}{}",
-                c.name,
-                c.url,
-                c.policy.mode_at(now).as_str(),
-                enum_str(&c.settings),
-                if flags.is_empty() {
-                    String::new()
-                } else {
-                    format!("  [{}]", flags.join(", "))
-                }
-            ),
-        );
-        // Which `nerve.*` profile is this pairing's: the others
-        // belong to other nodes or are left over (docs/dev/windows.md).
+        let mut row = vec![
+            c.name.clone(),
+            c.url.clone(),
+            c.policy.mode_at(now).as_str().to_string(),
+            enum_str(&c.settings),
+            match flags.is_empty() {
+                true => "-".into(),
+                false => flags.join(", "),
+            },
+        ];
         if cfg!(windows) {
-            w(
-                out,
-                format!(
-                    "  AppContainer {}",
-                    crate::grants::profile_name(&paths, &c.node_id)
-                ),
-            );
+            row.push(crate::grants::profile_name(&paths, &c.node_id));
         }
+        rows.push(row);
     }
+    let mut p = page(&match cfg.centers.len() {
+        1 => "1 center".to_string(),
+        n => format!("{n} centers"),
+    });
+    p.list(None, rows);
+    show(out, &p);
     Ok(())
 }
 
@@ -364,7 +369,24 @@ mod tests {
         assert!(cfg.center("a").unwrap().paused);
         assert!(!cfg.center("b").unwrap().paused);
         let ls = run(&paths, &["center"]).unwrap();
-        assert!(ls.contains("[paused]"), "{ls}");
+        // The STATE column, wherever it is: Windows adds the AppContainer
+        // after it.
+        let words = |l: &str| l.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let head = ls
+            .lines()
+            .map(words)
+            .find(|w| w.first().map(String::as_str) == Some("NAME"))
+            .unwrap_or_else(|| panic!("no head: {ls}"));
+        let state = head.iter().position(|w| w == "STATE").unwrap();
+        let state_of = |name: &str| {
+            ls.lines()
+                .map(words)
+                .find(|w| w.first().map(String::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("no {name}: {ls}"))[state]
+                .clone()
+        };
+        assert_eq!(state_of("a"), "paused", "{ls}");
+        assert_eq!(state_of("b"), "-", "{ls}");
         run(&paths, &["center", "resume", "a"]).unwrap();
         assert!(!load(&paths).center("a").unwrap().paused);
         run(&paths, &["center", "rm", "b"]).unwrap();
@@ -392,7 +414,7 @@ mod tests {
         assert!(profile.exists(), "{}", profile.display());
         assert!(!crate::grants::record_file(&paths).exists());
         let ls = run(&paths, &["center"]).unwrap();
-        assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
+        assert!(ls.contains("APPCONTAINER") && ls.contains(&name), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(
             out.contains(&format!("removed the AppContainer profile {name} of home")),
@@ -424,7 +446,7 @@ mod tests {
         );
         assert!(profile.exists(), "{}", profile.display());
         let ls = run(&paths, &["center"]).unwrap();
-        assert!(ls.contains(&format!("AppContainer {name}")), "{ls}");
+        assert!(ls.contains("APPCONTAINER") && ls.contains(&name), "{ls}");
         let out = run(&paths, &["center", "rm"]).unwrap();
         assert!(out.contains(&name), "{out}");
         assert!(!profile.exists(), "{}", profile.display());

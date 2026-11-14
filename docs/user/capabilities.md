@@ -27,6 +27,7 @@ is `cap.action`. The options:
 | `--params` | the JSON Schema of its arguments, or `none`; `-` reads it from stdin |
 | `--result` | `text` (the default), or a JSON Schema the output must fit |
 | `--timeout` | seconds it may run |
+| `--platform` | `any` (the default), `linux` or `windows`: a node offers only those of its own |
 
 A word written `{field}` is the call's argument `field`, as one whole
 argument. No shell reads the command, so `;` and `$(...)` in a value are
@@ -42,9 +43,12 @@ nerve-node cap add logs.tail --effect read \
 ```
 
 Mark an argument that is a path with `"x-nerve-path": "read"` or `"write"`,
-and the folders judge it as they judge a file call. `cap edit NAME` changes
-one, `cap rm NAME` removes it. In the desktop app, **Capabilities › Add a
-capability…** does the same in a form.
+and the folders judge it as they judge a file call. `cap edit NAME` takes
+the same options and changes only those you give; `cap rm NAME` removes it.
+In the desktop app, **Capabilities › Add a capability…** does the same in a
+form. On Windows a template whose program is `cmd`, a `.bat` file or
+PowerShell without `-File` is refused
+([Windows](windows.md#a-capabilitys-argument)).
 
 It runs as `nerve-run`, from the calling pairing's home, held like that
 pairing's commands. A node run by hand offers none

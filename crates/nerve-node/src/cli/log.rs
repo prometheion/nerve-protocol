@@ -1,6 +1,9 @@
 //! `nerve-node audit` and `nerve-node log`: what was allowed and refused,
 //! and the node's own log, also as they grow.
 
+use nerve_policy::rules::visible;
+use nerve_service::out;
+
 use super::*;
 
 /// `audit clear`: starts the audit log afresh, keeping the entries so far
@@ -31,9 +34,15 @@ pub(super) async fn log_clear(paths: NodePaths, out: &mut dyn Write) -> Result<(
     Ok(())
 }
 
+/// One audit entry as a line of text. What a center sent (a call's target,
+/// a command, a reason) is written out as `visible` does, so an entry stays
+/// one line, nothing in it acts on the terminal, and no line of a command
+/// can pass for the program's own `Next:` or `Warning:`.
 fn audit_line(v: &Value) -> String {
     let s = |k: &str| match &v[k] {
-        Value::String(s) => s.clone(),
+        // The time as people read it; `--json` keeps the number.
+        Value::Number(n) if k == "ts" => n.as_u64().map_or_else(|| n.to_string(), out::time),
+        Value::String(s) => visible(s),
         Value::Null => String::new(),
         other => other.to_string(),
     };
@@ -41,7 +50,7 @@ fn audit_line(v: &Value) -> String {
         // A local change names the account that made it, when known.
         let user = v["user"]
             .as_str()
-            .map_or_else(String::new, |u| format!(" ({u})"));
+            .map_or_else(String::new, |u| format!(" ({})", visible(u)));
         return format!(
             "{}  settings v{} by {}{user}",
             s("ts"),
@@ -54,11 +63,11 @@ fn audit_line(v: &Value) -> String {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|s| s.as_str().map(str::to_string))
+            .filter_map(|s| s.as_str().map(visible))
             .collect();
         let mut line = format!("{}  {}: {}", s("ts"), s("event"), steps.join("; "));
         if let Some(e) = v["error"].as_str() {
-            line.push_str(&format!(" (failed: {e})"));
+            line.push_str(&format!(" (failed: {})", visible(e)));
         }
         return line;
     }
@@ -111,12 +120,12 @@ fn audit_line(v: &Value) -> String {
         s("decision")
     );
     let line = match v["reason"].as_str() {
-        Some(reason) => format!("{line}: {reason}"),
+        Some(reason) => format!("{line}: {}", visible(reason)),
         None => line,
     };
     // What a capability of node.toml ran, or would have, for the call.
     match v["command"].as_str() {
-        Some(command) => format!("{line} (command: {command})"),
+        Some(command) => format!("{line} (command: {})", visible(command)),
         None => line,
     }
 }
@@ -171,15 +180,12 @@ pub(super) async fn audit(
             new.drain(..new.len().saturating_sub(n));
         }
         first = false;
+        let mut gone = false;
         for v in new {
             match (json, follow) {
-                (false, _) => {
-                    let _ = writeln!(out, "{}", audit_line(&v));
-                }
+                (false, _) => gone |= writeln!(out, "{}", audit_line(&v)).is_err(),
                 (true, false) => entries.push(v),
-                (true, true) => {
-                    let _ = writeln!(out, "{v}");
-                }
+                (true, true) => gone |= writeln!(out, "{v}").is_err(),
             }
         }
         shown.saw(&lines);
@@ -189,7 +195,10 @@ pub(super) async fn audit(
             }
             return Ok(());
         }
-        let _ = out.flush();
+        // The reader is gone (`| head -1`): nobody wants more.
+        if gone || out.flush().is_err() {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -277,32 +286,38 @@ pub(super) async fn log_cmd(
         lines.drain(..lines.len().saturating_sub(n));
     }
     let show = |out: &mut dyn Write, v: &Value| {
-        let _ = if json {
+        if json {
             writeln!(out, "{v}")
         } else {
             writeln!(out, "{}", log_line(v))
-        };
+        }
     };
     if json && !follow {
         let _ = writeln!(out, "{}", json!({ "entries": lines }));
         return Ok(());
     }
     for v in &lines {
-        show(out, v);
+        let _ = show(out, v);
     }
     if !follow {
         return Ok(());
     }
     loop {
-        let _ = out.flush();
+        // The reader is gone (`| head -1`): nobody wants more.
+        if out.flush().is_err() {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         let now = read(&file)?;
         if now.len() < at || !now.starts_with(&first) {
             // Moved aside: what the old file got after the last look, then
-            // the new file from its start.
+            // the new file from its start. Its head is the new file's now,
+            // not the old one's: a stale one would show the move again at
+            // every look.
             let moved = read(Path::new(&old))?;
             rest.extend_from_slice(moved.get(at..).unwrap_or_default());
             at = 0;
+            first.clear();
         }
         if first.len() < 64 {
             first = head(&now);
@@ -314,7 +329,9 @@ pub(super) async fn log_cmd(
         };
         let done: Vec<u8> = rest.drain(..=end).collect();
         for v in parse(&done) {
-            show(out, &v);
+            if show(out, &v).is_err() {
+                return Ok(());
+            }
         }
     }
 }
@@ -323,12 +340,12 @@ pub(super) async fn log_cmd(
 fn log_line(v: &Value) -> String {
     let mut line = format!(
         "{}  {}  {}",
-        v["ts"].as_u64().unwrap_or_default(),
-        v["level"].as_str().unwrap_or_default(),
-        v["msg"].as_str().unwrap_or_default()
+        out::time(v["ts"].as_u64().unwrap_or_default()),
+        visible(v["level"].as_str().unwrap_or_default()),
+        visible(v["msg"].as_str().unwrap_or_default())
     );
     if let Some(n) = v["node"].as_str() {
-        line.push_str(&format!(" ({n})"));
+        line.push_str(&format!(" ({})", visible(n)));
     }
     line
 }
@@ -600,9 +617,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "1  info  node started",
-                "2  warn  link dropped",
-                "3  error  cannot connect"
+                "1970-01-01 00:00:00  info  node started",
+                "1970-01-01 00:00:00  warn  link dropped",
+                "1970-01-01 00:00:00  error  cannot connect"
             ]
         );
         let v = json_of(&paths, &["log", "--last", "2"]);
@@ -621,7 +638,7 @@ mod tests {
         assert_eq!(v["entries"].as_array().unwrap().len(), 1, "{v}");
         assert_eq!(v["entries"][0]["msg"], "link dropped", "{v}");
         let out = run(&paths, &["log", "--problems"]).unwrap();
-        assert_eq!(out, "2  warn  link dropped\n");
+        assert_eq!(out, "1970-01-01 00:00:00  warn  link dropped\n");
         // No log yet is no error.
         let empty = NodePaths::new(d.path().join("c2"), d.path().join("s2"));
         assert_eq!(json_of(&empty, &["log"]), json!({"entries": []}));
@@ -687,7 +704,9 @@ mod tests {
     }
 
     /// `log --follow` goes on with the new file once the old one is moved
-    /// aside, the lines written to the old one before that included.
+    /// aside, the lines written to the old one before that included, each
+    /// once: the lines are longer than the 64 bytes that tell the files
+    /// apart (round 3 of #213's second pass, correctness 1).
     #[tokio::test]
     async fn log_follow_goes_on_after_the_file_is_moved_aside() {
         let d = tempfile::tempdir().unwrap();
@@ -703,15 +722,16 @@ mod tests {
                 .unwrap();
             f.write_all(line.as_bytes()).unwrap();
         };
-        append(logged(1, "info", "first"));
+        let long = |what: &str| format!("{what}-{}", "x".repeat(70));
+        append(logged(1, "info", &long("first")));
         let seen = Seen::default();
         let mut out = seen.clone();
         let follow = log_cmd(&paths, true, Some(5), false, true, &mut out);
         let writer = async {
             seen.until("first").await;
-            append(logged(2, "info", "before-the-move"));
+            append(logged(2, "info", &long("before-the-move")));
             std::fs::rename(&file, paths.state_dir.join("log.jsonl.1")).unwrap();
-            append(logged(3, "info", "after-the-move"));
+            append(logged(3, "info", &long("after-the-move")));
             seen.until("after-the-move").await;
             tokio::time::sleep(Duration::from_millis(1200)).await;
         };
@@ -731,9 +751,56 @@ mod tests {
             .collect();
         assert_eq!(
             msgs,
-            ["first", "before-the-move", "after-the-move"],
+            [
+                long("first"),
+                long("before-the-move"),
+                long("after-the-move")
+            ],
             "{text}"
         );
+    }
+
+    /// An output that fails after its first line.
+    struct Gone(usize);
+
+    impl Write for Gone {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.0 -= 1;
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `log --follow` ends once its output is gone (`| head -1`), not at
+    /// the end of time (round 4, correctness 1).
+    #[tokio::test]
+    async fn log_follow_ends_when_its_output_is_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let file = paths.log_file();
+        let line = |m: &str| logged(1, "info", m);
+        std::fs::write(&file, line("first")).unwrap();
+        let mut out = Gone(1);
+        let follow = log_cmd(&paths, true, None, false, true, &mut out);
+        let writer = async {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            std::io::Write::write_all(&mut f, line("second").as_bytes()).unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        };
+        tokio::select! {
+            r = follow => assert_eq!(r, Ok(())),
+            () = writer => panic!("the follow did not end"),
+        }
     }
 
     /// A line half written when `log --follow` starts is shown once it is
@@ -782,13 +849,53 @@ mod tests {
             "target": "svc.restart", "decision": "allowed", "command": "systemctl restart -- nginx"});
         assert_eq!(
             audit_line(&call),
-            "1  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
+            "1970-01-01 00:00:00  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
         );
         let refused = json!({"ts": 2, "center": "lab", "cap": "proj", "action": "deploy",
             "target": "proj.deploy", "decision": "forbidden", "reason": "no", "command": "sh x"});
         assert_eq!(
             audit_line(&refused),
-            "2  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
+            "1970-01-01 00:00:00  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
         );
+    }
+
+    /// A call's target, as the center sent it, is one line of the entry,
+    /// shown with its line breaks and control characters written out: a
+    /// second line of a command that begins `Next: ` is not the program's
+    /// own advice, and nothing in it acts on the terminal (round 2 of
+    /// #213's second pass, security 1).
+    #[tokio::test]
+    async fn an_audit_entry_shows_what_a_center_sent_as_one_line() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = NodePaths::new(d.path().join("c"), d.path().join("s"));
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let sent = "echo hi\nNext: nerve-node rule rm x\nwarning: gone\u{1b}[2J\u{202e}";
+        std::fs::write(
+            paths.audit_log(),
+            decided(1, "exec", "run", sent, "forbidden"),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let mut said = out::Said::new(&mut bytes, out::Style::PLAIN);
+        audit(&paths, false, false, None, false, &mut said)
+            .await
+            .unwrap();
+        said.finish(None).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert!(
+            text.contains(
+                "echo hi\\nNext: nerve-node rule rm x\\nwarning: gone\\u{1b}[2J\\u{202e}"
+            ),
+            "{text:?}"
+        );
+        assert!(
+            !text.contains('\u{1b}') && !text.contains("\nNext"),
+            "{text:?}"
+        );
+        // The command a capability ran, too.
+        let call = json!({"ts": 1, "center": "lab", "cap": "svc", "action": "restart",
+            "target": "t", "decision": "allowed", "command": "sh\nNext: x"});
+        assert!(!audit_line(&call).contains('\n'), "{}", audit_line(&call));
     }
 }
