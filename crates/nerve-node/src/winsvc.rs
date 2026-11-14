@@ -32,7 +32,7 @@ use crate::service::{
 pub const SERVICE_NAME: &str = "nerve-node";
 /// Why a command for the service does nothing here, and where the node is
 /// installed: the app is the only way to the node on Windows.
-pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve-node-desktop file";
+pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve file";
 /// What puts back what the install made: the install again, which the app
 /// runs when the owner's password is saved.
 pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save your password under Settings › General › Account for commands, which installs the node again";
@@ -815,7 +815,7 @@ fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
 /// administrator, and where the app does it, asking Windows for the rights.
 pub(crate) fn needs_admin(what: &str) -> String {
     let place = match what {
-        "install" => "the installer, which opens with the downloaded nerve-node-desktop file,",
+        "install" => "the installer, which opens with the downloaded nerve file,",
         "update" => "Settings › App › Update",
         _ => "Settings › App › Uninstall",
     };
@@ -1353,7 +1353,7 @@ async fn update_steps(
         service: SERVICE_NAME,
         services: &[SERVICE_NAME, PROFILE_SERVICE],
         settings_args: settings_args(owner.as_deref()),
-        install: "the installer (the downloaded nerve-node-desktop file)",
+        install: "the installer (the downloaded nerve file)",
     };
     let machine = Machine { sys, layout };
     if nerve_service::win::update::update(&p, &machine, from, steps).await? {
@@ -3706,7 +3706,7 @@ pub(crate) mod tests {
     }
 
     static DESKTOP: crate::edition::Edition = crate::edition::Edition {
-        program: "nerve-node-desktop",
+        program: "nerve",
         parts: Some(&Entry),
     };
 
@@ -3715,18 +3715,16 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = Layout {
-            bin: d.path().join("Program Files/Nerve/nerve-node-desktop.exe"),
+            bin: d.path().join("Program Files/Nerve/nerve.exe"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         let e = control(&l, &sys, ServiceAction::Start, &mut Vec::new()).unwrap_err();
         assert!(e.contains("not installed as a service"), "{e}");
         let link = l.bin.with_file_name("Nerve.lnk");
-        let exe = d
-            .path()
-            .join("Downloads/nerve-node-desktop-x86_64-windows.exe");
+        let exe = d.path().join("Downloads/nerve-x86_64-windows.exe");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
         install(&l, &sys, &exe, false, &mut out).unwrap();
@@ -3747,19 +3745,13 @@ pub(crate) mod tests {
 
         std::fs::remove_file(&link).unwrap();
         let new = d.path().join("new.exe");
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&new), &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.1.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.1.0"), "{out}");
         assert!(link.exists(), "{out}");
-        assert_eq!(
-            staged(&l.bin).file_name().unwrap(),
-            "nerve-node-desktop.new.exe"
-        );
+        assert_eq!(staged(&l.bin).file_name().unwrap(), "nerve.new.exe");
         assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
 
         let mut out = Vec::new();
@@ -3780,12 +3772,12 @@ pub(crate) mod tests {
         let sys = Fake::new();
         let node = installed(d.path(), &sys, "1.0.0").bin;
         let l = Layout {
-            bin: d.path().join("Program Files/Nerve/nerve-node-desktop.exe"),
+            bin: d.path().join("Program Files/Nerve/nerve.exe"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
-        let exe = d.path().join("Downloads/nerve-node-desktop.exe");
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        let exe = d.path().join("Downloads/nerve.exe");
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();

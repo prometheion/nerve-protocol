@@ -1,0 +1,67 @@
+[package]
+name = "nerve"
+description = "Nerve, the app: a window for the node or the center, the node's CLI, and the center's under a hidden first word."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+# Its own code is Apache-2.0 like the workspace; the program it builds
+# contains Slint, used under Slint's Royalty-free license 2.0.
+license-file = "LICENSE.md"
+# Slint's own minimum.
+rust-version = "1.92"
+publish = false
+
+[[bin]]
+name = "nerve"
+path = "src/main.rs"
+
+[dependencies]
+nerve-node.workspace = true
+slint.workspace = true
+serde_json.workspace = true
+
+# Which list an audit button puts a sudo command on, and whether a target
+# was cut: the node's own rules.
+nerve-policy.workspace = true
+# The name of the broker's pipe on Windows (src/broker.rs), and the span
+# of a relay's tunnel in words.
+nerve-transport.workspace = true
+# A relay's link, read before it is used (src/app/prefs.rs).
+nerve-proto.workspace = true
+# Native file and folder dialogs: the desktop portal on Linux, so they work
+# on Wayland too.
+rfd.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The broker is started with the UAC prompt and talks over a named pipe
+# that only the app's user may open (src/broker.rs); the Start
+# menu shortcut and the nerve:// handler (src/parts.rs); DLLs from System32
+# only (src/main.rs).
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# Asks a node the app started to end, as Ctrl+C would (src/app/node.rs).
+libc.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+nerve-conformance = { path = "../nerve-conformance" }
+# Writes the screenshots of tests/shots.rs; in the lock through Slint.
+png = "0.18"

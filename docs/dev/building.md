@@ -14,14 +14,14 @@ A debug build keeps line tables only (`[profile.dev]` in `Cargo.toml`), as
 CI builds: enough for a backtrace, and a far smaller `target/`. For a
 debugger, build with `CARGO_PROFILE_DEV_DEBUG=true`.
 
-`target/release/nerve-node-desktop` is the node with its desktop app
-(`crates/nerve-node-desktop`). On Linux it needs the fontconfig headers to build
+`target/release/nerve` is the node with its desktop app
+(`crates/nerve`). On Linux it needs the fontconfig headers to build
 (`libfontconfig1-dev` on Debian and Ubuntu), and glibc: it is no static musl
-program. Its UI is in `crates/nerve-node-desktop/ui/`, its colours, type and spaces
+program. Its UI is in `crates/nerve/ui/`, its colours, type and spaces
 in `ui/theme.slint`. Screenshots of every page, light and dark:
 
 ```sh
-NERVE_DESKTOP_SHOTS=/tmp/shots cargo test -p nerve-node-desktop --test shots -- --ignored
+NERVE_DESKTOP_SHOTS=/tmp/shots cargo test -p nerve --test shots -- --ignored
 ```
 
 Started from `target/`, the app shows its installer: it opens its pages only
@@ -30,7 +30,7 @@ removes it through the app's code; run it on a test machine only, as root (on
 Windows as an elevated administrator):
 
 ```sh
-NERVE_DESKTOP_REAL=/path/to/nerve-node-desktop cargo test -p nerve-node-desktop --test real -- --ignored
+NERVE_DESKTOP_REAL=/path/to/nerve cargo test -p nerve --test real -- --ignored
 ```
 
 ## Checks
@@ -53,7 +53,7 @@ by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
 | `linux` | fmt, that every script of the web UIs parses (`node --check`), clippy, a check of the runner's Landlock ABI (`landlock-abi.py`) and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`), six unit tests of uninstall, revoked grants and mounted drives, and the root test of `tests/own_proc.rs`; last the tests of a command's own `/proc` (`tests/own_proc.rs`) with user namespaces opened. After each run `skips.py` fails the job on a skipped test the list does not allow |
 | `musl` | on x86_64 and arm64: the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs; then `nerve-node` and `nerve-center` built as the release builds them, and the real tests' programs |
 | `installed` | those static programs installed on Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04), and on Ubuntu 26.04, Debian 12 and Debian 13, each a container with systemd on an Ubuntu 24.04 runner (`.github/workflows/installed.yml`): `.github/scripts/keyring-end-to-end.sh` runs the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then `.github/scripts/center-service-end-to-end.sh` installs the center as a service, drives it over MCP, updates and uninstalls it. On the x86_64 Ubuntu runners both scripts also open every page of the node's and the center's web UI in headless Chrome. The release runs the same on the binaries it publishes |
-| `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
+| `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve/tests/real.rs`) |
 | `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths). No test is skipped by name: the tests marked `#[ignore]` are listed as ignored with their reason, and `skips.py` fails the job on one that returns early. Then the debug programs and the test programs of `windows-installed` (`.github/scripts/windows-test-programs.sh`) |
 | `windows-installed` | the Windows tests marked `#[ignore]` that need a machine of their own, on a windows-2025 runner (`.github/workflows/installed-windows.yml`, [below](#windows-tests-on-an-installed-node)). The release runs the same on the release-profile programs it is about to publish, and its `publish` job waits for it |
 
@@ -98,7 +98,7 @@ service, an administrator account, a virtual disk, the system keyring) is
 | `real_account.rs` `the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run` | the keys in the keyring, and folder mode |
 | `real_root_owner.rs` (both) | root as the owner, a program of root as a provider |
 | `keyring.rs` `the_keys_move_into_the_system_keyring_and_back` | a node's keys into the keyring of `nerve` and back |
-| `nerve-node-desktop` `real.rs` | the desktop app's install on Linux |
+| `nerve` `real.rs` | the desktop app's install on Linux |
 
 Not run by CI, by hand on a test machine:
 
@@ -106,7 +106,7 @@ Not run by CI, by hand on a test machine:
   a distribution's own older kernel (CI's runners have GitHub's newer ones);
 - the Windows tests marked `#[ignore]` that `windows-installed` does not
   name: the UAC broker with another administrator
-  (`nerve-node-desktop/tests/broker_users.rs`), the open WMI gap
+  (`nerve/tests/broker_users.rs`), the open WMI gap
   (`exec::tests::a_cancel_ends_a_process_started_through_wmi`), the slow wait
   for a recycled shell id (`a_shell_pid_given_to_another_command_reaches_no_other_job`)
   and the PowerShell diagnostic of `nerve-sandbox`;
@@ -162,7 +162,7 @@ it built, with the same debug test programs of the same commit. The job:
   passwords, and their profiles by a logon that loads them, as nobody signs
   in on a runner;
 - has the app install, start, stop, restart, update and uninstall Nerve
-  (`nerve-node-desktop/tests/real.rs`);
+  (`nerve/tests/real.rs`);
 - installs over a folder in `C:\ProgramData\Nerve` that the standard account
   made first: the install refuses before it changes anything, and names the
   account and what to do;
@@ -208,7 +208,7 @@ it built, with the same debug test programs of the same commit. The job:
 
 After a failure the job prints the node's log, the Event Log entries, the
 folder grants and the permission lists of the test folders. The `windows` job
-also keeps the debug `nerve-node-desktop.exe` and `nerve-center.exe` as the
+also keeps the debug `nerve.exe` and `nerve-center.exe` as the
 artifact `windows-programs` for three days, to try a change on a Windows test
 machine as a person would.
 

@@ -8,7 +8,7 @@ version, task by task.
 ## Linux and Windows
 
 The center and the node run on Linux (x86_64, aarch64) and Windows (x86_64),
-the [desktop app](desktop.md) (`nerve-node-desktop`, the node with an app) on
+the [desktop app](desktop.md) (`nerve`, the node with an app) on
 Linux x86_64 and Windows x86_64. The node behaves the same except where this
 page says so. The Linux programs are static and run on any distribution;
 installing them as a service needs systemd ([distributions](service.md#linux-distributions)).
@@ -179,7 +179,7 @@ get the MCP center.
 ## The node as a service on Windows
 
 On Windows the node is the [desktop app](desktop.md). Open the downloaded
-`nerve-node-desktop-x86_64-windows.exe`: its installer installs the node as a
+`nerve-x86_64-windows.exe`: its installer installs the node as a
 service, and the app does everything else for it
 ([install](desktop.md#install)). There is no `nerve-node` for a terminal on
 Windows, and the node runs only as the service: started any other way, it
@@ -219,7 +219,7 @@ The install does this, and the installer shows each step:
    with `--as-owner`, and sudo; and for the permission entries of `folder`
    and `allowlist` mode, which the node changes on your folders as you. A
    stored password that still works is not asked for again.
-5. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
+5. Copies the program to `C:\Program Files\Nerve\nerve.exe`.
 6. Registers and starts the service `nerve-run-profile`, which runs as
    `nerve-run` and does nothing but keep its profile loaded: Windows starts a
    process in an AppContainer only for an account whose registry is loaded,
@@ -240,7 +240,7 @@ The install does this, and the installer shows each step:
 |---|---|
 | `node.toml`, one key per center, `nerve-run`'s password and yours | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logging.md#the-log-as-the-owner-reads-it), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
-| The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
+| The program | `C:\Program Files\Nerve\nerve.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](#the-windows-event-log)) |
 
 The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
@@ -411,7 +411,7 @@ command gets them.
 ### Update and uninstall on Windows
 
 **Settings**, **App**, **Update** downloads
-`nerve-node-desktop-x86_64-windows.exe` and checks it as above, or takes a
+`nerve-x86_64-windows.exe` and checks it as above, or takes a
 file you downloaded. It stops the service, moves the old program aside, puts
 the new one in its place, gives the services the settings the new program
 names, and starts the service; if the new one does not start, the old one

@@ -7,7 +7,7 @@ members = [
     "crates/nerve-sandbox",
     "crates/nerve-service",
     "crates/nerve-node",
-    "crates/nerve-node-desktop",
+    "crates/nerve",
     "crates/nerve-center",
     "crates/nerve-conformance",
 ]
@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/prometheion/nerve-protocol"
 # The workspace is under the Apache License 2.0 (LICENSE); the desktop app
-# adds Slint's terms (crates/nerve-node-desktop/LICENSE.md).
+# adds Slint's terms (crates/nerve/LICENSE.md).
 license = "Apache-2.0"
 rust-version = "1.89"
 
@@ -58,7 +58,7 @@ keyring = "4.2"
 # and the AppContainer of folder mode with the grants on its folders: the
 # bindings the node does not declare itself.
 windows-sys = "0.61"
-# The node's desktop app (crates/nerve-node-desktop), under Slint's Royalty-free
+# The node's desktop app (crates/nerve), under Slint's Royalty-free
 # license 2.0: the app shows Slint's AboutSlint in its About dialog.
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "software-renderer-systemfonts", "accessibility", "unstable-winit-030"] }
 slint-build = "1.18"

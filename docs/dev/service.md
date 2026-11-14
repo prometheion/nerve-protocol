@@ -9,7 +9,7 @@ guide's [install page](../user/install.md) has the commands.
 
 Put `nerve-center` on the machine where your agent harness runs. Put a node
 on every machine the agent may use: `nerve-node`, or on a machine with a
-desktop `nerve-node-desktop`, the node with an app
+desktop `nerve`, the node with an app
 ([desktop app](desktop.md)). On Windows the node is always the desktop app.
 A center and a node can share a machine.
 
@@ -22,11 +22,11 @@ release has these nine files, seven for Linux and two for Windows, and a
 
 | System | Files |
 |---|---|
-| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux`, which also comes as `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm` |
+| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-x86_64-linux`, which also comes as `nerve_<version>_amd64.deb` and `nerve-<version>.x86_64.rpm` |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
+| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-x86_64-windows.exe` |
 
-`nerve-node-desktop` is the node with a desktop app, which installs itself
+`nerve` is the node with a desktop app, which installs itself
 when you open it ([desktop app](desktop.md)). Windows has no `nerve-node` of
 its own: there the app is the only way to the node.
 
@@ -477,7 +477,7 @@ log. `--purge` deletes them, keys and audit log included. The
 [desktop app](desktop.md)'s uninstall also removes its menu entry, its link
 handler and the `nerve-node` link it made. Where the app took over the node,
 `nerve-node uninstall` of a `nerve-node` downloaded on its own hands over to the app's
-(`nerve-node-desktop uninstall`, with `--purge` if given), so the app goes
+(`nerve uninstall`, with `--purge` if given), so the app goes
 with the node.
 
 ### The rules for these commands

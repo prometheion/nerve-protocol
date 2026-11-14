@@ -33,7 +33,7 @@ Only the latest release gets fixes.
 
 ## In scope
 
-- `nerve-node`, `nerve-node-desktop` and `nerve-center`, as released and as
+- `nerve-node`, `nerve` and `nerve-center`, as released and as
   built from this repository: whatever lets a center, an agent's call or a
   command it runs get past the owner's mode, folders, rules or the account it
   runs as (`nerve-run`); whatever lets another local account control a node or

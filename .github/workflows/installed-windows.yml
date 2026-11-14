@@ -9,7 +9,7 @@
 # with random passwords and their profiles loaded (nobody signs in on a
 # runner), then runs:
 # - the desktop app's own install, control, update and uninstall
-#   (crates/nerve-node-desktop/tests/real.rs);
+#   (crates/nerve/tests/real.rs);
 # - an install over a folder in C:\ProgramData\Nerve that the standard
 #   account made first, which the install refuses before it changes anything;
 # - with the node installed again by that account, its owner: the sudo
@@ -62,7 +62,7 @@ on:
   workflow_call:
     inputs:
       programs:
-        description: "The artifact with nerve-node-desktop.exe and nerve-center.exe (CI's debug ones, or the release's)"
+        description: "The artifact with nerve.exe and nerve-center.exe (CI's debug ones, or the release's)"
         type: string
         required: true
       tests:
@@ -153,7 +153,7 @@ jobs:
           "NERVE_WIN_STD_PASSWORD=$pw" >> $env:GITHUB_ENV
       - name: The app installs, controls, updates and uninstalls Nerve
         run: |
-          $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path
+          $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve.exe).Path
           $said = & dist/tests/real.exe --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/real.log" | Out-String
           Write-Host $said
@@ -174,7 +174,7 @@ jobs:
             -Credential $cred -WorkingDirectory "$env:SystemRoot" -Wait
           $owner = (Get-Acl "$data\config").Owner
           if ($owner -notlike "*\$env:NERVE_WIN_STD_ACCOUNT") { throw "the folder is $owner's" }
-          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
+          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $said
           if ($code -eq 0) { throw 'the install took the folder' }
@@ -192,7 +192,7 @@ jobs:
       # password goes on stdin.
       - name: The node installed by the account, nerve-run for commands
         run: |
-          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
+          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/install.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($said in "run commands as $env:NERVE_WIN_SUDO_ACCOUNT", 'made the user nerve-run',
@@ -209,7 +209,7 @@ jobs:
       # Apps & features with the quiet uninstall winget runs.
       - name: The Start menu, nerve:// and Apps & features
         run: |
-          $exe = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          $exe = "$env:ProgramFiles\Nerve\nerve.exe"
           $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk"
           if (-not (Test-Path $link)) { throw "no Start menu link at $link" }
           $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
@@ -305,7 +305,7 @@ jobs:
           Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
             -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
           $sid = (Get-LocalUser $name).SID.Value
-          $pw | & dist/nerve-node-desktop.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
+          $pw | & dist/nerve.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # The name comes back in the console's code page: its ASCII start.
           if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install-umlaut.log" -Pattern 'run commands as Nerve M')) {
@@ -384,7 +384,7 @@ jobs:
           if (Test-Path 'Registry::HKEY_CLASSES_ROOT\nerve') { throw 'the nerve:// handler stays' }
           if (-not (Test-Path 'C:\ProgramData\Nerve\config\node.toml')) { throw 'the data went with it' }
           $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
-          & dist/nerve-node-desktop.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
+          & dist/nerve.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "the silent install failed ($LASTEXITCODE)" }
           if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the node does not run after the silent install' }
           if (-not (Test-Path $key)) { throw 'no Apps & features entry after the silent install' }
@@ -394,7 +394,7 @@ jobs:
         run: |
           # The app's program is a Windows program, not a console one:
           # PowerShell waits for it to end only when its output is piped.
-          $bin = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          $bin = "$env:ProgramFiles\Nerve\nerve.exe"
           if (Test-Path $bin) {
             & $bin uninstall --purge 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { exit 1 }

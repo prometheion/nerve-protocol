@@ -83,7 +83,7 @@ pub enum Package {
 
 impl Package {
     /// The file the package brings that says its kind: `deb` or `rpm`.
-    pub const MARK: &str = "/usr/share/nerve-node-desktop/package";
+    pub const MARK: &str = "/usr/share/nerve/package";
 
     pub fn word(self) -> &'static str {
         match self {
@@ -176,7 +176,7 @@ impl Layout {
     }
 
     /// [`Layout::system`] for `edition`: the program is named after it,
-    /// `/usr/local/bin/nerve-node-desktop` for the desktop app.
+    /// `/usr/local/bin/nerve` for the desktop app.
     pub fn of(edition: &'static crate::edition::Edition) -> Layout {
         let package = if cfg!(target_os = "linux") {
             package_at(Path::new(Package::MARK))
@@ -4915,7 +4915,7 @@ pub(crate) mod tests {
     }
 
     static DESKTOP: crate::edition::Edition = crate::edition::Edition {
-        program: "nerve-node-desktop",
+        program: "nerve",
         parts: Some(&Entry),
     };
 
@@ -4924,14 +4924,14 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = Layout {
-            bin: d.path().join("usr/local/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/local/bin/nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         let entry = l.bin.with_file_name("menu-entry");
-        let exe = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -4959,18 +4959,15 @@ pub(crate) mod tests {
         let e = update(&l, &sys, Some(&new), &mut Vec::new())
             .await
             .unwrap_err();
-        assert!(e.contains("is not nerve-node-desktop"), "{e}");
+        assert!(e.contains("is not nerve"), "{e}");
         std::fs::remove_file(&entry).unwrap();
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&new), &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.1.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.1.0"), "{out}");
         assert!(entry.exists(), "{out}");
-        assert!(!l.bin.with_file_name(".nerve-node-desktop.new").exists());
+        assert!(!l.bin.with_file_name(".nerve.new").exists());
 
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
@@ -4987,25 +4984,22 @@ pub(crate) mod tests {
         // A node installed with nerve-node.
         let node = installed(d.path(), &sys, "1.0.0");
         let l = Layout {
-            bin: d.path().join("usr/local/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/local/bin/nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         assert_eq!(node_beside(&l).as_ref(), Some(&node.bin));
         assert_eq!(node_beside(&node), None);
-        let exe = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("nerve-node is a link to"), "{out}");
         assert_eq!(std::fs::read_link(&node.bin).unwrap(), l.bin);
         // The command runs the app's program.
-        assert_eq!(
-            std::fs::read_to_string(&node.bin).unwrap(),
-            "nerve-node-desktop 1.0.0\n"
-        );
+        assert_eq!(std::fs::read_to_string(&node.bin).unwrap(), "nerve 1.0.0\n");
         assert!(!node.bin.with_file_name(".nerve-node.link").exists());
 
         // Again, and after an update, the link stays as it is.
@@ -5013,12 +5007,9 @@ pub(crate) mod tests {
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("is a link"));
         let new = d.path().join("new");
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         update(&l, &sys, Some(&new), &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&node.bin).unwrap(),
-            "nerve-node-desktop 1.1.0\n"
-        );
+        assert_eq!(std::fs::read_to_string(&node.bin).unwrap(), "nerve 1.1.0\n");
 
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
@@ -5051,25 +5042,25 @@ pub(crate) mod tests {
         }
         std::fs::write(&mark, "tar").unwrap();
         assert_eq!(package_at(&mark), None);
-        let app = "nerve-node-desktop";
+        let app = "nerve";
         let deb = Package::Deb.asset(app, "0.1.0");
         let rpm = Package::Rpm.asset(app, "0.1.0");
-        assert_eq!(deb, "nerve-node-desktop_0.1.0_amd64.deb");
-        assert_eq!(rpm, "nerve-node-desktop-0.1.0.x86_64.rpm");
+        assert_eq!(deb, "nerve_0.1.0_amd64.deb");
+        assert_eq!(rpm, "nerve-0.1.0.x86_64.rpm");
         let v = |p: Package, n: &str| p.version_in(app, n).map(|v| v.to_string());
         assert_eq!(v(Package::Deb, &deb).as_deref(), Some("0.1.0"));
         assert_eq!(v(Package::Rpm, &rpm).as_deref(), Some("0.1.0"));
         for other in [
             rpm.as_str(),
-            "nerve-node-desktop-x86_64-linux",
+            "nerve-x86_64-linux",
             "nerve-node_0.1.0_amd64.deb",
-            "nerve-node-desktop_0.1_amd64.deb",
-            "nerve-node-desktop_0.1.0_arm64.deb",
+            "nerve_0.1_amd64.deb",
+            "nerve_0.1.0_arm64.deb",
         ] {
             assert_eq!(v(Package::Deb, other), None, "{other}");
         }
         let l = Layout::of_package(&DESKTOP, Some(Package::Deb));
-        assert_eq!(l.bin, Path::new("/usr/bin/nerve-node-desktop"));
+        assert_eq!(l.bin, Path::new("/usr/bin/nerve"));
         assert_eq!(l.package, Some(Package::Deb));
         // What the package manager does not own stays in /usr/local.
         assert_eq!(
@@ -5122,25 +5113,25 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         // An earlier plain install of the app, which a node alone links to.
-        let plain = d.path().join("usr/local/bin/nerve-node-desktop");
+        let plain = d.path().join("usr/local/bin/nerve");
         let node = d.path().join("usr/local/bin/nerve-node");
-        write_file(&plain, b"nerve-node-desktop 0.9.0\n", 0o755).unwrap();
+        write_file(&plain, b"nerve 0.9.0\n", 0o755).unwrap();
         std::os::unix::fs::symlink(&plain, &node).unwrap();
         let mut l = Layout {
-            bin: d.path().join("usr/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/bin/nerve"),
             edition: &DESKTOP,
             package: Some(Package::Deb),
             ..layout(d.path())
         };
         *sys.package_bin.borrow_mut() = Some(l.bin.clone());
         // Another program does not take the package's place.
-        let download = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
-        write_file(&download, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        let download = d.path().join("Downloads/nerve-x86_64-linux");
+        write_file(&download, b"nerve 1.0.0\n", 0o755).unwrap();
         let e = install(&l, &sys, &download, "alice", &mut Vec::new()).unwrap_err();
         assert!(e.contains("came from its deb package"), "{e}");
         assert!(!l.unit.exists() && sys.calls().is_empty());
         // The package's own.
-        write_file(&l.bin, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        write_file(&l.bin, b"nerve 1.0.0\n", 0o755).unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &l.bin.clone(), "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -5160,10 +5151,10 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(e.contains("only its package manager replaces it"), "{e}");
         // The release's package.
-        let program: &[u8] = b"nerve-node-desktop 1.3.0\n";
-        let deb = Package::Deb.asset("nerve-node-desktop", "1.3.0");
+        let program: &[u8] = b"nerve 1.3.0\n";
+        let deb = Package::Deb.asset("nerve", "1.3.0");
         let sums = format!(
-            "{}  nerve-node-desktop-x86_64-linux\n{}  {deb}\n",
+            "{}  nerve-x86_64-linux\n{}  {deb}\n",
             sha(b"x"),
             sha(program)
         );
@@ -5176,10 +5167,7 @@ pub(crate) mod tests {
             out.contains(&format!("installed {deb} with apt-get")),
             "{out}"
         );
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.3.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.3.0"), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), program);
         let calls = sys.calls();
         let at = calls
@@ -5206,8 +5194,8 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(Package::Rpm.install_args(true), ["reinstall", "-y"]);
-        let older = Package::Deb.asset("nerve-node-desktop", "1.2.0");
-        let old_program: &[u8] = b"nerve-node-desktop 1.2.0\n";
+        let older = Package::Deb.asset("nerve", "1.2.0");
+        let old_program: &[u8] = b"nerve 1.2.0\n";
         l.release = release_of(
             &older,
             old_program,
@@ -5219,7 +5207,7 @@ pub(crate) mod tests {
         assert!(e.contains("older than the installed 1.3.0"), "{e}");
         assert_eq!(sys.calls().len(), calls);
         // The package's script after the package manager put it in place.
-        write_file(&l.bin, b"nerve-node-desktop 1.4.0\n", 0o755).unwrap();
+        write_file(&l.bin, b"nerve 1.4.0\n", 0o755).unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&l.bin.clone()), &mut out)
             .await
@@ -5230,10 +5218,7 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("`sudo apt remove nerve-node-desktop`"),
-            "{out}"
-        );
+        assert!(out.contains("`sudo apt remove nerve`"), "{out}");
         assert!(l.bin.is_file());
         assert!(std::fs::symlink_metadata(&node).is_err());
     }
@@ -5259,7 +5244,7 @@ pub(crate) mod tests {
     #[test]
     fn a_program_written_a_moment_ago_starts_once_it_is_closed() {
         let d = tempfile::tempdir().unwrap();
-        let app = d.path().join("nerve-node-desktop");
+        let app = d.path().join("nerve");
         let closer = held_open(&app, "#!/bin/sh\necho \"asked: $*\"\n");
         let mut out = Vec::new();
         hand_over_uninstall(&app, false, &mut out).unwrap();
@@ -5284,7 +5269,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let node = layout(d.path());
         let app = Layout {
-            bin: node.bin.with_file_name("nerve-node-desktop"),
+            bin: node.bin.with_file_name("nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
@@ -5326,17 +5311,14 @@ pub(crate) mod tests {
     #[test]
     fn the_desktop_app_has_a_place_and_a_release_file_of_its_own() {
         let l = Layout::of(&DESKTOP);
-        assert_eq!(l.bin, Path::new("/usr/local/bin/nerve-node-desktop"));
+        assert_eq!(l.bin, Path::new("/usr/local/bin/nerve"));
         assert_eq!(l.paths, Layout::system().paths);
         assert_eq!(Layout::system().bin, Path::new("/usr/local/bin/nerve-node"));
         if std::env::consts::ARCH == "x86_64" {
-            assert_eq!(
-                asset_name("nerve-node-desktop").unwrap(),
-                "nerve-node-desktop-x86_64-linux"
-            );
+            assert_eq!(asset_name("nerve").unwrap(), "nerve-x86_64-linux");
         }
         assert_eq!(
-            program_version(&l, "nerve-node-desktop 0.2.0\n").map(|v| v.to_string()),
+            program_version(&l, "nerve 0.2.0\n").map(|v| v.to_string()),
             Some("0.2.0".into())
         );
         assert_eq!(program_version(&l, "nerve-node 0.2.0"), None);

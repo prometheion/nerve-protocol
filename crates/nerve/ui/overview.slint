@@ -1,0 +1,414 @@
+// Overview: whether the node runs, its service, its centers at a glance,
+// and the switch that stops everything (panic) or allows it again (unlock).
+
+import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Page, Load } from "data.slint";
+import { Store } from "store.slint";
+import {
+    Button, ButtonKind, Card, Pill, StatusDot, IconTile, Banner, Loading, PageHeader,
+    PageFrame, SectionTitle, StatTile, Divider, Icon, Reveal, Fit, ScrollBox,
+} from "widgets.slint";
+
+export component OverviewPage inherits PageFrame {
+    gap: 0;
+    PageHeader {
+        icon: @image-url("icons/overview.svg");
+        title: "Overview";
+        error-title: "The node did not answer";
+        error: Store.status-error;
+        error-action: "Try again";
+        error-acted => {
+            Store.refresh();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Store.reload();
+            }
+        }
+    }
+
+    if Store.status-load == Load.loading && Store.status.state == "": Loading { }
+
+    // The node's state, in its colour.
+    Reveal {
+        shown: Store.status.state != "";
+        gap: Space.xxl;
+        Rectangle {
+            border-radius: Radius.lg;
+            border-width: 1px;
+            border-color: Theme.tone(Store.status.tone).transparentize(0.7);
+            background: @linear-gradient(90deg, Theme.tone-soft(Store.status.tone) 0%, Theme.surface 70%);
+            HorizontalLayout {
+                padding: Space.xxl;
+                spacing: Space.xl;
+                VerticalLayout {
+                    alignment: center;
+                    IconTile {
+                        size: 52px;
+                        solid: true;
+                        tone: Store.status.tone;
+                        icon: Store.status.state == "locked" ? @image-url("icons/lock.svg")
+                            : Store.status.state == "running" ? @image-url("icons/activity.svg")
+                            : @image-url("icons/wait.svg");
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: Store.status.title;
+                        color: Theme.tone(Store.status.tone);
+                        font-size: 20px;
+                        font-weight: Type.semibold;
+                        wrap: word-wrap;
+                    }
+                    Reveal {
+                        shown: Store.status.detail != "";
+                        gap: 4px;
+                        Text {
+                            text: Store.status.detail;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Reveal {
+                        shown: Store.status.confinement != "";
+                        gap: 8px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    source: @image-url("icons/shield.svg");
+                                    colorize: Theme.text-muted;
+                                    size: 14px;
+                                }
+                            }
+                            Text {
+                                text: "Confinement: " + Store.status.confinement;
+                                color: Theme.text-muted;
+                                font-size: Type.caption;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        if Store.status.state == "locked": Button {
+                            text: "Unlock";
+                            icon: @image-url("icons/unlock.svg");
+                            kind: ButtonKind.primary;
+                            busy: Store.busy == "node";
+                            clicked => {
+                                Store.unlock();
+                            }
+                        }
+                        if Store.status.state != "locked": Button {
+                            text: "Panic";
+                            icon: @image-url("icons/octagon.svg");
+                            kind: ButtonKind.danger-soft;
+                            busy: Store.busy == "node";
+                            why-disabled: "Ends every link and runs nothing until you unlock";
+                            clicked => {
+                                Store.panic();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The installed service: its state, and starting and stopping it.
+    Reveal {
+        shown: Store.service-state != "" && Store.service-state != "none";
+        gap: Space.lg;
+        Card {
+            pad: Space.xl;
+            HorizontalLayout {
+                spacing: Space.lg;
+                VerticalLayout {
+                    alignment: center;
+                    IconTile {
+                        icon: @image-url("icons/server.svg");
+                        tone: Store.service-state == "running" ? Tone.ok
+                            : Store.service-state == "failed" ? Tone.danger
+                            : Store.service-state == "stopped" ? Tone.warn
+                            : Tone.accent;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        alignment: start;
+                        Text {
+                            text: "Service";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                dot: true;
+                                text: Store.service-state == "running" ? "Running"
+                                    : Store.service-state == "failed" ? "Failed"
+                                    : Store.service-state == "stopped" ? "Stopped"
+                                    : Store.service-state == "starting" ? "Starting"
+                                    : "Stopping";
+                                tone: Store.service-state == "running" ? Tone.ok
+                                    : Store.service-state == "failed" ? Tone.danger
+                                    : Store.service-state == "stopped" ? Tone.warn
+                                    : Tone.accent;
+                            }
+                        }
+                    }
+                    Text {
+                        text: Store.service-state == "running" ? (Store.service-enabled ? "Runs as the user nerve and starts with the machine." : "Runs as the user nerve.")
+                            : Store.service-state == "failed" ? "The Log says why."
+                            : Store.service-state == "stopped" ? "No center reaches this machine while it is stopped."
+                            : "One moment.";
+                        color: Theme.text-muted;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        if Store.service-state == "stopped" || Store.service-state == "failed": Button {
+                            text: "Start";
+                            icon: @image-url("icons/play.svg");
+                            kind: ButtonKind.primary;
+                            busy: Store.busy == "service-start";
+                            clicked => {
+                                Store.service("start");
+                            }
+                        }
+                        if Store.service-state == "running": Button {
+                            text: "Restart";
+                            icon: @image-url("icons/refresh.svg");
+                            kind: ButtonKind.secondary;
+                            busy: Store.busy == "service-restart";
+                            enabled: Store.busy != "service-stop";
+                            clicked => {
+                                Store.service("restart");
+                            }
+                        }
+                        if Store.service-state == "running": Button {
+                            text: "Stop";
+                            icon: @image-url("icons/stop.svg");
+                            busy: Store.busy == "service-stop";
+                            enabled: Store.busy != "service-restart";
+                            clicked => {
+                                Store.service("stop");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Reveal {
+        shown: Store.service-state == "none";
+        gap: Space.lg;
+        Banner {
+            tone: Tone.warn;
+            title: "The service is not installed";
+            text: "Open the downloaded nerve again to install it.";
+        }
+    }
+
+    // Commands run without their limits: one line and what helps.
+    Reveal {
+        shown: Store.status.limits-off != "";
+        gap: Space.lg;
+        Banner {
+            tone: Tone.warn;
+            title: "Commands run without limits";
+            text: Store.status.limits-off;
+            action: Store.status.limits-restart && Store.service-state == "running" ? "Restart" : "Why?";
+            acted => {
+                if (Store.status.limits-restart && Store.service-state == "running") {
+                    Store.service("restart");
+                } else {
+                    Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/settings.md#limits-per-command");
+                }
+            }
+        }
+    }
+
+    Reveal {
+        shown: Store.status.warnings.length > 0;
+        gap: Space.lg;
+        VerticalLayout {
+            spacing: Space.sm;
+            for warning in Store.status.warnings: Banner {
+                tone: Tone.warn;
+                text: warning;
+            }
+        }
+    }
+
+    Reveal {
+        shown: Store.status.state != "";
+        gap: Space.xxl;
+        HorizontalLayout {
+            spacing: Space.lg;
+            StatTile {
+                icon: @image-url("icons/centers.svg");
+                label: "Centers";
+                value: Store.status.centers == 0 ? "None"
+                    : Store.status.centers + " paired";
+                detail: Store.status.state != "running" || Store.status.centers == 0 ? "None linked"
+                    : Store.status.connected + " linked";
+                tone: Store.status.centers == 0 ? Tone.accent : Store.status.connected > 0 ? Tone.ok : Tone.warn;
+            }
+            StatTile {
+                icon: @image-url("icons/key.svg");
+                label: "Sudo";
+                value: Store.status.sudo-on ? "On" : "Off";
+                detail: Store.status.sudo-on ? "Sudo list runs with sudo" : "Nothing runs with sudo";
+                tone: Store.status.sudo-on ? Tone.warn : Tone.ok;
+            }
+            StatTile {
+                icon: @image-url("icons/cpu.svg");
+                label: "Limits per command";
+                value: Store.status.limits;
+                detail: "Memory · CPU · processes";
+            }
+        }
+    }
+
+    Reveal {
+        shown: Store.status.state != "";
+        gap: Space.xxl;
+        VerticalLayout {
+            SectionTitle {
+                text: "Centers";
+                icon: @image-url("icons/centers.svg");
+                Button {
+                    text: "Manage";
+                    kind: ButtonKind.ghost;
+                    small: true;
+                    clicked => {
+                        Store.show(Page.centers);
+                    }
+                }
+            }
+            Reveal {
+                shown: Store.centers.length == 0;
+                gap: Space.md;
+                Card {
+                    HorizontalLayout {
+                        spacing: Space.lg;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "No center paired yet.";
+                            color: Theme.text-muted;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Set up…";
+                            kind: ButtonKind.ghost;
+                            clicked => {
+                                Store.setup-start();
+                            }
+                        }
+                        Button {
+                            text: "Pair a center";
+                            icon: @image-url("icons/plus.svg");
+                            kind: ButtonKind.primary;
+                            clicked => {
+                                Store.pair-start();
+                            }
+                        }
+                    }
+                }
+            }
+            Reveal {
+                shown: Store.centers.length > 0;
+                gap: Space.md;
+                Card {
+                    pad: 0;
+                    gap: 0;
+                    ScrollBox {
+                        rows: Store.centers.length;
+                        // Taller rows: half of one more shows below the cut.
+                        long-height: 450px;
+                        for c[i] in Store.centers: Fit {
+                            Divider {
+                                visible: i > 0;
+                                height: i > 0 ? 1px : 0;
+                            }
+                            HorizontalLayout {
+                                padding-left: Space.xl;
+                                padding-right: Space.xl;
+                                padding-top: 14px;
+                                padding-bottom: 14px;
+                                spacing: Space.md;
+                                VerticalLayout {
+                                    alignment: center;
+                                    StatusDot {
+                                        tone: c.link-tone;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: c.name;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        font-weight: Type.semibold;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: c.url;
+                                        color: Theme.text-muted;
+                                        font-size: Type.caption;
+                                        font-family: Type.mono;
+                                        overflow: elide;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Pill {
+                                        text: c.mode;
+                                        tone: Tone.accent;
+                                    }
+                                }
+                                Text {
+                                    min-width: 120px;
+                                    text: c.link;
+                                    color: c.link-tone == Tone.neutral ? Theme.text-muted : Theme.tone(c.link-tone);
+                                    font-size: Type.small;
+                                    font-weight: Type.semibold;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

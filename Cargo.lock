@@ -3146,6 +3146,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nerve"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nerve-conformance",
+ "nerve-node",
+ "nerve-policy",
+ "nerve-proto",
+ "nerve-transport",
+ "png",
+ "rfd",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "nerve-center"
 version = "0.1.0"
 dependencies = [
@@ -3208,26 +3228,6 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nerve-node-desktop"
-version = "0.1.0"
-dependencies = [
- "libc",
- "nerve-conformance",
- "nerve-node",
- "nerve-policy",
- "nerve-proto",
- "nerve-transport",
- "png",
- "rfd",
- "serde_json",
- "slint",
- "slint-build",
- "tempfile",
- "tokio",
  "windows-sys 0.61.2",
 ]
 

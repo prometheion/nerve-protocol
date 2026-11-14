@@ -17,8 +17,8 @@ use crate::command::{Command, Run, Script, Shell, Word, base_name, run};
 /// One rule of the guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
-    /// A command that runs `nerve-node` or `nerve-node-desktop`, or that
-    /// copies, moves, links, deletes or overwrites their files.
+    /// A command that runs `nerve-node` or the app's program `nerve`, or
+    /// that copies, moves, links, deletes or overwrites their files.
     Programs,
     /// A command that names the node's socket, pipes, config or state
     /// folders.
@@ -157,7 +157,7 @@ impl Spelling {
 }
 
 /// The node's programs, as [`base_name`] gives them.
-const NODE: [&str; 2] = ["nerve-node", "nerve-node-desktop"];
+const NODE: [&str; 2] = ["nerve-node", "nerve"];
 
 fn is_node(name: &str) -> bool {
     NODE.contains(&name)
@@ -501,16 +501,16 @@ fn is_service(word: &str, win: bool) -> bool {
     w == "nerve-node" || w == "nerve-node.service" || (win && w == DISPLAY_NAME)
 }
 
-/// Whether `word` holds the node's name at all (the display name has a blank
-/// where the program's has a dash). The exact checks cut the word into parts,
-/// so this keeps a long word that cannot name the node from costing a pass of
-/// them; on Windows case does not count.
+/// Whether `word` holds the node's name at all: `nerve`, which starts both
+/// programs' names (`nerve-node`, the app's `nerve`) and the display name.
+/// The exact checks cut the word into parts, so this keeps a long word that
+/// cannot name the node from costing a pass of them; on Windows case does
+/// not count.
 fn may_name_node(word: &str, win: bool) -> bool {
     if win {
-        let lower = word.to_ascii_lowercase();
-        lower.contains("nerve-node") || lower.contains(DISPLAY_NAME)
+        word.to_ascii_lowercase().contains("nerve")
     } else {
-        word.contains("nerve-node")
+        word.contains("nerve")
     }
 }
 
@@ -937,7 +937,7 @@ mod tests {
         for word in [
             "/usr/local/bin/nerve-node{,.bak}",
             "nerve-{node,x}",
-            "nerve-{x,node-desktop}",
+            "{nerve,x}",
             "/usr/{bin,sbin}/nerve-node",
             "{a,b}/nerve-{c,node}",
         ] {
@@ -1012,7 +1012,7 @@ mod tests {
         for key in [
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler",
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node.exe",
-            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node-desktop\\x",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-app\\x",
             "HKLM\\SOFTWARE\\nerve-node",
             // Folders and values that hold the same words are not keys.
             "C:\\Services\\nerve-node\\logs\\old.log",
@@ -1072,11 +1072,13 @@ mod tests {
             "^(a|nerve-node)$",
             "target/debug/(nerve-node|nerve-center)",
             "(target/debug/)?nerve-node",
-            "nerve-node|nerve-node-desktop",
+            "nerve-node|nerve",
+            // The app's program is the node's too.
+            "nerve-center|nerve",
         ] {
             assert!(pattern_names_node(p, false), "{p:?}");
         }
-        for p in ["nginx|php-fpm", "nerve-center|nerve", "nerve-node-x|y"] {
+        for p in ["nginx|php-fpm", "nerve-center|nervous", "nerve-node-x|y"] {
             assert!(!pattern_names_node(p, false), "{p:?}");
         }
     }
@@ -1092,9 +1094,10 @@ mod tests {
             assert!(names_service(w, true), "{w:?}");
             assert!(!names_service(w, false), "{w:?}");
         }
-        assert!(!names_service("Nerve nodes", true));
-        // A file named so is not the node's program.
-        assert!(!names_node("Nerve node", true));
+        assert!(!names_service("Nerves node", true));
+        // Its first word is the app's program, `nerve`, which is the node's
+        // too.
+        assert!(names_node("Nerve node", true));
         assert!(is_service("Nerve node", true));
         assert!(!is_service("Nerve node", false));
         assert!(!is_service("nerve node", false));

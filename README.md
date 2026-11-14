@@ -10,7 +10,7 @@ Three programs:
 |---|---|---|
 | `nerve-center` | The center. Your harness reaches it as an MCP server and gets two tools, `list` and `execute`. It pairs machines and serves a web UI | the machine where the harness runs, or a server it reaches |
 | `nerve-node` | The node: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each Linux machine the agent may use |
-| `nerve-node-desktop` | The node with a desktop app: a window that does what the CLI does | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
+| `nerve` | The node with a desktop app: a window that does what the CLI does | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
 
 A machine runs one node. Nerve runs on Linux (x86_64, aarch64) and Windows
 (x64). On Windows the node is always the desktop app, with no CLI; the
@@ -80,7 +80,7 @@ nerve-node ui on
 On a Linux desktop, take the desktop app in place of `nerve-node`: the
 `.deb` (Ubuntu, Debian) or the `.rpm` (Fedora). Double-click it, install it,
 then open **Nerve** and press **Install**. The plain
-`nerve-node-desktop-x86_64-linux` works too
+`nerve-x86_64-linux` works too
 ([install](docs/user/install.md#the-desktop-app)).
 
 It installs the node as a service, and its first steps pair your first
@@ -94,7 +94,7 @@ center.
    `.\nerve-center-x86_64-windows.exe install` in a terminal opened with
    **Run as administrator**.)
 2. On each machine the agent may use, double-click
-   `nerve-node-desktop-x86_64-windows.exe`. It is not signed: SmartScreen
+   `nerve-x86_64-windows.exe`. It is not signed: SmartScreen
    asks, **More info**, **Run anyway**. Its installer asks for your Windows
    password, installs the node as a service, and pairs your first center.
 
@@ -144,7 +144,7 @@ limits.
 ## Licence
 
 Nerve is under the [Apache License 2.0](LICENSE). The desktop app
-`nerve-node-desktop` is drawn with [Slint](https://slint.dev), which it uses
+`nerve` is drawn with [Slint](https://slint.dev), which it uses
 under Slint's Royalty-free license 2.0: the app shows Slint's notice in its
-About dialog ([its licence](crates/nerve-node-desktop/LICENSE.md)).
+About dialog ([its licence](crates/nerve/LICENSE.md)).
 [NOTICE](NOTICE) lists the works Nerve includes.

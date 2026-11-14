@@ -8,12 +8,12 @@ in the app, and what differs. [Windows in depth](../dev/windows.md).
 ## Download and check
 
 From [Releases](https://github.com/prometheion/nerve-protocol/releases/latest)
-take `nerve-node-desktop-x86_64-windows.exe`, the node with its app, and for a
+take `nerve-x86_64-windows.exe`, the node with its app, and for a
 center `nerve-center-x86_64-windows.exe`. Both are for x64. In PowerShell,
 compare the hash with its line in `SHA256SUMS`:
 
 ```powershell
-(Get-FileHash .\nerve-node-desktop-x86_64-windows.exe).Hash
+(Get-FileHash .\nerve-x86_64-windows.exe).Hash
 ```
 
 The programs are not signed yet. SmartScreen says "Windows protected your
@@ -34,7 +34,7 @@ It installs:
 Then the first-run steps pair your first center, choose its mode and its
 network, and in folder mode give it a first folder.
 
-`nerve-node-desktop-x86_64-windows.exe --silent` installs without a window
+`nerve-x86_64-windows.exe --silent` installs without a window
 or a question, for scripts and winget. The app asks for your password later,
 where it needs it.
 

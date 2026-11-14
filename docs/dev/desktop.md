@@ -1,12 +1,12 @@
 # The desktop app
 
-`nerve-node-desktop`: the node with an app. Its installer, the rights it
+`nerve`: the node with an app. Its installer, the rights it
 asks for, its settings tabs, what it needs per desktop, its keys and its own
 settings. The user guide's [install](../user/install.md#the-desktop-app) and
 [web UIs](../user/web-uis.md#the-desktop-app) pages are the short version,
 and on Windows its [Windows page](../user/windows.md).
 
-`nerve-node-desktop` is the node with a window, for a machine with a desktop:
+`nerve` is the node with a window, for a machine with a desktop:
 Linux x86_64 with GNOME or KDE Plasma (Wayland or X11), and Windows x86_64.
 It is one program: it holds the node, its CLI and the app. It installs
 itself like any other program, runs the node as a service, and does what
@@ -23,8 +23,8 @@ From [Releases](https://github.com/prometheion/nerve-protocol/releases):
 
 | System | File |
 |---|---|
-| Linux, x86_64 | `nerve-node-desktop_<version>_amd64.deb`, `nerve-node-desktop-<version>.x86_64.rpm`, or the plain `nerve-node-desktop-x86_64-linux` (each needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
-| Windows, x86_64 | `nerve-node-desktop-x86_64-windows.exe` |
+| Linux, x86_64 | `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm`, or the plain `nerve-x86_64-linux` (each needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
+| Windows, x86_64 | `nerve-x86_64-windows.exe` |
 
 Check it against `SHA256SUMS` ([install](service.md#download)).
 
@@ -33,10 +33,10 @@ Check it against `SHA256SUMS` ([install](service.md#download)).
 ### The package (Linux)
 
 Double-click the `.deb` or `.rpm` and press **Install** in the software
-installer, or `sudo apt install ./nerve-node-desktop_<version>_amd64.deb`,
-`sudo dnf install ./nerve-node-desktop-<version>.x86_64.rpm`. The package
+installer, or `sudo apt install ./nerve_<version>_amd64.deb`,
+`sudo dnf install ./nerve-<version>.x86_64.rpm`. The package
 puts the program in `/usr/bin`, **Nerve** in the application menu with its
-icon, and the mark `/usr/share/nerve-node-desktop/package` (`deb` or `rpm`),
+icon, and the mark `/usr/share/nerve/package` (`deb` or `rpm`),
 and brings fontconfig. Then open **Nerve** and press **Install**: the
 installer finds the program in place and goes on with the node.
 
@@ -51,7 +51,7 @@ What the mark changes (`service::Layout::of`, `service::Package`):
 - `install` leaves the program where it is, refuses another program in its
   place, writes no menu entry of its own (only the `nerve://` default), and
   removes the plain program and menu entry an earlier install put in
-  `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve-node-desktop`.
+  `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve`.
 - `update` takes the release's package of the same kind from `SHA256SUMS`,
   checks it, refuses an older one, installs it with `apt-get install -y` or
   `dnf install -y` (the same version again with `apt-get install --reinstall`
@@ -60,7 +60,7 @@ What the mark changes (`service::Layout::of`, `service::Package`):
   as the new program has them; a new program that does not start is put
   back. `update --from <file>` is refused: only the package manager replaces
   the program. A package installed by hand runs
-  `nerve-node-desktop update --from=/usr/bin/nerve-node-desktop` in its own
+  `nerve update --from=/usr/bin/nerve` in its own
   script where the node is installed, which restarts the service with it;
   the update that installs the package itself sets `NERVE_PACKAGE_UPDATE`,
   so the script leaves that to it.
@@ -110,15 +110,15 @@ and in folder mode give it a first folder, as `nerve-node setup` asks; **Back**
 goes to the step before, **Skip** past one. The downloaded file is no longer
 needed.
 
-On Windows `nerve-node-desktop.exe --silent` installs without a window and
+On Windows `nerve.exe --silent` installs without a window and
 without a question, for winget; the app asks for your Windows password later,
 where it is needed. Apps & features has a `QuietUninstallString`,
-`"…\nerve-node-desktop.exe" uninstall`, which keeps the data.
+`"…\nerve.exe" uninstall`, which keeps the data.
 
 | What | Linux | Windows |
 |---|---|---|
-| The program, which the service runs too | `/usr/local/bin/nerve-node-desktop`; from a package `/usr/bin/nerve-node-desktop` | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
-| The menu entry | `/usr/local/share/applications/nerve-node-desktop.desktop`, its icon in `/usr/local/share/icons/hicolor`; from a package the same in `/usr/share` | `Nerve` in the Start menu of all users |
+| The program, which the service runs too | `/usr/local/bin/nerve`; from a package `/usr/bin/nerve` | `C:\Program Files\Nerve\nerve.exe` |
+| The menu entry | `/usr/local/share/applications/nerve.desktop`, its icon in `/usr/local/share/icons/hicolor`; from a package the same in `/usr/share` | `Nerve` in the Start menu of all users |
 | `nerve://` links | the entry's `x-scheme-handler/nerve`, the default in `/etc/xdg/mimeapps.list` | `HKEY_LOCAL_MACHINE\Software\Classes\nerve` |
 | Apps & features | | `Nerve`, in `HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve` |
 | The node's files, the service | as `nerve-node install` puts them ([service](service.md#what-install-does)) | as on Windows ([service](windows.md#the-node-as-a-service-on-windows)) |
@@ -478,8 +478,8 @@ the downloaded file again offers **Uninstall…** too, and on Windows so does
 **Uninstall** at Nerve in **Settings**, **Apps** (Apps & features): it opens
 the same in the app. Kept data comes back with the next install
 ([uninstall](service.md#uninstall-the-node)). The app from a package stays,
-with its menu entry: `sudo apt remove nerve-node-desktop` or
-`sudo dnf remove nerve-node-desktop` removes it.
+with its menu entry: `sudo apt remove nerve` or
+`sudo dnf remove nerve` removes it.
 
 ## What the app needs
 
@@ -526,10 +526,10 @@ All of this is in [Windows](windows.md).
 
 ## In a terminal (Linux)
 
-On Linux, `nerve-node-desktop <command>` is `nerve-node <command>`, with
+On Linux, `nerve <command>` is `nerve-node <command>`, with
 `sudo` on the installed node; where the app took over a node installed with
 `nerve-node`, the command `nerve-node` runs the app's program, which says
-`nerve-node-desktop` for `--version`.
+`nerve` for `--version`.
 
 On Windows there is no command line for the node. The app's program,
 started with arguments, is how the app talks to the node, not a command for
@@ -540,7 +540,7 @@ the place in the app that does it instead (**Permissions › Folders**).
 ## The web UI (Linux)
 
 On Linux the app's node has the [node web UI](web-uis.md#the-nodes-web-ui) too, off unless
-you turn it on: `nerve-node-desktop ui on` (or `nerve-node ui on`). It works as
+you turn it on: `nerve ui on` (or `nerve-node ui on`). It works as
 for the plain `nerve-node`, and the app does not switch it. On Windows there is
 none: the app is the node's UI there.
 
@@ -594,6 +594,6 @@ seconds.
 
 The appearance (system, light or dark), the **Pre-releases** switch, and the
 card on commands that run as you when you hid it, are kept in
-`~/.config/nerve-node-desktop/settings.json` on Linux and
-`%APPDATA%\nerve-node-desktop\settings.json` on Windows, apart from the
+`~/.config/nerve/settings.json` on Linux and
+`%APPDATA%\nerve\settings.json` on Windows, apart from the
 node's settings.

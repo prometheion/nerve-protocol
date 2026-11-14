@@ -11,9 +11,9 @@ Get the programs from
 
 | Machine | Files |
 |---|---|
-| x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`; the desktop app as `nerve-node-desktop_<version>_amd64.deb`, `nerve-node-desktop-<version>.x86_64.rpm` or `nerve-node-desktop-x86_64-linux` |
+| x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`; the desktop app as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm` or `nerve-x86_64-linux` |
 | ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows x64 | `nerve-center-x86_64-windows.exe`, the desktop app `nerve-node-desktop-x86_64-windows.exe` ([Windows](windows.md)) |
+| Windows x64 | `nerve-center-x86_64-windows.exe`, the desktop app `nerve-x86_64-windows.exe` ([Windows](windows.md)) |
 
 `nerve-center` and `nerve-node` are static and need no libraries. The
 desktop app needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
@@ -103,12 +103,12 @@ manager. Such a node runs every command as you
 1. Download the package: the `.deb` for Ubuntu and Debian, the `.rpm` for
    Fedora.
 2. Double-click it, and press **Install** in the software installer (or
-   `sudo apt install ./nerve-node-desktop_<version>_amd64.deb`,
-   `sudo dnf install ./nerve-node-desktop-<version>.x86_64.rpm`).
+   `sudo apt install ./nerve_<version>_amd64.deb`,
+   `sudo dnf install ./nerve-<version>.x86_64.rpm`).
 3. Open **Nerve** from the application menu, and press **Install**. The
    system asks for an administrator's password.
 
-The plain program works too: download `nerve-node-desktop-x86_64-linux`,
+The plain program works too: download `nerve-x86_64-linux`,
 switch on **Executable as Program** in its **Properties** (GNOME Files) or
 tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
 press **Install**.
@@ -216,8 +216,8 @@ sudo nerve-center uninstall [--purge]
 it made there. Kept folders belong to root, and a later `install` takes them
 up again. Where the desktop app took over the node, `nerve-node uninstall`
 removes the app too. The app from a package: **Settings › App › Uninstall…**
-removes the node, then `sudo apt remove nerve-node-desktop` or
-`sudo dnf remove nerve-node-desktop` removes the app.
+removes the node, then `sudo apt remove nerve` or
+`sudo dnf remove nerve` removes the app.
 
 ## Where the files are
 

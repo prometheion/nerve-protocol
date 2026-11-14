@@ -1,6 +1,6 @@
 //! Which program this is comes from the program itself, never from the name
 //! it was started by (crate::edition): `nerve-node` started through a link
-//! named `nerve-node-desktop` is still `nerve-node`, installs and updates as
+//! named `nerve` is still `nerve-node`, installs and updates as
 //! it. The desktop app's tests/edition.rs checks the other way round.
 
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ fn the_node_called_by_another_name_is_the_node() {
     let node = link(
         Path::new(env!("CARGO_BIN_EXE_nerve-node")),
         d.path(),
-        "nerve-node-desktop",
+        "nerve",
     );
     assert_eq!(
         said(&node, &["--version"]).trim(),

@@ -11,7 +11,7 @@ workflow from" too: GitHub takes the workflow file from there, not from
 |---|---|
 | `branch` | The branch to build from. Default `main` |
 | `kind` | `pre-release` or `release` |
-| `version` | `x.y.z`, the version of `nerve-center`, `nerve-node` and `nerve-node-desktop` in the workspace `Cargo.toml` |
+| `version` | `x.y.z`, the version of `nerve-center`, `nerve-node` and `nerve` in the workspace `Cargo.toml` |
 
 Every run builds and publishes the Linux and the Windows programs.
 
@@ -50,11 +50,11 @@ Every run builds and publishes the Linux and the Windows programs.
 2. Builds `nerve-center` and `nerve-node` for `x86_64-unknown-linux-musl` and
    `aarch64-unknown-linux-musl` (static). Each Linux binary must be static.
    Each binary must print its version from `--version`, and it must equal the
-   one given. It also builds the desktop app `nerve-node-desktop` for Linux
+   one given. It also builds the desktop app `nerve` for Linux
    x86_64 on Ubuntu 22.04, the oldest runner (it links glibc and fontconfig,
    so it runs where glibc is 2.35 or newer; the run's summary says the glibc
-   it needs). It must print `nerve-node-desktop <version>`. The `windows`
-   job builds `nerve-center` and `nerve-node-desktop` for
+   it needs). It must print `nerve <version>`. The `windows`
+   job builds `nerve-center` and `nerve` for
    `x86_64-pc-windows-msvc` (static C runtime), with no Visual C++ runtime
    and the version given.
 3. Runs the conformance suite (`cargo test -p nerve-conformance`) against the
@@ -73,14 +73,14 @@ Every run builds and publishes the Linux and the Windows programs.
 4. Publishes, only once every job above passed, a GitHub Release with
    `SHA256SUMS` and nine files. The five Linux binaries:
    `nerve-center` and `nerve-node` for each machine, and
-   `nerve-node-desktop-x86_64-linux`, which also comes as
-   `nerve-node-desktop_<version>_amd64.deb` and
-   `nerve-node-desktop-<version>.x86_64.rpm`: packed from that program with
+   `nerve-x86_64-linux`, which also comes as
+   `nerve_<version>_amd64.deb` and
+   `nerve-<version>.x86_64.rpm`: packed from that program with
    `dpkg-deb` and `rpmbuild` (`.github/scripts/desktop-packages.sh`) and
    installed on Ubuntu 22.04 and 24.04 and Fedora in containers first
    (`desktop-packages-test`). And the two for Windows:
    `nerve-center-x86_64-windows.exe` and
-   `nerve-node-desktop-x86_64-windows.exe` (Windows has no `nerve-node` of
+   `nerve-x86_64-windows.exe` (Windows has no `nerve-node` of
    its own: the desktop app is the node there). The release text ends with a
    footer that names the programs it has. The desktop app's update takes its
    own file from there, as `nerve-node update` takes `nerve-node-*`. A release

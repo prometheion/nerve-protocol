@@ -694,7 +694,7 @@ mod tests {
         ("fs", "write", "/etc/crontab"),
         ("fs", "write", "/etc/cron.d/job"),
         ("exec", "run", "nerve-node status"),
-        ("exec", "run", "/usr/local/bin/nerve-node-desktop mode user"),
+        ("exec", "run", "/usr/local/bin/nerve mode user"),
         ("exec", "run", "ls /run/nerve-node"),
         ("exec", "run", "cat /etc/nerve/node.toml"),
         ("fs", "write", "/home/a/.config/nerve/node.toml"),
@@ -1763,9 +1763,9 @@ mod tests {
         for cmd in [
             "nerve-node config set machine.user root",
             "sudo /usr/local/bin/nerve-node rule rm deny 'rm *'",
-            "./target/release/nerve-node-desktop mode user",
+            "./target/release/nerve mode user",
             "cd /tmp && nerve-node status",
-            r"& 'C:\Program Files\Nerve\nerve-node-desktop.exe' config set node.name x",
+            r"& 'C:\Program Files\Nerve\nerve.exe' config set node.name x",
             "socat - UNIX-CONNECT:/run/nerve-node/owner.sock",
             r"[System.IO.Pipes.NamedPipeClientStream]::new('.', 'nerve-node-owner') # \\.\pipe\nerve-node-owner",
             "cat /etc/nerve/node.toml",
@@ -1781,9 +1781,9 @@ mod tests {
         for cmd in [
             "grep -r nerve-node docs/",
             "cargo build -p nerve-node",
-            "cargo test -p nerve-node-desktop --test shots",
+            "cargo test -p nerve --test shots",
             "journalctl -u nerve-node",
-            "ls ~/.config/nerve-node-desktop",
+            "ls ~/.config/nerve-app",
             "ls /etc/nervecenter",
             "git commit -m 'run nerve-node status'",
         ] {
@@ -1797,9 +1797,7 @@ mod tests {
         assert!(blocked("/var/lib/nerve/state/audit.jsonl"));
         assert!(blocked("/c/ProgramData/Nerve/config/node.toml"));
         assert!(blocked("/d/programdata/nerve/state/x"));
-        assert!(!blocked(
-            "/home/alice/.config/nerve-node-desktop/settings.json"
-        ));
+        assert!(!blocked("/home/alice/.config/nerve-app/settings.json"));
         assert!(!blocked("/home/alice/src/nerve/README.md"));
     }
 
