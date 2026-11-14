@@ -887,3 +887,56 @@ fn a_new_token_names_the_mcp_endpoint_with_the_web_ui_off() {
     assert!(made.contains("Claude Code:"), "{made}");
     assert!(!made.contains("Turn on MCP over HTTP"), "{made}");
 }
+
+/// The administrator's commands answer with `--json` as the desktop app
+/// reads them: their lines and data, an error as `{"error"}` on stdout too;
+/// the other commands refuse it.
+#[test]
+fn the_administrator_s_commands_answer_in_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let parse = |out: &std::process::Output| -> Value {
+        let text = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(text.trim()).unwrap_or_else(|e| panic!("{e}: {text:?}"))
+    };
+    // No center ran here yet: the error, on stdout.
+    let out = owner(&["--json", "owner-token"], Some(&state));
+    assert!(!out.status.success());
+    let v = parse(&out);
+    assert!(
+        v["error"].as_str().unwrap().contains("no center has run"),
+        "{v}"
+    );
+    // The token, as data and among the lines.
+    let token = nerve_center::owner::ensure(&state).unwrap().0;
+    let out = owner(&["--json", "owner-token"], Some(&state));
+    assert!(out.status.success(), "{out:?}");
+    let v = parse(&out);
+    assert_eq!(v["token"], json!(token), "{v}");
+    assert_eq!(v["made"], json!(false), "{v}");
+    assert!(
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().unwrap().contains(&token)),
+        "{v}"
+    );
+    // Status: not installed here, and not running.
+    let v = parse(&owner(&["--json", "status"], Some(&state)));
+    assert_eq!(v["installed"], json!(false), "{v}");
+    assert!(
+        v["messages"].as_array().is_some_and(|m| !m.is_empty()),
+        "{v}"
+    );
+    // A command that asks the running center does not take it.
+    let out = owner(&["--json", "nodes"], Some(&state));
+    assert!(!out.status.success());
+    assert!(
+        parse(&out)["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("--json is for"),
+        "{out:?}"
+    );
+}

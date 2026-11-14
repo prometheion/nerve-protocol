@@ -437,7 +437,14 @@ pub fn status(
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
         .flatten();
-    let page = status_page(layout, state, installed, file.as_deref(), ui, mcp);
+    let service = installed.then(service_state);
+    crate::json::also("installed", serde_json::json!(installed));
+    crate::json::also(
+        "service",
+        serde_json::json!(service.as_ref().map(|s| s.state.clone())),
+    );
+    crate::json::also("running", serde_json::json!(crate::attach::runs(state)));
+    let page = status_page(layout, state, installed, file.as_deref(), ui, mcp, service);
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
 }
@@ -516,8 +523,8 @@ fn status_page(
     file: Option<&str>,
     given_ui: &str,
     given_mcp: &crate::config::McpMode,
+    service: Option<ServiceState>,
 ) -> Page {
-    let service = installed.then(service_state);
     status_page_of(
         layout,
         state,

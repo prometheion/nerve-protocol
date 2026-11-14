@@ -35,6 +35,10 @@ and every limit is in
   the first.
 - `nerve-center set` shows the service's settings and changes one, such as
   `set ui 0.0.0.0:7480`, then restarts it; `install` takes them as flags.
+- `--json` for the center's administrator commands (`install`, `set`,
+  `update`, `uninstall`, `service`, `owner-token`, `backup`, `restore`) and
+  `status`: their lines as `{"messages": [...]}` with their data, an error
+  as `{"error": ...}`.
 - The center's owner commands in the terminal, also with the web UI off:
   `service start|stop|restart`, `pair`, `nodes list|disable|enable|rm`,
   `token new|list|rm` and `log`. They ask the running center through

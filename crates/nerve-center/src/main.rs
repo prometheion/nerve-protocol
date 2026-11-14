@@ -33,6 +33,13 @@ fn main() -> std::process::ExitCode {
         Err(e) if !is_service => e.exit(),
         Err(e) => return refuse(&layout, is_service, &e.to_string()),
     };
+    // `--json` is for the commands the desktop app runs (nerve_center::json).
+    if args.json && !nerve_center::json::takes(args.cmd.as_ref()) {
+        return answered(true, &[], Err(nerve_center::json::ONLY_FOR.into()));
+    }
+    if args.json {
+        nerve_center::json::start();
+    }
     if args.cmd.as_ref().is_some_and(Cmd::runs_the_service) {
         #[cfg(windows)]
         return nerve_center::win_host::serve(args);
@@ -79,12 +86,17 @@ fn main() -> std::process::ExitCode {
             &nerve_center::config::settings_given(&matches),
             elevated,
         ) {
-            return failed(&e.to_string());
+            return answered(args.json, &[], Err(e.to_string()));
         }
         let state = args.owner_state_dir();
         let settle = nerve_center::service::settle_user;
         let mut stdout = std::io::stdout();
-        let mut out = Said::new(&mut stdout, Style::stdout());
+        let mut text = Vec::new();
+        let mut said = (!args.json).then(|| Said::new(&mut stdout, Style::stdout()));
+        let out: &mut dyn std::io::Write = match said.as_mut() {
+            Some(s) => s,
+            None => &mut text,
+        };
         let done = match cmd {
             // What `update` asks the new program (or, when it is the same
             // one, the installed one), which it runs as root with an
@@ -104,19 +116,16 @@ fn main() -> std::process::ExitCode {
                 Ok(())
             }
             nerve_center::config::Cmd::OwnerToken { new } => {
-                settle(&state).and_then(|_| nerve_center::owner::run(&state, *new, &mut out))
+                settle(&state).and_then(|_| nerve_center::owner::run(&state, *new, out))
             }
-            Cmd::Status => {
-                nerve_center::service::status(&layout, &state, &args.ui, &args.mcp, &mut out)
-            }
+            Cmd::Status => nerve_center::service::status(&layout, &state, &args.ui, &args.mcp, out),
             // The running center answers these over its attach socket or
             // pipe, as the folder's owner asks it.
             Cmd::Pair | Cmd::Nodes { .. } | Cmd::Token(_) => {
                 let installed = layout.installed() && layout.is_state(&state);
                 settle(&state).and_then(|_| {
-                    owner_runtime()?.block_on(nerve_center::owner_calls::run(
-                        &state, cmd, installed, &mut out,
-                    ))
+                    owner_runtime()?
+                        .block_on(nerve_center::owner_calls::run(&state, cmd, installed, out))
                 })
             }
             Cmd::Log {
@@ -125,7 +134,7 @@ fn main() -> std::process::ExitCode {
                 problems,
             } => settle(&state).and_then(|_| {
                 owner_runtime()?.block_on(nerve_center::owner_calls::log(
-                    &state, *follow, *last, *problems, &mut out,
+                    &state, *follow, *last, *problems, out,
                 ))
             }),
             // A restore into the running service stops it first and starts
@@ -134,18 +143,17 @@ fn main() -> std::process::ExitCode {
             Cmd::Restore { .. } => nerve_center::service::with_service_stopped(
                 &layout,
                 &state,
-                &mut out,
+                out,
                 &|out, restarts| nerve_center::backup::run(&state, cmd, &settle, restarts, out),
             ),
-            _ => nerve_center::backup::run(&state, cmd, &settle, false, &mut out),
+            _ => nerve_center::backup::run(&state, cmd, &settle, false, out),
         };
-        let _ = out.finish(None);
-        let code = match done {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(e) => failed(&e),
-        };
+        if let Some(s) = said {
+            let _ = s.finish(None);
+        }
+        let code = answered(args.json, &text, done);
         // `service-files` is asked by `update`, never by a person.
-        if !matches!(cmd, Cmd::ServiceFiles) {
+        if !matches!(cmd, Cmd::ServiceFiles) && !args.json {
             hold_own_window();
         }
         return code;
@@ -155,12 +163,17 @@ fn main() -> std::process::ExitCode {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            return failed(&e.to_string());
+            return answered(args.json, &[], Err(e.to_string()));
         }
     };
     if let Some(cmd) = args.cmd.clone() {
         let mut stdout = std::io::stdout();
-        let mut out = Said::new(&mut stdout, Style::stdout());
+        let mut text = Vec::new();
+        let mut said = (!args.json).then(|| Said::new(&mut stdout, Style::stdout()));
+        let out: &mut dyn std::io::Write = match said.as_mut() {
+            Some(s) => s,
+            None => &mut text,
+        };
         let given = nerve_center::config::settings_given(&matches);
         #[cfg(windows)]
         let elevated = nerve_service::win::sid::is_admin();
@@ -169,7 +182,7 @@ fn main() -> std::process::ExitCode {
         if matches!(cmd, Cmd::Install)
             && let Err(e) = nerve_center::config::refuse_install_variables(&given, elevated)
         {
-            return failed(&e.to_string());
+            return answered(args.json, &[], Err(e.to_string()));
         }
         // What `install` writes into the service's settings.
         let set: Vec<(&str, String)> = nerve_center::config::INSTALL_SETTINGS
@@ -186,13 +199,14 @@ fn main() -> std::process::ExitCode {
                 value.map(|v| (*var, v))
             })
             .collect();
-        let done = rt.block_on(nerve_center::service::execute(cmd, &given, &set, &mut out));
-        let _ = out.finish(None);
-        let code = match done {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(e) => failed(&e),
-        };
-        hold_own_window();
+        let done = rt.block_on(nerve_center::service::execute(cmd, &given, &set, out));
+        if let Some(s) = said {
+            let _ = s.finish(None);
+        }
+        let code = answered(args.json, &text, done);
+        if !args.json {
+            hold_own_window();
+        }
         return code;
     }
     // Started by hand at a terminal, it would seem to hang: it waits for a
@@ -259,6 +273,18 @@ fn owner_runtime() -> Result<tokio::runtime::Runtime, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("cannot start the runtime: {e}"))
+}
+
+/// The exit code of a command that ended with `done`, and with `--json`
+/// its answer on stdout (nerve_center::json), the lines it printed in `text`.
+fn answered(json: bool, text: &[u8], done: Result<(), String>) -> std::process::ExitCode {
+    if json {
+        println!("{}", nerve_center::json::answer(text, &done));
+    }
+    match done {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => failed(&e),
+    }
 }
 
 /// Says why a command failed, in the style of both programs; its exit

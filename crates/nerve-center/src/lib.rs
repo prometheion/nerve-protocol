@@ -22,6 +22,7 @@ pub mod checker;
 pub mod config;
 pub mod holder;
 pub mod jobs;
+pub mod json;
 pub mod link;
 pub mod listen;
 pub mod listing;

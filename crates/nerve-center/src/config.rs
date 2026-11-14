@@ -225,6 +225,11 @@ pub struct Args {
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+    /// Print JSON for programs instead of text
+    ///
+    /// For the administrator's commands and status: the lines they print as {"messages": [...]} with their data, an error as {"error": ...}.
+    #[arg(long, global = true, hide = true)]
+    pub json: bool,
     /// Where the running center says where its web UI listens
     /// ([`crate::ui_file`]): the installed service's file, which
     /// [`crate::server::run`] names; no flag sets it.
