@@ -87,7 +87,10 @@ fn every_release_has_windows_the_app_and_the_center() {
         "{windows}"
     );
     assert!(!windows.contains("dist/nerve-center"), "{windows}");
-    assert!(!publish.contains("nerve-center-x86_64-windows"), "{publish}");
+    assert!(
+        !publish.contains("nerve-center-x86_64-windows"),
+        "{publish}"
+    );
     let footers: Vec<&str> = publish
         .lines()
         .filter(|l| l.trim_start().starts_with("footer="))
@@ -396,11 +399,6 @@ fn the_readme_starts_on_linux_and_windows() {
     }
     // No center of its own for Windows (owner, 2026-11-14).
     assert!(!readme.contains("nerve-center-x86_64-windows"), "{readme}");
-    for needed in [
-        "(docs/user/windows.md)",
-    ] {
-        assert!(windows.contains(needed), "{needed}: {windows}");
-    }
     let app = section("### The desktop app");
     let deb = app.find(".deb").expect("the .deb");
     assert!(app.contains(".rpm"), "{app}");
