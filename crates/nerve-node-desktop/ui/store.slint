@@ -473,6 +473,11 @@ export global Prefs {
     in-out property <[RelayNodeRow]> relay-nodes;
     in-out property <[TunnelRow]> tunnels;
     in-out property <string> relay-address: "0.0.0.0:7490";
+    // The row picked on the page: 0 this node's way to its centers, 1 the
+    // relay, 2 its tunnels, 3 a node that uses it and 4 a link now, each by
+    // its place (relay-pick-at).
+    in-out property <int> relay-pick;
+    in-out property <int> relay-pick-at;
     callback relay-on();
     callback relay-off();
     callback relay-remove(string);
