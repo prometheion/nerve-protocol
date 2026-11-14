@@ -1,7 +1,7 @@
 # The desktop app
 
 `nerve-node-desktop`: the node with an app. Its installer, the rights it
-asks for, its settings tabs, what it needs per desktop, its keys and its own
+asks for, its window, its settings, what it needs per desktop, its keys and its own
 settings. The user guide's [install](../user/install.md#the-desktop-app) and
 [web UIs](../user/web-uis.md#the-desktop-app) pages are the short version,
 and on Windows its [Windows page](../user/windows.md).
@@ -239,9 +239,46 @@ When the node does not take the lock, the app stops the service, says that
 the links ended only once it has stopped, and saves the lock for its next
 start.
 
+## The window
+
+A sidebar of the pages, and the page beside it, as wide as the window
+leaves it (up to 2000 px, with margins on a wider one). Each page scrolls as
+a whole: a list never scrolls in a box of its own, it makes the page longer.
+
+Most pages are a list and the picked row's details. The rows are one
+line each (Centers and the Overview two); the details show the picked one's
+whole text, its settings and its buttons, and stay in view while the page
+scrolls the list beside them. Details taller than the window scroll on their
+own, with a thin bar. The window's width decides the shape, with one layout
+for every size, so a resize keeps what you typed and what you picked:
+
+| Window | Shape |
+|---|---|
+| below 1100 px (the app is at least 900) | the list fills the page; a picked row shows its details there, with **Back to the list** |
+| 1100 to 1799 px (the app opens at 1180) | the list and the details side by side |
+| from 1800 px | a third pane where it helps: **Pair a center** on the Overview, the capabilities as a list of their own on Capabilities |
+
+Settings and Help list their sections the same way. **Permissions** has no
+details: its sections (Folders, Forbidden commands, Allowed commands, Sudo)
+on the left, below 1100 px a switch above the list, and the chosen one's list
+on the right. A folder's **Read**, **Write** and **Run** switch in its row,
+and **Capabilities** has each action's **On**, **Off** and **Hidden** in its
+row, so nothing needs opening to switch it.
+
+Adding is a form where it happens: a capability, a program and a relay's node
+in the details pane, a folder or a rule as a row of its list, which **Edit**
+also turns a row into (a folder's path can change there: the new folder gets
+the rights, then the old one goes). Escape cancels a form; Enter saves it.
+Removing a folder, a rule, a program or a relay's node asks in the row
+(**Remove?** **Cancel** **Remove**); unpairing, removing a capability and
+clearing the audit or the log ask in a dialog, which says what goes. Pairing,
+the mode, sudo, a relay node's centers and limits, backups and About stay
+dialogs.
+
 ## Settings
 
-Settings has tabs. Each control runs the `config` command a terminal would,
+Settings lists its sections: General, Keys, Network, Limits, Backup, App and
+Advanced. Each control runs the `config` command a terminal would,
 so the node checks a value as it checks the command line's.
 
 - **General**: the machine's **Name**; the **Account for commands** (it says
@@ -371,8 +408,9 @@ command before you turn on one that senses or acts (`nerve-node cap
 A stopped node shows its own capabilities and those of `node.toml`; the
 programs' show while it runs.
 
-**Your capabilities** lists those of `node.toml` with **Edit** and remove.
-**Add a capability…** opens a form: the name (`cap.action`), what it does,
+**Your capabilities** lists those of `node.toml`; a picked one's details
+have **Edit** and **Remove**. **Add a capability…** opens a form in the
+details pane: the name (`cap.action`), what it does,
 a summary, the command (the program first; a word with blanks in quotes, a
 word `{field}` the call's argument `field`), the arguments' JSON Schema
 (empty for none), the result (empty for the printed text, or a JSON Schema),
@@ -385,9 +423,9 @@ command missing shows which. The node checks again when you save (`cap add`,
 read it, stays in the form with its reason. Removing one
 (`cap rm`) asks first.
 
-**Programs** lists the programs allowed as providers, whether each is
-attached, and a row to allow one by its name and its file (`provider
-allow`), which **Choose…** picks.
+**Programs** lists the programs allowed as providers and whether each is
+attached; **Allow a program…** opens a form for its name and its file
+(`provider allow`), which **Choose…** picks.
 
 A node run by hand offers no capabilities of `node.toml` (they run as
 `nerve-run`, which only the installed node has), and the page says so. On
@@ -403,16 +441,19 @@ takes the link a relay showed (or its parts: the relay's address, this
 node's name there, its token and the relay's pin), and the page says through
 which relay the node goes and how many of its centers are linked.
 **Disconnect** reaches the centers directly again. **This machine as a
-relay**: its switch and address, its pin, the nodes that use it, each with
-**Centers and limits…**, **New link…** and remove, the tunnels it carries
-now, and its limits (`relay.max_links`, `max_links_per_node`,
-`max_opens_per_minute`). **Add a node…** asks for its name and where it
-reaches this machine, and shows its link once, with **Copy**. A
+relay**: its switch and address, its pin, its **Tunnels** (`relay.max_links`,
+`max_links_per_node`, `max_opens_per_minute`), the nodes that use it, each
+with **Centers and limits…**, **New link…** and remove, and the links it
+carries now. Each is a row of the page's list, with its details beside it.
+**Add a node…** asks in the details pane for its name and where it reaches
+this machine, and shows its link once, with **Copy**. A
 `nerve://relay` link you click opens the Relay page with it.
 
 ## Audit and Log
 
-**Audit** and **Log** follow the node as it writes. **Audit** reads the
+**Audit** and **Log** follow the node as it writes, one line per entry, the
+picked one whole beside them. **Log** has a bar on top: **All** or
+**Problems**, and words to find in the messages. **Audit** reads the
 newest 1000 entries and filters them: **All**, **Allowed**, **Refused** or
 **Changes** (settings), a center, an action (`exec.run`, `fs.read`, …) and
 words to find in the target and the reason (in a change, its settings). The
@@ -551,8 +592,9 @@ none: the app is the node's UI there.
 | Ctrl+1 … Ctrl+8 | Open Overview, Centers, Relay, Permissions, Audit, Log, Settings, Help |
 | Ctrl+9 | Open Capabilities |
 | Ctrl+R, F5 | Read the page again |
-| Esc | Close a dialog |
-| Enter | The dialog's main button |
+| ↑ ↓ | Pick in a list |
+| Esc | Close a dialog or a form |
+| Enter | The dialog's or the form's main button |
 | Tab, Shift+Tab | The next or the last control |
 | Space | Press a button, tick a box |
 | ← → | Choose in a row of choices or tabs |
@@ -561,16 +603,16 @@ A click on the page that is open reads nothing again; **Refresh** does.
 
 ## Help
 
-**Help** opens on a task map, folded: a task, where in the app it is done,
+**Help** lists its sections: the tasks, the keys and the command reference.
+The task map is folded into four groups: a task, where in the app it is done,
 and what differs on this machine (on Windows: the AppContainer, the Windows
-password, the Credential Manager, name lookups with the network off). It
-lists these keys and has the command reference: every
-`nerve-node` command by topic or from A to Z, with a filter, one row per
+password, the Credential Manager, name lookups with the network off). The
+command reference has every `nerve-node` command by topic or from A to Z, with a filter, one row per
 command card as on the web UI. A row opens on its commands, each with its
 line, an example and a button to the place in the app that does the same; its
 options fold under **Options**, and the row ends on its page of this guide.
-The task map, the keys, the reference, each topic, each row and each fold
-open and close on their own. On Windows the reference says that the app runs
+Each group of the task map, each topic, each row and each fold open and
+close on their own. On Windows the reference says that the app runs
 these commands for you: there is nothing to type.
 
 ## The app's own settings

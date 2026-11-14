@@ -38,7 +38,7 @@ component Fact inherits HorizontalLayout {
         font-weight: Type.semibold;
         vertical-alignment: center;
     }
-    Text {
+    if root.detail != "": Text {
         text: "· " + root.detail;
         color: Theme.text-faint;
         font-size: Type.small;
@@ -47,6 +47,39 @@ component Fact inherits HorizontalLayout {
 }
 
 // The installed service: its state, and starting and stopping it.
+// Starting and stopping the service.
+component ServiceButtons inherits HorizontalLayout {
+    spacing: Space.sm;
+    if Store.service-state == "stopped" || Store.service-state == "failed": Button {
+        text: "Start";
+        icon: @image-url("icons/play.svg");
+        kind: ButtonKind.primary;
+        busy: Store.busy == "service-start";
+        clicked => {
+            Store.service("start");
+        }
+    }
+    if Store.service-state == "running": Button {
+        text: "Restart";
+        icon: @image-url("icons/refresh.svg");
+        kind: ButtonKind.secondary;
+        busy: Store.busy == "service-restart";
+        enabled: Store.busy != "service-stop";
+        clicked => {
+            Store.service("restart");
+        }
+    }
+    if Store.service-state == "running": Button {
+        text: "Stop";
+        icon: @image-url("icons/stop.svg");
+        busy: Store.busy == "service-stop";
+        enabled: Store.busy != "service-restart";
+        clicked => {
+            Store.service("stop");
+        }
+    }
+}
+
 component ServiceCard inherits Card {
     pad: Space.xl;
     HorizontalLayout {
@@ -101,39 +134,17 @@ component ServiceCard inherits Card {
                 wrap: word-wrap;
             }
         }
+        // Beside the text on a small window, where the card is wide.
+        if !Shape.wide: VerticalLayout {
+            alignment: center;
+            ServiceButtons { }
+        }
     }
-    HorizontalLayout {
-        spacing: Space.sm;
+    // Below it on a wide window, beside the node's state.
+    if Shape.wide: HorizontalLayout {
         alignment: start;
         padding-left: 36px + Space.lg;
-        if Store.service-state == "stopped" || Store.service-state == "failed": Button {
-            text: "Start";
-            icon: @image-url("icons/play.svg");
-            kind: ButtonKind.primary;
-            busy: Store.busy == "service-start";
-            clicked => {
-                Store.service("start");
-            }
-        }
-        if Store.service-state == "running": Button {
-            text: "Restart";
-            icon: @image-url("icons/refresh.svg");
-            kind: ButtonKind.secondary;
-            busy: Store.busy == "service-restart";
-            enabled: Store.busy != "service-stop";
-            clicked => {
-                Store.service("restart");
-            }
-        }
-        if Store.service-state == "running": Button {
-            text: "Stop";
-            icon: @image-url("icons/stop.svg");
-            busy: Store.busy == "service-stop";
-            enabled: Store.busy != "service-restart";
-            clicked => {
-                Store.service("stop");
-            }
-        }
+        ServiceButtons { }
     }
 }
 
@@ -350,7 +361,7 @@ export component OverviewPage inherits PageFrame {
                     icon: @image-url("icons/key.svg");
                     label: "Sudo";
                     value: Store.status.sudo-on ? "On" : "Off";
-                    detail: Store.status.sudo-on ? "Sudo list runs with sudo" : "Nothing runs with sudo";
+                    detail: Store.status.sudo-on ? "Sudo list runs with sudo" : "";
                     tone: Store.status.sudo-on ? Tone.warn : Tone.ok;
                 }
                 Fact {

@@ -531,7 +531,6 @@ export component CapabilitiesPage inherits PageFrame {
                         // own switch, over its units.
                         ListGroup {
                             collapsed: c.action || parent.other;
-                            mono: true;
                             text: c.name + " · " + c.source;
                             count: c.units;
                             if c.switchable: Segmented {

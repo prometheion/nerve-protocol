@@ -2062,7 +2062,7 @@ export component DetailsPane {
     // As tall as its content, side by side up to the window's height less
     // a margin above and below.
     property <length> natural: body.preferred-height;
-    property <length> tall: Shape.wide ? min(root.natural, max(160px, root.view-height - 2 * Space.lg)) : root.natural;
+    out property <length> tall: Shape.wide ? min(root.natural, max(160px, root.view-height - 2 * Space.lg)) : root.natural;
     visible: root.shown;
     horizontal-stretch: root.stretch;
     preferred-width: 1px;

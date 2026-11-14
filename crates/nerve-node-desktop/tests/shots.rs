@@ -128,6 +128,15 @@ impl Shots<'_> {
         }
     }
 
+    /// The page with its picked row's details open, as `<name>-details`:
+    /// below 1100 px they take the list's place.
+    fn take_details(&self, name: &str) {
+        let store = self.window.global::<Store>();
+        store.set_details_open(true);
+        self.take(&format!("{name}-details"));
+        store.set_details_open(false);
+    }
+
     /// The page `height` logical pixels high, as `<name>-full`.
     fn take_full(&self, name: &str, height: u32) {
         let (width, base) = window_size();
@@ -481,7 +490,7 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Overview);
     store.set_service_state("running".into());
     shots.take("overview");
-    // Many centers: their list scrolls in its own box.
+    // Many centers: their list makes the page longer.
     let paired = store.get_centers();
     let first = paired.row_data(0).unwrap();
     let crowd: Vec<_> = (0..14)
@@ -515,6 +524,10 @@ fn every_page_light_and_dark() {
     store.set_status(st);
     store.invoke_show(Page::Centers);
     shots.take("centers");
+    // lab, which cannot be reached.
+    store.set_center_pick(1);
+    shots.take_details("centers");
+    store.set_center_pick(0);
     store.invoke_center_unpair(OFFICE.into());
     shots.take("centers-unpair");
     store.set_confirm_open(false);
@@ -526,6 +539,10 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Audit);
     until(&ctl, || store.get_audit().row_count() >= 7);
     shots.take("audit");
+    // The long command that chains others, and why it was refused.
+    store.set_audit_pick(2);
+    shots.take_details("audit");
+    store.set_audit_pick(0);
     shots.take_full("audit", 2300);
     let rows = store.get_audit();
     let build = (0..rows.row_count())
@@ -576,13 +593,40 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Policy);
     perm.invoke_pick(0);
     shots.take("permissions");
-    shots.take_full("permissions", 2150);
-    // A rule edited in place.
+    shots.take_full("permissions", 1200);
+    // Each section; a rule edited in place, one added, one asking before
+    // it goes; a folder changed in its row.
+    for (section, name) in [(1, "forbidden"), (2, "allowed"), (3, "sudo-list")] {
+        perm.set_section(section);
+        shots.take(&format!("permissions-{name}"));
+    }
+    perm.set_section(1);
     perm.set_edit_text(perm.get_deny().row_data(0).unwrap());
     perm.set_edit_index(0);
     perm.set_edit_list(1);
-    shots.take_full("permissions-edit", 2150);
+    shots.take("permissions-edit");
     perm.set_edit_list(-1);
+    perm.set_add_list(1);
+    perm.set_deny_text("git reset --hard".into());
+    perm.set_deny_wild(true);
+    shots.take("permissions-add-rule");
+    perm.set_add_list(-1);
+    perm.set_deny_text("".into());
+    perm.set_deny_wild(false);
+    store.set_asking(format!("rule:1:{}", perm.get_deny().row_data(1).unwrap()).into());
+    shots.take("permissions-remove");
+    store.set_asking("".into());
+    perm.set_section(0);
+    let second = perm.get_folders().row_data(1).unwrap();
+    perm.set_folder_edit(second.path.clone());
+    perm.set_folder_path(second.path.clone());
+    perm.set_folder_read(second.read);
+    perm.set_folder_write(second.write);
+    perm.set_folder_execute(second.execute);
+    perm.set_folder_open(true);
+    shots.take("permissions-edit-folder");
+    perm.set_folder_open(false);
+    perm.set_folder_edit("".into());
     // The installed Linux node: folder mode runs as nerve-run, with the
     // folders it always has; allowlist mode as nerve-run or as the owner; a
     // folder grant that failed (issue #142).
@@ -590,7 +634,7 @@ fn every_page_light_and_dark() {
     perm.set_account("nerve-run".into());
     perm.set_built_in("/var/lib/nerve-run/home/home and /var/lib/nerve-run/home/tmp, its own home and temporary folder, and /tmp and /var/tmp, shared with every center and account".into());
     perm.set_mode("folder".into());
-    shots.take_full("permissions-nerve-run", 2150);
+    shots.take_full("permissions-nerve-run", 1300);
     perm.set_grant_errors("/home/alex/usb-stick: its file system does not support POSIX ACLs, so nerve-run cannot be given it; give a folder on another file system (ext4, xfs, btrfs and tmpfs have them)".into());
     shots.take("permissions-grant-errors");
     perm.set_grant_errors("".into());
@@ -601,7 +645,7 @@ fn every_page_light_and_dark() {
     // A kernel without Landlock, a folder given in the owner's home.
     perm.set_landlock(false);
     perm.set_home_warning("Without Landlock, nerve-run can read every file in your home /home/alex that other accounts may read, not only the folders you give it, as it passes through your home to /home/alex/project. This warning stays while you give it a folder in your home: umask 027 and `chmod -R o-rwx` narrow what it can read there, and only folders outside your home or a kernel with Landlock end it.".into());
-    shots.take_full("permissions-nerve-run-without-landlock", 2150);
+    shots.take_full("permissions-nerve-run-without-landlock", 1500);
     perm.set_landlock(true);
     perm.set_home_warning("".into());
     perm.set_mode("allowlist".into());
@@ -625,7 +669,7 @@ fn every_page_light_and_dark() {
     perm.set_account("".into());
     perm.set_built_in("".into());
     perm.invoke_pick(0);
-    // Allowlist mode: the allow list, the deny rules as its exceptions.
+    // Allowlist mode: the allow list counts.
     let office = perm.get_centers().iter().position(|c| c == OFFICE).unwrap();
     for (list, rule) in [
         ("allow", "git status"),
@@ -635,11 +679,10 @@ fn every_page_light_and_dark() {
         run(&["rule", "add", list, rule, "--center", OFFICE]);
     }
     perm.invoke_pick(office as i32);
-    shots.take_full("permissions-allowlist", 1600);
-    perm.set_except_open(true);
-    shots.take_full("permissions-allowlist-exceptions", 2050);
-    perm.set_except_open(false);
-    // Long lists: each scrolls in its own box, and the page stays short.
+    perm.set_section(2);
+    shots.take("permissions-allowlist");
+    perm.set_section(0);
+    // Long lists make the page longer, each in its section.
     for i in 0..18 {
         run(&[
             "rule",
@@ -658,7 +701,10 @@ fn every_page_light_and_dark() {
     }
     perm.invoke_pick(office as i32);
     shots.take("permissions-long");
-    shots.take_full("permissions-long", 2350);
+    shots.take_full("permissions-long", 1200);
+    perm.set_section(2);
+    shots.take_full("permissions-long-allowed", 1500);
+    perm.set_section(0);
     perm.invoke_pick(0);
     perm.invoke_mode_pick("user".into());
     perm.set_mode_timed(true);
@@ -706,7 +752,34 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Capabilities);
     caps.invoke_pick(0);
     shots.take("capabilities");
-    shots.take_full("capabilities", 2300);
+    shots.take_full("capabilities", 1500);
+    // A unit's details, one of yours, a program, allowing one.
+    let rows = caps.get_rows();
+    let run_at = (0..rows.row_count())
+        .find(|i| rows.row_data(*i).unwrap().name == "exec.run")
+        .unwrap();
+    caps.set_pick_kind(0);
+    caps.set_pick_at(run_at as i32);
+    shots.take_details("capabilities");
+    caps.set_pick_kind(1);
+    caps.set_pick_at(0);
+    shots.take_details("capabilities-yours");
+    caps.set_pick_kind(2);
+    shots.take_details("capabilities-program");
+    store.set_asking("program:desk".into());
+    shots.take_details("capabilities-program-remove");
+    store.set_asking("".into());
+    caps.set_pick_kind(3);
+    caps.set_program_name("the-program".into());
+    caps.set_program_exe("/usr/bin/the-program".into());
+    shots.take_details("capabilities-allow");
+    caps.set_program_name("".into());
+    caps.set_program_exe("".into());
+    caps.set_pick_kind(0);
+    // The groups on the left of a large window.
+    caps.set_group(1);
+    shots.take("capabilities-group");
+    caps.set_group(0);
     caps.invoke_add();
     shots.take("capabilities-add");
     caps.set_edit_name("board.feed".into());
@@ -740,6 +813,14 @@ fn every_page_light_and_dark() {
     until(&ctl, || window.global::<Logs>().get_rows().row_count() >= 3);
     ctl.feed_ready();
     shots.take("log");
+    window.global::<Logs>().set_pick(1);
+    shots.take_details("log");
+    window.global::<Logs>().set_pick(0);
+    window.global::<Logs>().set_search("link".into());
+    window.global::<Logs>().invoke_searched();
+    shots.take("log-search");
+    window.global::<Logs>().set_search("".into());
+    window.global::<Logs>().invoke_searched();
     window.global::<Logs>().invoke_clear();
     shots.take("log-clear");
     store.set_confirm_open(false);
@@ -758,6 +839,8 @@ fn every_page_light_and_dark() {
         prefs.set_tab(i as i32);
         shots.take(&format!("settings-{tab}"));
     }
+    prefs.set_tab(5);
+    shots.take_details("settings-app");
     prefs.set_tab(3);
     shots.take_full("settings-limits", 1150);
     prefs.set_tab(0);
@@ -798,6 +881,13 @@ fn every_page_light_and_dark() {
     // The Relay page: this node direct, the relay off with one node.
     store.invoke_show(Page::Relay);
     shots.take("relay");
+    prefs.set_relay_pick(3);
+    prefs.set_relay_pick_at(0);
+    shots.take_details("relay-node");
+    store.set_asking("relay-node:laptop-2".into());
+    shots.take_details("relay-node-remove");
+    store.set_asking("".into());
+    prefs.set_relay_pick(0);
     prefs.invoke_relay_add();
     prefs.set_relay_add_name("build-agent-7".into());
     shots.take("relay-add");
@@ -833,7 +923,15 @@ fn every_page_light_and_dark() {
     )));
     shots.take("relay-on");
     shots.take_full("relay-on", 1250);
-    // Many nodes and tunnels: each list in its own box.
+    prefs.set_relay_pick(1);
+    shots.take_details("relay-on");
+    prefs.set_relay_pick(2);
+    shots.take_details("relay-tunnels");
+    prefs.set_relay_pick(4);
+    prefs.set_relay_pick_at(0);
+    shots.take_details("relay-link");
+    prefs.set_relay_pick(0);
+    // Many nodes and tunnels: the list makes the page longer.
     let many: Vec<serde_json::Value> = (0..16)
         .map(|i| serde_json::json!({"name": format!("build-agent-{i:02}"), "centers": [], "max_links": 4, "max_opens_per_minute": 30, "own_limits": false}))
         .collect();
@@ -1018,6 +1116,8 @@ fn every_page_light_and_dark() {
     store.invoke_show(Page::Help);
     shots.take("help");
     let manual = window.global::<nerve_node_desktop::Manual>();
+    // The sections whole on a small window too.
+    store.set_details_open(true);
     manual.set_tasks_open(slint::ModelRc::new(slint::VecModel::from(vec![
         true, true, false, false,
     ])));
@@ -1048,6 +1148,7 @@ fn every_page_light_and_dark() {
     manual.invoke_ref_update();
     manual.set_section(0);
     manual.set_tasks_open(slint::ModelRc::new(slint::VecModel::from(vec![false; 4])));
+    store.set_details_open(false);
     store.invoke_show(Page::Overview);
     store.set_about_open(true);
     shots.take("about");

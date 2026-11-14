@@ -20,6 +20,8 @@ slint::slint! {
         in property <bool> open;
         in property <int> rows;
         in-out property <int> made;
+        in property <length> details-height: 200px;
+        out property <length> details-shown-height: pane.tall;
         out property <length> list-x: list.absolute-position.x;
         out property <length> list-width: list.width;
         out property <length> card-height: card.height;
@@ -80,7 +82,7 @@ slint::slint! {
                     root.went-back();
                 }
                 details := Rectangle {
-                    height: 200px;
+                    height: root.details-height;
                     background: blue;
                     init => {
                         root.made += 1;
@@ -99,6 +101,8 @@ slint::slint! {
         in property <bool> open <=> probe.open;
         in property <int> rows <=> probe.rows;
         out property <int> made: probe.made;
+        in property <length> details-height <=> probe.details-height;
+        out property <length> details-shown-height: probe.details-shown-height;
         out property <length> list-x: probe.list-x;
         out property <length> list-width: probe.list-width;
         out property <length> card-height: probe.card-height;
@@ -288,6 +292,17 @@ fn the_list_and_its_details_follow_the_window() {
         "the details scrolled away with the list: at {y}, the page's top at {top}"
     );
 
+    // Details taller than the window keep within it, and scroll there.
+    window.set_details_height(2000.0);
+    screen.draw();
+    assert!(
+        window.get_details_shown_height() <= 900.0 - 32.0,
+        "the details are {} high in a window of 900",
+        window.get_details_shown_height()
+    );
+    window.set_details_height(200.0);
+    screen.draw();
+
     // A large window adds the third pane; the page keeps margins past its
     // cap.
     at(&screen, 2200, 1200);
@@ -375,7 +390,12 @@ fn the_list_and_its_details_follow_the_window() {
         });
     screen.draw();
     press(window.get_ask_x(), window.get_ask_y());
-    assert!(window.get_asking(), "the remove button did not ask");
+    assert!(
+        window.get_asking(),
+        "the remove button did not ask, at {} {}",
+        window.get_ask_x(),
+        window.get_ask_y()
+    );
     assert_eq!(window.get_removed(), 0, "it removed without asking");
     press(window.get_ask_x(), window.get_ask_y());
     assert_eq!(

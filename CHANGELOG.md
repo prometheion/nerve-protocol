@@ -129,6 +129,11 @@ and every limit is in
 
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
+- Each page is a list and the picked row's details: side by side from a
+  window of 1100 px, in turns with Back to the list on a smaller one, and the
+  page scrolls as a whole. Switches sit in the rows, adding is a form where it
+  happens, and removing asks in the row
+  ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
 - The node's own web UI on Linux, off until `nerve-node ui on`.
