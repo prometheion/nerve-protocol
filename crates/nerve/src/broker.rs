@@ -196,7 +196,12 @@ pub fn serve(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
-        args.splice(0..0, named.iter().cloned());
+        // The center's command line has no such option: its commands are
+        // the administrator's, whoever asked, and `__center` must stay the
+        // first word, by which this program runs as the center.
+        if args.first().map(String::as_str) != Some(nerve_center::edition::APP_WORD) {
+            args.splice(0..0, named.iter().cloned());
+        }
         let input = req["input"].as_str().map(str::to_string);
         let (out, exe) = (out.clone(), exe.clone());
         if req["follow"] == true {
@@ -1079,25 +1084,30 @@ mod tests {
     /// the one who asked when the broker was given that user's SID (the
     /// broker on Windows, which may run as another account), and only
     /// then. The program here prints what it got.
+    /// A program at `exe` that says its arguments and whether the variable
+    /// the app's user used to come in is set: it must not be.
     #[cfg(unix)]
-    #[test]
-    fn the_commands_carry_the_apps_user() {
-        let d = tempfile::tempdir().unwrap();
-        let exe = d.path().join("node");
+    fn echo_program(exe: &Path) {
         let mut sh = std::process::Command::new("/bin/sh")
             .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
-            .arg(&exe)
+            .arg(exe)
             .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let mut input = sh.stdin.take().unwrap();
-        // The command says its arguments and whether the variable the app's
-        // user used to come in is set: it must not be.
         input
             .write_all(b"#!/bin/sh\necho \"$* ${NERVE_DESKTOP_USER_SID-unset}\"\n")
             .unwrap();
         drop(input);
         assert!(sh.wait().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_commands_carry_the_apps_user() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("node");
+        echo_program(&exe);
         let got = |sid: Option<&'static str>| {
             let (req_r, mut req_w) = pipe();
             let (ans_r, ans_w) = pipe();
@@ -1126,6 +1136,39 @@ mod tests {
             ["--desktop-user-sid S-1-5-21-1-2-3-1001 --json x unset"; 2]
         );
         assert_eq!(got(None), ["--json x unset"; 2]);
+    }
+
+    /// The broker on Windows names the app's user for the node's commands
+    /// only: a center's command keeps `__center` first, by which this
+    /// program runs as the center (before, it ran as the node and refused
+    /// the word, so the app could not install a center).
+    #[cfg(unix)]
+    #[test]
+    fn a_center_command_keeps_its_word_first() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("nerve");
+        echo_program(&exe);
+        let (req_r, mut req_w) = pipe();
+        let (ans_r, ans_w) = pipe();
+        let t = std::thread::spawn(move || {
+            serve(req_r, Box::new(ans_w), exe, Some("S-1-5-21-1-2-3-1001"))
+        });
+        let mut lines = BufReader::new(ans_r).lines();
+        lines.next();
+        writeln!(
+            req_w,
+            "{}",
+            json!({"id": 1, "args": ["__center", "--json", "install"]})
+        )
+        .unwrap();
+        let done = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
+        drop(req_w);
+        t.join().unwrap();
+        assert_eq!(
+            done["done"]["stdout"].as_str().unwrap().trim(),
+            "__center --json install unset",
+            "{done}"
+        );
     }
 
     /// pkexec runs, and what it says when it does not start the broker
