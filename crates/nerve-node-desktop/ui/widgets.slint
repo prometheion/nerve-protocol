@@ -1507,7 +1507,7 @@ export component Toast inherits Rectangle {
 }
 
 // A page: its content scrolls, one scroll for the whole page, at most
-// Size.content-max wide, in the middle. A page that opens rises a little and
+// Size.page-max wide, in the middle. A page that opens rises a little and
 // fades in. Its lists grow with their rows; only a details pane taller than
 // the window scrolls on its own (DetailsPane).
 export component PageFrame {
@@ -1521,7 +1521,7 @@ export component PageFrame {
     // The side margins grow on a very wide window, so the content keeps its
     // width; a small window keeps less of them.
     property <length> pad: Shape.wide ? Space.page : Space.xxl;
-    property <length> side: max(root.pad, (scroll.visible-width - Size.content-max) / 2);
+    property <length> side: max(root.pad, (scroll.visible-width - Size.page-max) / 2);
     // How far it came in, 0 to 1.
     property <float> came: 0;
     animate came {

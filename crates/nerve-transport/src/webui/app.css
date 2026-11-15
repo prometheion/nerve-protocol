@@ -111,6 +111,8 @@
   --field: 38px;
   --sidebar-width: 236px;
   --content-max: 980px;
+  /* The app's page width at most; the center's pages take it with their new layout. */
+  --page-max: 2000px;
   --dialog: 520px;
 
   /* How things move, as the app's Motion: a hover or a press, a switch or
