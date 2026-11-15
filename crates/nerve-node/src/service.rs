@@ -2422,6 +2422,9 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         .filter(|o| o.status.success())
         .and_then(|o| program_version(layout, &String::from_utf8_lossy(&o.stdout)))
         .map(|v| v.to_string());
+    // A package replaced the program and the restart its script ran failed.
+    let older = state.is_some_and(|s| s.state == "running")
+        && nerve_service::stale::service_runs_older(UNIT_NAME, &layout.bin);
     serde_json::json!({
         "installed": state.is_some(),
         "state": state.map(|s| s.state.as_str()),
@@ -2429,6 +2432,7 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         "program": layout.bin.display().to_string(),
         "present": layout.bin.is_file(),
         "version": version,
+        "older": older,
     })
 }
 

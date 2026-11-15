@@ -108,7 +108,11 @@ What the mark changes (`service::Layout::of`, `service::Package`):
   `nerve update --from=/usr/bin/nerve` in its own
   script where the node is installed, which restarts the service with it;
   the update that installs the package itself sets `NERVE_PACKAGE_UPDATE`,
-  so the script leaves that to it.
+  so the script leaves that to it. Where that restart failed, `status --json`
+  says `"older": true` (the service's process started before the program's
+  change time, `nerve_service::stale`; Linux only, as Windows replaces no
+  running program), and `status` and the Overview say to restart it; the
+  center's `status` likewise.
 - `uninstall` removes the node and leaves the program; `apt remove` or
   `dnf remove` removes the app. Removing the package first leaves a service
   without its program: uninstall in the app first.

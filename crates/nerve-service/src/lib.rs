@@ -22,6 +22,7 @@ pub mod listen;
 pub mod out;
 pub mod prompt;
 pub mod role;
+pub mod stale;
 mod update;
 pub mod win;
 

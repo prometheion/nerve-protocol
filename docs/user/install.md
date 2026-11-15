@@ -217,7 +217,9 @@ alone. The desktop app updates under **Settings › App › Update…**, also on
 Windows, and **Settings › App › Pre-releases** makes it take the
 pre-releases too. From a package, it installs the release's package with
 `apt` or `dnf`, the same version again too, and a newer package you install
-yourself updates the node's service too.
+yourself updates the node's service too. If that restart fails, `status`
+and the app's Overview say the service still runs the earlier program;
+`service restart` starts the new one.
 
 ## Uninstall
 

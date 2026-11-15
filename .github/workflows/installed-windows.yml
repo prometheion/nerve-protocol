@@ -407,8 +407,10 @@ jobs:
           }
       # The app as a center (#232), once the node is gone: the service runs
       # the app's program behind __center, says where its web UI listens in
-      # a file every account reads, its firewall rule names the service, and
-      # its uninstall leaves the app's program, which is the app's.
+      # a file every account reads, its firewall rule names the service, the
+      # app is in the Start menu and Apps & features (whose quiet uninstall
+      # removes the center) without the nerve:// handler, and its uninstall
+      # takes all of it and the app's program, which served the center alone.
       - name: The app as a center
         run: |
           $exe = (Resolve-Path dist/nerve.exe).Path
@@ -424,13 +426,19 @@ jobs:
           if ($rule.Service -ne 'nerve-center') { throw "the firewall rule is for '$($rule.Service)', not the service" }
           $status = & $bin __center --json status | ConvertFrom-Json
           if (-not $status.installed) { throw "status: $($status | ConvertTo-Json)" }
-          & $bin __center --json uninstall --purge 2>&1 | Out-Host
+          $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk"
+          $apps = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve'
+          if (-not (Test-Path $link)) { throw 'the center role put no Start menu entry' }
+          $quiet = (Get-ItemProperty $apps).QuietUninstallString
+          if ($quiet -ne "`"$bin`" __center uninstall") { throw "Apps & features' quiet uninstall runs $quiet" }
+          if (Test-Path 'HKLM:\Software\Classes\nerve') { throw 'the center role opens nerve:// links' }
+          & $exe __center --json uninstall --purge 2>&1 | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "the app's center did not uninstall ($LASTEXITCODE)" }
           if (Get-Service nerve-center -ErrorAction SilentlyContinue) { throw 'the service stays' }
-          if (-not (Test-Path $bin)) { throw "the center's uninstall took the app's program" }
+          if (Test-Path $bin) { throw "the center's uninstall left the app's program" }
+          if ((Test-Path $link) -or (Test-Path $apps)) { throw "the center's uninstall left the app's entries" }
           if (Get-NetFirewallRule -DisplayName 'Nerve center' -ErrorAction SilentlyContinue) { throw 'the firewall rule stays' }
-          Remove-Item $bin
-          "the app as a center: installed, its service, web UI file and firewall rule, uninstalled" >> $env:GITHUB_STEP_SUMMARY
+          "the app as a center: installed, its service, web UI file, firewall rule and app entries, uninstalled" >> $env:GITHUB_STEP_SUMMARY
       # A test that returns early says so with `skipped` at the start of a
       # line, or behind `test <name> ... ` with one test thread.
       - name: No test skipped

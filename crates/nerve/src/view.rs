@@ -31,6 +31,11 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 
 /// What the Overview says while an administrator is the node's owner on
 /// Windows, the twin of [`ROOT_OWNER`] (#197).
+/// The Overview's warning while the service runs an older program than the
+/// installed one: a package replaced it and its restart failed.
+pub const OLDER_PROGRAM: &str =
+    "The service still runs the earlier program. Restart it to run the installed one.";
+
 pub const ADMIN_OWNER: &str = "The owner of this node is an administrator: commands of user mode, and of allowlist mode as the owner, run as that account and can take its administrator rights (UAC is no security boundary). They can do everything on this machine, Nerve and its keys included.";
 
 /// What the app says once the settings grant of the center `name` is given
@@ -123,6 +128,10 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
             warnings.push(
                 "The node found no keyring at its start. Restart it once the keyring runs.".into(),
             );
+        }
+        // A package replaced the program and its restart failed.
+        if v["service"]["older"] == true {
+            warnings.push(OLDER_PROGRAM.into());
         }
     }
     // An owner with the machine's full rights is said whether the node runs
@@ -2141,6 +2150,12 @@ mod tests {
             "provider_pipe_warning": "no program of yours attaches as a provider"});
         let (st, _) = status(&v, NOW);
         assert_eq!(st.warnings.row_count(), 1);
+        // The service that runs an older program than the installed one.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "service": {"state": "running", "older": true}});
+        let (st, _) = status(&v, NOW);
+        let w: Vec<SharedString> = st.warnings.iter().collect();
+        assert_eq!(w, [SharedString::from(OLDER_PROGRAM)]);
     }
 
     /// Giving the settings grant where root is the owner says that the

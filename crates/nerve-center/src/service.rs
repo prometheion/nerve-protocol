@@ -459,8 +459,16 @@ pub fn status(
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
         .flatten();
-    let service = installed.then(service_state);
+    // A package replaced the program and the restart its script ran failed.
+    let service = installed.then(service_state).map(|mut s| {
+        s.older = s.active && nerve_service::stale::service_runs_older(UNIT_NAME, &layout.bin);
+        s
+    });
     crate::json::also("installed", serde_json::json!(installed));
+    crate::json::also(
+        "older",
+        serde_json::json!(service.as_ref().is_some_and(|s| s.older)),
+    );
     crate::json::also(
         "service",
         serde_json::json!(service.as_ref().map(|s| s.state.clone())),
@@ -470,6 +478,10 @@ pub fn status(
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
 }
+
+/// What `status` says when the service runs an older program than the
+/// installed one.
+pub const OLDER_PROGRAM: &str = "The service still runs the program it started with, older than the installed one: `sudo nerve-center service restart` starts the new one.";
 
 /// The program's name and version on the head line of its pages.
 pub const PROGRAM: &str = "Nerve center";
@@ -491,6 +503,9 @@ struct ServiceState {
     active: bool,
     state: String,
     boot: Option<bool>,
+    /// It still runs an older program than the installed one
+    /// (nerve_service::stale).
+    older: bool,
 }
 
 /// The installed service's state, from systemd or the service control
@@ -503,16 +518,19 @@ fn service_state() -> ServiceState {
                 active: st.state == "running",
                 state: st.state.to_string(),
                 boot: st.automatic,
+                older: false,
             },
             Ok(None) => ServiceState {
                 active: false,
                 state: "not installed".into(),
                 boot: None,
+                older: false,
             },
             Err(e) => ServiceState {
                 active: false,
                 state: format!("unknown ({e})"),
                 boot: None,
+                older: false,
             },
         }
     }
@@ -532,6 +550,7 @@ fn service_state() -> ServiceState {
             active: state == "active",
             state,
             boot: ask("is-enabled").map(|e| e == "enabled"),
+            older: false,
         }
     }
 }
@@ -584,6 +603,9 @@ fn status_page_of(
         _ => ("not running", Tone::Plain),
     };
     let mut p = page().state(head, tone);
+    if service.as_ref().is_some_and(|s| s.older) {
+        p.warn(OLDER_PROGRAM);
+    }
     match &service {
         // A service that runs says so in the head line.
         Some(s) if s.active => {}
@@ -945,6 +967,7 @@ pub(crate) fn service_page(layout: &Layout, file: &str, runs: bool) -> Page {
                 false => "stopped".into(),
             },
             boot: None,
+            older: false,
         }),
     )
 }
@@ -1080,6 +1103,7 @@ pub(crate) fn done_page(
                 false => "stopped".into(),
             },
             boot: started.then_some(true),
+            older: false,
         }),
     );
     if let Some(v) = version {
@@ -2871,6 +2895,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             active: true,
             state: "active".into(),
             boot: Some(true),
+            older: false,
         });
         let runs = crate::attach::runs(state);
         status_page_of(l, state, installed, file, ui, mcp, runs, service).render(Style::PLAIN)
@@ -3147,6 +3172,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
                 active: false,
                 state: "inactive".into(),
                 boot: Some(true),
+                older: false,
             }),
         )
         .render(Style::PLAIN);
@@ -3159,6 +3185,25 @@ Next  Change one:  sudo nerve-center set <name> <value>
             has_next(&stopped, "Start it: sudo nerve-center service start"),
             "{stopped}"
         );
+        assert!(!stopped.contains("older"), "{stopped}");
+        // A service that still runs the program a package replaced says so.
+        let older = status_page_of(
+            &l,
+            &state,
+            true,
+            Some(file),
+            "",
+            &McpMode::Off,
+            Some(true),
+            Some(ServiceState {
+                active: true,
+                state: "active".into(),
+                boot: Some(true),
+                older: true,
+            }),
+        )
+        .render(Style::PLAIN);
+        assert!(older.contains("older than the installed one"), "{older}");
     }
 
     /// A link in place of the state or the settings folder is refused:
