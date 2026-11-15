@@ -207,6 +207,8 @@ jobs:
           $run = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\nerve-run' }
           if (-not $run) { throw 'nerve-run has no profile' }
           if ((Get-Service nerve-run-profile).Status -ne 'Running') { throw 'nerve-run-profile does not run' }
+          # A firewall rule by service matches the service's SID, which a service that logs on as an account has only when it is asked for.
+          if ((sc.exe qsidtype nerve-node | Out-String) -notmatch 'UNRESTRICTED') { throw "the node's service has no SID of its own, so a firewall rule by service lets nothing in" }
       # What the install put on the machine, read as Windows reads it: the
       # Start menu's link, the handler of nerve:// links, and the entry in
       # Apps & features with the quiet uninstall winget runs.

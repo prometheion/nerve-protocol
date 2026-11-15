@@ -214,7 +214,8 @@ pub struct Spec<'a> {
     /// arguments.
     pub line: &'a str,
     /// The local account it runs as and that account's password; `None`:
-    /// its own virtual account, with the service's SID in its token.
+    /// its own virtual account. Either way the service's SID is in its
+    /// token.
     pub logon: Option<(&'a str, &'a str)>,
     pub settings: &'a Settings,
 }
@@ -419,19 +420,19 @@ mod sys {
             (&raw const description).cast(),
             "its description",
         )?;
-        if spec.logon.is_none() {
-            // The service's own SID in its token: what its folders are
-            // opened to.
-            let sid = SERVICE_SID_INFO {
-                dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
-            };
-            change(
-                &s,
-                SERVICE_CONFIG_SERVICE_SID_INFO,
-                (&raw const sid).cast(),
-                "its SID",
-            )?;
-        }
+        // The service's own SID in its token: what its folders are opened
+        // to, and what a firewall rule by service (`-Service`) matches by:
+        // without it such a rule lets nothing in, found on a real machine
+        // with the node, which logs on as an account.
+        let sid = SERVICE_SID_INFO {
+            dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
+        };
+        change(
+            &s,
+            SERVICE_CONFIG_SERVICE_SID_INFO,
+            (&raw const sid).cast(),
+            "its SID",
+        )?;
         settle(&s, spec.settings)
     }
 
