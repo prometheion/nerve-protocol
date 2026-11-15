@@ -1044,7 +1044,11 @@ pub fn stored_folder<'a>(said: impl Iterator<Item = &'a str>) -> Option<String> 
 /// Whether two folder paths name one place, as the node compares them.
 pub fn same_folder(a: &str, b: &str) -> bool {
     use nerve_policy::paths::within;
-    within(Path::new(a), Path::new(b)) && within(Path::new(b), Path::new(a))
+    // A `.` part names no other place. Windows' comparison keeps it as a
+    // part of its own; Path's components leave it out on every platform.
+    let tidy = |p: &str| Path::new(p).components().collect::<std::path::PathBuf>();
+    let (a, b) = (tidy(a), tidy(b));
+    within(&a, &b) && within(&b, &a)
 }
 
 /// Where the picked row of `old` stands in `new`, once the page's rows were
