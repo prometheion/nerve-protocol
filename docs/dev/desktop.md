@@ -61,8 +61,7 @@ machine (#232):
   that), until the center gets pages of its own; a node run by hand (its
   folders named, or no systemd) keeps the app's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
-  where the machine is no center only, and with no role its `install` only;
-  behind `__center` the center's `install` where none is, else its
+  where the machine is no center only; behind `__center` the center's `install` where none is, else its
   administrator's commands and `status`, and `update` from the release only
   (from a file it stays a terminal's: the file would lie in the user's
   folders), and never where the machine has a node: a center beside a node
