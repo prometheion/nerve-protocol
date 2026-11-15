@@ -128,7 +128,8 @@ owner. Its first steps pair your first center and choose its mode.
 
 As a center it installs the center as a service, as `nerve-center install`
 does below, and the command `nerve-center` (a link to the app); its last
-step shows the owner token and opens the web UI. A role installed in the
+step shows the owner token and opens the web UI. **Nerve** in the menu then
+opens that step again, with **Uninstall…**. A role installed in the
 terminal stays that program's: the app does not install the other role
 beside it.
 After that the app needs the password only for what changes the system

@@ -1092,6 +1092,9 @@ fn every_page_light_and_dark() {
     install.set_center_ui("http://127.0.0.1:7480".into());
     install.set_step("center".into());
     shots.take("installer-center");
+    install.invoke_ask_uninstall_center();
+    shots.take("installer-uninstall-center");
+    install.set_action("install".into());
     install.set_role(0);
     install.set_step("welcome".into());
     install.set_node_only(false);

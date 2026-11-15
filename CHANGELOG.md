@@ -139,7 +139,10 @@ and every limit is in
   (for both, use the terminal programs `nerve-node` and `nerve-center`).
   On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
   link to it. The `.deb` and `.rpm` are named `nerve` and replace
-  `nerve-node-desktop`: a pre-release tester removes that first.
+  `nerve-node-desktop`: a pre-release tester removes that first. The
+  package's app asks the role at its first start. In the center role
+  **Nerve** in the menu opens the center's web UI and removes the center
+  (also Apps & features on Windows).
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
 - On Windows it is the only way to the node: no message sends you to a

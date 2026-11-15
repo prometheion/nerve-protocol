@@ -76,6 +76,9 @@ pub struct Layout {
     /// with: the app's `__center` ([`crate::edition`]); none for
     /// `nerve-center`.
     pub word: Option<&'static str>,
+    /// What the app puts in place with the center besides it
+    /// ([`crate::edition::Parts`]).
+    pub parts: crate::edition::AppParts,
 }
 
 impl Layout {
@@ -104,6 +107,7 @@ impl Layout {
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
                 run: data.join("run"),
                 word: edition.word,
+                parts: edition.parts,
             }
         }
         #[cfg(not(windows))]
@@ -124,6 +128,7 @@ impl Layout {
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
                 run: "/run/nerve-center".into(),
                 word: edition.word,
+                parts: edition.parts,
             }
         }
     }
@@ -1026,6 +1031,7 @@ pub fn install_with(
     if layout.word.is_some() {
         link_terminal_name(layout, &mut steps)?;
     }
+    put_parts(layout, &mut steps)?;
     nerve_service::start_unit(
         sys,
         &layout.unit,
@@ -1591,13 +1597,18 @@ pub fn uninstall(
         }
         None => {}
     }
-    // The app's program is the app's, which stays: only its terminal name
-    // for the center goes.
-    if layout.word.is_some() {
-        if let Some(gone) = unlink_terminal_name(layout)? {
-            step(out, format!("removed the link {}", gone.display()));
-        }
-    } else if layout.bin.exists() {
+    // The app's terminal name for the center and its parts go with the
+    // center; so does its program, which serves this role alone (one role
+    // per machine), unless its package manager owns it.
+    if layout.word.is_some()
+        && let Some(gone) = unlink_terminal_name(layout)?
+    {
+        step(out, format!("removed the link {}", gone.display()));
+    }
+    for gone in remove_parts(layout)? {
+        step(out, gone);
+    }
+    if !packaged(layout) && layout.bin.exists() {
         std::fs::remove_file(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
         step(out, format!("removed the program {}", layout.bin.display()));
     }
@@ -1608,6 +1619,26 @@ pub fn uninstall(
         );
     }
     Ok(())
+}
+
+/// Puts the app's parts for its center role in place once its program is
+/// ([`crate::edition::Parts`]): the program opens as the app again from the
+/// menu, and removes the center there.
+pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    if let Some(parts) = layout.parts.0 {
+        for step in parts.install(&layout.bin)? {
+            steps.did(step);
+        }
+    }
+    Ok(())
+}
+
+/// Removes what [`put_parts`] put in place; what it did.
+pub(crate) fn remove_parts(layout: &Layout) -> Result<Vec<String>, String> {
+    match layout.parts.0 {
+        Some(parts) => parts.uninstall(&layout.bin),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Where the terminal name of the app's center goes: `nerve-center` in the
@@ -1882,8 +1913,8 @@ mod tests {
 
     /// The app runs the center behind its hidden word: the unit starts its
     /// program so, its install puts the terminal name `nerve-center` on the
-    /// PATH as a link to it, and its uninstall takes the link away but
-    /// leaves the app's program, which is the app's to remove.
+    /// PATH as a link to it, and its uninstall takes the link away, and the
+    /// plain program, which serves the center alone.
     #[test]
     fn the_app_s_center_runs_the_app_behind_its_word() {
         let d = tempfile::tempdir().unwrap();
@@ -1914,9 +1945,10 @@ mod tests {
             "{said}"
         );
         uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
-        assert!(l.bin.is_file(), "the app's program stays");
+        assert!(!l.bin.exists(), "the plain program goes with its role");
         assert!(std::fs::symlink_metadata(&link).is_err());
         // A program of that name that is no link to the app stays.
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
         std::fs::write(&link, "nerve-center 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &l.bin, &mut out).unwrap();
@@ -1926,6 +1958,7 @@ mod tests {
         );
         uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
         assert!(link.is_file());
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
         // One role per machine: not where the node's unit is; the terminal
         // center (no word) may.
         std::fs::write(l.unit.with_file_name("nerve-node.service"), "").unwrap();
@@ -1935,6 +1968,57 @@ mod tests {
         assert!(!l.unit.exists());
         l.word = None;
         install(&l, &sys, &l.bin, &mut Vec::new()).unwrap();
+    }
+
+    /// What the parts of the test below were asked to do.
+    static PARTS_DID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct Parts;
+
+    impl crate::edition::Parts for Parts {
+        fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_DID
+                .lock()
+                .unwrap()
+                .push(format!("put {}", bin.display()));
+            Ok(vec!["put Nerve in the menu".into()])
+        }
+        fn uninstall(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_DID
+                .lock()
+                .unwrap()
+                .push(format!("removed {}", bin.display()));
+            Ok(vec!["removed Nerve from the menu".into()])
+        }
+    }
+
+    /// The app's parts come with its center and go with it: the app opens
+    /// again from the menu in the center role, and nothing of it is left.
+    #[test]
+    fn the_app_s_parts_come_and_go_with_its_center() {
+        static PARTS: Parts = Parts;
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("usr/local/bin/nerve");
+        l.word = Some(crate::edition::APP_WORD);
+        l.parts = crate::edition::AppParts(Some(&PARTS));
+        let exe = d.path().join("download/nerve");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("put Nerve in the menu"), "{said}");
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("removed Nerve from the menu"), "{said}");
+        let bin = l.bin.display();
+        assert_eq!(
+            *PARTS_DID.lock().unwrap(),
+            [format!("put {bin}"), format!("removed {bin}")]
+        );
     }
 
     /// The release files: the terminal center's for Linux on both machines,
@@ -1984,6 +2068,7 @@ mod tests {
             release: "http://127.0.0.1:1/none".into(),
             run: root.join("run/nerve-center"),
             word: None,
+            parts: Default::default(),
         }
     }
 

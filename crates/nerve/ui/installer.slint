@@ -60,7 +60,7 @@ export component Working {
         Text {
             text: Install.asking ? "Waiting for the administrator rights…"
                 : Install.action == "update" ? "Updating Nerve…"
-                : Install.action == "uninstall" ? "Removing Nerve…"
+                : Install.action == "uninstall" || Install.action == "uninstall-center" ? "Removing Nerve…"
                 : "Installing Nerve…";
             color: Theme.text;
             font-size: Type.heading;
@@ -148,7 +148,8 @@ export component UninstallChoice {
         OptionTile {
             icon: @image-url("icons/archive.svg");
             title: "Keep the data";
-            text: Install.windows ? "Settings, pairings, keys, your stored Windows password and the audit log stay for a new install." : "Settings, pairings, keys and the audit log stay for a new install.";
+            text: Install.action == "uninstall-center" ? "Settings, keys, pairings and tokens stay for a new install."
+                : Install.windows ? "Settings, pairings, keys, your stored Windows password and the audit log stay for a new install." : "Settings, pairings, keys and the audit log stay for a new install.";
             selected: !Install.purge;
             clicked => {
                 Install.purge = false;
@@ -157,7 +158,8 @@ export component UninstallChoice {
         OptionTile {
             icon: @image-url("icons/trash.svg");
             title: "Delete the data";
-            text: "Keys, pairings and the audit log go. A center must pair again.";
+            text: Install.action == "uninstall-center" ? "Keys, pairings and tokens go. Every node must pair again."
+                : "Keys, pairings and the audit log go. A center must pair again.";
             selected: Install.purge;
             clicked => {
                 Install.purge = true;
@@ -276,7 +278,7 @@ component StepFoot {
             Banner {
                 tone: Tone.danger;
                 title: Install.action == "update" ? "The update did not finish"
-                    : Install.action == "uninstall" ? "Uninstalling did not finish"
+                    : Install.action == "uninstall" || Install.action == "uninstall-center" ? "Uninstalling did not finish"
                     : "Installing did not finish";
                 text: Install.error;
             }
@@ -510,6 +512,13 @@ export component InstallerView inherits Rectangle {
                                     text: "Its web UI manages it: open it here, and log in with the owner token" + (Install.center-ui != "" ? " (" + Install.center-ui + ")." : ".");
                                 }
                                 StepFoot {
+                                    Button {
+                                        text: "Uninstall…";
+                                        kind: ButtonKind.ghost;
+                                        clicked => {
+                                            Install.ask-uninstall-center();
+                                        }
+                                    }
                                     Spacer { }
                                     Button {
                                         text: "Close";
@@ -687,8 +696,9 @@ export component InstallerView inherits Rectangle {
                             VerticalLayout {
                                 spacing: Space.xl;
                                 StepHead {
-                                    title: "Uninstall Nerve?";
-                                    text: "The service, its user, the app and its menu entry go.";
+                                    title: Install.action == "uninstall-center" ? "Uninstall the center?" : "Uninstall Nerve?";
+                                    text: Install.action == "uninstall-center" ? "The center's service, its user and the app go."
+                                        : "The service, its user, the app and its menu entry go.";
                                 }
                                 UninstallChoice { }
                                 StepFoot {
@@ -700,7 +710,7 @@ export component InstallerView inherits Rectangle {
                                         kind: ButtonKind.ghost;
                                         clicked => {
                                             Install.error = "";
-                                            Install.step = "installed";
+                                            Install.step = Install.action == "uninstall-center" ? "center" : "installed";
                                         }
                                     }
                                     Button {
@@ -732,10 +742,11 @@ export component InstallerView inherits Rectangle {
                                     tone: Tone.ok;
                                     title: Install.action == "update" ? "Nerve is updated to " + Install.installed-version
                                         : Install.action == "uninstall" ? "Nerve is removed"
+                                        : Install.action == "uninstall-center" ? "The center is removed"
                                         : Install.action == "install-center" ? "The center is installed"
                                         : "Nerve is installed";
                                     text: Install.action == "update" ? "The service runs the new version."
-                                        : Install.action == "uninstall" ? (Install.purge ? "Nerve and its data are gone." : "Nerve is gone. Its data stays for a new install.")
+                                        : Install.action == "uninstall" || Install.action == "uninstall-center" ? (Install.purge ? "Nerve and its data are gone." : "Nerve is gone. Its data stays for a new install.")
                                         : Install.action == "install-center" ? "It runs and starts with the machine. Its web UI asks for the owner token, which the steps above show; keep it in your password manager."
                                         : "The node runs and starts with the machine. Open Nerve to pair it with a center.";
                                 }
@@ -744,12 +755,12 @@ export component InstallerView inherits Rectangle {
                                     Spacer { }
                                     Button {
                                         text: "Close";
-                                        kind: Install.action == "uninstall" ? ButtonKind.primary : ButtonKind.ghost;
+                                        kind: Install.action == "uninstall" || Install.action == "uninstall-center" ? ButtonKind.primary : ButtonKind.ghost;
                                         clicked => {
                                             Install.close();
                                         }
                                     }
-                                    if Install.action != "uninstall" && Install.action != "install-center": Button {
+                                    if Install.action == "install" || Install.action == "update": Button {
                                         text: "Open Nerve";
                                         kind: ButtonKind.primary;
                                         clicked => {

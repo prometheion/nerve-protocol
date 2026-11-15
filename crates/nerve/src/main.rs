@@ -29,7 +29,7 @@ fn main() {
     // with its menu entry and link handler; and of the center, which it
     // runs behind its hidden word.
     nerve_node::edition::set(&nerve::parts::EDITION);
-    nerve_center::edition::set(&nerve_center::edition::APP);
+    nerve_center::edition::set(&nerve::parts::CENTER_EDITION);
     // Not `args()`: a path for the CLI need not be UTF-8.
     let argv0 = std::env::args_os().next();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();

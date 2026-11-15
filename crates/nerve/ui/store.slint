@@ -585,7 +585,10 @@ export global Install {
     in-out property <string> center-ui;
     callback install-center();
     callback open-center-ui();
-    // What runs or ran: install, update or uninstall.
+    // Asks keep or delete for the center's uninstall.
+    callback ask-uninstall-center();
+    // What runs or ran: install, update or uninstall; install-center or
+    // uninstall-center.
     in-out property <string> action: "install";
     // This program's version, the installed one's ("" when none), and
     // whether this one is newer.

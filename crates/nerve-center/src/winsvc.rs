@@ -384,6 +384,7 @@ pub fn install(
     start(sys, layout)?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
+    crate::service::put_parts(layout, &mut steps)?;
     let page = done_page(layout, &file, Some(&owner_token), None, true);
     let _ = write!(
         steps.out,
@@ -507,8 +508,12 @@ pub fn uninstall(
             sys.remove_program(&left)?;
         }
     }
-    // The app's program stays: the app goes with its own uninstall.
-    if layout.word.is_none() && layout.bin.exists() {
+    // The app's parts and its program go with the center: the program
+    // serves this role alone (one role per machine).
+    for gone in crate::service::remove_parts(layout)? {
+        steps.did(gone);
+    }
+    if layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
         } else {
@@ -557,6 +562,8 @@ pub async fn update(
     let r = update_steps(layout, sys, from, &mut steps).await;
     crate::service::log_update(layout, &steps.done, &r, steps.out);
     let started = r?;
+    // Apps & features names the new version.
+    crate::service::put_parts(layout, &mut steps)?;
     let version = sys
         .version_of(&layout.bin)
         .ok()
@@ -899,12 +906,14 @@ mod tests {
             release: "http://127.0.0.1:1/none".into(),
             run: root.join("ProgramData/nerve-center/run"),
             word: None,
+            parts: Default::default(),
         }
     }
 
     /// The app's center: the service starts the app's program with its
     /// hidden word, its install puts no folder on the machine's Path, and
-    /// its uninstall leaves the app's program.
+    /// its uninstall removes the app's program, which serves this role
+    /// alone.
     #[test]
     fn the_app_s_center_runs_the_app_behind_its_word() {
         let d = tempfile::tempdir().unwrap();
@@ -929,7 +938,7 @@ mod tests {
             sys.calls()
         );
         uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
-        assert!(l.bin.is_file(), "the app's program stays");
+        assert!(!l.bin.exists(), "the app's program goes with its role");
         assert!(
             !sys.calls()
                 .iter()

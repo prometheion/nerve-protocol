@@ -91,6 +91,13 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
             "the installer's step {step} does not fit its window"
         );
     }
+    // The center's uninstall, as Apps & features opens it.
+    install.set_action("uninstall-center".into());
+    install.set_step("choose".into());
+    assert!(
+        foot_is_background(&screen.draw()),
+        "the center's uninstall does not fit the installer's window"
+    );
     // A step longer than the installer's window scrolls to its end: the
     // welcome on Windows, with its password field, after a long error.
     install.set_windows(true);

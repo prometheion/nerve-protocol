@@ -60,6 +60,20 @@ fn adds_the_app(installed: bool, app: bool, windows: bool) -> bool {
     installed && !app && !windows
 }
 
+/// The arguments of the uninstall `action`: the node's, or the center's
+/// behind its hidden word; `purge` deletes the data.
+fn uninstall_args(action: &str, purge: bool) -> Vec<String> {
+    let mut args = match action {
+        "uninstall-center" => vec![nerve_center::edition::APP_WORD.to_string()],
+        _ => Vec::new(),
+    };
+    args.push("uninstall".into());
+    if purge {
+        args.push("--purge".into());
+    }
+    args
+}
+
 /// Whether an install or uninstall error says that the keys and the proxy's
 /// login could not be put aside, and the owner may go on without them.
 fn offers_forget(error: &str) -> bool {
@@ -122,19 +136,31 @@ fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
     ))
 }
 
-/// The installer's first step: Nerve installed already, the app added to a
-/// node installed alone (Linux), a center installed here, or what this
-/// machine becomes (the role is read from the installed services).
+/// The installer's first step: the app added to a node installed alone
+/// (Linux), Nerve installed already as a node, a center installed here, or
+/// what this machine becomes (the role is read from the installed
+/// services). The app's program without a role's service, as a package
+/// leaves it, is not installed yet.
 pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) -> &'static str {
-    if app {
-        "installed"
-    } else if node_only {
+    if node_only {
         "welcome"
+    } else if app && roles.node {
+        "installed"
     } else if roles.center {
         "center"
     } else {
         "role"
     }
+}
+
+/// Whether the app at its installed place opens as the installer: where no
+/// role is installed (the program from a package, before its first start)
+/// it asks what the machine becomes; on a center it shows the center's step,
+/// where the center's web UI opens and the center is removed. A node this
+/// user runs by hand (`by_hand`: its folders named, or no systemd) keeps the
+/// app's pages, as no service is installed for it.
+pub fn opens_the_installer(roles: nerve_node::role::Roles, by_hand: bool) -> bool {
+    !roles.node && (roles.center || !by_hand)
 }
 
 /// Where the installed center's web UI listens, as it says in its file
@@ -197,7 +223,13 @@ impl Ctl {
                 i.set_newer(app && newer(&i.get_version(), &version));
                 i.set_node_only(node_only);
                 i.set_center_ui(center_ui().unwrap_or_default().into());
-                i.set_step(first_step(app, node_only, roles).into());
+                // Apps & features' Uninstall of the center role asked for
+                // the uninstall before the step was known.
+                let step = match (first_step(app, node_only, roles), i.get_action().as_str()) {
+                    ("center", "uninstall-center") => "choose",
+                    (step, _) => step,
+                };
+                i.set_step(step.into());
             });
         });
     }
@@ -252,7 +284,7 @@ impl Ctl {
     fn failed(&self, e: String) {
         self.with_install(|i| {
             let back = match i.get_action().as_str() {
-                "uninstall" => "choose",
+                "uninstall" | "uninstall-center" => "choose",
                 "install-center" => "welcome-center",
                 "update" if !i.get_shown() => "choose",
                 "update" => "installed",
@@ -366,12 +398,22 @@ impl Ctl {
     }
 
     fn uninstall_go(self: &Rc<Self>) {
-        let purge = self.with_install(|i| i.get_purge()).unwrap_or(false);
-        let mut args = vec!["uninstall".to_string()];
-        if purge {
-            args.push("--purge".into());
-        }
-        self.run_service_command("uninstall", args, None);
+        let Some((purge, action)) = self.with_install(|i| (i.get_purge(), i.get_action())) else {
+            return;
+        };
+        let action = action.to_string();
+        let args = uninstall_args(&action, purge);
+        self.run_service_command(&action, args, None);
+    }
+
+    /// Opens the center's uninstall: keep or delete its data, then go.
+    pub fn ask_uninstall_center(&self) {
+        self.with_install(|i| {
+            i.set_action("uninstall-center".into());
+            i.set_purge(false);
+            i.set_error(SharedString::new());
+            i.set_step("choose".into());
+        });
     }
 
     /// Another copy of the program was started while the app is open, such
@@ -494,6 +536,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     i.on_install_center(move || c.install_center_go());
     let c = ctl.clone();
+    i.on_ask_uninstall_center(move || c.ask_uninstall_center());
+    let c = ctl.clone();
     i.on_open_center_ui(move || {
         if let Err(e) = open_center_ui() {
             c.with_install(|i| i.set_error(e.into()));
@@ -523,6 +567,27 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 mod tests {
     use super::*;
 
+    /// The installed app opens as the installer where it has no role yet,
+    /// and on a center; on a node, and for a node run by hand, as the app.
+    #[test]
+    fn the_installed_app_opens_by_the_machine_s_role() {
+        use nerve_node::role::Roles;
+        let none = Roles::default();
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        let node = Roles {
+            center: false,
+            node: true,
+        };
+        assert!(opens_the_installer(none, false));
+        assert!(opens_the_installer(center, false));
+        assert!(opens_the_installer(center, true));
+        assert!(!opens_the_installer(node, false));
+        assert!(!opens_the_installer(none, true));
+    }
+
     /// The installer starts with what this machine becomes where no role is
     /// installed; a center installed here is said, not offered a node.
     #[test]
@@ -533,10 +598,24 @@ mod tests {
             center: true,
             node: false,
         };
+        let node = Roles {
+            center: false,
+            node: true,
+        };
         assert_eq!(first_step(false, false, none), "role");
         assert_eq!(first_step(false, false, center), "center");
-        assert_eq!(first_step(true, false, none), "installed");
-        assert_eq!(first_step(false, true, none), "welcome");
+        assert_eq!(first_step(true, false, node), "installed");
+        assert_eq!(first_step(false, true, node), "welcome");
+        // The app's program without a node's service: from its package
+        // before its first start, or the program of the center role.
+        assert_eq!(first_step(true, false, none), "role");
+        assert_eq!(first_step(true, false, center), "center");
+        // The center's uninstall goes behind its word.
+        assert_eq!(
+            uninstall_args("uninstall-center", true),
+            ["__center", "uninstall", "--purge"]
+        );
+        assert_eq!(uninstall_args("uninstall", false), ["uninstall"]);
         // The center's commands always need the rights.
         assert!(crate::app::needs_admin(&[
             "__center".into(),

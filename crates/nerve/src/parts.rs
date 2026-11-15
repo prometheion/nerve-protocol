@@ -13,6 +13,9 @@
 //!   `nerve` in `HKLM\Software\Classes`, and the entry in Apps & features
 //!   (`HKLM\…\Uninstall\Nerve`), whose Uninstall opens the app's
 //!   ([`UNINSTALL_ARG`]). The program carries its icon itself (build.rs).
+//!
+//! In the center role ([`CENTER_EDITION`]) the app puts the same entries but
+//! no `nerve://` handler: the center opens no pairing links.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,13 @@ pub const PROGRAM: &str = nerve_node::edition::DESKTOP_PROGRAM;
 pub static EDITION: Edition = Edition {
     program: PROGRAM,
     parts: Some(&Desktop),
+};
+
+/// This program as the center, behind its hidden word: the center's
+/// install puts the app's parts for that role ([`CenterDesktop`]).
+pub static CENTER_EDITION: nerve_center::edition::Edition = nerve_center::edition::Edition {
+    parts: nerve_center::edition::AppParts(Some(&CenterDesktop)),
+    ..nerve_center::edition::APP
 };
 
 /// The parts of this machine.
@@ -62,6 +72,29 @@ pub const SILENT_ARG: &str = "--silent";
 
 /// What a silent install runs: the program's own `install`, the owner's
 /// password not asked (no input), its output the caller's.
+/// The parts of the center role: the app in the menu (Linux) or in the
+/// Start menu and Apps & features (Windows), without the `nerve://` handler.
+pub struct CenterDesktop;
+
+impl nerve_center::edition::Parts for CenterDesktop {
+    fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
+        #[cfg(windows)]
+        return win::install_center(bin);
+        #[cfg(not(windows))]
+        Places::system().install_center(bin)
+    }
+
+    fn uninstall(&self, bin: &Path) -> Result<Vec<String>, String> {
+        #[cfg(windows)]
+        return win::uninstall(bin);
+        #[cfg(not(windows))]
+        {
+            let _ = bin;
+            Places::system().uninstall()
+        }
+    }
+}
+
 pub fn silent_install() -> i32 {
     let me = match std::env::current_exe() {
         Ok(me) => me,
@@ -142,24 +175,7 @@ impl Places {
     }
 
     pub fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
-        let mut did = Vec::new();
-        if self.packaged {
-            // The package's entry is the menu's Nerve: an earlier plain
-            // program's would show it twice.
-            if self.remove_entry()? {
-                did.push(
-                    "removed the menu entry of the earlier program: the package has its own"
-                        .to_string(),
-                );
-            }
-        } else {
-            write(&self.icon(), ICON, 0o644)?;
-            write(&self.entry(), desktop_entry(bin).as_bytes(), 0o644)?;
-            did.push(format!(
-                "put Nerve in the application menu ({}), with its icon",
-                self.entry().display()
-            ));
-        }
+        let mut did = self.put_entry(bin, desktop_entry(bin))?;
         let before = std::fs::read_to_string(&self.mimeapps).unwrap_or_default();
         write(
             &self.mimeapps,
@@ -175,6 +191,39 @@ impl Places {
         if let Some(missing) = self.refresh() {
             did.push(format!(
                 "Warning: {missing} is not on this machine, so the desktop may not know yet that Nerve opens nerve:// links. Install desktop-file-utils, or log out and in."
+            ));
+        }
+        Ok(did)
+    }
+
+    /// The center role's parts: the menu entry alone, which opens no
+    /// `nerve://` links.
+    pub fn install_center(&self, bin: &Path) -> Result<Vec<String>, String> {
+        let entry = desktop_entry(bin).replace(&format!("MimeType={MIME};\n"), "");
+        let did = self.put_entry(bin, entry)?;
+        let _ = self.refresh();
+        Ok(did)
+    }
+
+    /// The menu entry `entry` and the icon, but where a package has its own.
+    fn put_entry(&self, bin: &Path, entry: String) -> Result<Vec<String>, String> {
+        let _ = bin;
+        let mut did = Vec::new();
+        if self.packaged {
+            // The package's entry is the menu's Nerve: an earlier plain
+            // program's would show it twice.
+            if self.remove_entry()? {
+                did.push(
+                    "removed the menu entry of the earlier program: the package has its own"
+                        .to_string(),
+                );
+            }
+        } else {
+            write(&self.icon(), ICON, 0o644)?;
+            write(&self.entry(), entry.as_bytes(), 0o644)?;
+            did.push(format!(
+                "put Nerve in the application menu ({}), with its icon",
+                self.entry().display()
             ));
         }
         Ok(did)
@@ -448,8 +497,8 @@ fn write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
 /// The texts of Nerve's entry in Apps & features on Windows, for the
 /// program `bin` of `version`: Uninstall there runs `bin` with
 /// [`UNINSTALL_ARG`]; a quiet one (winget) runs its `uninstall`, which keeps
-/// the data.
-pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
+/// the data: the center's behind its hidden word in the `center` role.
+pub fn apps_entry(bin: &Path, version: &str, center: bool) -> Vec<(&'static str, String)> {
     let exe = bin.display().to_string();
     let folder = bin
         .parent()
@@ -461,7 +510,13 @@ pub fn apps_entry(bin: &Path, version: &str) -> Vec<(&'static str, String)> {
         ("DisplayVersion", version.to_string()),
         ("DisplayIcon", format!("\"{exe}\",0")),
         ("UninstallString", format!("\"{exe}\" {UNINSTALL_ARG}")),
-        ("QuietUninstallString", format!("\"{exe}\" uninstall")),
+        (
+            "QuietUninstallString",
+            match center {
+                true => format!("\"{exe}\" {} uninstall", nerve_center::edition::APP_WORD),
+                false => format!("\"{exe}\" uninstall"),
+            },
+        ),
         ("InstallLocation", folder),
         ("URLInfoAbout", env!("CARGO_PKG_REPOSITORY").to_string()),
         (
@@ -531,8 +586,8 @@ mod win {
     /// Puts Nerve in Apps & features: its name, publisher, version and
     /// icon, and Uninstall, which opens the app's uninstall at `bin` (the
     /// app asks keep or delete, then the rights).
-    fn put_entry(bin: &Path) -> Result<(), String> {
-        for (name, value) in super::apps_entry(bin, &version_of(bin)) {
+    fn put_entry(bin: &Path, center: bool) -> Result<(), String> {
+        for (name, value) in super::apps_entry(bin, &version_of(bin), center) {
             set_value(UNINSTALL_KEY, Some(name), &value)?;
         }
         // One program, nothing to change or repair; its size in KB.
@@ -577,9 +632,21 @@ mod win {
             "nerve:// links open in Nerve (HKEY_LOCAL_MACHINE\\{key})"
         ));
         associations_changed();
-        put_entry(bin)?;
+        put_entry(bin, false)?;
         did.push("put Nerve in Apps & features, where Uninstall removes it".to_string());
         Ok(did)
+    }
+
+    /// The center role's: the Start menu and Apps & features, and no
+    /// `nerve://` handler.
+    pub fn install_center(bin: &Path) -> Result<Vec<String>, String> {
+        let link = shortcut();
+        make_shortcut(&link, bin)?;
+        put_entry(bin, true)?;
+        Ok(vec![
+            format!("put Nerve in the Start menu ({})", link.display()),
+            "put Nerve in Apps & features, where Uninstall removes the center".to_string(),
+        ])
     }
 
     pub fn uninstall(_bin: &Path) -> Result<Vec<String>, String> {
@@ -821,7 +888,8 @@ mod tests {
     #[test]
     fn apps_and_features_uninstalls_with_the_app_at_its_place() {
         let bin = Path::new(r"C:\Program Files\Nerve\nerve.exe");
-        let entry: std::collections::HashMap<_, _> = apps_entry(bin, "0.0.6").into_iter().collect();
+        let entry: std::collections::HashMap<_, _> =
+            apps_entry(bin, "0.0.6", false).into_iter().collect();
         assert_eq!(entry["DisplayName"], "Nerve");
         assert_eq!(entry["DisplayVersion"], "0.0.6");
         assert_eq!(
@@ -986,5 +1054,50 @@ mod tests {
         assert!(!p.icons.parent().unwrap().exists() && !p.applications.exists());
         // Nothing left says nothing.
         assert!(p.uninstall().unwrap().is_empty());
+    }
+
+    /// In the center role the app is in the menu, so it opens again, but
+    /// opens no nerve:// links: the center pairs no machine by a link.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_center_role_puts_the_menu_entry_without_the_link_handler() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Places::under(d.path());
+        let bin = d.path().join("usr/local/bin/nerve");
+        let did = p.install_center(&bin).unwrap();
+        assert_eq!(did.len(), 1, "{did:?}");
+        let entry = std::fs::read_to_string(p.entry()).unwrap();
+        assert!(entry.contains(&format!("Exec={} %u", bin.display())));
+        assert!(!entry.contains("MimeType"), "{entry}");
+        assert!(!p.mimeapps.exists());
+        assert!(p.icon().exists());
+        assert_eq!(p.uninstall().unwrap().len(), 1);
+        assert!(!p.entry().exists());
+        // The package has its own entry.
+        let packaged = Places {
+            packaged: true,
+            ..Places::under(d.path())
+        };
+        assert!(packaged.install_center(&bin).unwrap().is_empty());
+        assert!(!p.entry().exists());
+    }
+
+    /// The center role's Apps & features entry opens the app's uninstall
+    /// too, and its quiet uninstall removes the center.
+    #[test]
+    fn apps_and_features_removes_the_center_in_its_role() {
+        let bin = Path::new(r"C:\Program Files\Nerve\nerve.exe");
+        let entry: std::collections::HashMap<_, _> =
+            apps_entry(bin, "0.1.0", true).into_iter().collect();
+        assert_eq!(
+            entry["UninstallString"],
+            format!(r#""C:\Program Files\Nerve\nerve.exe" {UNINSTALL_ARG}"#)
+        );
+        assert_eq!(
+            entry["QuietUninstallString"],
+            r#""C:\Program Files\Nerve\nerve.exe" __center uninstall"#
+        );
+        assert_eq!(CENTER_EDITION.word, Some("__center"));
+        assert!(CENTER_EDITION.parts.0.is_some());
     }
 }

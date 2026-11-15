@@ -916,6 +916,7 @@ mod tests {
             release: String::new(),
             run: d.path().join("run"),
             word: None,
+            parts: Default::default(),
         };
         // Nothing is installed: no command, whatever the folder.
         assert_eq!(start_after(&l, &l.state, false), None);

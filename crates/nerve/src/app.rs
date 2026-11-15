@@ -1387,7 +1387,18 @@ pub fn run(start: crate::instance::Asked) -> Result<(), Failed> {
         ctl.keep_settings(file);
     }
     ctl.take_starts(instance);
+    // At its installed place the app is the installer still where the
+    // machine has no role yet, or is a center (install::opens_the_installer).
+    let roles = nerve_node::role::Roles::here();
+    let by_hand = std::env::var_os(nerve_node::paths::CONFIG_DIR_VAR).is_some()
+        || std::env::var_os(nerve_node::paths::STATE_DIR_VAR).is_some()
+        || (cfg!(target_os = "linux") && !std::path::Path::new("/run/systemd/system").is_dir());
     if here.is_none() || here != installed {
+        ctl.installer(Launch::Elevated, &layout.bin);
+    } else if install::opens_the_installer(roles, by_hand) {
+        if roles.center && start.uninstall {
+            ctl.ask_uninstall_center();
+        }
         ctl.installer(Launch::Elevated, &layout.bin);
     } else {
         // The node's default folders: the service's when it is installed.

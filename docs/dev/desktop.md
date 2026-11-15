@@ -34,7 +34,11 @@ machine (#232):
   line), its update takes the app's release file (from a package: the
   package manager does, and the package's script restarts the service), its
   install puts the link `nerve-center` on the `PATH` (Linux) and no folder on
-  the machine's `Path` (Windows), and its uninstall leaves the app's program.
+  the machine's `Path` (Windows), and the app's parts for the role
+  (`parts::CENTER_EDITION`): the menu entry (Linux, unless a package has it)
+  or the Start menu and Apps & features (Windows), but no `nerve://` handler.
+  Its uninstall removes them and the program, which serves that role alone
+  (a package's stays the package manager's).
 - **One role per machine.** The role is read from the installed services
   (`nerve_service::role`), never from a setting of the app. The app's program
   refuses to install a node where the center's service is installed, and the
@@ -46,6 +50,11 @@ machine (#232):
   `nerve __center install`, with the rights; its last step, and the installer
   on a machine that is a center, open its web UI after checking that the
   center's service holds the port ([web UIs](web-uis.md#where-it-listens)).
+  The app at its installed place opens as the installer too while the
+  machine has no role (the package's program before its first start) or is a
+  center (its step, with **Uninstall…**; Apps & features' Uninstall opens
+  that), until the center gets pages of its own; a node run by hand (its
+  folders named, or no systemd) keeps the app's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
   where the machine is no center only; behind `__center` the center's
   `install` where none is, else its administrator's commands and `status`,

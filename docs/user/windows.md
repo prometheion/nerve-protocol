@@ -102,7 +102,8 @@ program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
 the node port (7443) of the center's service. Its last step shows what it
 did, the owner token among it, and **Open the web UI**, which checks first
 that the center holds the web UI's port. Keep the token in your password
-manager: the web UI asks for it.
+manager: the web UI asks for it. **Nerve** in the Start menu opens that step
+again; it opens no `nerve://` links.
 
 Harnesses connect over HTTP MCP: the web UI's **Connect a harness** makes a
 harness token and the entry. The center's settings are in
@@ -119,7 +120,8 @@ old one comes back. **Pre-releases** beside it makes Update take test
 builds too.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
-the data** or **Delete the data**. The quiet uninstall of Apps & features
+the data** or **Delete the data**. On a center, Apps & features or
+**Uninstall…** in the app's center step removes the center and the app. The quiet uninstall of Apps & features
 keeps it. The data holds your stored Windows password too, open to the
 administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
 `nerve-run` that Windows still holds goes after a restart; the uninstall
