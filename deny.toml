@@ -76,7 +76,7 @@ exceptions = [
 [[licenses.clarify]]
 crate = "nerve"
 expression = "Apache-2.0 AND LicenseRef-Slint-Royalty-free-2.0"
-license-files = [{ path = "LICENSE.md", hash = 0x5524ff9c }]
+license-files = [{ path = "LICENSE.md", hash = 0xe2223808 }]
 
 [bans]
 # A second version of a crate fails, except the ones named here, each with

@@ -336,6 +336,13 @@ fn rule(b: &Value) -> Result<&str, (u16, String)> {
         .ok_or_else(|| (400, "rule is missing".to_string()))
 }
 
+/// What a whole path starts with, as the refusal says it.
+const WHOLE: &str = if cfg!(windows) {
+    "it starts with a drive, like C:\\"
+} else {
+    "it starts at /"
+};
+
 /// A folder's path: absolute, as the node has no working folder of the
 /// owner's to read a relative one against.
 fn folder(b: &Value) -> Result<&str, (u16, String)> {
@@ -344,7 +351,7 @@ fn folder(b: &Value) -> Result<&str, (u16, String)> {
         .filter(|p| !p.is_empty())
         .ok_or_else(|| (400, "path is missing".to_string()))?;
     if !Path::new(p).is_absolute() {
-        return Err((400, format!("{p:?} is not a whole path: it starts at /")));
+        return Err((400, format!("{p:?} is not a whole path: {WHOLE}")));
     }
     Ok(p)
 }
@@ -369,7 +376,7 @@ fn folder_like<'a>(b: &'a Value, key: &str) -> Result<&'a str, (u16, String)> {
         .filter(|p| !p.is_empty())
         .ok_or_else(|| (400, format!("{key} is missing")))?;
     if !Path::new(p).is_absolute() {
-        return Err((400, format!("{p:?} is not a whole path: it starts at /")));
+        return Err((400, format!("{p:?} is not a whole path: {WHOLE}")));
     }
     Ok(p)
 }
@@ -758,6 +765,13 @@ fn log(file: &Path, problems: bool) -> ApiResult {
 mod tests {
     use super::*;
 
+    /// A whole path on the platform the tests run on.
+    const WHOLE_PATH: &str = if cfg!(windows) {
+        r"C:\srv\data"
+    } else {
+        "/srv/data"
+    };
+
     #[test]
     fn values_go_after_the_options_and_never_read_as_one() {
         assert_eq!(
@@ -802,7 +816,7 @@ mod tests {
             assert_eq!(center(&bad).unwrap_err().0, 400, "{bad}");
         }
         assert!(folder(&json!({"path": "relative/dir"})).is_err());
-        assert!(folder(&json!({"path": "/srv/data"})).is_ok());
+        assert!(folder(&json!({"path": WHOLE_PATH})).is_ok());
         assert!(word(&json!({"mode": "folder; rm"}), "mode").is_err());
         assert!(list(&json!({"list": "other"})).is_err());
         assert!(link(&json!({"link": "nerve://pair?x\nmore"})).is_err());
@@ -898,7 +912,7 @@ mod tests {
         assert!(name(&json!({"name": "a b"}), "name").is_err());
         assert!(address(&json!({"address": "relay.example"})).is_err());
         assert!(folder_like(&json!({"exe": "bin/true"}), "exe").is_err());
-        assert!(folder_like(&json!({"exe": "/usr/bin/true"}), "exe").is_ok());
+        assert!(folder_like(&json!({"exe": WHOLE_PATH}), "exe").is_ok());
         // The settings shown keep no token hash of the web UI.
         let mut cfg = nerve_policy::NodeConfig::default();
         cfg.ui.tokens.push(nerve_policy::config::UiToken {

@@ -83,13 +83,17 @@ fn install_control_update_and_uninstall_on_this_machine() {
     let store = window.global::<Store>();
     let cli = Runner::new(exe.clone(), None, None);
 
-    // The downloaded file: what it installs, then Install.
+    // The downloaded file: the role first (this machine is a node), then
+    // what it installs, then Install.
     ctl.installer(Launch::Plain, &layout.bin);
     assert_eq!(
         install.get_step(),
-        "welcome",
+        "role",
         "Nerve is installed here already"
     );
+    // What the role step's Continue does with the node's card picked.
+    install.set_role(0);
+    install.set_step("welcome".into());
     install.invoke_install();
     eprintln!("install:\n{}", said(&install));
     assert_eq!(install.get_step(), "done", "{}", said(&install));
