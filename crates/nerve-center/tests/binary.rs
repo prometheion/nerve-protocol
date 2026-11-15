@@ -929,6 +929,14 @@ fn the_administrator_s_commands_answer_in_json() {
         v["messages"].as_array().is_some_and(|m| !m.is_empty()),
         "{v}"
     );
+    // A service command takes `--json` for how to answer, not for a setting
+    // it refuses: here it gets as far as its own check of the rights.
+    #[cfg(target_os = "linux")]
+    if !nerve_service::System::is_root(&nerve_service::Host) {
+        let out = owner(&["--json", "install"], Some(&state));
+        let e = parse(&out)["error"].as_str().unwrap().to_string();
+        assert!(!e.contains("--json"), "{e}");
+    }
     // A command that asks the running center does not take it.
     let out = owner(&["--json", "nodes"], Some(&state));
     assert!(!out.status.success());
