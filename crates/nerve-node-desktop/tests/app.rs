@@ -780,6 +780,21 @@ fn the_app_drives_the_cli_end_to_end() {
     st["owner_full_rights"] = serde_json::json!(false);
     ctl.show_status(Ok(st));
     assert!(!perm.get_owner_is_root() && !perm.get_owner_is_admin());
+    // A center that is unpaired while a form row is open for it: the center
+    // that takes its place must not get the form's rights.
+    perm.set_folder_edit("/somewhere".into());
+    perm.set_folder_open(true);
+    perm.set_add_list(1);
+    perm.set_edit_list(0);
+    ctl.show_status(Ok(
+        serde_json::json!({"daemon": "running", "owner": "alice",
+        "centers": [{"name": "other", "mode": "user", "account": "alice"}]}),
+    ));
+    assert_eq!(perm.get_center(), "other");
+    assert!(!perm.get_folder_open());
+    assert_eq!(perm.get_folder_edit(), "");
+    assert_eq!(perm.get_add_list(), -1);
+    assert_eq!(perm.get_edit_list(), -1);
     ctl.refresh_status();
     until(&ctl, "the node's own status", || {
         perm.get_landlock() && perm.get_home_warning() == "" && perm.get_stale() == ""

@@ -38,6 +38,8 @@ impl Ctl {
                 None => {
                     p.set_current(0);
                     p.set_center(names.first().map(String::as_str).unwrap_or("").into());
+                    // The center the forms were opened for is gone.
+                    close_forms(p);
                 }
             }
         });
@@ -835,6 +837,15 @@ impl Ctl {
     }
 }
 
+/// Closes the folder and rule form rows. They show one center's rights, so
+/// every change of the page's center closes them.
+fn close_forms(p: &Perm<'_>) {
+    p.set_folder_open(false);
+    p.set_folder_edit(SharedString::new());
+    p.set_add_list(-1);
+    p.set_edit_list(-1);
+}
+
 pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let p = window.global::<Perm>();
     let c = ctl.clone();
@@ -848,10 +859,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
                 p.set_center(name);
                 // A form row was opened for the center before, and shows
                 // that center's rights: it would save them to this one.
-                p.set_folder_open(false);
-                p.set_folder_edit(SharedString::new());
-                p.set_add_list(-1);
-                p.set_edit_list(-1);
+                close_forms(p);
             });
             c.perm_load();
         }
