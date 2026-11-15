@@ -161,6 +161,8 @@ impl System for Fake {
         account: Option<&Account>,
         args: &[&str],
     ) -> Result<String, String> {
+        // The app asks for the center's by its hidden first word.
+        let args = args.strip_prefix(&["__center"]).unwrap_or(args);
         // The service's files are asked of the program as root: a process
         // of the service's user could be reached by the others of it.
         match (args.first().copied(), account) {

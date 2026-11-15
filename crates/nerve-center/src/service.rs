@@ -1706,6 +1706,11 @@ pub fn terminal_name(layout: &Layout) -> PathBuf {
 fn link_terminal_name(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let link = terminal_name(layout);
     let at = |e: std::io::Error| format!("{}: {e}", link.display());
+    // A link to the plain program that the app's package replaced is ours
+    // to move: it must not keep the command on the older program.
+    let to_plain = plain_program(layout).is_some_and(|plain| {
+        plain != layout.bin && std::fs::read_link(&link).is_ok_and(|t| t == plain)
+    });
     match std::fs::symlink_metadata(&link) {
         Ok(m)
             if m.file_type().is_symlink()
@@ -1713,6 +1718,7 @@ fn link_terminal_name(layout: &Layout, steps: &mut Steps) -> Result<(), String> 
         {
             return Ok(());
         }
+        Ok(m) if m.file_type().is_symlink() && to_plain => {}
         // A file, or a link to a program of another's (a terminal center
         // kept elsewhere).
         Ok(_) => {
@@ -1746,6 +1752,55 @@ fn link_terminal_name(layout: &Layout, steps: &mut Steps) -> Result<(), String> 
     Ok(())
 }
 
+/// Where the plain program of the app's center is: the `nerve` of the
+/// `/usr/local/bin` where `nerve-center` goes, beside the package's in
+/// `/usr/bin` (the same place as `layout.bin` for a plain install).
+fn plain_program(layout: &Layout) -> Option<PathBuf> {
+    layout
+        .bin
+        .file_name()
+        .map(|name| terminal_name(layout).with_file_name(name))
+}
+
+/// Where the app came from a package, the plain program an earlier install
+/// of the center put in `/usr/local/bin` goes: the package's takes its
+/// place, and neither the command nor the menu may run the older one. Not
+/// where the node's unit starts it.
+fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    let Some(plain) = plain_program(layout).filter(|p| *p != layout.bin) else {
+        return Ok(());
+    };
+    if !std::fs::symlink_metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    let node_runs_it = layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &plain));
+    if node_runs_it {
+        return Ok(());
+    }
+    std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
+    steps.did(format!(
+        "removed the earlier program {}: the package's takes its place",
+        plain.display()
+    ));
+    Ok(())
+}
+
+/// What an update of the app from its package does besides the service: the
+/// center a plain program installed moves to the package's program in its
+/// menu entry, its command and its file too, as the node's does
+/// (`install_parts`).
+fn take_over_plain(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    put_parts(layout, steps)?;
+    drop_plain_program(layout, steps)?;
+    link_terminal_name(layout, steps)
+}
+
 /// Removes the link [`link_terminal_name`] made, and no other; the link it
 /// removed.
 fn unlink_terminal_name(layout: &Layout) -> Result<Option<PathBuf>, String> {
@@ -1772,6 +1827,18 @@ pub async fn update(
     from: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    update_as(layout, sys, from, out, packaged(layout)).await
+}
+
+/// [`update`] where `packaged` says whether the program is the package's
+/// (its place is `/usr/bin`, which a test cannot use).
+async fn update_as(
+    layout: &Layout,
+    sys: &dyn System,
+    from: Option<&Path>,
+    out: &mut dyn Write,
+    packaged: bool,
+) -> Result<(), String> {
     supported(sys, "update")?;
     if !layout.installed() || !layout.bin.is_file() {
         return Err(NOT_INSTALLED.into());
@@ -1785,7 +1852,7 @@ pub async fn update(
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     // The app from a package: its package manager replaces the program, and
     // the package's script runs this with the program in place.
-    let placed = match (packaged(layout), from) {
+    let placed = match (packaged, from) {
         (false, _) => None,
         (true, Some(f)) if real(f).is_some() && real(f) == real(&layout.bin) => {
             Some(nerve_service::Placed::default())
@@ -1813,7 +1880,10 @@ pub async fn update(
     };
     let mut steps = Steps::new(out);
     let started = || sys.wait_running(&layout.state);
-    let r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
+    let mut r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
+    if matches!(r, Ok(true)) && p.placed.is_some() {
+        r = take_over_plain(layout, &mut steps).map(|()| true);
+    }
     log_update(layout, &steps.done, &r, steps.out);
     let started = r?;
     let version = sys
@@ -2110,6 +2180,79 @@ mod tests {
             *PARTS_DID.lock().unwrap(),
             [format!("put {bin}"), format!("removed {bin}")]
         );
+    }
+
+    /// What the parts of the take-over test were asked to do.
+    static PARTS_TOOK: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct TakeOverParts;
+
+    impl crate::edition::Parts for TakeOverParts {
+        fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_TOOK
+                .lock()
+                .unwrap()
+                .push(format!("put {}", bin.display()));
+            Ok(vec!["put Nerve in the menu".into()])
+        }
+        fn uninstall(&self, _: &Path) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The app's package over a center the plain program installed: the
+    /// update moves the service to the package's program, and also the
+    /// plain program, its menu entry (the parts) and the `nerve-center`
+    /// link go to it, so the menu and the command never run the older
+    /// program. The node's unit starting the plain program keeps it.
+    #[tokio::test]
+    async fn the_package_takes_over_a_center_the_plain_program_installed() {
+        static PARTS: TakeOverParts = TakeOverParts;
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("usr/bin/nerve");
+        l.word = Some(crate::edition::APP_WORD);
+        l.parts = crate::edition::AppParts(Some(&PARTS));
+        let plain = d.path().join("usr/local/bin/nerve");
+        let link = terminal_name(&l);
+        assert_eq!(plain_program(&l).unwrap(), plain);
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        // The plain program installed the center.
+        std::fs::write(&plain, "nerve-center 0.9.0\n").unwrap();
+        let sys = Fake::new();
+        let mut earlier = l.clone();
+        earlier.bin = plain.clone();
+        install(&earlier, &sys, &plain, &mut Vec::new()).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), plain);
+        // The package puts its program in place and runs the update.
+        std::fs::write(&l.bin, "nerve-center 1.3.0\n").unwrap();
+        let before = PARTS_TOOK.lock().unwrap().len();
+        let mut out = Vec::new();
+        update_as(&l, &sys, Some(&l.bin), &mut out, true)
+            .await
+            .unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("removed the earlier program"), "{said}");
+        assert!(std::fs::symlink_metadata(&plain).is_err(), "{said}");
+        assert_eq!(std::fs::read_link(&link).unwrap(), l.bin, "{said}");
+        assert!(l.bin.is_file());
+        assert_eq!(
+            PARTS_TOOK.lock().unwrap()[before..],
+            [format!("put {}", l.bin.display())]
+        );
+        // A node's unit that starts the plain program keeps it.
+        std::fs::write(&plain, "nerve-center 0.9.0\n").unwrap();
+        std::fs::write(
+            l.unit.with_file_name("nerve-node.service"),
+            format!(
+                "[Service]\nExecStart={} --config-dir x run\n",
+                plain.display()
+            ),
+        )
+        .unwrap();
+        take_over_plain(&l, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file());
     }
 
     /// The release files: the terminal center's for Linux on both machines,

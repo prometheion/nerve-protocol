@@ -640,7 +640,8 @@ and `status` an answer for programs, as the node's commands have one: the
 lines they print as `{"messages": [...]}`, with their data beside them
 (`owner-token`'s `token` and `made`; `status`'s `installed`, `service` and
 `running`), and an error as `{"error": "..."}` on stdout too. The other
-commands refuse it. The desktop app runs these through its broker.
+commands refuse it. The desktop app runs all of these but `backup` and `restore` through its
+broker (see desktop.md, the broker's closed lists).
 
 ### Update
 
