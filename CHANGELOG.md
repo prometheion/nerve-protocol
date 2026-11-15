@@ -126,8 +126,8 @@ and every limit is in
   node, and a quiet uninstall that keeps the data); a harness reaches the
   center over HTTP MCP; tested on Windows 11 Pro and Windows Server 2025.
 - The package's update restarts the service that runs the app's program,
-  the node's or the center's; one a terminal program installed is that
-  program's to update. Where that restart failed, `status` and the app say
+  the node's or the center's, also one the plain program installed; one a
+  terminal program installed is that program's to update. Where that restart failed, `status` and the app say
   that the service still runs the earlier program (for a service that starts
   the app's program only).
 - `update` checks the download against the release's `SHA256SUMS` and puts

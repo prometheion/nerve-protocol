@@ -218,11 +218,12 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
         "Depends: libc6 (>= 2.35), libfontconfig1",
         "Requires: glibc >= 2.35",
         "Requires: fontconfig",
-        // The service that runs the app's program, whichever role it is,
-        // restarts with the new one; a terminal program's is left alone.
-        "grep -qs \"^ExecStart=/usr/bin/nerve \" /etc/systemd/system/nerve-node.service",
+        // The service that runs the app's program (the package's or the
+        // plain one's), whichever role it is, restarts with the new one;
+        // a terminal program's is left alone (checked below).
+        "/etc/systemd/system/nerve-node.service",
         "/usr/bin/nerve update --from=/usr/bin/nerve",
-        "grep -qs \"^ExecStart=/usr/bin/nerve __center \" /etc/systemd/system/nerve-center.service",
+        "/etc/systemd/system/nerve-center.service",
         "/usr/bin/nerve __center update --from=/usr/bin/nerve",
         // The pre-releases' package, which this one replaces.
         "Replaces: nerve-node-desktop",
@@ -235,6 +236,63 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
         "update --from=/usr/bin/nerve",
     ] {
         assert!(script.contains(needed), "{needed}");
+    }
+    // Which units that condition takes, run against the unit texts the
+    // programs write: the package's program and the plain one's, either
+    // role; a terminal program's (`nerve-node`, `nerve-center`) is left.
+    let tested = |role: &str, exec: &str| {
+        let line = script
+            .lines()
+            .find(|l| l.contains("grep -qs") && l.contains(&format!("nerve-{role}.service")))
+            .unwrap_or_else(|| panic!("no condition for the {role}"))
+            .trim()
+            .trim_start_matches("if ")
+            .trim_end_matches("; then")
+            .to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("unit");
+        std::fs::write(&unit, format!("[Service]\nExecStart={exec}\n")).unwrap();
+        let line = line.replace(
+            &format!("/etc/systemd/system/nerve-{role}.service"),
+            "\"$0\"",
+        );
+        std::process::Command::new("sh")
+            .args(["-c", &line])
+            .arg(&unit)
+            .status()
+            .unwrap()
+            .success()
+    };
+    for (role, exec, takes) in [
+        ("node", "/usr/bin/nerve --config-dir /etc/nerve run", true),
+        (
+            "node",
+            "/usr/local/bin/nerve --config-dir /etc/nerve run",
+            true,
+        ),
+        (
+            "node",
+            "/usr/local/bin/nerve-node --config-dir /etc/nerve run",
+            false,
+        ),
+        ("node", "/usr/bin/nerve-node run", false),
+        (
+            "center",
+            "/usr/bin/nerve __center --state-dir /var/lib/c",
+            true,
+        ),
+        (
+            "center",
+            "/usr/local/bin/nerve __center --state-dir /var/lib/c",
+            true,
+        ),
+        (
+            "center",
+            "/usr/local/bin/nerve-center --state-dir /var/lib/c",
+            false,
+        ),
+    ] {
+        assert_eq!(tested(role, exec), takes, "{role}: {exec}");
     }
     assert!(script.contains(&format!("\"$bin\" {} ", nerve::parts::PACKAGE_ROOT_ARG)));
     assert!(script.contains(&format!("${{{}:-}}", nerve_node::service::UPDATING_VAR)));

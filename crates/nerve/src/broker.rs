@@ -76,7 +76,10 @@ fn output_of(v: &Value) -> Output {
 ///   a machine that is a center only. Where no role is installed yet, a node
 ///   run by hand is driven the same way, by the folders it is given.
 /// - The center's (`__center` first): `install` where no center is yet;
-///   where one is installed, its administrator's commands and `status`, and
+///   where one is installed, its administrator's commands and `status` (none
+///   with a setting of the center's, like `--state-dir`, which would point an
+///   elevated command at another folder; no `backup` or `restore`, whose
+///   file a request would name), and
 ///   `update` from the release only (from a file it stays a terminal's: the
 ///   file would lie in the user's folders, where a program of the user could
 ///   replace it before the broker reads it). Not on a machine that has a
@@ -92,12 +95,18 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
         }
         let argv = std::iter::once(nerve_center::edition::TERMINAL_NAME)
             .chain(args[1..].iter().map(String::as_str));
-        let cmd = nerve_center::config::command_of(argv);
-        let Some(cmd) = cmd else {
+        let Some((cmd, given)) = nerve_center::config::command_given(argv) else {
             return Err("the broker runs the center's administrator commands only".into());
         };
         return match cmd {
             Cmd::Install => Ok(()),
+            // The installed center is the one these commands work on; a
+            // setting like --state-dir would point an elevated command at
+            // another folder.
+            _ if !given.is_empty() => Err(format!(
+                "the broker runs the installed center's commands only, not with {}",
+                given.join(", ")
+            )),
             _ if !roles.center => {
                 Err("no center is installed here: the broker runs only its install".into())
             }
@@ -110,8 +119,6 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
             | Cmd::Service { cmd: Some(_) }
             | Cmd::Set { .. }
             | Cmd::OwnerToken { .. }
-            | Cmd::Backup { .. }
-            | Cmd::Restore { .. }
             | Cmd::Status => Ok(()),
             _ => Err("the broker runs the center's administrator commands only".into()),
         };
@@ -135,6 +142,20 @@ pub fn serve(
     output: Box<dyn Write + Send>,
     exe: PathBuf,
     app_user_sid: Option<&str>,
+) {
+    serve_with(input, output, exe, app_user_sid, || {
+        nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM)
+    });
+}
+
+/// [`serve`] with `roles`, which says the app's roles installed on the
+/// machine now; the tests give fixed ones, not the machine's.
+fn serve_with(
+    input: impl Read,
+    output: Box<dyn Write + Send>,
+    exe: PathBuf,
+    app_user_sid: Option<&str>,
+    roles: impl Fn() -> nerve_node::role::Roles,
 ) {
     let named: Arc<Vec<String>> = Arc::new(
         app_user_sid
@@ -175,8 +196,7 @@ pub fn serve(
         // The closed list of the app's role here, read from the services at
         // each request ([`allowed`]); a role a terminal program installed
         // beside it is the terminal's (nerve_node::role::Roles::of_app).
-        let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
-        if let Err(e) = allowed(&args, roles) {
+        if let Err(e) = allowed(&args, roles()) {
             let refused = Output {
                 stderr: e.into_bytes(),
                 ..Output::default()
@@ -916,6 +936,7 @@ pub mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nerve_node::role::Roles;
 
     /// A pipe in memory: what one side writes, the other reads.
     fn pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
@@ -928,7 +949,6 @@ mod tests {
     /// is neither.
     #[test]
     fn the_broker_runs_only_the_installed_role_s_list() {
-        use nerve_node::role::Roles;
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let none = Roles::default();
         let center = Roles {
@@ -951,8 +971,6 @@ mod tests {
             &["__center", "--json", "service", "restart"],
             &["__center", "--json", "set", "ui", "off"],
             &["__center", "--json", "owner-token"],
-            &["__center", "--json", "backup", "/tmp/b"],
-            &["__center", "--json", "restore", "/tmp/b"],
             &["__center", "--json", "status"],
         ] {
             assert!(allowed(&args(ok), center).is_ok(), "{ok:?}");
@@ -964,6 +982,16 @@ mod tests {
             &["__center"],
             &["__center", "--json", "service"],
             &["--json", "status"],
+            // A file a request names, written or read as an administrator.
+            &["__center", "--json", "backup", "/tmp/b"],
+            &["__center", "--json", "backup", "/tmp/b", "--overwrite"],
+            &["__center", "--json", "restore", "/tmp/b"],
+            // A setting of the center's points an owner command at another
+            // folder than the installed center's, before the command or after.
+            &["__center", "--state-dir", "/tmp/s", "--json", "status"],
+            &["__center", "--json", "status", "--state-dir", "/tmp/s"],
+            &["__center", "--json", "owner-token", "--state-dir=/tmp/s"],
+            &["__center", "--json", "update", "--state-dir", "/tmp/s"],
         ] {
             assert!(allowed(&args(refused), center).is_err(), "{refused:?}");
         }
@@ -1001,11 +1029,12 @@ mod tests {
         // A program that is not this one would be refused before it ran;
         // here nothing must run at all.
         let t = std::thread::spawn(move || {
-            serve(
+            serve_with(
                 req_r,
                 Box::new(ans_w),
                 PathBuf::from("/nonexistent/program"),
                 None,
+                Roles::default,
             )
         });
         writeln!(req_w, "{}", json!({"id": 7, "args": ["__exec-shim", "x"]})).unwrap();
@@ -1033,11 +1062,12 @@ mod tests {
         let (ans_r, ans_w) = pipe();
         // Nothing must run at all.
         let t = std::thread::spawn(move || {
-            serve(
+            serve_with(
                 req_r,
                 Box::new(ans_w),
                 PathBuf::from("/nonexistent/program"),
                 Some("S-1-5-21-1-2-3-1001"),
+                Roles::default,
             )
         });
         for (id, args) in [
@@ -1115,7 +1145,9 @@ mod tests {
             let (req_r, mut req_w) = pipe();
             let (ans_r, ans_w) = pipe();
             let exe = exe.clone();
-            let t = std::thread::spawn(move || serve(req_r, Box::new(ans_w), exe, sid));
+            let t = std::thread::spawn(move || {
+                serve_with(req_r, Box::new(ans_w), exe, sid, Roles::default)
+            });
             let mut said = Vec::new();
             let mut lines = BufReader::new(ans_r).lines();
             lines.next();
@@ -1154,7 +1186,13 @@ mod tests {
         let (req_r, mut req_w) = pipe();
         let (ans_r, ans_w) = pipe();
         let t = std::thread::spawn(move || {
-            serve(req_r, Box::new(ans_w), exe, Some("S-1-5-21-1-2-3-1001"))
+            serve_with(
+                req_r,
+                Box::new(ans_w),
+                exe,
+                Some("S-1-5-21-1-2-3-1001"),
+                Roles::default,
+            )
         });
         let mut lines = BufReader::new(ans_r).lines();
         lines.next();
@@ -1171,6 +1209,49 @@ mod tests {
             done["done"]["stdout"].as_str().unwrap().trim(),
             "__center --json install unset",
             "{done}"
+        );
+    }
+
+    /// The broker's list is the one of the roles it is given, not of the
+    /// machine the test runs on.
+    #[test]
+    fn the_broker_takes_its_roles_from_the_reader_it_is_given() {
+        let asked = |roles: Roles, args: Value| {
+            let (req_r, mut req_w) = pipe();
+            let (ans_r, ans_w) = pipe();
+            let t = std::thread::spawn(move || {
+                serve_with(
+                    req_r,
+                    Box::new(ans_w),
+                    PathBuf::from("/nonexistent/program"),
+                    None,
+                    move || roles,
+                )
+            });
+            writeln!(req_w, "{}", json!({"id": 1, "args": args})).unwrap();
+            drop(req_w);
+            let lines: Vec<Value> = BufReader::new(ans_r)
+                .lines()
+                .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+                .collect();
+            t.join().unwrap();
+            lines[1]["done"]["stderr"].as_str().unwrap().to_string()
+        };
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        let node = Roles {
+            node: true,
+            center: false,
+        };
+        assert!(
+            asked(center, json!(["--json", "status"])).contains("is a center"),
+            "a center refuses the node's commands"
+        );
+        assert!(
+            asked(node, json!(["__center", "--json", "status"])).contains("is a node"),
+            "a node refuses the center's commands"
         );
     }
 

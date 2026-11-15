@@ -34,11 +34,11 @@ what your centers may do here, or a center, which your agent's harness
 reaches; its window, and the node's command line."
 homepage="https://github.com/prometheion/nerve-protocol"
 after_install='if [ -z "${NERVE_PACKAGE_UPDATE:-}" ]; then
-  if grep -qs "^ExecStart=/usr/bin/nerve " /etc/systemd/system/nerve-node.service; then
+  if grep -qsE "^ExecStart=/usr/(local/)?bin/nerve " /etc/systemd/system/nerve-node.service; then
     /usr/bin/nerve update --from=/usr/bin/nerve \
       || echo "nerve: the node still runs the earlier program; the app'"'"'s Update tries again" >&2
   fi
-  if grep -qs "^ExecStart=/usr/bin/nerve __center " /etc/systemd/system/nerve-center.service; then
+  if grep -qsE "^ExecStart=/usr/(local/)?bin/nerve __center " /etc/systemd/system/nerve-center.service; then
     /usr/bin/nerve __center update --from=/usr/bin/nerve \
       || echo "nerve: the center still runs the earlier program; sudo nerve-center update --from=/usr/bin/nerve tries again" >&2
   fi

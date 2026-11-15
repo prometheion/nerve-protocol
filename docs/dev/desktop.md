@@ -67,7 +67,10 @@ machine (#232):
   folders named, or no systemd) keeps the app's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
   where the machine is no center only; behind `__center` the center's `install` where none is, else its
-  administrator's commands and `status`, and `update` from the release only
+  administrator's commands and `status`, never with a setting of the center's
+  (`--state-dir` would point an elevated command at another folder), no
+  `backup` or `restore` (their file would be one a request names; the
+  center's pages say how it crosses), and `update` from the release only
   (from a file it stays a terminal's: the file would lie in the user's
   folders), and never where the machine has a node: a center beside a node
   is the terminal's. The center's commands always take the broker.

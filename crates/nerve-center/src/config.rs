@@ -473,9 +473,24 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    command_given(args).map(|(cmd, _)| cmd)
+}
+
+/// [`command_of`] with the settings the command line itself gives
+/// ([`settings_given`]'s flags, not the variables of this process): the app's
+/// broker refuses the ones a command does not take, since a setting like
+/// `--state-dir` points an owner command at another folder.
+pub fn command_given<I, S>(args: I) -> Option<(Cmd, Vec<String>)>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
     use clap::FromArgMatches;
     let m = command().try_get_matches_from(args).ok()?;
-    Args::from_arg_matches(&m).ok()?.cmd
+    let cmd = Args::from_arg_matches(&m).ok()?.cmd?;
+    let mut given = settings_given(&m);
+    given.retain(|g| g.starts_with("--"));
+    Some((cmd, given))
 }
 
 impl Cmd {
