@@ -7,8 +7,11 @@
 //!   and KDE read, its icon in the hicolor theme of `/usr/local/share/icons`,
 //!   and `x-scheme-handler/nerve` in the entry and as the default in
 //!   `/etc/xdg/mimeapps.list`. The app from a .deb or .rpm (#212) has the
-//!   package's entry and icon in `/usr/share` ([`package_root`]), so it
-//!   writes only the default handler.
+//!   package's entry and icon in `/usr/share` ([`package_root`]); that entry
+//!   opens no links, so a center, and a machine with no role yet, answers
+//!   none. The node role puts an entry of the same name in
+//!   `/usr/local/share/applications`, which the desktop reads first, with
+//!   the handler, and the default handler.
 //! - Windows: a shortcut in the Start menu of all users, the URL protocol
 //!   `nerve` in `HKLM\Software\Classes`, and the entry in Apps & features
 //!   (`HKLM\…\Uninstall\Nerve`), whose Uninstall opens the app's
@@ -175,7 +178,7 @@ impl Places {
     }
 
     pub fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
-        let mut did = self.put_entry(bin, desktop_entry(bin))?;
+        let mut did = self.put_entry(desktop_entry(bin), true)?;
         let before = std::fs::read_to_string(&self.mimeapps).unwrap_or_default();
         write(
             &self.mimeapps,
@@ -199,19 +202,24 @@ impl Places {
     /// The center role's parts: the menu entry alone, which opens no
     /// `nerve://` links.
     pub fn install_center(&self, bin: &Path) -> Result<Vec<String>, String> {
-        let entry = desktop_entry(bin).replace(&format!("MimeType={MIME};\n"), "");
-        let did = self.put_entry(bin, entry)?;
+        let did = self.put_entry(menu_entry(bin), false)?;
         let _ = self.refresh();
         Ok(did)
     }
 
-    /// The menu entry `entry` and the icon, but where a package has its own.
-    fn put_entry(&self, bin: &Path, entry: String) -> Result<Vec<String>, String> {
-        let _ = bin;
+    /// The menu entry `entry` and the icon, but where a package has its own:
+    /// then only the entry that opens links (`link`), which goes before the
+    /// package's of the same name; no other. The package's is the menu's
+    /// Nerve, and an earlier plain program's would show it twice.
+    fn put_entry(&self, entry: String, link: bool) -> Result<Vec<String>, String> {
         let mut did = Vec::new();
-        if self.packaged {
-            // The package's entry is the menu's Nerve: an earlier plain
-            // program's would show it twice.
+        if self.packaged && link {
+            write(&self.entry(), entry.as_bytes(), 0o644)?;
+            did.push(format!(
+                "put the nerve:// link handler before the package's menu entry ({})",
+                self.entry().display()
+            ));
+        } else if self.packaged {
             if self.remove_entry()? {
                 did.push(
                     "removed the menu entry of the earlier program: the package has its own"
@@ -339,7 +347,9 @@ pub fn package_root(root: &Path, exe: &Path, package: Package) -> Result<Vec<Pat
     };
     let files = [
         (under(&bin), program, 0o755),
-        (share.entry(), desktop_entry(&bin).into_bytes(), 0o644),
+        // Without the link handler: that is the node role's, which a center
+        // is not (the node role's install adds it).
+        (share.entry(), menu_entry(&bin).into_bytes(), 0o644),
         (share.icon(), ICON.to_vec(), 0o644),
         (
             under(Path::new(Package::MARK)),
@@ -380,6 +390,12 @@ pub fn package_root_main(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// The menu's "Nerve" with no `nerve://` link to open ([`desktop_entry`]
+/// without its handler).
+pub fn menu_entry(bin: &Path) -> String {
+    desktop_entry(bin).replace(&format!("MimeType={MIME};\n"), "")
 }
 
 /// The desktop entry: the menu's "Nerve", which opens `bin`, also with a
@@ -962,6 +978,8 @@ mod tests {
         assert_eq!(std::fs::read(&wrote[0]).unwrap(), b"the program");
         let entry = std::fs::read_to_string(&wrote[1]).unwrap();
         assert!(entry.contains("\nExec=/usr/bin/nerve %u\n"), "{entry}");
+        // A center from the package opens no links: the node role adds them.
+        assert!(!entry.contains("MimeType"), "{entry}");
         assert_eq!(std::fs::read(&wrote[2]).unwrap(), ICON);
         assert_eq!(
             nerve_node::service::package_at(&wrote[3]),
@@ -975,11 +993,13 @@ mod tests {
         assert_eq!(package_root_main(&["x".into(), "tar".into()]), 2);
     }
 
-    /// The app from a package writes only the default handler: the menu
-    /// entry and icon are the package's, and an earlier plain program's go.
+    /// The app from a package has the menu entry and icon of the package,
+    /// which opens no links: the node role puts the link handler before it
+    /// (an entry of its name in /usr/local) and the default handler, and an
+    /// earlier plain program's entry goes in the center role.
     #[cfg(not(windows))]
     #[test]
-    fn the_app_from_a_package_leaves_the_menu_entry_to_it() {
+    fn the_app_from_a_package_adds_only_the_link_handler_to_its_menu_entry() {
         let d = tempfile::tempdir().unwrap();
         let plain = Places::under(d.path());
         plain
@@ -990,19 +1010,31 @@ mod tests {
             ..Places::under(d.path())
         };
         let did = p.install(Path::new("/usr/bin/nerve")).unwrap();
-        assert!(did[0].contains("the package has its own"), "{did:?}");
-        assert!(!p.entry().exists() && !p.icon().exists());
+        assert!(did[0].contains("link handler"), "{did:?}");
+        let entry = std::fs::read_to_string(p.entry()).unwrap();
+        assert!(entry.contains("\nExec=/usr/bin/nerve %u\n"), "{entry}");
+        assert!(
+            entry.contains("\nMimeType=x-scheme-handler/nerve;\n"),
+            "{entry}"
+        );
         assert!(
             std::fs::read_to_string(&p.mimeapps)
                 .unwrap()
                 .contains("x-scheme-handler/nerve=nerve.desktop")
         );
-        // Again writes nothing of the menu's.
+        // Again writes the same.
         let did = p.install(Path::new("/usr/bin/nerve")).unwrap();
-        assert_eq!(did.len(), 1, "{did:?}");
-        assert!(!p.applications.exists() || !p.entry().exists());
+        assert_eq!(did.len(), 2, "{did:?}");
         p.uninstall().unwrap();
-        assert!(!p.mimeapps.exists());
+        assert!(!p.mimeapps.exists() && !p.entry().exists());
+        // A center from the package opens no links: it puts nothing, and
+        // takes an earlier plain program's entry away.
+        plain
+            .install(&d.path().join("usr/local/bin/nerve"))
+            .unwrap();
+        let did = p.install_center(Path::new("/usr/bin/nerve")).unwrap();
+        assert!(did[0].contains("the package has its own"), "{did:?}");
+        assert!(!p.entry().exists());
     }
 
     #[cfg(not(windows))]

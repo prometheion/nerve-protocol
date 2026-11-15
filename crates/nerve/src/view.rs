@@ -31,6 +31,10 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 
 /// What the Overview says while an administrator is the node's owner on
 /// Windows, the twin of [`ROOT_OWNER`] (#197).
+/// What the Overview says of a center installed in the terminal beside the
+/// app's node.
+pub const ALSO_CENTER: &str = "Also a center, installed in the terminal. The app leaves it as it is: its own program updates it.";
+
 /// The Overview's warning while the service runs an older program than the
 /// installed one: a package replaced it and its restart failed.
 pub const OLDER_PROGRAM: &str =
@@ -132,6 +136,9 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         // A package replaced the program and its restart failed.
         if v["service"]["older"] == true {
             warnings.push(OLDER_PROGRAM.into());
+        }
+        if v["service"]["also_center"] == true {
+            warnings.push(ALSO_CENTER.into());
         }
     }
     // An owner with the machine's full rights is said whether the node runs
@@ -2156,6 +2163,12 @@ mod tests {
         let (st, _) = status(&v, NOW);
         let w: Vec<SharedString> = st.warnings.iter().collect();
         assert_eq!(w, [SharedString::from(OLDER_PROGRAM)]);
+        // A center installed in the terminal beside the app's node.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "service": {"state": "running", "also_center": true}});
+        let (st, _) = status(&v, NOW);
+        let w: Vec<SharedString> = st.warnings.iter().collect();
+        assert_eq!(w, [SharedString::from(ALSO_CENTER)]);
     }
 
     /// Giving the settings grant where root is the owner says that the

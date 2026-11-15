@@ -302,3 +302,28 @@ fn the_places_are_kept_per_session() {
     drop(held);
     assert!(ui.place_for(Who::Session(2)).is_some());
 }
+
+/// On Windows the owners are SIDs, and the audit names the one whose browser
+/// made a change as the owner pipe names it, not as `root`, an account
+/// Windows does not have.
+#[test]
+fn the_owner_of_a_web_change_is_named_as_the_pipe_names_them() {
+    let sid = "S-1-5-21-1-2-3-1001".to_string();
+    let named = |s: &str| {
+        (s == sid)
+            .then(|| "PC\\alice".to_string())
+            .ok_or_else(|| "no account".to_string())
+    };
+    assert_eq!(
+        owner_name(&Owners::Sids(vec![sid.clone()]), named),
+        "PC\\alice"
+    );
+    // No account found: the SID, as the pipe says it.
+    assert_eq!(
+        owner_name(&Owners::Sids(vec!["S-1-5-21-9".into()]), named),
+        "S-1-5-21-9"
+    );
+    assert_ne!(owner_name(&Owners::Sids(Vec::new()), named), "root");
+    assert_eq!(owner_name(&Owners::Named("alice".into()), named), "alice");
+    assert_eq!(owner_name(&Owners::Uids(Vec::new()), named), "root");
+}

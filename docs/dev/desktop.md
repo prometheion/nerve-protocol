@@ -25,7 +25,8 @@ machine (#232):
 - **Its first word picks what it is.** None: the window. `__center`: the
   center's command line (`nerve_center::entry`), as `__desktop-broker` makes it
   the broker. Any other: the node's command line. On Linux the role's
-  terminal name is a link to it, `nerve-node` or `nerve-center`, and the
+  terminal name is a link to it, `nerve-node` or `nerve-center` (a link to
+  another program stays as it is), and the
   program picks that command line by the name it was started by, for those
   two names only. The edition stays the app's (`nerve`): `update` through
   either link updates the app.
@@ -44,7 +45,11 @@ machine (#232):
   refuses to install a node where the center's service is installed, and the
   other way round. The terminal programs are files of their own and may
   install both roles, for tests; each service is updated by the program it
-  runs.
+  runs. The app says a role a terminal program installed beside its own (its
+  unit starts `nerve-node` or `nerve-center`, not `nerve`) on the Overview or
+  the center's step, and leaves it alone; the node's terminal commands warn
+  at `mode user`, `allowlist --as-owner` and a folder over the home or a
+  harness's settings where a center runs too (`cli/beside.rs`).
 - **The installer asks first** what the machine is: **A node** or **A center**
   (two cards, one column, in its 760x700 window). A center is installed by
   `nerve __center install`, with the rights; its last step, and the installer
@@ -56,11 +61,12 @@ machine (#232):
   that), until the center gets pages of its own; a node run by hand (its
   folders named, or no systemd) keeps the app's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
-  where the machine is no center only; behind `__center` the center's
-  `install` where none is, else its administrator's commands and `status`,
-  and `update` from the release only (from a file it stays a terminal's: the
-  file would lie in the user's folders). The center's commands always take
-  the broker.
+  where the machine is no center only, and with no role its `install` only;
+  behind `__center` the center's `install` where none is, else its
+  administrator's commands and `status`, and `update` from the release only
+  (from a file it stays a terminal's: the file would lie in the user's
+  folders), and never where the machine has a node: a center beside a node
+  is the terminal's. The center's commands always take the broker.
 
 ## Download
 
@@ -94,7 +100,10 @@ before it publishes them.
 What the mark changes (`service::Layout::of`, `service::Package`):
 
 - `install` leaves the program where it is, refuses another program in its
-  place, writes no menu entry of its own (only the `nerve://` default), and
+  place, writes a menu entry of its own only for the `nerve://` links (the
+  package's entry opens none, so a center and a machine with no role answer
+  no link: the node role's entry of the same name goes before the package's
+  in `/usr/local/share/applications`) and the `nerve://` default, and
   removes the plain program and menu entry an earlier install put in
   `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve`.
 - `update` takes the release's package of the same kind from `SHA256SUMS`,

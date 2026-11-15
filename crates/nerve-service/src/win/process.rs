@@ -130,10 +130,12 @@ pub fn session_listed(pid: u32) -> Option<u32> {
     None
 }
 
-/// The account signed in to the session `session`, as the Terminal
-/// Services name it (a name and its domain, which any account may ask of
-/// the sessions of this machine); `None` for a session without one, such as
-/// session 0, which holds the services.
+/// The account signed in to the session `session`: as the Terminal Services
+/// name it (a name and its domain) where they answer the caller, which they
+/// do for an administrator, and else as the logon screen's record of it
+/// ([`logon_record_user`]), which is all the node's service gets (they
+/// refuse an account that is no administrator); `None` for a session
+/// without one, such as session 0, which holds the services.
 pub fn session_user(session: u32) -> Option<Vec<u8>> {
     let ask = |class: WTS_INFO_CLASS| -> Option<String> {
         let mut text: *mut u16 = std::ptr::null_mut();
@@ -168,10 +170,12 @@ pub fn session_user(session: u32) -> Option<Vec<u8>> {
 }
 
 /// The account signed in to the session `session` as the logon screen
-/// records it (`LoggedOnSAMUser`, which any account may read). A service
-/// that is no administrator is refused by the Terminal Services when it asks
-/// for another account's session ([`session_user`]), and this is the record
-/// that is left to ask.
+/// records it (`LoggedOnSAMUser`): written at each logon, readable by every
+/// account and writable by administrators only, so the rule that lets a
+/// session in rests on a record they alone can change. A service that is no
+/// administrator is refused by the Terminal Services when it asks for
+/// another account's session ([`session_user`]), and this is the record that
+/// is left to ask.
 fn logon_record_user(session: u32) -> Option<Vec<u8>> {
     use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
     let key = super::sid::wide(format!(

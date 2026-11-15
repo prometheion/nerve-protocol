@@ -324,6 +324,33 @@ impl std::ops::Deref for Call<'_> {
     }
 }
 
+/// The owner the commands run for, as the owner socket or pipe names them
+/// (on Windows the account of the SID, or the SID where none is found, as
+/// the pipe does): what the audit and the log say made the change.
+fn owner_name(owners: &Owners, sid_name: impl Fn(&str) -> Result<String, String>) -> String {
+    match owners {
+        Owners::Named(n) => n.clone(),
+        Owners::Uids(u) => u
+            .first()
+            .map(|uid| crate::account::name_of(*uid).unwrap_or_else(|| format!("uid {uid}")))
+            .unwrap_or_else(|| "root".into()),
+        Owners::Sids(sids) => match sids.first() {
+            Some(sid) => sid_name(sid).unwrap_or_else(|_| sid.clone()),
+            None => "an owner".into(),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn sid_name(sid: &str) -> Result<String, String> {
+    crate::win_user::name_of_sid(sid)
+}
+
+#[cfg(not(windows))]
+fn sid_name(sid: &str) -> Result<String, String> {
+    Err(format!("{sid} is no account of this machine"))
+}
+
 /// Who the UI runs its commands for, and whose accounts it lets in.
 struct Ctx {
     shared: Arc<Shared>,
@@ -336,16 +363,9 @@ struct Ctx {
 }
 
 impl Ctx {
-    /// The owner the commands run for, as the owner socket names them.
+    /// The owner the commands run for.
     fn who(&self) -> String {
-        match &self.owners {
-            Owners::Named(n) => n.clone(),
-            Owners::Uids(u) => u
-                .first()
-                .map(|uid| crate::account::name_of(*uid).unwrap_or_else(|| format!("uid {uid}")))
-                .unwrap_or_else(|| "root".into()),
-            Owners::Sids(_) => "root".into(),
-        }
+        owner_name(&self.owners, sid_name)
     }
 
     /// The local accounts let in: the owner's and root's.

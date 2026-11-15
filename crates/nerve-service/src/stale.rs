@@ -32,24 +32,23 @@ pub fn runs_older(pid: u32, bin: &Path) -> bool {
 pub fn service_runs_older(unit: &str, bin: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        if !unit_starts(unit, bin) {
-            return false;
-        }
-        let pid = std::process::Command::new("systemctl")
-            .args(["show", "--property=MainPID", "--value", unit])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
+        let show = |property: &str| {
+            std::process::Command::new("systemctl")
+                .args(["show", &format!("--property={property}"), "--value", unit])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let pid = show("MainPID")
+            .and_then(|p| p.parse::<u32>().ok())
             .filter(|p| *p != 0);
-        pid.is_some_and(|p| runs_older(p, bin))
+        match (show("ExecStart"), pid) {
+            (Some(exec), Some(pid)) => judge(&exec, started(pid), changed(bin), bin),
+            _ => false,
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -58,17 +57,11 @@ pub fn service_runs_older(unit: &str, bin: &Path) -> bool {
     }
 }
 
-/// Whether the unit `unit` starts the program `bin`.
-#[cfg(target_os = "linux")]
-fn unit_starts(unit: &str, bin: &Path) -> bool {
-    std::process::Command::new("systemctl")
-        .args(["show", "--property=ExecStart", "--value", unit])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some_and(|o| starts(&String::from_utf8_lossy(&o.stdout), bin))
+/// The answer of [`service_runs_older`] from what was read: the unit's
+/// `ExecStart` (`exec_start`), when its process started and when `bin` was
+/// put in place. `false` unless the unit starts `bin` itself.
+pub fn judge(exec_start: &str, started: Option<f64>, changed: Option<f64>, bin: &Path) -> bool {
+    starts(exec_start, bin) && matches!((started, changed), (Some(s), Some(c)) if older(s, c))
 }
 
 /// Whether `exec_start`, what `systemctl show --property=ExecStart` says
@@ -156,6 +149,33 @@ mod tests {
         assert_eq!(started_of(stat, boot, 100.0), Some(1_700_000_500.0));
         assert_eq!(started_of("4242 nerve", boot, 100.0), None);
         assert_eq!(started_of(stat, "cpu 1\n", 100.0), None);
+    }
+
+    #[test]
+    fn only_a_service_that_starts_the_program_runs_an_older_one() {
+        let exec = |path: &str| format!("{{ path={path} ; argv[]={path} run ; ignore_errors=no }}");
+        let bin = Path::new("/usr/bin/nerve");
+        // Started at 1000, the file put in place at 2000.
+        assert!(judge(
+            &exec("/usr/bin/nerve"),
+            Some(1000.0),
+            Some(2000.0),
+            bin
+        ));
+        assert!(!judge(
+            &exec("/usr/local/bin/nerve-node"),
+            Some(1000.0),
+            Some(2000.0),
+            bin
+        ));
+        assert!(!judge(
+            &exec("/usr/bin/nerve"),
+            Some(3000.0),
+            Some(2000.0),
+            bin
+        ));
+        assert!(!judge(&exec("/usr/bin/nerve"), None, Some(2000.0), bin));
+        assert!(!judge(&exec("/usr/bin/nerve"), Some(1000.0), None, bin));
     }
 
     #[test]

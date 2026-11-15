@@ -2443,7 +2443,18 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         "present": layout.bin.is_file(),
         "version": version,
         "older": older,
+        "also_center": also_center(layout),
     })
+}
+
+/// Whether the app's node has a center beside it that was installed in the
+/// terminal: the app shows it and leaves it alone.
+fn also_center(layout: &Layout) -> bool {
+    layout.edition.program != crate::edition::NODE.program
+        && nerve_service::role::in_terminal(
+            nerve_service::role::Role::Center,
+            layout.edition.program,
+        )
 }
 
 /// The state of the unit, `None` when the node is not installed here.

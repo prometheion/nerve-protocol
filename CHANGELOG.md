@@ -85,6 +85,13 @@ and every limit is in
   switch needs the Windows Firewall service.
 - `user` mode and allowlist as you run as the owner; root may be the owner
   on Linux, and an administrator on Windows, with a warning.
+- Where a center runs on the same machine (the terminal programs), `mode
+  user`, `allowlist --as-owner` and a folder over your home or a harness's
+  settings say that what runs as you, or `nerve-run` there, reaches the
+  center's owner token.
+- The guard refuses the app's program `nerve` for the file tools where a
+  program is installed (`/usr/bin`, `Program Files\Nerve`), not for any path
+  called `nerve`: `rm -rf ~/src/nerve` runs.
 
 ### Capabilities
 
@@ -121,7 +128,8 @@ and every limit is in
 - The package's update restarts the service that runs the app's program,
   the node's or the center's; one a terminal program installed is that
   program's to update. Where that restart failed, `status` and the app say
-  that the service still runs the earlier program.
+  that the service still runs the earlier program (for a service that starts
+  the app's program only).
 - `update` checks the download against the release's `SHA256SUMS` and puts
   the old program back if the new one does not start. The programs are not
   signed yet.
@@ -139,20 +147,25 @@ and every limit is in
   is, a node or a center, and installs that role; one role per machine
   (for both, use the terminal programs `nerve-node` and `nerve-center`).
   On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
-  link to it. The `.deb` and `.rpm` are named `nerve` and replace
+  link to it (a link to another program stays as it is). The `.deb` and `.rpm` are named `nerve` and replace
   `nerve-node-desktop`: a pre-release tester removes that first. The
   package's app asks the role at its first start. In the center role
   **Nerve** in the menu opens the center's web UI and removes the center
-  (also Apps & features on Windows).
+  (also Apps & features on Windows). A role a terminal program installed
+  beside it is said, as "Also a center, installed in the terminal", and left
+  alone. The package's menu entry opens no `nerve://` links; the node role
+  adds the handler, so a center answers none.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
 - The node's own web UI, on Linux and Windows, off until it is turned on in
   **Settings › Network › Web UI** (or `nerve-node ui on`), with its tokens.
-  **Open** checks first that the node holds the port. On Windows only the
-  owner's own session gets in, and beyond loopback is an administrator's
-  step.
+  **Open** checks first that the node holds the port, and opens it over TLS
+  where the node serves it so. On Windows only the owner's own session gets
+  in, and beyond loopback is an administrator's step, also as the setting
+  `ui.listen` (`config set`, a changed node.toml or a restore); what the
+  web UI changes is audited as the owner's account.
 
 ### On Windows
 

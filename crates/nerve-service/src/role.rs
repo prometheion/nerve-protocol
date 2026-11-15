@@ -82,6 +82,36 @@ impl Roles {
     }
 }
 
+/// Whether the unit of `role` in the systemd folder `units` starts a program
+/// other than `app` (a name without its path): the role was installed in the
+/// terminal, by `nerve-node` or `nerve-center`, and runs that file, which the
+/// app leaves as it is.
+pub fn in_terminal_units(units: &Path, role: Role, app: &str) -> bool {
+    std::fs::read_to_string(units.join(format!("{}.service", role.service())))
+        .ok()
+        .and_then(|unit| started_by(&unit))
+        .is_some_and(|program| program != app)
+}
+
+/// [`in_terminal_units`] for the units of this machine; Windows has no
+/// terminal programs.
+pub fn in_terminal(role: Role, app: &str) -> bool {
+    cfg!(not(windows)) && in_terminal_units(Path::new("/etc/systemd/system"), role, app)
+}
+
+/// The name of the program a unit's `ExecStart` starts.
+fn started_by(unit: &str) -> Option<String> {
+    let line = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    // systemd's prefixes (`-`, `@`, `+`, `!`, `:`) come before the path.
+    let path = line
+        .trim_start_matches(['-', '@', '+', '!', ':'])
+        .split_whitespace()
+        .next()?;
+    path.rsplit('/').next().map(str::to_string)
+}
+
 /// Refuses an install of `want` by the app's program where the other role's
 /// service is installed (`other`): one role per machine.
 pub fn one_role(want: Role, other: bool) -> Result<(), String> {
@@ -114,6 +144,41 @@ mod tests {
         assert!(r.center && !r.node && r.has(Role::Center));
         std::fs::write(d.path().join("nerve-node.service"), "").unwrap();
         assert!(Roles::in_units(d.path()).node);
+    }
+
+    #[test]
+    fn a_role_that_runs_another_program_than_the_apps_was_installed_in_the_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let unit = |name: &str, exec: &str| {
+            std::fs::write(
+                d.path().join(format!("{name}.service")),
+                format!("[Service]\nUser=x\nExecStart={exec}\n"),
+            )
+            .unwrap()
+        };
+        let in_terminal = |role| in_terminal_units(d.path(), role, "nerve");
+        // Nothing installed.
+        assert!(!in_terminal(Role::Center));
+        unit(
+            "nerve-center",
+            "/usr/local/bin/nerve-center --state-dir /var/lib/nerve-center",
+        );
+        assert!(in_terminal(Role::Center));
+        // The app's own: its program, and its word.
+        unit(
+            "nerve-center",
+            "/usr/bin/nerve __center --state-dir /var/lib/nerve-center",
+        );
+        assert!(!in_terminal(Role::Center));
+        unit("nerve-node", "/usr/local/bin/nerve-node --state-dir x run");
+        assert!(in_terminal(Role::Node));
+        unit("nerve-node", "/usr/bin/nerve run");
+        assert!(!in_terminal(Role::Node));
+        assert_eq!(
+            started_by("[Service]\nExecStart=-/opt/n/x y\n").as_deref(),
+            Some("x")
+        );
+        assert_eq!(started_by("[Service]\n"), None);
     }
 
     #[test]

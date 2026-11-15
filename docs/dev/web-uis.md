@@ -346,7 +346,9 @@ and revokes its tokens there (by `ui` commands), and opens it with **Open**,
 which first checks that the node's service holds the port (as the center's
 log-in does, [where it listens](#where-it-listens)). On Windows, where there
 is no terminal, that is the way; listening beyond loopback is an
-administrator's step there (`ui on --listen` needs one), with a Windows
+administrator's step there (`ui on --listen` needs one, and so does a
+change of the setting `ui.listen` to such an address, by `config set`, a
+changed node.toml or a restore), with a Windows
 Firewall rule for the service `nerve-node` and its port, not for the program.
 
 ### Turn it on
@@ -460,8 +462,13 @@ process to read its account, so a local peer is told by its session:
 
 - the process at the other end, from Windows' table of connections; its
   session, from the system's list of processes (which names it without
-  opening it); and the account signed in to that session, from the Terminal
-  Services. Only a process of a session of yours gets in.
+  opening it); and the account signed in to that session, from the logon
+  screen's record of it (`LoggedOnSAMUser` under
+  `HKLM\…\Authentication\LogonUI\SessionData\<session>`). The Terminal
+  Services would name it too, but refuse an account like `nerve`, which is no
+  administrator. Every account may read the record, and only administrators
+  write it, which is what the rule rests on; it is written at each logon.
+  Only a process of a session of yours gets in.
 - Session 0 is closed: it holds every service, and the node's own commands.
 - A process in one of the node's job objects is closed, beside the
   AppContainer's own block of loopback.

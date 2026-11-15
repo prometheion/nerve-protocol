@@ -73,18 +73,20 @@ fn output_of(v: &Value) -> Output {
 ///
 /// - The node's commands: its options first (`--json`), never one of the
 ///   helpers this program also is (the exec shim, this broker), and not on
-///   a machine that is a center only.
+///   a machine that is a center only. Where no role is installed yet, its
+///   `install` only.
 /// - The center's (`__center` first): `install` where no center is yet;
 ///   where one is installed, its administrator's commands and `status`, and
 ///   `update` from the release only (from a file it stays a terminal's: the
 ///   file would lie in the user's folders, where a program of the user could
-///   replace it before the broker reads it). Not on a machine that is a
-///   node only.
+///   replace it before the broker reads it). Not on a machine that has a
+///   node: the app runs one role, and a center beside a node is the
+///   terminal's, not the app's.
 pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), String> {
     use nerve_center::config::Cmd;
     let first = args.first().map(String::as_str);
     if first == Some(nerve_center::edition::APP_WORD) {
-        if roles.node && !roles.center {
+        if roles.node {
             return Err("this machine is a node: the broker runs no center commands here".into());
         }
         let argv = std::iter::once(nerve_center::edition::TERMINAL_NAME)
@@ -118,6 +120,16 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
     }
     if roles.center && !roles.node {
         return Err("this machine is a center: the broker runs no node commands here".into());
+    }
+    // The node's options come first, the command after them.
+    if !roles.node
+        && args
+            .iter()
+            .find(|a| !a.starts_with("--"))
+            .map(String::as_str)
+            != Some("install")
+    {
+        return Err("no node is installed here: the broker runs only its install".into());
     }
     Ok(())
 }
@@ -169,16 +181,6 @@ pub fn serve(
             .flatten()
             .filter_map(|a| a.as_str().map(str::to_string))
             .collect();
-        // The closed list of the role installed here, read from the
-        // services at each request ([`allowed`]).
-        if let Err(e) = allowed(&args, nerve_node::role::Roles::here()) {
-            let refused = Output {
-                stderr: e.into_bytes(),
-                ..Output::default()
-            };
-            send(&out, &json!({ "id": id, "done": done(&refused) }));
-            continue;
-        }
         // The app's user is the broker's to name. clap refuses the option
         // given twice before the subcommand only; after it, the later one
         // wins, so a request must not carry it at all.
@@ -189,6 +191,16 @@ pub fn serve(
         {
             let refused = Output {
                 stderr: b"the broker names the app's user itself".to_vec(),
+                ..Output::default()
+            };
+            send(&out, &json!({ "id": id, "done": done(&refused) }));
+            continue;
+        }
+        // The closed list of the role installed here, read from the
+        // services at each request ([`allowed`]).
+        if let Err(e) = allowed(&args, nerve_node::role::Roles::here()) {
+            let refused = Output {
+                stderr: e.into_bytes(),
                 ..Output::default()
             };
             send(&out, &json!({ "id": id, "done": done(&refused) }));
@@ -960,6 +972,33 @@ mod tests {
         // A node: its commands, no center's.
         assert!(allowed(&args(&["--json", "sudo", "on"]), node).is_ok());
         assert!(allowed(&args(&["__center", "--json", "install"]), node).is_err());
+        // A node with a terminal center beside it: the center is the
+        // terminal's, whose owner token no program of the app's user asks
+        // for through the app.
+        let both = Roles {
+            node: true,
+            center: true,
+        };
+        assert!(allowed(&args(&["--json", "sudo", "on"]), both).is_ok());
+        for refused in [
+            &["__center", "--json", "owner-token"][..],
+            &["__center", "--json", "set", "ui", "off"],
+            &["__center", "--json", "backup", "/tmp/b"],
+            &["__center", "--json", "uninstall", "--purge"],
+            &["__center", "--json", "install"],
+        ] {
+            assert!(allowed(&args(refused), both).is_err(), "{refused:?}");
+        }
+        // No role yet: only the installs, not the node's other commands.
+        for refused in [
+            &["--json", "sudo", "on"][..],
+            &["--json", "config", "set", "log.level", "debug"],
+            &["--json", "uninstall", "--purge"],
+            &["--json", "update"],
+            &["--json"],
+        ] {
+            assert!(allowed(&args(refused), none).is_err(), "{refused:?}");
+        }
         // Neither: a helper of this program.
         for role in [none, center, node] {
             assert!(allowed(&args(&["__exec-shim", "x"]), role).is_err());
@@ -1087,13 +1126,13 @@ mod tests {
             let mut said = Vec::new();
             let mut lines = BufReader::new(ans_r).lines();
             lines.next();
-            writeln!(req_w, "{}", json!({"id": 1, "args": ["--json", "x"]})).unwrap();
+            writeln!(req_w, "{}", json!({"id": 1, "args": ["--json", "install"]})).unwrap();
             let done = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
             said.push(done["done"]["stdout"].as_str().unwrap().trim().to_string());
             writeln!(
                 req_w,
                 "{}",
-                json!({"id": 2, "args": ["--json", "x"], "follow": true})
+                json!({"id": 2, "args": ["--json", "install"], "follow": true})
             )
             .unwrap();
             let line = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
@@ -1104,9 +1143,9 @@ mod tests {
         };
         assert_eq!(
             got(Some("S-1-5-21-1-2-3-1001")),
-            ["--desktop-user-sid S-1-5-21-1-2-3-1001 --json x unset"; 2]
+            ["--desktop-user-sid S-1-5-21-1-2-3-1001 --json install unset"; 2]
         );
-        assert_eq!(got(None), ["--json x unset"; 2]);
+        assert_eq!(got(None), ["--json install unset"; 2]);
     }
 
     /// pkexec runs, and what it says when it does not start the broker

@@ -170,6 +170,9 @@ pub(super) async fn set_mode(
     {
         w(out, note);
     }
+    if let Some(note) = super::beside::mode_note(m, as_owner) {
+        w(out, note.into());
+    }
     Ok(())
 }
 
@@ -177,6 +180,23 @@ pub(super) async fn set_mode(
 mod tests {
     use super::*;
     use crate::cli::tests::{has_row, json_of, load, run, setup};
+
+    /// A mode whose commands run as you says so where a center runs on the
+    /// machine too: they reach its owner token.
+    #[test]
+    fn a_mode_that_runs_as_you_says_a_center_runs_here_too() {
+        use crate::cli::beside::tests::with_center;
+        let (_d, paths) = setup(&["home"]);
+        let said = |center: bool, args: &[&str]| {
+            with_center(center, || run(&paths, args).unwrap())
+                .contains("a center runs on this machine")
+        };
+        assert!(said(true, &["mode", "user"]));
+        assert!(said(true, &["mode", "allowlist", "--as-owner"]));
+        assert!(!said(true, &["mode", "allowlist"]));
+        assert!(!said(true, &["mode", "folder"]));
+        assert!(!said(false, &["mode", "user"]));
+    }
 
     /// Allowlist mode runs as the owner only when asked for, and setting a
     /// mode again without the flag takes it back; the other modes refuse it.

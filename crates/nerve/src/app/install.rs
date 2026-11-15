@@ -163,6 +163,22 @@ pub fn opens_the_installer(roles: nerve_node::role::Roles, by_hand: bool) -> boo
     !roles.node && (roles.center || !by_hand)
 }
 
+/// What the center step says of a node that a terminal program installed
+/// beside the app's center: nothing where there is none.
+pub fn also_node(
+    roles: nerve_node::role::Roles,
+    node_in_terminal: impl FnOnce() -> bool,
+) -> &'static str {
+    if roles.center && node_in_terminal() {
+        ALSO_NODE
+    } else {
+        ""
+    }
+}
+
+/// The twin of the Overview's note, on the center's step.
+pub const ALSO_NODE: &str = "Also a node, installed in the terminal: the app leaves it as it is.";
+
 /// Where the installed center's web UI listens, as it says in its file
 /// (nerve_center::ui_file); `None` while it does not run or it is off.
 fn center_ui() -> Option<String> {
@@ -216,6 +232,15 @@ impl Ctl {
                 i.set_newer(app && newer(&i.get_version(), &version));
                 i.set_node_only(node_only);
                 i.set_center_ui(center_ui().unwrap_or_default().into());
+                i.set_also(
+                    also_node(roles, || {
+                        nerve_node::role::in_terminal(
+                            nerve_node::role::Role::Node,
+                            crate::parts::PROGRAM,
+                        )
+                    })
+                    .into(),
+                );
                 // Apps & features' Uninstall of the center role asked for
                 // the uninstall before the step was known.
                 let step = match (first_step(app, node_only, roles), i.get_action().as_str()) {
@@ -579,6 +604,21 @@ mod tests {
         assert!(opens_the_installer(center, true));
         assert!(!opens_the_installer(node, false));
         assert!(!opens_the_installer(none, true));
+    }
+
+    /// A node a terminal program installed beside the app's center is said
+    /// on its step, and only there.
+    #[test]
+    fn the_center_step_says_a_node_installed_in_the_terminal() {
+        use nerve_node::role::Roles;
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        assert_eq!(also_node(center, || true), ALSO_NODE);
+        assert_eq!(also_node(center, || false), "");
+        // Not a center: the step is not shown, and nothing is asked.
+        assert_eq!(also_node(Roles::default(), || unreachable!()), "");
     }
 
     /// The installer starts with what this machine becomes where no role is

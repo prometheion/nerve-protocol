@@ -509,7 +509,7 @@ export component InstallerView inherits Rectangle {
                                     icon: @image-url("icons/ok.svg");
                                     tone: Tone.ok;
                                     title: "This machine is a center";
-                                    text: "Its web UI manages it: open it here, and log in with the owner token" + (Install.center-ui != "" ? " (" + Install.center-ui + ")." : ".");
+                                    text: "Its web UI manages it: open it here, and log in with the owner token" + (Install.center-ui != "" ? " (" + Install.center-ui + ")." : ".") + (Install.also != "" ? " " + Install.also : "");
                                 }
                                 StepFoot {
                                     Button {

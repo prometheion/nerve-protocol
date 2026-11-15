@@ -343,9 +343,16 @@ pub fn needs_admin(cmd: &Cmd) -> bool {
             | ConfigCmd::Unset { key }
             | ConfigCmd::Add { key, .. }
             | ConfigCmd::Rm { key, .. },
-        ) => ROOT_ONLY.contains(&key.as_str()) || sets_web_ui_wide(cmd, cfg!(windows)),
+        ) => config_needs_admin(cmd, key, cfg!(windows)),
         c => refused(c).is_some(),
     }
+}
+
+/// Whether the change of the setting `key` by `cmd` is an administrator's:
+/// a setting of [`ROOT_ONLY`], and on `windows` the web UI's address
+/// beyond loopback.
+fn config_needs_admin(cmd: &Cmd, key: &str, windows: bool) -> bool {
+    ROOT_ONLY.contains(&key) || sets_web_ui_wide(cmd, windows)
 }
 
 /// Whether `cmd` is `config set ui.listen` to an address beyond loopback,
@@ -2703,6 +2710,15 @@ mod tests {
             true
         ));
         assert_eq!(needs_admin(&set("0.0.0.0:7470").cmd), cfg!(windows));
+        let wide = set("0.0.0.0:7470");
+        assert!(config_needs_admin(&wide.cmd, WEB_UI_LISTEN, true));
+        assert!(!config_needs_admin(&wide.cmd, WEB_UI_LISTEN, false));
+        assert!(config_needs_admin(&wide.cmd, "machine.shell", false));
+        assert!(!config_needs_admin(
+            &set("127.0.0.1:7470").cmd,
+            WEB_UI_LISTEN,
+            true
+        ));
         let at = |l: Option<&str>| {
             let mut c = nerve_policy::NodeConfig::default();
             c.ui.listen = l.map(String::from);
