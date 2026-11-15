@@ -347,6 +347,7 @@ export component CapabilitiesPage inherits PageFrame {
     gap: 0;
     init => {
         Store.details-open = false;
+        Store.asking = "";
     }
     function pick(kind: int, at: int) {
         Caps.pick-kind = kind;

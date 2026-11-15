@@ -55,8 +55,9 @@ export global Store {
     in-out property <string> audit-summary;
     in-out property <string> audit-foot;
     in-out property <bool> audit-more-left;
-    // The entry picked, by its place in the shown list.
-    in-out property <int> audit-pick;
+    // The entry picked, by its place in the shown list; -1 until one is
+    // clicked, so that the details follow the first one.
+    in-out property <int> audit-pick: -1;
 
     // Pairing: the link, then what the owner confirms.
     in-out property <bool> pair-open;
@@ -394,9 +395,12 @@ export global Logs {
     in-out property <string> error;
     in-out property <[LogRow]> rows;
     in-out property <bool> problems-only;
-    // Words the shown lines hold (the search bar), and the line picked.
+    // Words the shown lines hold (the search bar), and the line picked (-1
+    // until one is clicked: the details follow the newest line). The search
+    // goes over the lines the page read (`read`), not the whole log.
     in-out property <string> search;
-    in-out property <int> pick;
+    in-out property <int> pick: -1;
+    in-out property <int> read;
     // How many of the newest lines the page asks for (src/app/live.rs).
     in-out property <int> limit: 300;
     callback filter(bool);

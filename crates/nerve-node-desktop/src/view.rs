@@ -1010,6 +1010,84 @@ pub fn declared(v: &Value) -> Vec<DeclaredRow> {
         .collect()
 }
 
+/// The folder a typed or chosen path means, as `folder add` gets it: `~` is
+/// the owner's home, and a relative path is refused, since the node would
+/// join it to the folder the app happens to run in. A network folder or
+/// drive is said at once, as the node refuses it.
+pub fn typed_folder(text: &str, home: &Path) -> Result<String, String> {
+    let text = text.trim();
+    let rest = text
+        .strip_prefix('~')
+        .filter(|r| r.is_empty() || r.starts_with('/') || (cfg!(windows) && r.starts_with('\\')));
+    let path = match rest {
+        Some(rest) => format!("{}{rest}", home.display()),
+        None => text.to_string(),
+    };
+    if !Path::new(&path).is_absolute() {
+        return Err("Type the whole path, from the top of the drive, or choose the folder.".into());
+    }
+    match nerve_node::drives::refusal(&path) {
+        Some(why) => Err(why),
+        None => Ok(path),
+    }
+}
+
+/// The place `folder add` stored a folder at, from what it said
+/// (`<center>: folder <path> <rights>`): the node tidies the path and
+/// follows its links, so it may differ from what was asked.
+pub fn stored_folder<'a>(said: impl Iterator<Item = &'a str>) -> Option<String> {
+    said.filter_map(|l| l.split_once(": folder ")?.1.rsplit_once(' '))
+        .map(|(path, _)| path.to_string())
+        .next()
+}
+
+/// Whether two folder paths name one place, as the node compares them.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    use nerve_policy::paths::within;
+    within(Path::new(a), Path::new(b)) && within(Path::new(b), Path::new(a))
+}
+
+/// Where the picked row of `old` stands in `new`, once the page's rows were
+/// made again (a line came in): the pick follows the row, not its place.
+/// `same` says whether two rows are one entry; of several equal ones the pick
+/// keeps its rank from the end that does not move (`newest_first`: the oldest
+/// end), so a repeated line is not mistaken for its twin. -1 when nothing was
+/// picked (the page follows the first row) or the row is gone.
+pub fn follow_pick<T>(
+    old: &[T],
+    pick: i32,
+    new: &[T],
+    newest_first: bool,
+    same: impl Fn(&T, &T) -> bool,
+) -> i32 {
+    let Some(at) = usize::try_from(pick)
+        .ok()
+        .map(|p| p.min(old.len().saturating_sub(1)))
+        .filter(|_| !old.is_empty())
+    else {
+        return -1;
+    };
+    let rank = |rows: &[T], at: usize| {
+        let twins = rows.iter().enumerate().filter(|(_, r)| same(r, &rows[at]));
+        if newest_first {
+            twins.filter(|(i, _)| *i > at).count()
+        } else {
+            twins.filter(|(i, _)| *i < at).count()
+        }
+    };
+    let want = rank(old, at);
+    let mut twins: Vec<usize> = new
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| same(r, &old[at]))
+        .map(|(i, _)| i)
+        .collect();
+    if newest_first {
+        twins.reverse();
+    }
+    twins.get(want).map_or(-1, |i| *i as i32)
+}
+
 /// The lines of the log to show, from `newest` first: all of them, or the
 /// errors and warnings only, and of those the ones whose message holds
 /// `search` (any case; empty: every one).
@@ -2893,6 +2971,77 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].msg, "link dropped (web-1)");
         assert!(log_rows(&lines, true, "started", NOW).is_empty());
+    }
+
+    #[test]
+    fn a_typed_folder_is_a_whole_path() {
+        let home = Path::new(if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            "/home/me"
+        });
+        let whole = if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        };
+        assert_eq!(typed_folder(&format!(" {whole} "), home).unwrap(), whole);
+        // `~` is the owner's home, as in the CLI's own examples.
+        assert_eq!(
+            typed_folder("~/code", home).unwrap(),
+            format!("{}/code", home.display())
+        );
+        assert_eq!(typed_folder("~", home).unwrap(), home.display().to_string());
+        // The node would join these to the folder the app runs in.
+        for relative in ["code", "./code", "~me/code", "-rf"] {
+            let e = typed_folder(relative, home).unwrap_err();
+            assert!(e.contains("whole path"), "{relative}: {e}");
+        }
+    }
+
+    #[test]
+    fn what_folder_add_stored_is_read_from_its_answer() {
+        let said = [
+            "note: nothing",
+            "home: folder /var/home/me/my proj rw-",
+            "home: folder ignored r--",
+        ];
+        assert_eq!(
+            stored_folder(said.into_iter()).as_deref(),
+            Some("/var/home/me/my proj")
+        );
+        assert_eq!(stored_folder(["note: nothing"].into_iter()), None);
+        // Another spelling of one place is that place.
+        assert!(same_folder("/home/me/proj/", "/home/me/proj"));
+        assert!(same_folder("/home/me/./proj", "/home/me/proj"));
+        assert!(!same_folder("/home/me/proj2", "/home/me/proj"));
+        assert!(!same_folder("/home/me/proj/sub", "/home/me/proj"));
+    }
+
+    #[test]
+    fn a_pick_follows_its_row_as_rows_come() {
+        let same = |a: &&str, b: &&str| a == b;
+        // Newest first: two lines come in front, the pick moves down two.
+        let old = ["c", "b", "a"];
+        let new = ["e", "d", "c", "b", "a"];
+        assert_eq!(follow_pick(&old, 1, &new, true, same), 3);
+        // Nothing picked yet (-1): the page follows the first row.
+        assert_eq!(follow_pick(&old, -1, &new, true, same), -1);
+        // A row that fell off the end is gone.
+        assert_eq!(follow_pick(&old, 2, &["e", "d", "c", "b"], true, same), -1);
+        // Equal lines keep their rank from the old end: the second "x" from
+        // the end stays that one when another "x" comes in front.
+        let old = ["x", "x", "y"];
+        let new = ["x", "x", "x", "y"];
+        assert_eq!(follow_pick(&old, 0, &new, true, same), 1);
+        assert_eq!(follow_pick(&old, 1, &new, true, same), 2);
+        // Oldest first: rows come at the end, a pick keeps its place.
+        assert_eq!(
+            follow_pick(&["a", "b"], 1, &["a", "b", "c"], false, same),
+            1
+        );
+        // A pick past the end means the last row, as the page shows it.
+        assert_eq!(follow_pick(&old, 9, &new, true, same), 3);
     }
 
     #[test]

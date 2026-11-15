@@ -133,6 +133,7 @@ export component RelayPage inherits PageFrame {
     gap: 0;
     init => {
         Store.details-open = false;
+        Store.asking = "";
     }
     function pick(kind: int, at: int) {
         Prefs.relay-pick = kind;

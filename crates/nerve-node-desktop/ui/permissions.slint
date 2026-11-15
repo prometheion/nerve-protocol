@@ -355,9 +355,9 @@ component Folders inherits VerticalLayout {
                 alignment: center;
                 RemoveAsk {
                     label: "Remove " + f.path;
-                    asking: Store.asking == "folder:" + f.path;
+                    asking: Store.asking == "folder:" + Perm.center + ":" + f.path;
                     ask => {
-                        Store.asking = "folder:" + f.path;
+                        Store.asking = "folder:" + Perm.center + ":" + f.path;
                     }
                     cancel => {
                         Store.asking = "";
@@ -509,9 +509,9 @@ component Rules inherits VerticalLayout {
                 alignment: center;
                 RemoveAsk {
                     label: "Remove " + r;
-                    asking: Store.asking == "rule:" + root.list + ":" + r;
+                    asking: Store.asking == "rule:" + Perm.center + ":" + root.list + ":" + r;
                     ask => {
-                        Store.asking = "rule:" + root.list + ":" + r;
+                        Store.asking = "rule:" + Perm.center + ":" + root.list + ":" + r;
                     }
                     cancel => {
                         Store.asking = "";
@@ -736,6 +736,10 @@ component SectionItem inherits ListItem {
 
 export component PermissionsPage inherits PageFrame {
     gap: 0;
+    // A question left open on another visit is not asked again.
+    init => {
+        Store.asking = "";
+    }
     PageHeader {
         icon: @image-url("icons/shield.svg");
         title: "Permissions";

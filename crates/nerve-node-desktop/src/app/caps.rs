@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use serde_json::Value;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{Choose, Ctl, Pending};
 use crate::{Caps, Load, Page, Tone, view};
@@ -358,10 +358,18 @@ impl Ctl {
                     c.with_caps(|p| {
                         p.set_program_name(SharedString::new());
                         p.set_program_exe(SharedString::new());
-                        // The form gives way to the new program's details:
-                        // the node lists it after the others.
+                        // The form gives way to the program's details: the
+                        // node lists a new one after the others, and one of
+                        // that name allowed again keeps its place.
+                        let programs = p.get_programs();
                         p.set_pick_kind(2);
-                        p.set_pick_at(slint::Model::row_count(&p.get_programs()) as i32);
+                        p.set_pick_at(
+                            programs
+                                .iter()
+                                .position(|r| r.name == name.as_str())
+                                .unwrap_or_else(|| programs.row_count())
+                                as i32,
+                        );
                     });
                     c.done(&v, format!("{name} may attach as a provider."));
                 }

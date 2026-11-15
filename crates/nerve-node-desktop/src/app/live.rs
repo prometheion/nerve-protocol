@@ -6,10 +6,10 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{CURRENT, Ctl, Exec, now_ms};
-use crate::{Load, Logs, Page, view};
+use crate::{AuditRow, Load, LogRow, Logs, Page, view};
 
 /// The most audit entries and log lines a page asks for once the owner
 /// wants more than the newest few (`Store.audit-limit`, `Logs.limit`): the
@@ -298,16 +298,54 @@ impl Ctl {
             let rows = view::log_rows(&self.log.borrow(), problems, &search, now_ms());
             if let Some(w) = self.window.upgrade() {
                 let l = w.global::<Logs>();
+                // The picked line stays the picked one while newer ones come.
+                let pick = view::follow_pick(
+                    &l.get_rows().iter().collect::<Vec<_>>(),
+                    l.get_pick(),
+                    &rows,
+                    true,
+                    same_line,
+                );
+                self.pick_gone(l.get_pick(), pick);
+                l.set_pick(pick);
+                l.set_read(self.log.borrow().len() as i32);
                 l.set_rows(ModelRc::new(VecModel::from(rows)));
                 l.set_load(Load::Ready);
                 l.set_error(SharedString::new());
             }
         } else {
+            let before = self
+                .with_store(|s| (s.get_audit().iter().collect::<Vec<_>>(), s.get_audit_pick()))
+                .unwrap_or_default();
             self.show_audit();
+            // The picked entry stays the picked one while newer ones come.
+            self.with_store(|s| {
+                let pick = view::follow_pick(
+                    &before.0,
+                    before.1,
+                    &s.get_audit().iter().collect::<Vec<_>>(),
+                    !s.get_audit_oldest(),
+                    same_entry,
+                );
+                s.set_audit_pick(pick);
+            });
+            self.pick_gone(
+                before.1,
+                self.with_store(|s| s.get_audit_pick()).unwrap_or(-1),
+            );
             self.with_store(|s| {
                 s.set_audit_load(Load::Ready);
                 s.set_audit_error(SharedString::new());
             });
+        }
+    }
+
+    /// A picked row that is gone (it fell off the end of the list) leaves
+    /// the details with nothing to show: the small window goes back to the
+    /// list.
+    fn pick_gone(&self, was: i32, now: i32) {
+        if was >= 0 && now < 0 {
+            self.with_store(|s| s.set_details_open(false));
         }
     }
 
@@ -362,6 +400,7 @@ impl Ctl {
             &l.get_search(),
             now_ms(),
         );
+        l.set_read(self.log.borrow().len() as i32);
         l.set_rows(ModelRc::new(VecModel::from(rows)));
     }
 
@@ -372,6 +411,33 @@ impl Ctl {
         }
         self.follow_log();
     }
+}
+
+/// Whether two shown log lines are one line (not the time they read, which
+/// moves on).
+fn same_line(a: &LogRow, b: &LogRow) -> bool {
+    (&a.when_exact, &a.level, &a.msg) == (&b.when_exact, &b.level, &b.msg)
+}
+
+/// [`same_line`] for audit entries.
+fn same_entry(a: &AuditRow, b: &AuditRow) -> bool {
+    (
+        &a.when_exact,
+        &a.kind,
+        &a.title,
+        &a.badge,
+        &a.center,
+        &a.target,
+        &a.detail,
+    ) == (
+        &b.when_exact,
+        &b.kind,
+        &b.title,
+        &b.badge,
+        &b.center,
+        &b.target,
+        &b.detail,
+    )
 }
 
 /// Puts each of `rows` whose time (`when`) differs from the shown one in

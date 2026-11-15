@@ -268,7 +268,10 @@ row, so nothing needs opening to switch it.
 Adding is a form where it happens: a capability, a program and a relay's node
 in the details pane, a folder or a rule as a row of its list, which **Edit**
 also turns a row into (a folder's path can change there: the new folder gets
-the rights, then the old one goes). Escape cancels a form; Enter saves it.
+the rights, then the old one goes, unless the node stored the new path at the
+place of the old one, as it does for another spelling of it). A typed path
+must be a whole one, with `~` for your home; the app refuses a relative one,
+which the node would join to the folder the app runs in. Escape cancels a form; Enter saves it.
 Removing a folder, a rule, a program or a relay's node asks in the row
 (**Remove?** **Cancel** **Remove**); unpairing, removing a capability and
 clearing the audit or the log ask in a dialog, which says what goes. Pairing,
@@ -452,8 +455,12 @@ this machine, and shows its link once, with **Copy**. A
 ## Audit and Log
 
 **Audit** and **Log** follow the node as it writes, one line per entry, the
-picked one whole beside them. **Log** has a bar on top: **All** or
-**Problems**, and words to find in the messages. **Audit** reads the
+picked one whole beside them. The picked row stays the picked one while new
+entries come in front of it (the pick follows the entry, not its place; until
+one is picked the details show the first). **Log** has a bar on top: **All** or
+**Problems**, and words to find in the messages, which the page looks for in
+the lines it read (300, or 1000 after **Show more**, which stays while a search
+narrows the list). **Audit** reads the
 newest 1000 entries and filters them: **All**, **Allowed**, **Refused** or
 **Changes** (settings), a center, an action (`exec.run`, `fs.read`, …) and
 words to find in the target and the reason (in a change, its settings). The

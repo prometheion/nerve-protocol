@@ -412,24 +412,28 @@ impl Ctl {
             self.with_perm(|p| p.set_folder_error("Choose a folder.".into()));
             return;
         }
+        let path = match view::typed_folder(&path, &nerve_node::paths::home_dir()) {
+            Ok(path) => path,
+            Err(e) => {
+                self.with_perm(|p| p.set_folder_error(e.into()));
+                return;
+            }
+        };
         // A new folder gets some right; `none` is for closing one inside
         // another, which a folder's row does.
         if !(r || w || x) {
             self.with_perm(|p| p.set_folder_error("Choose at least one right.".into()));
             return;
         }
+        // Behind `--`, so that a path is never read as a flag.
         let args = vec![
             "folder".into(),
             "add".into(),
+            format!("--center={}", self.perm_center()),
+            "--".into(),
             path.clone(),
             view::rights(r, w, x),
-            format!("--center={}", self.perm_center()),
         ];
-        let said = if was == path {
-            format!("The rights of {path} changed.")
-        } else {
-            format!("{path} is added.")
-        };
         self.command(args, None, move |c, answer| {
             match answer {
                 Ok(v) => {
@@ -437,8 +441,21 @@ impl Ctl {
                         p.set_folder_open(false);
                         p.set_folder_edit(SharedString::new());
                     });
-                    c.done(&v, said);
-                    if !was.is_empty() && was != path {
+                    // Another spelling of the folder it changes (a closing
+                    // `/`, a link on the way) is that folder: the node
+                    // stored it at the same place, and removing the old
+                    // path would take the grant away again.
+                    let stored = view::stored_folder(super::lines(&v)).unwrap_or(path.clone());
+                    let moved = !was.is_empty() && !view::same_folder(&was, &stored);
+                    c.done(
+                        &v,
+                        if !was.is_empty() && !moved {
+                            format!("The rights of {path} changed.")
+                        } else {
+                            format!("{path} is added.")
+                        },
+                    );
+                    if moved {
                         c.folder_remove(&was);
                     }
                 }

@@ -212,7 +212,7 @@ component AuditFilters inherits VerticalLayout {
             current: Store.audit-decision;
             chosen(i) => {
                 Store.audit-decision = i;
-                Store.audit-pick = 0;
+                Store.audit-pick = -1;
                 Store.audit-filtered();
             }
         }
@@ -224,7 +224,7 @@ component AuditFilters inherits VerticalLayout {
             current: Store.audit-oldest ? 1 : 0;
             chosen(i) => {
                 Store.audit-oldest = i == 1;
-                Store.audit-pick = 0;
+                Store.audit-pick = -1;
                 Store.audit-filtered();
             }
         }
@@ -237,7 +237,7 @@ component AuditFilters inherits VerticalLayout {
             placeholder: "Find in target and reason";
             label: "Find in target and reason";
             edited => {
-                Store.audit-pick = 0;
+                Store.audit-pick = -1;
                 Store.audit-filtered();
             }
         }
@@ -247,7 +247,7 @@ component AuditFilters inherits VerticalLayout {
             label: "Center";
             chosen(i) => {
                 Store.audit-center = i;
-                Store.audit-pick = 0;
+                Store.audit-pick = -1;
                 Store.audit-filtered();
             }
         }
@@ -257,7 +257,7 @@ component AuditFilters inherits VerticalLayout {
             label: "Action";
             chosen(i) => {
                 Store.audit-action = i;
-                Store.audit-pick = 0;
+                Store.audit-pick = -1;
                 Store.audit-filtered();
             }
         }
@@ -330,7 +330,7 @@ export component AuditPage inherits PageFrame {
                     Store.audit-center = 0;
                     Store.audit-action = 0;
                     Store.audit-text = "";
-                    Store.audit-pick = 0;
+                    Store.audit-pick = -1;
                     Store.audit-filtered();
                 }
             }
