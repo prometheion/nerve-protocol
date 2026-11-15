@@ -177,14 +177,7 @@ fn center_ui() -> Option<String> {
 pub fn open_center_ui() -> Result<(), String> {
     let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
     let said = nerve_center::ui_file::read(&file)?.ok_or("The center is not running.")?;
-    let url = said.url.ok_or("The center's web UI is off.")?;
-    let at: std::net::SocketAddr = url
-        .split_once("://")
-        .map(|(_, a)| a)
-        .unwrap_or_default()
-        .parse()
-        .map_err(|_| format!("{url} names no address"))?;
-    nerve_center::holder::check(at)?;
+    let url = nerve_center::holder::open_target(&said, nerve_center::holder::of)?;
     crate::browser::open(&url)
 }
 

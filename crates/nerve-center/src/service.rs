@@ -1687,11 +1687,14 @@ fn link_terminal_name(layout: &Layout, steps: &mut Steps) -> Result<(), String> 
     let link = terminal_name(layout);
     let at = |e: std::io::Error| format!("{}: {e}", link.display());
     match std::fs::symlink_metadata(&link) {
-        Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::read_link(&link).is_ok_and(|t| t == layout.bin) {
-                return Ok(());
-            }
+        Ok(m)
+            if m.file_type().is_symlink()
+                && std::fs::read_link(&link).is_ok_and(|t| t == layout.bin) =>
+        {
+            return Ok(());
         }
+        // A file, or a link to a program of another's (a terminal center
+        // kept elsewhere).
         Ok(_) => {
             steps.did(format!(
                 "left {} as it is: another program of that name",
@@ -1982,7 +1985,22 @@ mod tests {
         );
         uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
         assert!(link.is_file());
-        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            // A link to a center of another's stays too, install and uninstall.
+            std::fs::remove_file(&link).unwrap();
+            let theirs = d.path().join("opt/nerve-center");
+            std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+            std::fs::write(&theirs, "nerve-center 1.0.0\n").unwrap();
+            std::os::unix::fs::symlink(&theirs, &link).unwrap();
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+            install(&l, &sys, &l.bin, &mut Vec::new()).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), theirs);
+            uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), theirs);
+            std::fs::remove_file(&link).unwrap();
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        }
         // One role per machine: not where the node's unit is; the terminal
         // center (no word) may.
         std::fs::write(l.unit.with_file_name("nerve-node.service"), "").unwrap();

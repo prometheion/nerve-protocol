@@ -30,6 +30,44 @@ pub fn holder(at: std::net::SocketAddr) -> Result<nerve_service::holder::Holder,
     )
 }
 
+/// The address a program on this machine opens the web UI at, for the
+/// configured `listen`, once `held` says the node's service holds the port
+/// there: a program that took it while the node was stopped would get the
+/// login, and the token a password manager fills there. The scheme follows
+/// the configured address as the node's listener does (TLS beyond
+/// loopback, so also for every address), not the one reached it by.
+pub fn open_target(
+    listen: &str,
+    held: impl FnOnce(std::net::SocketAddr) -> Result<nerve_service::holder::Holder, String>,
+) -> Result<String, String> {
+    use nerve_service::holder::Holder;
+    let Ok(at) = listen.parse::<std::net::SocketAddr>() else {
+        return Err(format!("{listen:?} is not an address"));
+    };
+    let scheme = if at.ip().is_loopback() {
+        "http"
+    } else {
+        "https"
+    };
+    // Every address of this machine is reached on its loopback one.
+    let ip = match at.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    let at = std::net::SocketAddr::new(ip, at.port());
+    match held(at)? {
+        Holder::Service => Ok(format!("{scheme}://{at}")),
+        Holder::Nobody => Err(
+            "The web UI does not listen yet: the node turns it on in a moment, or is stopped."
+                .into(),
+        ),
+        Holder::Other => Err(format!(
+            "Another program listens on {at}, not the node: the web UI is not opened there."
+        )),
+    }
+}
+
 /// Whether `at` (as `ui on --listen` takes it) is beyond loopback: on
 /// Windows that is an administrator's step (crate::owner::refused).
 pub fn beyond_loopback(at: &str) -> bool {
@@ -560,6 +598,51 @@ pub fn utc_text(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nerve_service::holder::Holder;
+
+    #[test]
+    fn the_web_ui_opens_over_tls_wherever_the_node_serves_it_so() {
+        let svc = |_| Ok(Holder::Service);
+        assert_eq!(
+            open_target("127.0.0.1:7470", svc).as_deref(),
+            Ok("http://127.0.0.1:7470")
+        );
+        assert_eq!(
+            open_target("[::1]:7470", svc).as_deref(),
+            Ok("http://[::1]:7470")
+        );
+        // The node serves these over TLS, reached on this machine's own loopback address.
+        assert_eq!(
+            open_target("0.0.0.0:7470", svc).as_deref(),
+            Ok("https://127.0.0.1:7470")
+        );
+        assert_eq!(
+            open_target("[::]:7470", svc).as_deref(),
+            Ok("https://[::1]:7470")
+        );
+        assert_eq!(
+            open_target("192.0.2.7:7470", svc).as_deref(),
+            Ok("https://192.0.2.7:7470")
+        );
+    }
+
+    #[test]
+    fn the_web_ui_opens_only_where_the_node_s_service_holds_the_port() {
+        let by = |h: Holder| move |_| Ok(h);
+        assert!(open_target("127.0.0.1:7470", by(Holder::Service)).is_ok());
+        assert!(open_target("127.0.0.1:7470", by(Holder::Nobody)).is_err());
+        let other = open_target("127.0.0.1:7470", by(Holder::Other)).unwrap_err();
+        assert!(other.contains("not the node"), "{other}");
+        // The lookup is asked for the address the browser would reach.
+        let asked = std::cell::Cell::new(None);
+        let _ = open_target("0.0.0.0:7470", |at| {
+            asked.set(Some(at));
+            Ok(Holder::Nobody)
+        });
+        assert_eq!(asked.get(), Some("127.0.0.1:7470".parse().unwrap()));
+        assert!(open_target("no address", by(Holder::Service)).is_err());
+        assert!(open_target("127.0.0.1:7470", |_| Err("no".into())).is_err());
+    }
 
     #[test]
     fn a_fingerprint_is_written_as_browsers_show_it() {

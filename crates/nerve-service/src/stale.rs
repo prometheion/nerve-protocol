@@ -26,10 +26,15 @@ pub fn runs_older(pid: u32, bin: &Path) -> bool {
 }
 
 /// Whether the running service `unit` (systemd's name, with `.service`)
-/// runs an older program than `bin`.
+/// runs an older program than `bin`: only where the unit starts `bin`
+/// itself. A node a terminal `nerve-node` installed keeps running that file
+/// when the app's package comes after it, and a restart changes nothing.
 pub fn service_runs_older(unit: &str, bin: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
+        if !unit_starts(unit, bin) {
+            return false;
+        }
         let pid = std::process::Command::new("systemctl")
             .args(["show", "--property=MainPID", "--value", unit])
             .stdin(std::process::Stdio::null())
@@ -51,6 +56,32 @@ pub fn service_runs_older(unit: &str, bin: &Path) -> bool {
         let _ = (unit, bin);
         false
     }
+}
+
+/// Whether the unit `unit` starts the program `bin`.
+#[cfg(target_os = "linux")]
+fn unit_starts(unit: &str, bin: &Path) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["show", "--property=ExecStart", "--value", unit])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| starts(&String::from_utf8_lossy(&o.stdout), bin))
+}
+
+/// Whether `exec_start`, what `systemctl show --property=ExecStart` says
+/// (`{ path=/usr/bin/nerve ; argv[]=... ; ... }`), starts `bin`.
+pub fn starts(exec_start: &str, bin: &Path) -> bool {
+    let Some(path) = exec_start
+        .split_once("path=")
+        .and_then(|(_, rest)| rest.split(" ;").next())
+    else {
+        return false;
+    };
+    let path = Path::new(path.trim());
+    path == bin || matches!((path.canonicalize(), bin.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Whether a process started at `started` runs an older program than a file
@@ -125,6 +156,28 @@ mod tests {
         assert_eq!(started_of(stat, boot, 100.0), Some(1_700_000_500.0));
         assert_eq!(started_of("4242 nerve", boot, 100.0), None);
         assert_eq!(started_of(stat, "cpu 1\n", 100.0), None);
+    }
+
+    #[test]
+    fn a_service_started_from_another_file_is_not_older() {
+        let show = |path: &str| {
+            format!(
+                "{{ path={path} ; argv[]={path} --state-dir /var/lib/nerve ; ignore_errors=no ; start_time=[n/a] }}"
+            )
+        };
+        let bin = Path::new("/usr/bin/nerve");
+        assert!(starts(&show("/usr/bin/nerve"), bin));
+        assert!(!starts(&show("/usr/local/bin/nerve-node"), bin));
+        assert!(!starts("", bin));
+        // A link to the program is the program.
+        #[cfg(unix)]
+        {
+            let d = tempfile::tempdir().unwrap();
+            let (real, link) = (d.path().join("nerve"), d.path().join("nerve-center"));
+            std::fs::write(&real, "").unwrap();
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(starts(&show(link.to_str().unwrap()), &real));
+        }
     }
 
     /// This test's own process started before a file it writes now, which

@@ -544,23 +544,10 @@ fn newest(
     n: usize,
     take: &mut dyn FnMut(&str) -> Option<Value>,
 ) -> std::io::Result<Vec<Value>> {
-    // The file's identity, which a move to `old` changes: its device and
-    // inode on Unix; on Windows its creation time, which a new file has
-    // anew (a move keeps it).
-    #[cfg(unix)]
-    let id = |p: &Path| {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
-    };
-    #[cfg(windows)]
-    let id = |p: &Path| {
-        use std::os::windows::fs::MetadataExt;
-        std::fs::metadata(p).ok().map(|m| (m.creation_time(), 0u64))
-    };
     let mut tries = 0;
     loop {
         tries += 1;
-        let before = id(file);
+        let before = file_id(file);
         let mut out = Vec::new();
         let read =
             from_end(file, n, take, &mut out).and_then(|()| from_end(old, n, take, &mut out));
@@ -568,13 +555,44 @@ fn newest(
             // A file cut short (cleared) under the read is read again too.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && tries < 3 => continue,
             Err(e) => return Err(e),
-            Ok(()) if id(file) != before && tries < 3 => continue,
+            Ok(()) if file_id(file) != before && tries < 3 => continue,
             Ok(()) => {
                 out.reverse();
                 return Ok(out);
             }
         }
     }
+}
+
+/// The identity of the file `p`, which a move to `old` changes: its device
+/// and inode.
+#[cfg(unix)]
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// The identity of the file `p`: its volume and file index. Not its creation time: NTFS gives a
+/// file made soon after another of the same name was renamed away that
+/// one's creation time (name tunnelling), which is what a log's rotation
+/// does.
+#[cfg(windows)]
+fn file_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let f = std::fs::File::open(p).ok()?;
+    // SAFETY: an all-zero struct of plain numbers.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid handle that lives through the call, and a struct of the right size.
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return None;
+    }
+    Some((
+        u64::from(info.dwVolumeSerialNumber),
+        u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
+    ))
 }
 
 /// Adds to `out` the entries of the lines of `p`, newest first, until it
@@ -952,6 +970,23 @@ mod tests {
         // No files, no entries.
         let none = d.path().join("none");
         assert!(newest(&none, &none, 5, &mut |_| None).unwrap().is_empty());
+    }
+
+    /// A rotation moves the log away and makes the file anew at once, which
+    /// is what a read of the two is repeated for. On NTFS a creation time
+    /// would not tell the files apart (name tunnelling).
+    #[test]
+    fn a_log_that_rotates_is_another_file() {
+        let d = tempfile::tempdir().unwrap();
+        let (old, file) = (d.path().join("a.jsonl.1"), d.path().join("a.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        let before = file_id(&file).unwrap();
+        assert_eq!(file_id(&file), Some(before));
+        std::fs::rename(&file, &old).unwrap();
+        std::fs::write(&file, "{}\n").unwrap();
+        assert_ne!(file_id(&file), Some(before));
+        assert_eq!(file_id(&old), Some(before));
+        assert_eq!(file_id(&d.path().join("none")), None);
     }
 
     #[test]

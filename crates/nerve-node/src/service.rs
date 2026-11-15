@@ -2287,25 +2287,35 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
     }
 }
 
-/// A node installed with `nerve-node` and then taken over by the desktop
-/// app keeps its terminal command on Linux: the old program becomes a link
-/// to the app's, which runs the CLI as `nerve-node` does, so one program
-/// stays and it is never an older one. The edition comes from the program
-/// the link leads to (crate::edition), so `nerve-node update` through it
-/// updates the app. Nothing is made where no node alone was installed.
+/// The node the desktop app installs has its terminal command on Linux, as
+/// the center has: `nerve-node` is a link to the app's program, which runs
+/// the CLI as `nerve-node` does. A node installed with `nerve-node` and then
+/// taken over by the app keeps its command the same way: the old program
+/// becomes the link, so one program stays and it is never an older one. The
+/// edition comes from the program the link leads to (crate::edition), so
+/// `nerve-node update` through it updates the app. A link of another's
+/// stays.
 #[cfg(not(windows))]
 fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let Some(node) = node_beside(layout) else {
         return Ok(());
     };
+    let at = |e: std::io::Error| format!("{}: {e}", node.display());
     // A link is there already (this one, or another's to leave alone),
     // but for one to the plain program the package's replaced.
     let to_plain = layout.package.is_some()
         && std::fs::read_link(&node).is_ok_and(|t| t == beside(layout, layout.edition.program));
-    if !std::fs::symlink_metadata(&node).is_ok_and(|m| m.is_file()) && !to_plain {
-        return Ok(());
+    match std::fs::symlink_metadata(&node) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) if to_plain => {}
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = node.parent() {
+                std::fs::create_dir_all(dir).map_err(at)?;
+            }
+        }
+        Err(e) => return Err(at(e)),
     }
-    let at = |e: std::io::Error| format!("{}: {e}", node.display());
     // Made beside it first and moved over it, so the command is never
     // missing.
     let name = node
@@ -5055,9 +5065,17 @@ pub(crate) mod tests {
         assert!(std::fs::symlink_metadata(&node.bin).is_err());
         assert!(!l.bin.exists());
 
-        // No node alone was there: no link is made; a link of another's
-        // stays.
-        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        // No node alone was there: the app's node has the command too, and
+        // takes it with it; a link of another's stays.
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("nerve-node is a link to")
+        );
+        assert_eq!(std::fs::read_link(&node.bin).unwrap(), l.bin);
+        uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
         assert!(std::fs::symlink_metadata(&node.bin).is_err());
         let other = d.path().join("other");
         std::os::unix::fs::symlink(&other, &node.bin).unwrap();

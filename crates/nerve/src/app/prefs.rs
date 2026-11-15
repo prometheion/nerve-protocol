@@ -733,37 +733,13 @@ impl Ctl {
     }
 
     /// Opens the web UI in the browser, once the node's service is found to
-    /// hold its port: a program that took it while the node was stopped
-    /// would get the login, and the token a password manager fills there.
+    /// hold its port (nerve_node::cli::ui::open_target).
     fn web_ui_open(self: &Rc<Self>) {
         let listen = self
             .with_prefs(|p| p.get_ui_listen().to_string())
             .unwrap_or_default();
-        let Ok(at) = listen.parse::<std::net::SocketAddr>() else {
-            return self.toast(format!("{listen:?} is not an address"), Tone::Danger);
-        };
-        // Every address of this machine is reached on its loopback one.
-        let ip = match at.ip() {
-            std::net::IpAddr::V4(v4) if v4.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
-            std::net::IpAddr::V6(v6) if v6.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
-            ip => ip,
-        };
-        let at = std::net::SocketAddr::new(ip, at.port());
-        use nerve_node::holder::Holder;
-        let said = match nerve_node::cli::ui::holder(at) {
-            Ok(Holder::Service) => {
-                let scheme = if ip.is_loopback() { "http" } else { "https" };
-                crate::browser::open(&format!("{scheme}://{at}"))
-            }
-            Ok(Holder::Nobody) => Err(
-                "The web UI does not listen yet: the node turns it on in a moment, or is stopped."
-                    .into(),
-            ),
-            Ok(Holder::Other) => Err(format!(
-                "Another program listens on {at}, not the node: the web UI is not opened there."
-            )),
-            Err(e) => Err(e),
-        };
+        let said = nerve_node::cli::ui::open_target(&listen, nerve_node::cli::ui::holder)
+            .and_then(|url| crate::browser::open(&url));
         if let Err(e) = said {
             self.toast(e, Tone::Danger);
         }

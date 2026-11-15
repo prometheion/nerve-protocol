@@ -163,6 +163,45 @@ fn is_node(name: &str) -> bool {
     NODE.contains(&name)
 }
 
+/// The places a program of the system is installed in (Linux): the app's
+/// `nerve` is the node's file there.
+const PROGRAM_DIRS: &[&str] = &[
+    "/usr/bin",
+    "/usr/local/bin",
+    "/bin",
+    "/usr/sbin",
+    "/usr/local/sbin",
+    "/sbin",
+];
+
+/// Whether the path `p` is a file of the node's program. `nerve-node` is
+/// wherever it stands; the app's program is just `nerve`, a name that a
+/// checkout or a project folder has as well, so it is the node's only where
+/// the program is installed: in a place of programs, in a folder named
+/// `nerve` (`C:\Program Files\Nerve`), or, on Windows, spelled `nerve.exe`.
+fn is_node_path(p: &str, win: bool) -> bool {
+    match base_name(p, win).as_str() {
+        "nerve-node" => true,
+        "nerve" => {
+            let sep: &[char] = if win { &['/', '\\'] } else { &['/'] };
+            let (dir, file) = p.rsplit_once(sep).unwrap_or(("", p));
+            let folder = dir.rsplit(sep).next().unwrap_or_default();
+            let at = |d: &&str| {
+                if win {
+                    d.eq_ignore_ascii_case(dir)
+                } else {
+                    *d == dir
+                }
+            };
+            (win && file.len() > "nerve".len())
+                || PROGRAM_DIRS.iter().any(at)
+                || (win && folder.eq_ignore_ascii_case("nerve"))
+                || (!win && folder == "nerve")
+        }
+        _ => false,
+    }
+}
+
 /// The programs that copy, move, link, delete, overwrite or change a file:
 /// the file tools proper, the writers (`tee`, `dd`, `sed`), the downloaders
 /// (`curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`), the packers and
@@ -309,9 +348,9 @@ fn is_node_file(word: &str, spelling: Spelling) -> bool {
             if brace && p.contains('{') {
                 let mut all = Vec::new();
                 expand_braces(p, &mut all, &mut Budget::of(p));
-                all.iter().any(|p| is_node(&base_name(p, win)))
+                all.iter().any(|p| is_node_path(p, win))
             } else {
-                is_node(&base_name(p, win))
+                is_node_path(p, win)
             }
         })
     })
@@ -932,12 +971,43 @@ mod tests {
         assert!(is_node_file("C:\\x\\NERVE-NODE.exe", WIN_SH));
     }
 
+    /// The app's program is `nerve`, a name a checkout has too: a file tool
+    /// is refused for it where a program is installed, not for any `nerve`.
+    #[test]
+    fn the_app_s_name_is_the_node_s_file_only_where_it_is_installed() {
+        for (word, spelling) in [
+            ("/usr/bin/nerve", SH),
+            ("/usr/local/bin/nerve", SH),
+            ("/opt/nerve/nerve", SH),
+            ("/usr/bin/nerve-node", SH),
+            ("nerve-node", SH),
+            ("C:\\Program Files\\Nerve\\nerve.exe", PS),
+            ("C:\\Program Files\\Nerve\\nerve", PS),
+            ("C:\\x\\NERVE.EXE", PS),
+            ("nerve.exe", PS),
+        ] {
+            assert!(is_node_file(word, spelling), "{word:?}");
+        }
+        for (word, spelling) in [
+            ("nerve", SH),
+            ("~/src/nerve", SH),
+            ("./nerve", SH),
+            ("target/release/nerve", SH),
+            ("/home/x/nerve/target/nerve", SH),
+            ("/usr/bin/nerve.old", SH),
+            ("C:\\Users\\x\\Nerve", PS),
+            ("nerve", PS),
+        ] {
+            assert!(!is_node_file(word, spelling), "{word:?}");
+        }
+    }
+
     #[test]
     fn a_brace_group_is_several_words_in_sh_and_fish_only() {
         for word in [
             "/usr/local/bin/nerve-node{,.bak}",
             "nerve-{node,x}",
-            "{nerve,x}",
+            "/usr/{bin,sbin}/{nerve,x}",
             "/usr/{bin,sbin}/nerve-node",
             "{a,b}/nerve-{c,node}",
         ] {

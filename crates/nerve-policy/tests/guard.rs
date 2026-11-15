@@ -194,6 +194,20 @@ const NODE_ITSELF: &[Case] = &[
     ("cp notes.md nerve-node.md", SH, None),
     ("rm -rf target/debug/nerve-node.d", SH, None),
     ("sha256sum /usr/local/bin/nerve-node", SH, None),
+    // The app's program is `nerve`, a name a checkout or a project folder
+    // has too: it is the node's file where a program is installed.
+    ("rm /usr/bin/nerve", SH, PROGRAMS),
+    ("sudo mv /usr/local/bin/nerve /tmp/n", SH, PROGRAMS),
+    (
+        "Remove-Item 'C:\\Program Files\\Nerve\\nerve.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    ("Remove-Item nerve.exe", PS, PROGRAMS),
+    ("rm -rf ~/src/nerve", SH, None),
+    ("mv nerve nerve.old", SH, None),
+    ("cp target/release/nerve dist/", SH, None),
+    ("Remove-Item -Recurse C:\\Users\\x\\Nerve", PS, None),
     // What only mentions the node runs.
     (
         "git commit -m \"use sudo nerve-node audit to see it\"",
