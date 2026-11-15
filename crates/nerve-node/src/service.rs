@@ -1228,7 +1228,7 @@ fn install_steps(
         steps.did(format!("put the program at {}", layout.bin.display()));
     }
     // The old program goes over at once: a running one keeps its file.
-    install_parts(layout, steps)?;
+    install_parts(layout, sys, steps)?;
     // A node whose keys are in the system keyring does not start without
     // one that answers for its user; the installed program asks it.
     if in_keyring {
@@ -1879,12 +1879,16 @@ fn uninstall_steps(
 /// install put in `/usr/local/bin` goes: the package's takes its place,
 /// and the command must not run the older one.
 #[cfg(not(windows))]
-fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+fn drop_plain_program(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
     if layout.package.is_none() {
         return Ok(());
     }
     let plain = beside(layout, layout.edition.program);
     if !std::fs::symlink_metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    // A `nerve` of other software is not ours to remove.
+    if !nerve_service::is_the_app(sys, &plain, USER) {
         return Ok(());
     }
     std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
@@ -1979,7 +1983,7 @@ async fn update_steps(
     };
     let started = || sys.wait_running(&layout.paths);
     if nerve_service::update(&p, sys, from, &started, steps).await? {
-        install_parts(layout, steps)?;
+        install_parts(layout, sys, steps)?;
     }
     Ok(())
 }
@@ -2176,11 +2180,17 @@ pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String
 /// drops its earlier plain program ([`drop_plain_program`]). Windows has no
 /// node alone to take over: the desktop app is the only way to the node
 /// there.
-pub(crate) fn install_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+pub(crate) fn install_parts(
+    layout: &Layout,
+    sys: &dyn System,
+    steps: &mut Steps,
+) -> Result<(), String> {
     put_parts(layout, steps)?;
+    #[cfg(windows)]
+    let _ = sys;
     #[cfg(not(windows))]
     {
-        drop_plain_program(layout, steps)?;
+        drop_plain_program(layout, sys, steps)?;
         link_node(layout, steps)?;
     }
     Ok(())
@@ -5272,6 +5282,13 @@ pub(crate) mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("is at") && out.contains("already"), "{out}");
         assert!(out.contains("removed the earlier program"), "{out}");
+        assert!(!plain.exists());
+        // A `nerve` of other software in its place is left, the app's goes.
+        write_file(&plain, b"other 1.0\n", 0o755).unwrap();
+        drop_plain_program(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file(), "a program that is not the app was removed");
+        write_file(&plain, b"nerve 0.9.0\n", 0o755).unwrap();
+        drop_plain_program(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
         assert!(!plain.exists());
         assert_eq!(std::fs::read_link(&node).unwrap(), l.bin);
         assert!(

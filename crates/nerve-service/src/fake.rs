@@ -162,6 +162,7 @@ impl System for Fake {
         args: &[&str],
     ) -> Result<String, String> {
         // The app asks for the center's by its hidden first word.
+        let said = args;
         let args = args.strip_prefix(&["__center"]).unwrap_or(args);
         // The service's files are asked of the program as root: a process
         // of the service's user could be reached by the others of it.
@@ -175,7 +176,7 @@ impl System for Fake {
             }
             _ => {}
         }
-        self.runs.borrow_mut().push(args.join(" "));
+        self.runs.borrow_mut().push(said.join(" "));
         let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
         let (first, rest) = text.split_once('\n').unwrap_or((&text, ""));
         match args.first().copied() {

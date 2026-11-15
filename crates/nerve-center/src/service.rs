@@ -1766,7 +1766,7 @@ fn plain_program(layout: &Layout) -> Option<PathBuf> {
 /// of the center put in `/usr/local/bin` goes: the package's takes its
 /// place, and neither the command nor the menu may run the older one. Not
 /// where the node's unit starts it.
-fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+fn drop_plain_program(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
     let Some(plain) = plain_program(layout).filter(|p| *p != layout.bin) else {
         return Ok(());
     };
@@ -1780,7 +1780,8 @@ fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> 
             nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
         })
         .is_some_and(|program| nerve_service::role::same_program(&program, &plain));
-    if node_runs_it {
+    // A `nerve` of other software is not ours to remove.
+    if node_runs_it || !nerve_service::is_the_app(sys, &plain, USER) {
         return Ok(());
     }
     std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
@@ -1795,9 +1796,9 @@ fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> 
 /// center a plain program installed moves to the package's program in its
 /// menu entry, its command and its file too, as the node's does
 /// (`install_parts`).
-fn take_over_plain(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+fn take_over_plain(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
     put_parts(layout, steps)?;
-    drop_plain_program(layout, steps)?;
+    drop_plain_program(layout, sys, steps)?;
     link_terminal_name(layout, steps)
 }
 
@@ -1882,7 +1883,7 @@ async fn update_as(
     let started = || sys.wait_running(&layout.state);
     let mut r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
     if matches!(r, Ok(true)) && p.placed.is_some() {
-        r = take_over_plain(layout, &mut steps).map(|()| true);
+        r = take_over_plain(layout, sys, &mut steps).map(|()| true);
     }
     log_update(layout, &steps.done, &r, steps.out);
     let started = r?;
@@ -2226,6 +2227,11 @@ mod tests {
         install(&earlier, &sys, &plain, &mut Vec::new()).unwrap();
         assert_eq!(std::fs::read_link(&link).unwrap(), plain);
         // The package puts its program in place and runs the update.
+        // A `nerve` of other software in the plain program's place stays.
+        std::fs::write(&plain, "other 1.0\n").unwrap();
+        take_over_plain(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file(), "a program that is not the app was removed");
+        std::fs::write(&plain, "nerve 0.9.0\n").unwrap();
         std::fs::write(&l.bin, "nerve-center 1.3.0\n").unwrap();
         let before = PARTS_TOOK.lock().unwrap().len();
         let mut out = Vec::new();
@@ -2233,6 +2239,16 @@ mod tests {
             .await
             .unwrap();
         let said = String::from_utf8(out).unwrap();
+        // The app's center is asked for by its word, or the node's files
+        // would be written for the center.
+        assert!(
+            sys.runs
+                .borrow()
+                .iter()
+                .any(|r| r == "__center service-files"),
+            "{:?}",
+            sys.runs
+        );
         assert!(said.contains("removed the earlier program"), "{said}");
         assert!(std::fs::symlink_metadata(&plain).is_err(), "{said}");
         assert_eq!(std::fs::read_link(&link).unwrap(), l.bin, "{said}");
@@ -2242,7 +2258,7 @@ mod tests {
             [format!("put {}", l.bin.display())]
         );
         // A node's unit that starts the plain program keeps it.
-        std::fs::write(&plain, "nerve-center 0.9.0\n").unwrap();
+        std::fs::write(&plain, "nerve 0.9.0\n").unwrap();
         std::fs::write(
             l.unit.with_file_name("nerve-node.service"),
             format!(
@@ -2251,7 +2267,7 @@ mod tests {
             ),
         )
         .unwrap();
-        take_over_plain(&l, &mut Steps::new(&mut Vec::new())).unwrap();
+        take_over_plain(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
         assert!(plain.is_file());
     }
 
