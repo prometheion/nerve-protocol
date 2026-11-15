@@ -21,7 +21,60 @@ const MOST: i32 = 1000;
 /// match.
 const SCAN: usize = 1000;
 
+/// The row that was picked when a feed restarted.
+pub(super) enum Kept {
+    Log(LogRow),
+    Audit(AuditRow),
+}
+
 impl Ctl {
+    /// Remembers the picked row of the page that restarts its feed, so that
+    /// a reload keeps the pick on its line. A pick of nothing (the page
+    /// follows the first row) is remembered as nothing; a restart before
+    /// the first row came keeps what the one before it remembered.
+    fn keep_pick(&self, log: bool) {
+        // The picked row, and how many rows there are.
+        let (row, count) = if log {
+            self.window
+                .upgrade()
+                .map(|w| {
+                    let l = w.global::<Logs>();
+                    let at = l.get_pick();
+                    let row = usize::try_from(at)
+                        .ok()
+                        .and_then(|i| l.get_rows().row_data(i));
+                    (row.map(Kept::Log), l.get_rows().row_count())
+                })
+                .unwrap_or((None, 0))
+        } else {
+            self.with_store(|s| {
+                let at = s.get_audit_pick();
+                let row = usize::try_from(at)
+                    .ok()
+                    .and_then(|i| s.get_audit().row_data(i));
+                (row.map(Kept::Audit), s.get_audit().row_count())
+            })
+            .unwrap_or((None, 0))
+        };
+        // A restart before the first row of the one before it came: the pick
+        // reads -1 meanwhile, and what was remembered stays.
+        if row.is_none() && count == 0 {
+            return;
+        }
+        // The rows are gone for now: the page follows the first row until
+        // the picked one is back.
+        if row.is_some() {
+            if log {
+                if let Some(w) = self.window.upgrade() {
+                    w.global::<Logs>().set_pick(-1);
+                }
+            } else {
+                self.with_store(|s| s.set_audit_pick(-1));
+            }
+        }
+        *self.kept.borrow_mut() = row;
+    }
+
     pub(super) fn stop_follow(&self) {
         // A new start; what the old one still sends is left alone.
         self.feed.fetch_add(1, Ordering::SeqCst);
@@ -72,6 +125,7 @@ impl Ctl {
         if self.waiting_for_rights() {
             return;
         }
+        self.keep_pick(false);
         self.audit.borrow_mut().clear();
         self.with_store(|s| {
             s.set_audit_load(Load::Loading);
@@ -179,11 +233,15 @@ impl Ctl {
         if self.waiting_for_rights() {
             return;
         }
+        self.keep_pick(true);
         self.log.borrow_mut().clear();
         if let Some(w) = self.window.upgrade() {
             let l = w.global::<Logs>();
             l.set_load(Load::Loading);
             l.set_rows(ModelRc::default());
+            // Nothing was read yet: a search must not name lines of the
+            // feed before.
+            l.set_read(0);
         }
         let (last, problems) = self
             .window
@@ -229,6 +287,10 @@ impl Ctl {
     /// calls it a moment after the start; tests, which have none, call it
     /// themselves.
     pub fn feed_ready(&self) {
+        // A picked row that did not come back by now is gone.
+        if self.kept.borrow_mut().take().is_some() {
+            self.with_store(|s| s.set_details_open(false));
+        }
         match self.page() {
             Some(Page::Log) => {
                 if let Some(w) = self.window.upgrade() {
@@ -298,14 +360,18 @@ impl Ctl {
             let rows = view::log_rows(&self.log.borrow(), problems, &search, now_ms());
             if let Some(w) = self.window.upgrade() {
                 let l = w.global::<Logs>();
-                // The picked line stays the picked one while newer ones come.
-                let pick = view::follow_pick(
-                    &l.get_rows().iter().collect::<Vec<_>>(),
-                    l.get_pick(),
-                    &rows,
-                    true,
-                    same_line,
-                );
+                // The picked line stays the picked one while newer ones come,
+                // and over a restart of the feed.
+                let kept = self.kept.borrow_mut().take();
+                let (old, was) = match &kept {
+                    Some(Kept::Log(row)) if l.get_pick() < 0 => (vec![row.clone()], 0),
+                    _ => (l.get_rows().iter().collect::<Vec<_>>(), l.get_pick()),
+                };
+                let pick = view::follow_pick(&old, was, &rows, true, same_line);
+                // Not among the lines that came yet: the next batch may hold it.
+                if pick < 0 && l.get_pick() < 0 {
+                    *self.kept.borrow_mut() = kept;
+                }
                 self.pick_gone(l.get_pick(), pick);
                 l.set_pick(pick);
                 l.set_read(self.log.borrow().len() as i32);
@@ -314,9 +380,18 @@ impl Ctl {
                 l.set_error(SharedString::new());
             }
         } else {
-            let before = self
+            let mut before = self
                 .with_store(|s| (s.get_audit().iter().collect::<Vec<_>>(), s.get_audit_pick()))
                 .unwrap_or_default();
+            // The pick of a feed that restarted looks for its entry.
+            let was = before.1;
+            let kept = match self.kept.borrow_mut().take() {
+                Some(Kept::Audit(row)) if was < 0 => Some(row),
+                _ => None,
+            };
+            if let Some(row) = &kept {
+                before = (vec![row.clone()], 0);
+            }
             self.show_audit();
             // The picked entry stays the picked one while newer ones come.
             self.with_store(|s| {
@@ -329,10 +404,14 @@ impl Ctl {
                 );
                 s.set_audit_pick(pick);
             });
-            self.pick_gone(
-                before.1,
-                self.with_store(|s| s.get_audit_pick()).unwrap_or(-1),
-            );
+            let pick = self.with_store(|s| s.get_audit_pick()).unwrap_or(-1);
+            // Not among the entries that came yet: the next batch may hold it.
+            if pick < 0
+                && let Some(row) = kept
+            {
+                *self.kept.borrow_mut() = Some(Kept::Audit(row));
+            }
+            self.pick_gone(was, pick);
             self.with_store(|s| {
                 s.set_audit_load(Load::Ready);
                 s.set_audit_error(SharedString::new());
@@ -409,6 +488,8 @@ impl Ctl {
         if let Some(w) = self.window.upgrade() {
             w.global::<Logs>().set_problems_only(problems);
         }
+        // Another list of lines: the pick of the one before is no pick.
+        *self.kept.borrow_mut() = None;
         self.follow_log();
     }
 }

@@ -281,13 +281,28 @@ impl Ctl {
     /// again. `close` runs on success (a dialog that closes).
     fn perm_change(
         self: &Rc<Self>,
+        args: Vec<String>,
+        input: Option<String>,
+        said: String,
+        close: fn(&Ctl),
+        failed: fn(&Ctl, String),
+    ) {
+        let center = self.perm_center();
+        self.perm_change_on(&center, args, input, said, close, failed);
+    }
+
+    /// [`Ctl::perm_change`] for the center named, not the one picked now:
+    /// the second command of a move must reach the center of the first.
+    fn perm_change_on(
+        self: &Rc<Self>,
+        center: &str,
         mut args: Vec<String>,
         input: Option<String>,
         said: String,
         close: fn(&Ctl),
         failed: fn(&Ctl, String),
     ) {
-        args.push(format!("--center={}", self.perm_center()));
+        args.push(format!("--center={center}"));
         self.command(args, input, move |c, answer| {
             match answer {
                 Ok(v) => {
@@ -425,11 +440,15 @@ impl Ctl {
             self.with_perm(|p| p.set_folder_error("Choose at least one right.".into()));
             return;
         }
+        // The center the form was opened for: the owner may pick another
+        // while the node walks the new folder, and the old grant goes from
+        // this one.
+        let center = self.perm_center();
         // Behind `--`, so that a path is never read as a flag.
         let args = vec![
             "folder".into(),
             "add".into(),
-            format!("--center={}", self.perm_center()),
+            format!("--center={center}"),
             "--".into(),
             path.clone(),
             view::rights(r, w, x),
@@ -456,7 +475,7 @@ impl Ctl {
                         },
                     );
                     if moved {
-                        c.folder_remove(&was);
+                        c.folder_remove_on(&center, &was);
                     }
                 }
                 Err(e) => {
@@ -499,8 +518,14 @@ impl Ctl {
     }
 
     fn folder_remove(self: &Rc<Self>, path: &str) {
+        let center = self.perm_center();
+        self.folder_remove_on(&center, path);
+    }
+
+    fn folder_remove_on(self: &Rc<Self>, center: &str, path: &str) {
         let args = vec!["folder".into(), "rm".into(), path.into()];
-        self.perm_change(
+        self.perm_change_on(
+            center,
             args,
             None,
             format!("{path} is removed."),
@@ -821,6 +846,12 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
             c.with_perm(|p| {
                 p.set_current(i);
                 p.set_center(name);
+                // A form row was opened for the center before, and shows
+                // that center's rights: it would save them to this one.
+                p.set_folder_open(false);
+                p.set_folder_edit(SharedString::new());
+                p.set_add_list(-1);
+                p.set_edit_list(-1);
             });
             c.perm_load();
         }

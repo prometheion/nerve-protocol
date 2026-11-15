@@ -369,6 +369,21 @@ fn the_app_drives_the_cli_end_to_end() {
         "git push origin main",
         "the pick stayed at its place while an entry came"
     );
+    // Refresh reads the entries again: the pick stays on its entry.
+    let all = store.get_audit().row_count();
+    store.invoke_reload();
+    until(&ctl, "the entries again", || {
+        store.get_audit().row_count() == all && store.get_audit_pick() >= 0
+    });
+    assert_eq!(
+        store
+            .get_audit()
+            .row_data(store.get_audit_pick() as usize)
+            .unwrap()
+            .target,
+        "git push origin main",
+        "Refresh dropped the pick"
+    );
     store.set_audit_pick(-1);
     store.invoke_audit_rule(index_of("/srv/data/report.txt"), "deny".into(), true);
     until(&ctl, "the second rule", || settings_shown() == before + 2);
@@ -628,6 +643,17 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(config(&paths).centers[0].policy.folders.len(), 1);
     perm.set_folder_open(false);
     perm.set_folder_error(slint::SharedString::new());
+    // A form row belongs to the center it was opened for: picking a center
+    // closes it, so that it does not save one center's rights to another.
+    perm.set_folder_edit("/somewhere".into());
+    perm.set_folder_open(true);
+    perm.set_add_list(1);
+    perm.set_edit_list(0);
+    perm.invoke_pick(0);
+    assert!(!perm.get_folder_open());
+    assert_eq!(perm.get_folder_edit(), "");
+    assert_eq!(perm.get_add_list(), -1);
+    assert_eq!(perm.get_edit_list(), -1);
     // Sync folders walks the grants again. No node runs here: on Linux the
     // node walks them when it starts, on Windows this command does.
     perm.invoke_folder_sync();
@@ -1038,6 +1064,23 @@ fn the_app_drives_the_cli_end_to_end() {
     logs.set_search("".into());
     logs.invoke_searched();
     until(&ctl, "every line", || logs.get_rows().row_count() == 3);
+    // Refresh and Show more read the lines again: the pick stays on its
+    // line.
+    logs.set_pick(2);
+    assert_eq!(logs.get_rows().row_data(2).unwrap().msg, "link dropped");
+    logs.set_read(99);
+    store.invoke_reload();
+    assert_eq!(logs.get_read(), 0, "a search would name lines never read");
+    until(&ctl, "the line again", || {
+        logs.get_rows().row_count() == 3 && logs.get_pick() >= 0
+    });
+    let at = logs.get_pick() as usize;
+    assert_eq!(
+        logs.get_rows().row_data(at).unwrap().msg,
+        "link dropped",
+        "Refresh dropped the pick"
+    );
+    logs.set_pick(-1);
     // The problems come from the whole log: a warning shows behind newer
     // lines that are none, more than the page shows.
     logged_level(&paths, now, "info", "linked");
