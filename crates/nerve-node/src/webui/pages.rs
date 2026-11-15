@@ -572,27 +572,11 @@ fn file_id(p: &Path) -> Option<(u64, u64)> {
     std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
 }
 
-/// The identity of the file `p`: its volume and file index. Not its creation time: NTFS gives a
-/// file made soon after another of the same name was renamed away that
-/// one's creation time (name tunnelling), which is what a log's rotation
-/// does.
+/// The identity of the file `p`: its volume and file index, not its
+/// creation time (nerve_service::win::file).
 #[cfg(windows)]
 fn file_id(p: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-    let f = std::fs::File::open(p).ok()?;
-    // SAFETY: an all-zero struct of plain numbers.
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: a valid handle that lives through the call, and a struct of the right size.
-    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
-        return None;
-    }
-    Some((
-        u64::from(info.dwVolumeSerialNumber),
-        u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
-    ))
+    nerve_service::win::file::id(p)
 }
 
 /// Adds to `out` the entries of the lines of `p`, newest first, until it

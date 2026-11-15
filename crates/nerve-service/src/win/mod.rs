@@ -11,7 +11,8 @@
 //! loopback connection ([`tcp`]). The machine's own
 //! folders come from Windows, not from the environment ([`folders`]), and
 //! the center's install puts its folder on the machine's `Path`
-//! ([`machine_path`]). What
+//! ([`machine_path`]); a file is told from another by its volume and index
+//! ([`file`]). What
 //! is plain logic is compiled and tested on every platform.
 
 #[cfg(windows)]
@@ -21,6 +22,8 @@ pub mod dacl;
 pub mod dispatch;
 #[cfg(windows)]
 pub mod event;
+#[cfg(windows)]
+pub mod file;
 pub mod folders;
 pub mod job;
 #[cfg(windows)]
