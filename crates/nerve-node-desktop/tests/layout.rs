@@ -36,6 +36,10 @@ slint::slint! {
         out property <length> top: root.view-top;
         in-out property <bool> asking;
         in-out property <int> removed;
+        in-out property <int> stepped;
+        public function focus-list() {
+            card.focus();
+        }
         out property <length> ask-x: remove.absolute-position.x + remove.width - 12px;
         out property <length> ask-y: remove.absolute-position.y + remove.height / 2;
         callback went-back();
@@ -65,6 +69,9 @@ slint::slint! {
             list := ListPane {
                 open: root.open;
                 card := ListCard {
+                    step(d) => {
+                        root.stepped += d;
+                    }
                     for i in root.rows: ListItem {
                         first: i == 0;
                         selected: i == 3;
@@ -118,6 +125,10 @@ slint::slint! {
         callback went-back <=> probe.went-back;
         in-out property <bool> asking <=> probe.asking;
         out property <int> removed: probe.removed;
+        out property <int> stepped: probe.stepped;
+        public function focus-list() {
+            probe.focus-list();
+        }
         out property <length> ask-x: probe.ask-x;
         out property <length> ask-y: probe.ask-y;
         init => {
@@ -404,6 +415,24 @@ fn the_list_and_its_details_follow_the_window() {
         "Remove in its place did not remove"
     );
     assert!(!window.get_asking());
+
+    // The list takes the arrow keys: down and up move the pick.
+    window.invoke_focus_list();
+    for (key, want) in [
+        (slint::platform::Key::DownArrow, 1),
+        (slint::platform::Key::DownArrow, 2),
+        (slint::platform::Key::UpArrow, 1),
+    ] {
+        let text: slint::SharedString = key.into();
+        let w = window.window();
+        w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+        assert_eq!(
+            window.get_stepped(),
+            want,
+            "the arrow keys do not move the pick"
+        );
+    }
 
     // Every size drew the same details: nothing was made again.
     assert_eq!(window.get_made(), 1, "a resize made the details anew");
