@@ -122,8 +122,8 @@ tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
 press **Install**.
 
 As a node it installs the node as a service, `nerve://` links, so a pairing
-link opens in Nerve, the command `nerve-node` (a link to the app), and, for
-the plain program, **Nerve** in the application menu. You become the node's
+link opens in Nerve, and, for the plain program, **Nerve** in the
+application menu. You become the node's
 owner. Its first steps pair your first center and choose its mode.
 
 As a center it installs the center as a service, as `nerve-center install`
