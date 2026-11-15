@@ -39,7 +39,10 @@ machine (#232):
   (`parts::CENTER_EDITION`): the menu entry (Linux, unless a package has it)
   or the Start menu and Apps & features (Windows), but no `nerve://` handler.
   Its uninstall removes them and the program, which serves that role alone
-  (a package's stays the package manager's).
+  (a package's stays the package manager's). An uninstall of the other role
+  by the app's program (`nerve uninstall` typed on a center, `nerve __center
+  uninstall` on a node) leaves the program and the parts where the other
+  role's service runs that file.
 - **One role per machine.** The role is read from the installed services
   (`nerve_service::role`), never from a setting of the app. The app's program
   refuses to install a node where the center's service is installed, and the
@@ -47,7 +50,9 @@ machine (#232):
   install both roles, for tests; each service is updated by the program it
   runs. The app says a role a terminal program installed beside its own (its
   unit starts `nerve-node` or `nerve-center`, not `nerve`) on the Overview or
-  the center's step, and leaves it alone; the node's terminal commands warn
+  the center's step, and leaves it alone: the app's window, its broker and
+  `nerve-node uninstall`'s hand-over to the app count only the role whose
+  unit starts the app (`Roles::of_app`). The node's terminal commands warn
   at `mode user`, `allowlist --as-owner` and a folder over the home or a
   harness's settings where a center runs too (`cli/beside.rs`).
 - **The installer asks first** what the machine is: **A node** or **A center**
@@ -651,6 +656,6 @@ seconds.
 
 The appearance (system, light or dark), the **Pre-releases** switch, and the
 card on commands that run as you when you hid it, are kept in
-`~/.config/nerve/settings.json` on Linux and
-`%APPDATA%\nerve\settings.json` on Windows, apart from the
+`~/.config/nerve-app/settings.json` on Linux and
+`%APPDATA%\nerve-app\settings.json` on Windows, apart from the
 node's settings.

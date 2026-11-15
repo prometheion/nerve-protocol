@@ -222,8 +222,8 @@ pub struct Spec<'a> {
 
 #[cfg(windows)]
 pub use sys::{
-    configure, delete, delete_at_restart, pid, put, registered, set_dacl, start, state, stop,
-    wait_running,
+    command_line, configure, delete, delete_at_restart, pid, put, registered, set_dacl, start,
+    state, stop, wait_running,
 };
 
 #[cfg(windows)]
@@ -302,6 +302,16 @@ mod sys {
             SERVICE_STOPPED => "stopped",
             _ => "running",
         };
+        let automatic = config_of(&s, |config| config.dwStartType == SERVICE_AUTO_START);
+        Ok(Some(State {
+            state: state.into(),
+            automatic,
+        }))
+    }
+
+    /// What `f` reads of the configuration of the service `s`, opened with
+    /// SERVICE_QUERY_CONFIG; `None` when it cannot be read.
+    fn config_of<T>(s: &Scm, f: impl FnOnce(&QUERY_SERVICE_CONFIGW) -> T) -> Option<T> {
         // The configuration's size first, then the configuration.
         let mut need = 0u32;
         // SAFETY: a query of the size only, with no buffer.
@@ -317,15 +327,22 @@ mod sys {
                 &mut need,
             )
         };
-        let automatic = (ok != 0).then(|| {
-            // SAFETY: the call filled the struct at the buffer's start.
-            let config = unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
-            config.dwStartType == SERVICE_AUTO_START
-        });
-        Ok(Some(State {
-            state: state.into(),
-            automatic,
-        }))
+        // SAFETY: the call filled the struct at the buffer's start, and its
+        // strings in the buffer, which lives while `f` reads them.
+        (ok != 0).then(|| f(unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() }))
+    }
+
+    /// The command line the service `name` starts, as anyone may ask;
+    /// `None` when it is not registered or cannot be read.
+    pub fn command_line(name: &str) -> Option<String> {
+        let s = Scm::open(SC_MANAGER_CONNECT)
+            .ok()?
+            .service(name, SERVICE_QUERY_CONFIG)
+            .ok()??;
+        // SAFETY: a NUL-terminated string in the configuration's buffer.
+        config_of(&s, |config| unsafe {
+            crate::win::sid::from_wide(config.lpBinaryPathName)
+        })
     }
 
     /// A list of names as the manager takes it: each ended by a NUL, and

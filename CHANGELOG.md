@@ -87,8 +87,8 @@ and every limit is in
   on Linux, and an administrator on Windows, with a warning.
 - Where a center runs on the same machine (the terminal programs), `mode
   user`, `allowlist --as-owner` and a folder over your home or a harness's
-  settings say that what runs as you, or `nerve-run` there, reaches the
-  center's owner token.
+  settings say that what runs as you, or `nerve-run` there, can read the
+  harness tokens that reach the center.
 - The guard refuses the app's program `nerve` for the file tools where a
   program is installed (`/usr/bin`, `Program Files\Nerve`), not for any path
   called `nerve`: `rm -rf ~/src/nerve` runs.
@@ -153,7 +153,8 @@ and every limit is in
   **Nerve** in the menu opens the center's web UI and removes the center
   (also Apps & features on Windows). A role a terminal program installed
   beside it is said, as "Also a center, installed in the terminal", and left
-  alone. The package's menu entry opens no `nerve://` links; the node role
+  alone; uninstalling one role keeps the program while the other role's
+  service runs it. The package's menu entry opens no `nerve://` links; the node role
   adds the handler, so a center answers none.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.

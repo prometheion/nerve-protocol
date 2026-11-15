@@ -475,7 +475,11 @@ process to read its account, so a local peer is told by its session:
 - The 16 places per peer are kept per session.
 
 What remains on Windows: a program of another account started inside your
-session (`runas`) reaches the login, where it needs a token.
+session (`runas`) reaches the login, where it needs a token. So may a
+connection whose socket outlived the process that made it: the table names
+that process's number, which Windows may give to a process of yours later.
+The other account still needs a token at the login, but it can hold your
+session's places while it waits there.
 
 ### What the web UI does
 

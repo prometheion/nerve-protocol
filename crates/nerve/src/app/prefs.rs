@@ -738,8 +738,7 @@ impl Ctl {
         let listen = self
             .with_prefs(|p| p.get_ui_listen().to_string())
             .unwrap_or_default();
-        let said = nerve_node::cli::ui::open_target(&listen, nerve_node::cli::ui::holder)
-            .and_then(|url| crate::browser::open(&url));
+        let said = open_web_ui(&listen, nerve_node::cli::ui::holder, crate::browser::open);
         if let Err(e) = said {
             self.toast(e, Tone::Danger);
         }
@@ -1360,9 +1359,37 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_restore_confirm(move || c.restore_confirm());
 }
 
+/// Opens the node's web UI configured at `listen` with the browser `open`,
+/// once `held` says the node's service holds the port there
+/// (nerve_node::cli::ui::open_target).
+fn open_web_ui(
+    listen: &str,
+    held: impl FnOnce(std::net::SocketAddr) -> Result<nerve_node::holder::Holder, String>,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    nerve_node::cli::ui::open_target(listen, held).and_then(|url| open(&url))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Open the web UI** in Settings › Network opens the browser only
+    /// once the node's service holds the port.
+    #[test]
+    fn the_web_ui_opens_only_where_the_node_s_service_holds_the_port() {
+        use nerve_node::holder::Holder;
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |url: &str| {
+            opened.borrow_mut().push(url.to_string());
+            Ok(())
+        };
+        assert!(open_web_ui("127.0.0.1:7450", |_| Ok(Holder::Other), open).is_err());
+        assert!(open_web_ui("127.0.0.1:7450", |_| Ok(Holder::Nobody), open).is_err());
+        assert!(opened.borrow().is_empty());
+        open_web_ui("127.0.0.1:7450", |_| Ok(Holder::Service), open).unwrap();
+        assert_eq!(*opened.borrow(), ["http://127.0.0.1:7450"]);
+    }
 
     #[test]
     fn a_limit_shows_in_the_fields_unit_and_its_default_when_unset() {

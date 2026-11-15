@@ -1848,6 +1848,18 @@ fn uninstall_steps(
         }
         None => {}
     }
+    // The app's program serves the center here (the app installs one role
+    // per machine, so a node beside it is a terminal's): the program and
+    // the app's menu entry are the center's, and stay.
+    if center_runs(layout) {
+        #[cfg(unix)]
+        unlink_node(layout, steps)?;
+        steps.did(format!(
+            "left the program {} and the app's menu entry: the center's service runs it",
+            layout.bin.display()
+        ));
+        return Ok(());
+    }
     uninstall_parts(layout, steps)?;
     if let Some(package) = layout.package {
         steps.did(format!(
@@ -2187,6 +2199,18 @@ pub(crate) fn uninstall_parts(layout: &Layout, steps: &mut Steps) -> Result<(), 
     Ok(())
 }
 
+/// Whether the center's unit beside the node's starts the program at
+/// `layout.bin`: the app's program serves the center then.
+fn center_runs(layout: &Layout) -> bool {
+    layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Center)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &layout.bin))
+}
+
 /// Where `install` of the node alone put its program, beside `layout`'s
 /// when that is another edition's: `nerve-node`. Not on Windows, where the
 /// node alone is not released or installed.
@@ -2215,10 +2239,12 @@ fn beside(layout: &Layout, program: &str) -> PathBuf {
 }
 
 /// The desktop app's program beside `layout`'s, when the app is installed
-/// there and `layout` is the node alone's: the app took the node over, so
-/// the service, the parts and the program are the app's, and only its own
-/// uninstall removes them all ([`hand_over_uninstall`]). Not on Windows,
-/// where no node alone is installed beside the app.
+/// there, `layout` is the node alone's and the node's unit starts the app:
+/// the app took the node over, so the service, the parts and the program
+/// are the app's, and only its own uninstall removes them all
+/// ([`hand_over_uninstall`]). A node whose unit starts `nerve-node` is the
+/// terminal's, also beside the app's center, and removes itself. Not on
+/// Windows, where no node alone is installed beside the app.
 #[cfg(not(windows))]
 pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
     if layout.edition.program != crate::edition::NODE.program {
@@ -2232,9 +2258,12 @@ pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
         .and_then(Path::parent)
         .and_then(Path::parent)
         .map(|usr| usr.join("bin").join(app));
+    let started = layout.unit.parent().and_then(|units| {
+        nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+    })?;
     std::iter::once(beside(layout, app))
         .chain(packaged)
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && *p == started)
 }
 
 /// `uninstall` of the node alone where the desktop app took the node over:
@@ -4977,6 +5006,46 @@ pub(crate) mod tests {
         install(&alone, &sys, &exe, "alice", &mut Vec::new()).unwrap();
     }
 
+    /// `nerve uninstall` on the app's center (by hand, or for a node a
+    /// terminal program installed beside it) leaves the program and the
+    /// app's menu entry, which the center's service runs and shows; beside
+    /// a center of the terminal it removes them.
+    #[test]
+    fn the_node_s_uninstall_leaves_the_program_the_center_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = Layout {
+            bin: d.path().join("usr/local/bin/nerve"),
+            edition: &DESKTOP,
+            ..layout(d.path())
+        };
+        let entry = l.bin.with_file_name("menu-entry");
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(l.unit.parent().unwrap()).unwrap();
+        let center = l.unit.with_file_name("nerve-center.service");
+        let put = |exec: &Path| {
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+            std::fs::write(&entry, "Exec").unwrap();
+            std::fs::write(
+                &center,
+                format!(
+                    "[Service]\nExecStart={} __center --state-dir x\n",
+                    exec.display()
+                ),
+            )
+            .unwrap();
+        };
+        put(&l.bin);
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists() && entry.exists(), "{out}");
+        assert!(out.contains("the center's service runs it"), "{out}");
+        put(&l.bin.with_file_name("nerve-center"));
+        uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists() && !entry.exists());
+    }
+
     #[tokio::test]
     async fn the_desktop_app_installs_updates_and_uninstalls_its_parts_with_the_node() {
         let d = tempfile::tempdir().unwrap();
@@ -5351,6 +5420,13 @@ pub(crate) mod tests {
             .unwrap();
         };
         script(0);
+        // Only where the node's unit starts the app: a node of the terminal
+        // (beside the app's center) removes itself.
+        assert_eq!(app_beside(&node), None);
+        std::fs::create_dir_all(node.unit.parent().unwrap()).unwrap();
+        std::fs::write(&node.unit, node.unit_text(None)).unwrap();
+        assert_eq!(app_beside(&node), None);
+        std::fs::write(&node.unit, app.unit_text(None)).unwrap();
         assert_eq!(app_beside(&node).as_ref(), Some(&app.bin));
         // The app itself does its uninstall.
         assert_eq!(app_beside(&app), None);

@@ -1003,6 +1003,16 @@ pub fn install_with(
         let node = nerve_service::role::Roles::in_units(units).node;
         nerve_service::role::one_role(nerve_service::role::Role::Center, node)?;
     }
+    // The package manager owns the package's program, which every account
+    // starts from the menu: another one does not take its place, as for
+    // the node.
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    if packaged(layout) && !(real(exe).is_some() && real(exe) == real(&layout.bin)) {
+        return Err(format!(
+            "the app came from its package here, so its program is {}: open that one (Nerve in the application menu)",
+            layout.bin.display()
+        ));
+    }
     for (var, value) in set {
         check_setting(var, value)?;
     }
@@ -1040,7 +1050,6 @@ pub fn install_with(
     sys.give(state, account.uid, account.gid)?;
     steps.did(format!("{} belongs to {USER}", state.display()));
     settings(layout, sys, set, steps.out)?;
-    let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
             "the program is at {} already",
@@ -1623,11 +1632,22 @@ pub fn uninstall(
     }
     // The app's terminal name for the center and its parts go with the
     // center; so does its program, which serves this role alone (one role
-    // per machine), unless its package manager owns it.
+    // per machine), unless its package manager owns it, or the node's
+    // service runs it (the app's node, a center of the terminal beside it).
     if layout.word.is_some()
         && let Some(gone) = unlink_terminal_name(layout)?
     {
         step(out, format!("removed the link {}", gone.display()));
+    }
+    if node_runs(layout) {
+        step(
+            out,
+            format!(
+                "left the program {} and the app's menu entry: the node's service runs it",
+                layout.bin.display()
+            ),
+        );
+        return Ok(());
     }
     for gone in remove_parts(layout)? {
         step(out, gone);
@@ -1870,6 +1890,18 @@ pub(crate) fn asset_of(edition: &crate::edition::Edition, arch: &str) -> Result<
 
 /// Whether the installed program is the app from its .deb or .rpm, which
 /// only its package manager replaces.
+/// Whether the node's unit beside the center's starts the program at
+/// `layout.bin`: the app's program serves the node then.
+fn node_runs(layout: &Layout) -> bool {
+    layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &layout.bin))
+}
+
 fn packaged(layout: &Layout) -> bool {
     layout.word.is_some() && layout.bin.starts_with("/usr/bin")
 }
@@ -2001,9 +2033,26 @@ mod tests {
             std::fs::remove_file(&link).unwrap();
             std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
         }
+        // Where the node's unit starts the app's program (`nerve __center
+        // uninstall` typed on the app's node), the program and the parts
+        // stay: they are the node's.
+        let node_unit = l.unit.with_file_name("nerve-node.service");
+        std::fs::write(
+            &node_unit,
+            format!(
+                "[Service]\nExecStart={} --config-dir x run\n",
+                l.bin.display()
+            ),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists(), "{said}");
+        assert!(said.contains("the node's service runs it"), "{said}");
         // One role per machine: not where the node's unit is; the terminal
         // center (no word) may.
-        std::fs::write(l.unit.with_file_name("nerve-node.service"), "").unwrap();
+        std::fs::write(&node_unit, "").unwrap();
         let e = install(&l, &sys, &l.bin, &mut Vec::new()).unwrap_err();
         assert!(e.starts_with("this machine is a node already"), "{e}");
         assert!(e.contains("nerve-node and nerve-center"), "{e}");
@@ -2085,6 +2134,25 @@ mod tests {
         assert!(packaged(&l));
         l.word = None;
         assert!(!packaged(&l));
+    }
+
+    /// The app from its package: the center's install by another copy of
+    /// the program (one from Downloads) is refused before anything
+    /// changes; the package's program is the one to open.
+    #[test]
+    fn the_app_s_center_takes_no_other_program_than_the_package_s() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = "/usr/bin/nerve".into();
+        l.word = Some(crate::edition::APP_WORD);
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        let e = install(&l, &sys, &exe, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("came from its package here"), "{e}");
+        assert!(e.contains("/usr/bin/nerve"), "{e}");
+        assert!(!l.unit.exists() && !l.state.exists());
     }
 
     /// The run folder of the installed center is the runtime folder its

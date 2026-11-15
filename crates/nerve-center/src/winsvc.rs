@@ -509,7 +509,16 @@ pub fn uninstall(
         }
     }
     // The app's parts and its program go with the center: the program
-    // serves this role alone (one role per machine).
+    // serves this role alone (one role per machine), but where the node's
+    // service is registered, which only the app installs on Windows: that
+    // one runs the program too.
+    if layout.word.is_some() && sys.registered(nerve_service::role::Role::Node.service()) {
+        steps.did(format!(
+            "left the program {} and the app's Start menu entry: the node's service runs it",
+            layout.bin.display()
+        ));
+        return Ok(());
+    }
     for gone in crate::service::remove_parts(layout)? {
         steps.did(gone);
     }
@@ -946,8 +955,16 @@ mod tests {
             "{:?}",
             sys.calls()
         );
-        // One role per machine: not where the node's service is.
+        // Where the node's service is (the app's node), the center's
+        // uninstall leaves the program to it.
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
         sys.others.borrow_mut().push("nerve-node".into());
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists(), "{said}");
+        assert!(said.contains("the node's service runs it"), "{said}");
+        // One role per machine: not where the node's service is.
         let e = install(&l, &sys, &l.bin, &[], &mut Vec::new()).unwrap_err();
         assert!(e.starts_with("this machine is a node already"), "{e}");
         assert_eq!(sys.service.get(), None);

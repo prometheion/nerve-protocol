@@ -35,7 +35,7 @@ pub(super) fn center_here() -> bool {
 pub(super) fn mode_note(mode: Mode, as_owner: bool) -> Option<&'static str> {
     let as_you = mode == Mode::User || (mode == Mode::Allowlist && as_owner);
     (as_you && center_here()).then_some(
-        "note: a center runs on this machine too, and commands that run as you can read its owner token and the tokens in your harnesses' settings; folder mode, or a machine of its own for the center, keeps them apart",
+        "note: a center runs on this machine too, and commands that run as you can read the tokens in your harnesses' settings, which reach it; folder mode, or a machine of its own for the center, keeps them apart",
     )
 }
 
@@ -97,7 +97,11 @@ pub(super) mod tests {
     #[test]
     fn a_mode_that_runs_as_you_is_said_where_a_center_runs_too() {
         with_center(true, || {
-            assert!(mode_note(Mode::User, false).is_some());
+            // The center's service keeps its owner token in a folder of its
+            // own account: what such commands reach is the harness tokens.
+            let note = mode_note(Mode::User, false).unwrap();
+            assert!(note.contains("harnesses' settings"), "{note}");
+            assert!(!note.contains("owner token"), "{note}");
             assert!(mode_note(Mode::Allowlist, true).is_some());
             assert!(mode_note(Mode::Allowlist, false).is_none());
             assert!(mode_note(Mode::Folder, false).is_none());

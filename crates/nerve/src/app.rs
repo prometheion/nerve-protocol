@@ -1389,7 +1389,9 @@ pub fn run(start: crate::instance::Asked) -> Result<(), Failed> {
     ctl.take_starts(instance);
     // At its installed place the app is the installer still where the
     // machine has no role yet, or is a center (install::opens_the_installer).
-    let roles = nerve_node::role::Roles::here();
+    // A role a terminal program installed beside the app's is not the app's
+    // to show (nerve_node::role::Roles::of_app).
+    let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
     let by_hand = std::env::var_os(nerve_node::paths::CONFIG_DIR_VAR).is_some()
         || std::env::var_os(nerve_node::paths::STATE_DIR_VAR).is_some()
         || (cfg!(target_os = "linux") && !std::path::Path::new("/run/systemd/system").is_dir());

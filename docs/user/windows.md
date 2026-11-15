@@ -137,9 +137,10 @@ install or update over 0.0.6, whose settings it cannot read, and the app's
 The node's own web UI is off until you turn it on in **Settings › Network ›
 Web UI**. There you make its tokens (each is shown once) and revoke them.
 Open it with **Open** there, once the app says it listens: the app checks
-first that the node holds the port. Only you get in from this machine, from
-your own session; another account, a service and the commands of the centers
-do not ([web UIs](web-uis.md#the-nodes-web-ui)).
+first that the node holds the port. From this machine it lets in programs
+of your own session only, and closes the services and the commands of the
+centers; everyone needs a token at its login
+([web UIs](web-uis.md#the-nodes-web-ui)).
 
 ## What Windows does not have
 

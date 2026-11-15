@@ -80,8 +80,9 @@ fn output_of(v: &Value) -> Output {
 ///   `update` from the release only (from a file it stays a terminal's: the
 ///   file would lie in the user's folders, where a program of the user could
 ///   replace it before the broker reads it). Not on a machine that has a
-///   node: the app runs one role, and a center beside a node is the
-///   terminal's, not the app's.
+///   node: the app runs one role, and a center beside the app's node is the
+///   terminal's. `roles` are the app's (nerve_node::role::Roles::of_app): a
+///   node of the terminal beside the app's center is not counted.
 pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), String> {
     use nerve_center::config::Cmd;
     let first = args.first().map(String::as_str);
@@ -171,9 +172,11 @@ pub fn serve(
             .flatten()
             .filter_map(|a| a.as_str().map(str::to_string))
             .collect();
-        // The closed list of the role installed here, read from the
-        // services at each request ([`allowed`]).
-        if let Err(e) = allowed(&args, nerve_node::role::Roles::here()) {
+        // The closed list of the app's role here, read from the services at
+        // each request ([`allowed`]); a role a terminal program installed
+        // beside it is the terminal's (nerve_node::role::Roles::of_app).
+        let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
+        if let Err(e) = allowed(&args, roles) {
             let refused = Output {
                 stderr: e.into_bytes(),
                 ..Output::default()

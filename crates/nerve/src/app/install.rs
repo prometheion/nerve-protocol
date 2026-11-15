@@ -191,10 +191,24 @@ fn center_ui() -> Option<String> {
 /// port while the center was stopped would get the owner token a password
 /// manager fills there.
 pub fn open_center_ui() -> Result<(), String> {
-    let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
+    open_center_ui_in(
+        &nerve_center::service::Layout::system().run,
+        nerve_center::holder::of,
+        crate::browser::open,
+    )
+}
+
+/// [`open_center_ui`] for the center's run folder `run`, the holder `held`
+/// says and the browser `open`.
+fn open_center_ui_in(
+    run: &Path,
+    held: impl FnOnce(std::net::SocketAddr) -> Result<nerve_center::holder::Holder, String>,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let file = nerve_center::ui_file::path_in(run);
     let said = nerve_center::ui_file::read(&file)?.ok_or("The center is not running.")?;
-    let url = nerve_center::holder::open_target(&said, nerve_center::holder::of)?;
-    crate::browser::open(&url)
+    let url = nerve_center::holder::open_target(&said, held)?;
+    open(&url)
 }
 
 impl Ctl {
@@ -226,7 +240,7 @@ impl Ctl {
             let installed = v["installed"] == true;
             let version = v["version"].as_str().unwrap_or_default().to_string();
             let node_only = adds_the_app(installed, app, cfg!(windows));
-            let roles = nerve_node::role::Roles::here();
+            let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
             c.with_install(|i| {
                 i.set_installed_version(version.as_str().into());
                 i.set_newer(app && newer(&i.get_version(), &version));
@@ -619,6 +633,64 @@ mod tests {
         assert_eq!(also_node(center, || false), "");
         // Not a center: the step is not shown, and nothing is asked.
         assert_eq!(also_node(Roles::default(), || unreachable!()), "");
+    }
+
+    /// The app's center with a node a terminal program installed beside it
+    /// (design of #232, 6): the app opens the center's step, says the node,
+    /// and the broker runs the center's commands, not the node's; the app's
+    /// node with a center of the terminal beside it stays the app's node.
+    #[test]
+    fn a_role_of_the_terminal_beside_the_app_s_is_not_the_app_s() {
+        use nerve_node::role::Roles;
+        let d = tempfile::tempdir().unwrap();
+        let unit = |name: &str, exec: &str| {
+            std::fs::write(
+                d.path().join(format!("{name}.service")),
+                format!("[Service]\nExecStart={exec}\n"),
+            )
+            .unwrap()
+        };
+        unit(
+            "nerve-center",
+            "/usr/local/bin/nerve __center --state-dir x",
+        );
+        unit("nerve-node", "/usr/local/bin/nerve-node --state-dir y run");
+        let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
+        assert!(opens_the_installer(roles, false));
+        assert_eq!(first_step(true, false, roles), "center");
+        assert_eq!(also_node(roles, || true), ALSO_NODE);
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(crate::broker::allowed(&args(&["__center", "--json", "uninstall"]), roles).is_ok());
+        assert!(crate::broker::allowed(&args(&["--json", "uninstall"]), roles).is_err());
+        // The other way round.
+        unit("nerve-center", "/usr/local/bin/nerve-center --state-dir x");
+        unit("nerve-node", "/usr/local/bin/nerve --state-dir y run");
+        let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
+        assert!(!opens_the_installer(roles, false));
+        assert_eq!(first_step(true, false, roles), "installed");
+        assert!(crate::broker::allowed(&args(&["__center", "--json", "status"]), roles).is_err());
+    }
+
+    /// **Open the web UI** on the center's step opens the address the
+    /// center's file says only once the center's service holds the port.
+    #[test]
+    fn the_center_s_web_ui_opens_only_where_its_service_holds_the_port() {
+        use nerve_center::holder::Holder;
+        let d = tempfile::tempdir().unwrap();
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |url: &str| {
+            opened.borrow_mut().push(url.to_string());
+            Ok(())
+        };
+        let e = open_center_ui_in(d.path(), |_| Ok(Holder::Service), open).unwrap_err();
+        assert_eq!(e, "The center is not running.");
+        let said =
+            nerve_center::ui_file::UiAddress::of(Some("127.0.0.1:7480".parse().unwrap()), None);
+        nerve_center::ui_file::write(&nerve_center::ui_file::path_in(d.path()), &said).unwrap();
+        assert!(open_center_ui_in(d.path(), |_| Ok(Holder::Other), open).is_err());
+        assert!(opened.borrow().is_empty());
+        open_center_ui_in(d.path(), |_| Ok(Holder::Service), open).unwrap();
+        assert_eq!(*opened.borrow(), ["http://127.0.0.1:7480"]);
     }
 
     /// The installer starts with what this machine becomes where no role is

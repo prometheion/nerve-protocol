@@ -464,7 +464,15 @@ remove it after a restart.
 
 As on Linux, the center runs as a service of its own, so an agent's shell
 command, which runs as you or as the node's account, cannot read its owner
-token or its TLS key. In a terminal opened with **Run as administrator**:
+token or its TLS key.
+
+What follows is the `nerve-center.exe` built from source, which the release
+does not have. The app's center (**A center** in its installer, or
+`nerve.exe __center install`) does the same with the app's own program: it
+stays `C:\Program Files\Nerve\nerve.exe`, its service runs
+`nerve.exe __center service`, no folder goes on the `Path`, and the Start
+menu and Apps & features get the app's entries. In a terminal opened with
+**Run as administrator**:
 
 ```powershell
 nerve-center install --name lab --public-url https://lab.example:7443
@@ -484,7 +492,8 @@ The install does this, and says each step:
 2. Makes the owner token in the state folder (one made before is kept) and
    writes `settings\center.env` with a new harness token; `--name`,
    `--public-url`, `--listen`, `--ui` and `--mcp` go into it.
-3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
+3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe` (the
+   app's center keeps `nerve.exe` there).
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
    service: no password, no user to keep. Its start, stop and failures also
