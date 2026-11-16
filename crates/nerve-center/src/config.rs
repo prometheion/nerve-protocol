@@ -294,8 +294,9 @@ pub enum Cmd {
         /// That is the center's key, its pairings and its log.
         #[arg(long)]
         purge: bool,
-        /// The app's role change: keep the app's program for the other
-        /// role's install (nerve_service::keeps_program).
+        /// The app's role change: keep the app's program
+        ///
+        /// The other role's install takes it next (nerve_service::keeps_program).
         #[arg(long, hide = true)]
         keep_program: bool,
     },

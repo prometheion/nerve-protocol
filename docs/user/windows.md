@@ -101,22 +101,18 @@ program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
 `C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
 the node port (7443) of the center's service. Its last step shows what it
 did, the owner token among it. Keep the token in your password manager.
-**Nerve** in the Start menu then opens the center's pages: they ask for the
-token, or read it with one UAC prompt, and manage the center as its web UI
-does ([the center in the app](center.md#in-the-app)); it opens no `nerve://`
-links. Any program of yours can read the open app's memory, as it can a
-browser tab's: run the harness under another account.
+**Nerve** in the Start menu then opens the center's pages, which ask for
+the token ([the center in the app](center.md#in-the-app)). Any program of
+yours can read the open app's memory: run the harness under another
+account.
 
 Harnesses connect over HTTP MCP: **Harnesses › Connect a harness** makes a
-harness token and the entry; a copy of it leaves the clipboard after a
-minute and stays out of the clipboard history. The center's settings are in
+harness token and the entry. The center's settings are in
 `settings\center.env` there; its web UI and MCP stay on this machine, and
 the app installs no second role beside it.
 
-To make the machine a node instead, use **Settings › This machine › Change
-the role…** (on a node: **Settings › App › Change the role…**): a backup
-first, then the old role goes with its data and the installer installs the
-other.
+**Change the role…** (Settings › This machine, on a node Settings › App)
+backs up, removes the role with its data, and installs the other.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.
 

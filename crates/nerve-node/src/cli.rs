@@ -191,8 +191,9 @@ pub enum Cmd {
         /// Windows: an uninstall that keeps the data puts the keys and the proxy's login that the service's Credential Manager keeps aside first, which needs the node to run. Where it does not, uninstall stops and changes nothing; with this flag it goes on, and they are lost.
         #[arg(long)]
         forget_secrets: bool,
-        /// The app's role change: keep the app's program for the other
-        /// role's install (nerve_service::keeps_program).
+        /// The app's role change: keep the app's program
+        ///
+        /// The other role's install takes it next (nerve_service::keeps_program).
         #[arg(long, hide = true)]
         keep_program: bool,
     },
