@@ -1315,7 +1315,9 @@ fn uninstall_steps(
             sys.remove_program(&left)?;
         }
     }
-    if layout.bin.exists() {
+    if nerve_service::keeps_program() {
+        steps.did(nerve_service::kept_program(&layout.bin));
+    } else if layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
         } else {

@@ -98,6 +98,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
         let u = Ui::new(&center, token.as_deref(), !tls);
+        u.set_started(&args.listen, &a, &args.mcp.setting());
         page = Some(u.clone());
         tasks.push(tokio::spawn(u.serve(server)));
     }

@@ -294,6 +294,10 @@ pub enum Cmd {
         /// That is the center's key, its pairings and its log.
         #[arg(long)]
         purge: bool,
+        /// The app's role change: keep the app's program for the other
+        /// role's install (nerve_service::keeps_program).
+        #[arg(long, hide = true)]
+        keep_program: bool,
     },
     /// Save the center's identity and pairings to a passphrase-protected file
     ///
@@ -755,6 +759,17 @@ pub fn refuse_install_variables(given: &[String], elevated: bool) -> Result<(), 
 }
 
 impl Args {
+    /// The arguments of `argv`, its first word the program's name: for a
+    /// program that starts a center of its own without clap (the app's
+    /// tests).
+    pub fn from_argv<I, T>(argv: I) -> Result<Args, String>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Args::try_parse_from(argv).map_err(|e| e.to_string())
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.state_dir.clone().unwrap_or_else(default_state_dir)
     }
@@ -1393,7 +1408,10 @@ mod tests {
         }
         assert_eq!(
             cmd(&["uninstall", "--purge"]),
-            Some(Cmd::Uninstall { purge: true })
+            Some(Cmd::Uninstall {
+                purge: true,
+                keep_program: false
+            })
         );
         assert!(Args::try_parse_from(["nerve-center", "install", "x"]).is_err());
         // The service's go to the service, backup and restore to the state

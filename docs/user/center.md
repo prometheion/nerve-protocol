@@ -12,8 +12,29 @@ nerve-center status
 do next. `sudo nerve-center service start|stop|restart` starts and stops
 it. The app `nerve` installs the center too, as its role
 ([the desktop app](install.md#the-desktop-app)); then `nerve-center` is a
-link to it. On Windows the app installs it, and its web UI manages it
-([Windows](windows.md#the-center-as-a-service)).
+link to it, and the app manages it ([in the app](#in-the-app)). On Windows
+the app installs it ([Windows](windows.md#the-center-as-a-service)).
+
+## In the app
+
+On a machine where the app `nerve` installed the center (on Windows always),
+**Nerve** in the menu opens the center's pages: Overview, Nodes, Harnesses,
+Action checker, Capabilities, Statistics, Audit, Log, Settings and Help.
+They ask for the owner token first: paste it, or **Read it from this
+machine…**, which asks for an administrator's password once. The app keeps
+it in memory until it closes; **Settings › Owner token › Remember the log-in
+in my keyring** keeps it for the next start, where other programs of yours,
+an agent among them, could read it.
+
+Before the token goes out, the app checks that the port is the center
+service's; another program that took it gets nothing. The pages use the web
+UI on this machine (on Linux the web UI must be on; the log-in offers to turn
+it on). What only an administrator may do (start and stop, an address in
+**Settings › Center**, update, uninstall, the owner token, backup and
+restore) asks for the password each time.
+
+A copied harness token, harness line or pairing link leaves the clipboard
+after a minute.
 
 ## In the terminal
 

@@ -151,14 +151,33 @@ and every limit is in
   link to it (a link to another program stays as it is). The `.deb` and `.rpm` are named `nerve` and replace
   `nerve-node-desktop`: a pre-release tester removes that first. The
   package's app asks the role at its first start. In the center role
-  **Nerve** in the menu opens the center's web UI and removes the center
-  (also Apps & features on Windows). A role a terminal program installed
+  **Nerve** in the menu opens the center's pages (Apps & features on Windows
+  opens its uninstall). A role a terminal program installed
   beside it is said, as "Also a center, installed in the terminal", and left
   alone; uninstalling one role keeps the program while the other role's
   service runs it. The package's menu entry opens no `nerve://` links; the node role
   adds the handler, so a center answers none.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
+- The center with a window: Overview, Nodes (with **Pair a machine**),
+  Harnesses (**Connect a harness**, the tokens and the sessions), Action
+  checker (the blocklist, the rules that skip the model, the decision model,
+  each machine's own switches), Capabilities per machine, Statistics, Audit,
+  Log, Settings (the center, this machine, the owner token, the center key,
+  backup) and Help. They use the center's web UI on this machine, with its
+  checks, after making sure the port is the center service's.
+- The center's pages log in with the owner token: pasted, or **Read it from
+  this machine…** with one administrator's prompt. It is kept in memory until
+  the app closes; **Settings › Owner token** can keep it in your keyring
+  instead, which other programs of yours could then read.
+- A copied token, harness line or pairing link leaves the clipboard after a
+  minute; on Windows it stays out of the clipboard history and the cloud
+  clipboard. A new harness token is hidden until **Show the token**.
+- Each administrator's step of the center (start and stop, update,
+  uninstall, an address, the owner token, backup and restore) asks once and
+  ends with it.
+- `nerve-center --json backup -` and `restore -` hand the sealed backup over
+  the answer and the input, with `--passphrase-file -`.
 - Each page is a list and the picked row's details: side by side from a
   window of 1100 px, in turns with Back to the list on a smaller one, and the
   page scrolls as a whole. Switches sit in the rows, adding is a form where it

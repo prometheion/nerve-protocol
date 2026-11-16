@@ -8,8 +8,9 @@ On Windows the app is the only program: [Nerve on Windows](windows.md) has
 its install.
 
 **Tried a pre-release?** Remove its `nerve-node-desktop` first (`sudo apt
-remove nerve-node-desktop`, or `sudo dnf remove nerve-node-desktop`; on
-Windows, Apps & features). The `nerve` package replaces it.
+remove nerve-node-desktop`, `sudo dnf remove nerve-node-desktop`, or
+`sudo pacman -R nerve-node-desktop`; on Windows, Apps & features). The
+`nerve` package replaces it.
 
 ## Download
 
@@ -18,13 +19,14 @@ Get the programs from
 
 | Machine | Files |
 |---|---|
-| x86_64 | the app as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm` or `nerve-x86_64-linux`; `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux` |
+| x86_64 | the app as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm`, `nerve-<version>-1-x86_64.pkg.tar.zst` (Arch Linux) or `nerve-x86_64-linux`; `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux` |
 | ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
 | Windows x64 | the app `nerve-x86_64-windows.exe` ([Windows](windows.md)) |
 
 `nerve-center` and `nerve-node` are static and need no libraries: take them
 for a server without a desktop, and on ARM. The app needs glibc 2.35 or
-newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and fontconfig.
+newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch Linux and later) and
+fontconfig.
 
 ### Check the download
 
@@ -108,10 +110,12 @@ manager. Such a node runs every command as you
 ## The desktop app
 
 1. Download the package: the `.deb` for Ubuntu and Debian, the `.rpm` for
-   Fedora.
+   Fedora, the `.pkg.tar.zst` for Arch Linux.
 2. Double-click it, and press **Install** in the software installer (or
    `sudo apt install ./nerve_<version>_amd64.deb`,
-   `sudo dnf install ./nerve-<version>.x86_64.rpm`).
+   `sudo dnf install ./nerve-<version>.x86_64.rpm`,
+   `sudo pacman -U ./nerve-<version>-1-x86_64.pkg.tar.zst`). There is no AUR
+   package.
 3. Open **Nerve** from the application menu. It asks what this machine is,
    **A node** or **A center**, and installs that role; the system asks for
    an administrator's password.
@@ -128,8 +132,9 @@ owner. Its first steps pair your first center and choose its mode.
 
 As a center it installs the center as a service, as `nerve-center install`
 does below, and the command `nerve-center` (a link to the app); its last
-step shows the owner token and opens the web UI. **Nerve** in the menu then
-opens that step again, with **Uninstall…**. A role installed in the
+step shows the owner token. **Nerve** in the menu then opens the center's
+pages, which ask for that token ([the center in the app](center.md#in-the-app)).
+A role installed in the
 terminal stays that program's: the app does not install the other role
 beside it, and says "Also a node, installed in the terminal" (or a center)
 where one runs.
@@ -176,7 +181,7 @@ app installs it ([Windows](windows.md#the-center-as-a-service)).
 
 | | |
 |---|---|
-| Tested | Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13 on x86_64; Ubuntu 24.04 on aarch64 |
+| Tested | Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13 on x86_64; Ubuntu 24.04 on aarch64; the app's packages on Ubuntu, Fedora and Arch Linux |
 | Expected to work | Fedora, Arch Linux, other distributions with systemd |
 | As a service | systemd, polkit, cgroup v2, a file system with ACLs (ext4, XFS, Btrfs) |
 | Not as a service | Alpine with OpenRC, Void with runit, WSL 1: run the node by hand |
@@ -216,8 +221,9 @@ the new program does not start, the old one comes back. Changes of your own
 to a unit belong in `sudo systemctl edit nerve-node`, which `update` leaves
 alone. The desktop app updates under **Settings › App › Update…**, also on
 Windows, and **Settings › App › Pre-releases** makes it take the
-pre-releases too. From a package, it installs the release's package with
-`apt` or `dnf`, the same version again too, and a newer package you install
+pre-releases too; as a center, **Settings › This machine › Update**. From a
+package, it installs the release's package with `apt`, `dnf` or `pacman`,
+the same version again too, and a newer package you install
 yourself updates the node's service too. If that restart fails, `status`
 and the app's Overview say the service still runs the earlier program;
 `service restart` starts the new one.
@@ -234,8 +240,9 @@ sudo nerve-center uninstall [--purge]
 it made there. Kept folders belong to root, and a later `install` takes them
 up again. Where the desktop app took over the node, `nerve-node uninstall`
 removes the app too. The app from a package: **Settings › App › Uninstall…**
-removes the node, then `sudo apt remove nerve` or
-`sudo dnf remove nerve` removes the app.
+removes the node (as a center, **Settings › This machine › Uninstall…**),
+then `sudo apt remove nerve`, `sudo dnf remove nerve` or
+`sudo pacman -R nerve` removes the app.
 
 ## Where the files are
 

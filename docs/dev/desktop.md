@@ -57,23 +57,69 @@ machine (#232):
   harness's settings where a center runs too (`cli/beside.rs`).
 - **The installer asks first** what the machine is: **A node** or **A center**
   (two cards, one column, in its 760x700 window). A center is installed by
-  `nerve __center install`, with the rights; its last step, and the installer
-  on a machine that is a center, open its web UI after checking that the
-  center's service holds the port ([web UIs](web-uis.md#where-it-listens)).
-  The app at its installed place opens as the installer too while the
-  machine has no role (the package's program before its first start) or is a
-  center (its step, with **Uninstall…**; Apps & features' Uninstall opens
-  that), until the center gets pages of its own; a node run by hand (its
-  folders named, or no systemd) keeps the app's pages.
+  `nerve __center install`, with the rights; its last step opens the
+  installed app. The app at its installed place opens as the installer too
+  while the machine has no role (the package's program before its first
+  start), and for a center's uninstall from Apps & features
+  (`app::install::opens`); on a center it opens [the center's
+  pages](#the-centers-pages); a node run by hand (its folders named, or no
+  systemd) keeps the node's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
   where the machine is no center only; behind `__center` the center's `install` where none is, else its
   administrator's commands and `status`, never with a setting of the center's
   (`--state-dir` would point an elevated command at another folder), no
-  `backup` or `restore` (their file would be one a request names; the
-  center's pages say how it crosses), and `update` from the release only
+  `backup` or `restore` with a file (a request would name it): only
+  `backup -` and `restore -` with `--passphrase-file -`, which hand the sealed
+  backup over the `--json` answer and the input, and `update` from the release only
   (from a file it stays a terminal's: the file would lie in the user's
   folders), and never where the machine has a node: a center beside a node
   is the terminal's. The center's commands always take the broker.
+
+## The center's pages
+
+On a center the app installed, the window shows the center's pages
+(`src/app/hub.rs`, `ui/hub*.slint`, global `Hub`), drawn in the layout of
+the node's (#231, proposal B; Pair a machine is an overlay). They use the
+center's web UI API on loopback, as a browser does (`src/hub.rs`), not its
+attach socket: the center's owner powers stay behind the owner token, which
+a harness's agent, a program of the same user, does not have (design of
+#232, section 2).
+
+- **Where.** The center writes its web UI's address into
+  `/run/nerve-center/ui` (`C:\ProgramData\nerve-center\run\ui`); the app
+  reads it on every check. Off, or not running, the log-in says so and offers
+  `set ui 127.0.0.1:7480` or a start, each through the broker.
+- **The peer check.** Before the token or the session goes out, on every
+  request, `nerve_center::holder::of` must say that the port is the center
+  service's (Linux: the listening socket's uid is `nerve-center`; Windows: its
+  PID is the service's). Another holder gets nothing.
+- **The log-in.** The owner token, typed or read with `__center owner-token`
+  through one broker, goes once to `POST /login`; the app keeps the session
+  and the token in memory (a restart of the center ends the session, and the
+  app logs in again with it). On Linux the app is made undumpable before it
+  holds them (`broker::shut_out_the_user`). **Remember the log-in in my
+  keyring** (`settings.json`'s `keep_center_login`, off by default) keeps the
+  token in the user's keyring (`hub::keep`, service `nerve-app`), and logging
+  out or a token the center refuses forgets it.
+- **The calls** are the web UI's (`/api/overview`, `/api/checker`,
+  `/api/caps`, `/api/audit/rule`, ...), with its checks; the checker is saved
+  whole with the version it was read at, and a change in between is refused
+  and read again (409).
+- **Administrator's commands** (`service`, `set`, `update`, `uninstall`,
+  `owner-token`, `backup -`, `restore -`) each start a broker of their own,
+  which ends with the command (one Save that changes two addresses runs both
+  in one broker). The center role keeps no broker.
+- **Copied secrets** (`hub::clip`): a harness line, the owner token, a
+  pairing link. On Windows the copy is set with
+  `ExcludeClipboardContentFromMonitorProcessing`,
+  `CanIncludeInClipboardHistory` = 0 and `CanUploadToCloudClipboard` = 0;
+  after a minute the clipboard is emptied if its sequence number is still
+  the copy's. On Linux the copy goes through Slint's platform clipboard and
+  is cleared after a minute while the clipboard still holds it.
+- **Tests:** `tests/hub.rs` and `tests/hub_pages.rs` against a center started
+  in the test (the peer check answered by the test), `tests/hub_fit.rs` at the
+  four sizes, `tests/hub_shots.rs` for the screenshots (made-up data,
+  `tests/hub_sample`).
 
 ## Download
 

@@ -78,8 +78,9 @@ fn output_of(v: &Value) -> Output {
 /// - The center's (`__center` first): `install` where no center is yet;
 ///   where one is installed, its administrator's commands and `status` (none
 ///   with a setting of the center's, like `--state-dir`, which would point an
-///   elevated command at another folder; no `backup` or `restore`, whose
-///   file a request would name), and
+///   elevated command at another folder; `backup` and `restore` only handed
+///   over their answer and input (`-`, the passphrase on the input too), as
+///   a file a request named would be one a program of the user chose), and
 ///   `update` from the release only (from a file it stays a terminal's: the
 ///   file would lie in the user's folders, where a program of the user could
 ///   replace it before the broker reads it). Not on a machine that has a
@@ -114,6 +115,20 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
                 "an update from a file is a terminal's; the app updates the center from the release"
                     .into(),
             ),
+            Cmd::Backup {
+                file,
+                overwrite: false,
+                passphrase_file: Some(pass),
+            }
+            | Cmd::Restore {
+                file,
+                replace: false,
+                passphrase_file: Some(pass),
+            } if handed(&file) && handed(&pass) => Ok(()),
+            Cmd::Backup { .. } | Cmd::Restore { .. } => Err(
+                "the broker hands a center's backup over its answer and input only, never a file"
+                    .into(),
+            ),
             Cmd::Update { .. }
             | Cmd::Uninstall { .. }
             | Cmd::Service { cmd: Some(_) }
@@ -130,6 +145,12 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
         return Err("this machine is a center: the broker runs no node commands here".into());
     }
     Ok(())
+}
+
+/// Whether a center backup's file is the one handed over the command's
+/// answer and input (nerve_center::backup::HANDED).
+fn handed(file: &std::path::Path) -> bool {
+    file.as_os_str() == nerve_center::backup::HANDED
 }
 
 /// The broker's side: answers the requests on `input` with `exe`, the
@@ -540,7 +561,7 @@ fn elevate(pkexec: &Path, exe: &Path) -> Result<Arc<Client>, String> {
 /// app's file dialogs run in a process of their own
 /// ([`crate::dialog`]).
 #[cfg(target_os = "linux")]
-fn shut_out_the_user() -> Result<(), String> {
+pub(crate) fn shut_out_the_user() -> Result<(), String> {
     // SAFETY: prctl with integer arguments only.
     let (set, now) = unsafe {
         (
@@ -972,6 +993,23 @@ mod tests {
             &["__center", "--json", "set", "ui", "off"],
             &["__center", "--json", "owner-token"],
             &["__center", "--json", "status"],
+            // A backup handed over the answer and the input (#232).
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "-",
+                "--passphrase-file",
+                "-",
+            ],
+            &[
+                "__center",
+                "--json",
+                "restore",
+                "-",
+                "--passphrase-file",
+                "-",
+            ],
         ] {
             assert!(allowed(&args(ok), center).is_ok(), "{ok:?}");
         }
@@ -986,6 +1024,32 @@ mod tests {
             &["__center", "--json", "backup", "/tmp/b"],
             &["__center", "--json", "backup", "/tmp/b", "--overwrite"],
             &["__center", "--json", "restore", "/tmp/b"],
+            &["__center", "--json", "backup", "-"],
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "-",
+                "--passphrase-file",
+                "/tmp/p",
+            ],
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "/tmp/b",
+                "--passphrase-file",
+                "-",
+            ],
+            &[
+                "__center",
+                "--json",
+                "restore",
+                "-",
+                "--passphrase-file",
+                "-",
+                "--replace",
+            ],
             // A setting of the center's points an owner command at another
             // folder than the installed center's, before the command or after.
             &["__center", "--state-dir", "/tmp/s", "--json", "status"],

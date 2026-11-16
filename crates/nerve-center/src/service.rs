@@ -887,7 +887,13 @@ async fn execute_on(
             let layout = with_release(layout, pre, tag).await?;
             update(&layout, sys, from.as_deref(), out).await
         }
-        Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
+        Cmd::Uninstall {
+            purge,
+            keep_program,
+        } => {
+            nerve_service::set_keep_program(keep_program);
+            uninstall(layout, sys, purge, out)
+        }
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         Cmd::Backup { .. }
         | Cmd::Restore { .. }
@@ -1652,7 +1658,9 @@ pub fn uninstall(
     for gone in remove_parts(layout)? {
         step(out, gone);
     }
-    if !packaged(layout) && layout.bin.exists() {
+    if nerve_service::keeps_program() {
+        step(out, nerve_service::kept_program(&layout.bin));
+    } else if !packaged(layout) && layout.bin.exists() {
         std::fs::remove_file(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
         step(out, format!("removed the program {}", layout.bin.display()));
     }
@@ -2703,7 +2711,13 @@ mod tests {
                     tag: None,
                 },
             ),
-            ("uninstall", Cmd::Uninstall { purge: false }),
+            (
+                "uninstall",
+                Cmd::Uninstall {
+                    purge: false,
+                    keep_program: false,
+                },
+            ),
         ] {
             let r = execute_on(cmd, &[], &[], &l, &NotRoot, &node, &mut Vec::new()).await;
             results.push((what, r));
@@ -2742,7 +2756,10 @@ mod tests {
         // NotRoot answers nothing but that it is not root: the refusal
         // comes first.
         let e = execute_on(
-            Cmd::Uninstall { purge: true },
+            Cmd::Uninstall {
+                purge: true,
+                keep_program: false,
+            },
             &["NERVE_CENTER_LISTEN".to_string()],
             &[],
             &l,
@@ -3516,6 +3533,29 @@ Next  Change one:  sudo nerve-center set <name> <value>
         let l = installed(d.path(), &sys, "1.0.0");
         assert_eq!(token(&l), token_before);
         assert!(l.state.join("state.json").exists());
+    }
+
+    /// The app's role change (#232) takes the center whole, its data too,
+    /// and keeps the app's program for the node's install.
+    #[test]
+    fn a_role_change_keeps_the_program_and_takes_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let mut out = Vec::new();
+        nerve_service::set_keep_program(true);
+        let r = uninstall(&l, &sys, true, &mut out);
+        nerve_service::set_keep_program(false);
+        r.unwrap();
+        assert!(l.bin.exists());
+        assert!(!l.unit.exists() && !l.state.exists());
+        assert!(sys.user.borrow().is_none());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("kept the program"), "{out}");
+        // Without it, the program goes as before.
+        let l = installed(d.path(), &sys, "1.0.0");
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists());
     }
 
     #[test]

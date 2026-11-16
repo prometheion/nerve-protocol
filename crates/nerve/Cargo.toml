@@ -31,6 +31,9 @@ nerve-policy.workspace = true
 nerve-transport.workspace = true
 # A relay's link, read before it is used (src/app/prefs.rs).
 nerve-proto.workspace = true
+# The center role's pages call the center's web UI API on loopback, one
+# request on a small runtime of its own (src/hub.rs).
+tokio.workspace = true
 # Native file and folder dialogs: the desktop portal on Linux, so they work
 # on Wayland too.
 rfd.workspace = true
@@ -39,12 +42,16 @@ rfd.workspace = true
 # The broker is started with the UAC prompt and talks over a named pipe
 # that only the app's user may open (src/broker.rs); the Start
 # menu shortcut and the nerve:// handler (src/parts.rs); DLLs from System32
-# only (src/main.rs).
+# only (src/main.rs); a copied secret kept out of the clipboard history
+# (src/hub/clip.rs).
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
@@ -64,7 +71,6 @@ slint-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
 nerve-conformance = { path = "../nerve-conformance" }
 # Writes the screenshots of tests/shots.rs; in the lock through Slint.
 png = "0.18"

@@ -216,6 +216,10 @@ pub struct Ui {
     /// How this center serves MCP, for the Connect a harness card
     /// (`/api/overview`'s `mcp`); stdio until the server says otherwise.
     mcp: std::sync::OnceLock<Value>,
+    /// The settings this run was started with that `nerve-center set`
+    /// changes (`listen`, `ui`, `mcp`), for the app's Settings page
+    /// (`/api/center`'s `started`): the settings file is root's.
+    started: std::sync::OnceLock<Value>,
 }
 
 impl Ui {
@@ -231,6 +235,7 @@ impl Ui {
             sessions: Sessions::new(),
             wrong: webui::WrongSecrets::default(),
             mcp: std::sync::OnceLock::new(),
+            started: std::sync::OnceLock::new(),
         })
     }
 
@@ -268,6 +273,14 @@ impl Ui {
         let _ = self
             .mcp
             .set(json!({"mode": mode, "url": url, "fingerprint": pin}));
+    }
+
+    /// Says what this run was started with of the settings `set` changes:
+    /// the node port, the web UI's address (or off) and the MCP mode.
+    pub fn set_started(&self, listen: &str, ui: &str, mcp: &str) {
+        let _ = self
+            .started
+            .set(json!({"listen": listen, "ui": ui, "mcp": mcp}));
     }
 
     pub async fn serve(self: Arc<Self>, server: Server) {
@@ -727,6 +740,7 @@ impl Ui {
             }))
             .map(|mut v| {
                 v["key"] = c.key_json();
+                v["started"] = self.started.get().cloned().unwrap_or(Value::Null);
                 v
             }),
             ("POST", "/api/center") => {

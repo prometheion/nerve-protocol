@@ -45,6 +45,13 @@ pub struct BackupReport {
     pub nodes: usize,
 }
 
+/// The file name that hands a backup over the command's own input and
+/// answer instead of a file: the app's broker names no file
+/// (`nerve::broker::allowed`), so a backup goes into the `--json` answer as
+/// `backup` and a restore reads the backup from the first line of stdin,
+/// each sealed and in base64url.
+pub const HANDED: &str = "-";
+
 /// Writes the backup of the center in `state` to `file`.
 pub fn backup(
     state: &Path,
@@ -53,6 +60,17 @@ pub fn backup(
     overwrite: bool,
     rounds: u32,
 ) -> Result<BackupReport, String> {
+    let (report, bytes) = sealed(state, pass, rounds)?;
+    crate::util::write_backup_file(file, &bytes, overwrite)?;
+    Ok(report)
+}
+
+/// The backup of the center in `state`, sealed with `pass`.
+pub fn sealed(
+    state: &Path,
+    pass: &Passphrase,
+    rounds: u32,
+) -> Result<(BackupReport, Vec<u8>), String> {
     pass.check_new()?;
     let read = |name: &str| {
         nerve_transport::files::read_plain_string(&state.join(name)).map_err(|e| {
@@ -103,13 +121,30 @@ pub fn backup(
     // not written.
     let parsed = parse(contents.clone())?;
     let bytes = backup::seal_with(&contents, pass, rounds)?;
-    crate::util::write_backup_file(file, &bytes, overwrite)?;
-    Ok(BackupReport {
+    let report = BackupReport {
         name: parsed.store.center_name.clone(),
         id: parsed.store.center_id.clone(),
         pin: parsed.identity.pin(),
         nodes: parsed.store.nodes.len(),
-    })
+    };
+    Ok((report, bytes))
+}
+
+/// A backup handed on the first line of `input` ([`HANDED`]).
+fn read_handed(input: &mut dyn std::io::BufRead) -> Result<Vec<u8>, String> {
+    use std::io::{BufRead, Read};
+    // Base64 of the largest backup, and its line break.
+    let most = backup::MAX_FILE * 4 / 3 + 8;
+    let mut line = String::new();
+    input
+        .take(most + 1)
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the backup: {e}"))?;
+    if line.len() as u64 > most {
+        return Err("the backup handed over is larger than a backup can be".into());
+    }
+    nerve_transport::tls::unb64url(line.trim())
+        .ok_or_else(|| "the backup handed over does not read".into())
 }
 
 /// A center backup that was opened and checked.
@@ -563,11 +598,26 @@ pub fn run(
             overwrite,
             passphrase_file,
         } => {
-            if settle(state)? {
+            let handed = file.as_os_str() == HANDED;
+            if handed && !crate::json::on() {
+                return Err(
+                    "a backup handed over (-) goes into the --json answer: add --json".into(),
+                );
+            }
+            if settle(state)? && !handed {
                 as_owner_may_reach(state, file, passphrase_file.as_deref())?;
             }
             let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
-            let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
+            let r = if handed {
+                let (r, bytes) = sealed(state, &pass, backup::ITERATIONS)?;
+                crate::json::also(
+                    "backup",
+                    serde_json::json!(nerve_transport::tls::b64url(&bytes)),
+                );
+                r
+            } else {
+                backup(state, file, &pass, *overwrite, backup::ITERATIONS)?
+            };
             // Which center it is, since an owner command may take another
             // folder than the installed one (round 7, security 2).
             let page = backup_page(&r, file, state);
@@ -578,7 +628,10 @@ pub fn run(
             replace,
             passphrase_file,
         } => {
-            let bytes = backup::read_file(file)?;
+            let bytes = match file.as_os_str() == HANDED {
+                true => read_handed(&mut std::io::stdin().lock())?,
+                false => backup::read_file(file)?,
+            };
             let kind = backup::kind_of(&bytes)?;
             if kind != Kind::Center {
                 return Err(format!(

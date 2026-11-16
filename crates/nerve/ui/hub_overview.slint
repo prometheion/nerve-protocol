@@ -1,0 +1,388 @@
+// The center's Overview: whether it runs and where it is reached, its
+// service, the machines, sessions and checker at a glance, and the
+// machines with the picked one's details; on a large window the sessions
+// beside them.
+
+import { Theme, Type, Space, Radius, Tone, Shape } from "theme.slint";
+import { Hub, HubPage } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, StatusDot, IconTile, Banner, PageHeader, PageFrame, Icon,
+    Reveal, Split, ListPane, DetailsPane, SidePane, EmptyState,
+} from "widgets.slint";
+import { NodeList, NodeDetails } from "hub_nodes.slint";
+
+component Fact inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> value;
+    spacing: Space.sm;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: root.icon;
+            colorize: Theme.text-muted;
+        }
+    }
+    Text {
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Type.small;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-size: Type.small;
+        font-weight: Type.semibold;
+        vertical-alignment: center;
+    }
+}
+
+// The installed service: its state, and starting and stopping it, each
+// through one administrator's prompt.
+export component HubServiceCard inherits Card {
+    pad: Space.xl;
+    property <Tone> tone: Hub.service-state == "running" ? Tone.ok
+        : Hub.service-state == "failed" ? Tone.danger
+        : Hub.service-state == "stopped" ? Tone.warn : Tone.accent;
+    HorizontalLayout {
+        spacing: Space.lg;
+        VerticalLayout {
+            alignment: center;
+            IconTile {
+                icon: @image-url("icons/server.svg");
+                tone: root.tone;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                Text {
+                    text: "Service";
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        dot: true;
+                        text: Hub.service-state == "running" ? "Running"
+                            : Hub.service-state == "failed" ? "Failed"
+                            : Hub.service-state == "stopped" ? "Stopped" : "Asking…";
+                        tone: root.tone;
+                    }
+                }
+            }
+            Text {
+                text: Hub.service-line;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        padding-left: 36px + Space.lg;
+        spacing: Space.sm;
+        if Hub.service-state != "running": Button {
+            text: "Start";
+            icon: @image-url("icons/play.svg");
+            kind: ButtonKind.primary;
+            busy: Hub.busy == "service-start";
+            clicked => {
+                Hub.service("start");
+            }
+        }
+        if Hub.service-state == "running": Button {
+            text: "Restart";
+            icon: @image-url("icons/refresh.svg");
+            busy: Hub.busy == "service-restart";
+            enabled: Hub.busy == "";
+            clicked => {
+                Hub.service("restart");
+            }
+        }
+        if Hub.service-state == "running": Button {
+            text: "Stop";
+            icon: @image-url("icons/stop.svg");
+            busy: Hub.busy == "service-stop";
+            enabled: Hub.busy == "";
+            clicked => {
+                Hub.service("stop");
+            }
+        }
+    }
+}
+
+// The sessions of the harnesses, on a large window beside the machines.
+component SessionsCard inherits Card {
+    HorizontalLayout {
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: start;
+            IconTile {
+                icon: @image-url("icons/activity.svg");
+                size: 32px;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: "Sessions";
+                color: Theme.text;
+                font-size: Type.heading;
+                font-weight: Type.semibold;
+            }
+            Text {
+                text: "Harnesses that are connected to this center.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if Hub.sessions.length == 0: Text {
+        text: "None now.";
+        color: Theme.text-muted;
+        font-size: Type.small;
+    }
+    for s in Hub.sessions: HorizontalLayout {
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            StatusDot {
+                tone: Tone.ok;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Text {
+                text: s.client;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.semibold;
+                overflow: elide;
+            }
+            Text {
+                text: s.nodes + " · " + s.since;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: s.calls;
+            color: Theme.text-faint;
+            font-size: Type.small;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component HubOverviewPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Hub.node-pick, Hub.nodes.length - 1));
+    property <bool> running: Hub.state == "running";
+    property <Tone> tone: root.running ? Tone.ok : Tone.warn;
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/overview.svg");
+        title: "Overview";
+        error-title: "The center did not answer";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    // The center's state, and its service beside it on a wide window,
+    // below it on a small one.
+    Reveal {
+        shown: Hub.state != "";
+        gap: Space.xl;
+        HorizontalLayout {
+            spacing: Shape.wide ? Space.lg : 0px;
+            Rectangle {
+                horizontal-stretch: 1.4;
+                border-radius: Radius.lg;
+                border-width: 1px;
+                border-color: Theme.tone(root.tone).transparentize(0.7);
+                background: @linear-gradient(90deg, Theme.tone-soft(root.tone) 0%, Theme.surface 70%);
+                HorizontalLayout {
+                    padding: Space.xxl;
+                    spacing: Space.xl;
+                    VerticalLayout {
+                        alignment: center;
+                        IconTile {
+                            size: 52px;
+                            solid: true;
+                            tone: root.tone;
+                            icon: @image-url("icons/route.svg");
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 4px;
+                        Text {
+                            text: root.running ? "Running" : "Not running";
+                            color: Theme.tone(root.tone);
+                            font-size: 20px;
+                            font-weight: Type.semibold;
+                        }
+                        Text {
+                            text: Hub.public-url == "" ? "" : "Nodes reach it at " + Hub.public-url + ".";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    source: @image-url("icons/plug.svg");
+                                    colorize: Theme.text-muted;
+                                    size: 14px;
+                                }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: Hub.mcp-line;
+                                color: Theme.text-muted;
+                                font-size: Type.caption;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+            // Beside it on a wide window: nothing of it counts while not.
+            Rectangle {
+                visible: Shape.wide;
+                horizontal-stretch: Shape.wide ? 1 : 0;
+                max-width: Shape.wide ? 100000px : 0px;
+                min-width: 0px;
+                min-height: 0px;
+                preferred-height: Shape.wide ? beside.preferred-height : 0px;
+                beside := HubServiceCard {
+                    height: parent.height;
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.state != "" && !Shape.wide;
+        gap: Space.lg;
+        HubServiceCard { }
+    }
+    Reveal {
+        shown: Hub.alerts.length > 0;
+        gap: Space.lg;
+        VerticalLayout {
+            spacing: Space.sm;
+            for a in Hub.alerts: Banner {
+                tone: Tone.warn;
+                text: a;
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.state != "";
+        gap: Space.lg;
+        Card {
+            pad: 0;
+            FlexboxLayout {
+                padding-left: Space.xl;
+                padding-right: Space.xl;
+                padding-top: Space.md;
+                padding-bottom: Space.md;
+                spacing-horizontal: 22px;
+                spacing-vertical: Space.sm;
+                Fact {
+                    icon: @image-url("icons/server.svg");
+                    label: "Nodes";
+                    value: Hub.nodes-count;
+                }
+                Fact {
+                    icon: @image-url("icons/activity.svg");
+                    label: "Sessions";
+                    value: Hub.sessions-count;
+                }
+                Fact {
+                    icon: @image-url("icons/octagon.svg");
+                    label: "Action checker";
+                    value: Hub.checker-line;
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.state != "" && Hub.nodes.length == 0;
+        gap: Space.lg;
+        Card {
+            HorizontalLayout {
+                spacing: Space.lg;
+                Text {
+                    horizontal-stretch: 1;
+                    text: "No machine paired yet.";
+                    color: Theme.text-muted;
+                    font-size: Type.body;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Pair a machine";
+                    icon: @image-url("icons/plus.svg");
+                    kind: ButtonKind.primary;
+                    clicked => {
+                        Hub.pair-start();
+                    }
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.nodes.length > 0;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                NodeList { }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                NodeDetails {
+                    item: Hub.nodes[root.pick];
+                }
+            }
+            SidePane {
+                SessionsCard { }
+            }
+        }
+    }
+}

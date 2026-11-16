@@ -12,7 +12,8 @@
 # that were built (the ones that will be released), on a runner of their own
 # architecture, and `installed` installs and drives them on the distributions
 # Nerve supports (.github/workflows/installed.yml); the desktop app's .deb and
-# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`).
+# .rpm are installed on Ubuntu and Fedora (`desktop-packages-test`), its Arch
+# package on Arch Linux (`desktop-arch-package-test`).
 # `windows` builds the Windows programs, and `windows-installed` installs and
 # drives them (.github/workflows/installed-windows.yml), as CI does with its
 # debug ones. `publish` is the only job
@@ -387,6 +388,71 @@ jobs:
           test ! -e /usr/bin/nerve
           test ! -e /usr/share/applications/nerve.desktop
 
+  # The desktop app for Arch Linux (#230), from the same program: makepkg packs
+  # packaging/arch/PKGBUILD in an archlinux container
+  # (.github/scripts/arch-package.sh). No AUR package (owner, 2026-11-14).
+  desktop-arch-package:
+    needs: [check, desktop-linux]
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nerve-desktop-x86_64-linux
+          path: program
+      - name: makepkg, and the fontconfig the program links
+        run: pacman -Syu --noconfirm --needed base-devel fontconfig
+      - name: The package
+        run: |
+          chmod +x program/nerve-x86_64-linux
+          .github/scripts/arch-package.sh program/nerve-x86_64-linux dist
+          test -f "dist/nerve-${VERSION}-1-x86_64.pkg.tar.zst"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nerve-desktop-arch-package
+          path: dist/*
+          if-no-files-found: error
+
+  # The Arch package installed with pacman in an archlinux container, as the
+  # .deb and the .rpm are: pacman brings what the app links, the app starts
+  # headless (`--version`), its menu entry is valid and opens the package's
+  # program, and removing the package removes them.
+  desktop-arch-package-test:
+    needs: desktop-arch-package
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nerve-desktop-arch-package
+          path: dist
+      - name: Install the package
+        run: |
+          pacman -Syu --noconfirm --needed desktop-file-utils
+          pacman -U --noconfirm "./dist/nerve-${VERSION}-1-x86_64.pkg.tar.zst"
+      - name: The app starts, and its menu entry opens it
+        run: |
+          said=$(nerve --version)
+          if [ "$said" != "nerve $VERSION" ]; then
+            echo "the installed app says '$said', not 'nerve $VERSION'" >&2
+            exit 1
+          fi
+          test -x /usr/bin/nerve
+          entry=/usr/share/applications/nerve.desktop
+          desktop-file-validate "$entry"
+          grep -qx 'Exec=/usr/bin/nerve %u' "$entry"
+          test -f /usr/share/icons/hicolor/scalable/apps/nerve.svg
+          test "$(cat /usr/share/nerve/package)" = pacman
+      - name: Removing the package removes the app
+        run: |
+          pacman -R --noconfirm nerve
+          test ! -e /usr/bin/nerve
+          test ! -e /usr/share/applications/nerve.desktop
+
   # The conformance suite (crates/nerve-conformance) against the binaries that
   # were built, not against the source: the end-to-end tests start the real
   # `nerve-center` and `nerve-node` from NERVE_CENTER_BIN and NERVE_NODE_BIN
@@ -539,7 +605,7 @@ jobs:
   # draft and the tag this run created, and nothing else (see there). It runs
   # only once every job it needs passed.
   publish:
-    needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, windows, windows-installed, conformance, installed]
+    needs: [check, linux, desktop-linux, desktop-packages, desktop-packages-test, desktop-arch-package, desktop-arch-package-test, windows, windows-installed, conformance, installed]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -563,11 +629,11 @@ jobs:
         run: |
           cd dist
           # Two Linux programs on each of two machines, the app for Linux,
-          # also as a .deb and an .rpm, and the app for Windows (nerve-x86_64-*
-          # takes both apps; Windows has neither nerve-node nor nerve-center of
-          # its own).
-          want=8
-          files=(nerve-center-* nerve-node-* nerve-x86_64-* nerve_*_amd64.deb nerve-[0-9]*.x86_64.rpm)
+          # also as a .deb, an .rpm and an Arch package, and the app for
+          # Windows (nerve-x86_64-* takes both apps; Windows has neither
+          # nerve-node nor nerve-center of its own).
+          want=9
+          files=(nerve-center-* nerve-node-* nerve-x86_64-* nerve_*_amd64.deb nerve-[0-9]*.x86_64.rpm nerve-[0-9]*-1-x86_64.pkg.tar.zst)
           if [ "${#files[@]}" != "$want" ]; then
             echo "expected $want binaries, got: ${files[*]}" >&2
             exit 1
@@ -586,7 +652,7 @@ jobs:
               prerelease=true
               ;;
           esac
-          footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the app \`nerve\`, which is a node or a center, for Linux x86_64 (glibc 2.35 or newer; also as a .deb and an .rpm) and Windows x86_64, built from $SHA. On Windows the app is the node and the center: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\`, \`nerve-center update\` and the app's update check the one they download against SHA256SUMS (docs/user/install.md)."
+          footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, and the app \`nerve\`, which is a node or a center, for Linux x86_64 (glibc 2.35 or newer; also as a .deb, an .rpm and an Arch package) and Windows x86_64, built from $SHA. On Windows the app is the node and the center: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\`, \`nerve-center update\` and the app's update check the one they download against SHA256SUMS (docs/user/install.md)."
           # A pre-release's body is the footer alone.
           if [ "$KIND" = release ]; then
             { cat notes/changelog.md; echo; echo "$footer"; } > release-notes.md

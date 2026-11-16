@@ -1,6 +1,7 @@
 //! The app's own settings, kept for each user apart from the node's: the
-//! appearance the owner chose (system, light or dark), and whether Update
-//! takes the pre-releases too. A small JSON file in
+//! appearance the owner chose (system, light or dark), whether Update
+//! takes the pre-releases too, and whether the center's log-in is kept in
+//! the user's keyring (crate::hub::keep). A small JSON file in
 //! the user's config folder, `nerve-app/settings.json` (not `nerve`, which is
 //! the node's); the node's
 //! settings stay the node's (`nerve-node config`).
@@ -58,6 +59,18 @@ pub fn save_pre_releases(path: &Path, on: bool) -> Result<(), String> {
     change(path, |v| v["pre_releases"] = json!(on))
 }
 
+/// Whether the center's log-in is kept in the user's keyring, as saved in
+/// `path`: off unless the owner turned it on (owner decision on #232).
+pub fn keep_login(path: &Path) -> bool {
+    read(path).is_some_and(|v| v["keep_center_login"] == true)
+}
+
+/// Saves whether the center's log-in is kept in the keyring, the rest of
+/// the file as it was.
+pub fn save_keep_login(path: &Path, on: bool) -> Result<(), String> {
+    change(path, |v| v["keep_center_login"] = json!(on))
+}
+
 /// The file at `path` with `f` applied, the rest as it was.
 fn change(path: &Path, f: impl FnOnce(&mut Value)) -> Result<(), String> {
     let mut v = read(path)
@@ -108,5 +121,20 @@ mod tests {
         assert_eq!(appearance(&f), 2);
         save_pre_releases(&f, false).unwrap();
         assert!(!pre_releases(&f));
+    }
+
+    /// The center's log-in stays in memory until the owner turns the
+    /// keyring on (#232).
+    #[test]
+    fn the_center_log_in_is_kept_only_when_turned_on() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("nerve/settings.json");
+        assert!(!keep_login(&f));
+        save_pre_releases(&f, true).unwrap();
+        save_keep_login(&f, true).unwrap();
+        assert!(keep_login(&f));
+        assert!(pre_releases(&f));
+        save_keep_login(&f, false).unwrap();
+        assert!(!keep_login(&f));
     }
 }

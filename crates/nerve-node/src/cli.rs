@@ -191,6 +191,10 @@ pub enum Cmd {
         /// Windows: an uninstall that keeps the data puts the keys and the proxy's login that the service's Credential Manager keeps aside first, which needs the node to run. Where it does not, uninstall stops and changes nothing; with this flag it goes on, and they are lost.
         #[arg(long)]
         forget_secrets: bool,
+        /// The app's role change: keep the app's program for the other
+        /// role's install (nerve_service::keeps_program).
+        #[arg(long, hide = true)]
+        keep_program: bool,
     },
     /// Save the config and keys to a passphrase-protected file
     ///
@@ -1580,7 +1584,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Uninstall {
             purge,
             forget_secrets,
-        } => install::uninstall(paths, purge, forget_secrets, out).await,
+            keep_program,
+        } => {
+            nerve_service::set_keep_program(keep_program);
+            install::uninstall(paths, purge, forget_secrets, out).await
+        }
     }
 }
 

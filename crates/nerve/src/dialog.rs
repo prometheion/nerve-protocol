@@ -14,9 +14,11 @@ use crate::app::Choose;
 /// [`Choose`] by its name.
 pub const ARG: &str = "__desktop-choose";
 
-const ALL: [Choose; 5] = [
+const ALL: [Choose; 7] = [
     Choose::Folder,
     Choose::SaveBackup,
+    Choose::SaveCenterBackup,
+    Choose::SaveLog,
     Choose::OpenBackup,
     Choose::Program,
     Choose::Provider,
@@ -26,6 +28,8 @@ fn name(c: Choose) -> &'static str {
     match c {
         Choose::Folder => "folder",
         Choose::SaveBackup => "save-backup",
+        Choose::SaveCenterBackup => "save-center-backup",
+        Choose::SaveLog => "save-log",
         Choose::OpenBackup => "open-backup",
         Choose::Program => "program",
         Choose::Provider => "provider",
@@ -45,6 +49,14 @@ pub fn show(c: Choose) -> Result<Option<PathBuf>, String> {
         Choose::SaveBackup => d
             .set_title("Back up the node")
             .set_file_name("nerve-node.backup")
+            .save_file(),
+        Choose::SaveCenterBackup => d
+            .set_title("Back up the center")
+            .set_file_name("nerve-center.backup")
+            .save_file(),
+        Choose::SaveLog => d
+            .set_title("Save the center's log")
+            .set_file_name("nerve-center-log.jsonl")
             .save_file(),
         Choose::OpenBackup => d.set_title("Restore a backup").pick_file(),
         Choose::Program => d.set_title("The new nerve").pick_file(),

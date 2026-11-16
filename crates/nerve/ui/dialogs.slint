@@ -1,6 +1,7 @@
 // The dialogs: pairing a center, confirming a change that cannot be undone,
 // and About with Slint's AboutSlint, as Slint's Royalty-free license asks.
 
+import { Hub } from "hub.slint";
 import { AboutSlint } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Store, Perm, Caps, Prefs, Install } from "store.slint";
@@ -275,7 +276,7 @@ export component AboutDialog inherits Dialog {
             }
         }
         Text {
-            text: "Nerve node";
+            text: Hub.shown ? "Nerve center" : "Nerve node";
             color: Theme.text;
             font-size: 18px;
             font-weight: Type.semibold;
@@ -288,7 +289,8 @@ export component AboutDialog inherits Dialog {
             horizontal-alignment: center;
         }
         Text {
-            text: "Every action runs nerve-node, with its checks and audit records.";
+            text: Hub.shown ? "Its pages use the center's own API, with the checks of its web UI."
+                : "Every action runs nerve-node, with its checks and audit records.";
             color: Theme.text-muted;
             font-size: Type.small;
             wrap: word-wrap;

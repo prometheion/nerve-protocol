@@ -70,7 +70,8 @@ pub struct Layout {
     pub package: Option<Package>,
 }
 
-/// The kind of package the Linux desktop app came from (#212). The package
+/// The kind of package the Linux desktop app came from (#212, the Arch
+/// package of #230). The package
 /// puts the program in `/usr/bin` with its menu entry and icon, and
 /// [`Package::MARK`], which names its kind; `install` then leaves the
 /// program where it is, `update` installs the release's package with the
@@ -79,16 +80,19 @@ pub struct Layout {
 pub enum Package {
     Deb,
     Rpm,
+    Pacman,
 }
 
 impl Package {
-    /// The file the package brings that says its kind: `deb` or `rpm`.
+    /// The file the package brings that says its kind: `deb`, `rpm` or
+    /// `pacman`.
     pub const MARK: &str = "/usr/share/nerve/package";
 
     pub fn word(self) -> &'static str {
         match self {
             Package::Deb => "deb",
             Package::Rpm => "rpm",
+            Package::Pacman => "pacman",
         }
     }
 
@@ -97,6 +101,7 @@ impl Package {
         match said.trim() {
             "deb" => Some(Package::Deb),
             "rpm" => Some(Package::Rpm),
+            "pacman" => Some(Package::Pacman),
             _ => None,
         }
     }
@@ -106,6 +111,7 @@ impl Package {
         match self {
             Package::Deb => format!("{program}_{v}_amd64.deb"),
             Package::Rpm => format!("{program}-{v}.x86_64.rpm"),
+            Package::Pacman => format!("{program}-{v}-1-x86_64.pkg.tar.zst"),
         }
     }
 
@@ -121,6 +127,10 @@ impl Package {
                 .strip_prefix(program)?
                 .strip_prefix('-')?
                 .strip_suffix(".x86_64.rpm")?,
+            Package::Pacman => name
+                .strip_prefix(program)?
+                .strip_prefix('-')?
+                .strip_suffix("-1-x86_64.pkg.tar.zst")?,
         };
         Version::parse_of(program, &format!("{program} {v}"))
     }
@@ -131,6 +141,7 @@ impl Package {
         match self {
             Package::Deb => "apt-get",
             Package::Rpm => "dnf",
+            Package::Pacman => "pacman",
         }
     }
 
@@ -138,6 +149,8 @@ impl Package {
     /// same version, which it would leave as it is otherwise.
     pub fn install_args(self, again: bool) -> &'static [&'static str] {
         match (self, again) {
+            // pacman installs a file of the same version again as it is.
+            (Package::Pacman, _) => &["-U", "--noconfirm"],
             (_, false) => &["install", "-y"],
             (Package::Deb, true) => &["install", "--reinstall", "-y"],
             (Package::Rpm, true) => &["reinstall", "-y"],
@@ -149,6 +162,7 @@ impl Package {
         match self {
             Package::Deb => format!("sudo apt remove {program}"),
             Package::Rpm => format!("sudo dnf remove {program}"),
+            Package::Pacman => format!("sudo pacman -R {program}"),
         }
     }
 }
@@ -1861,7 +1875,9 @@ fn uninstall_steps(
         return Ok(());
     }
     uninstall_parts(layout, steps)?;
-    if let Some(package) = layout.package {
+    if nerve_service::keeps_program() {
+        steps.did(nerve_service::kept_program(&layout.bin));
+    } else if let Some(package) = layout.package {
         steps.did(format!(
             "left the program {}: it is the {} package's, which `{}` removes",
             layout.bin.display(),
@@ -4096,6 +4112,27 @@ pub(crate) mod tests {
         }
     }
 
+    /// The app's role change (#232) takes the node whole, its data and its
+    /// polkit files too, and keeps the app's program for the center's
+    /// install.
+    #[test]
+    fn a_role_change_keeps_the_program_and_takes_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let mut out = Vec::new();
+        nerve_service::set_keep_program(true);
+        let r = uninstall(&l, &sys, true, &mut out);
+        nerve_service::set_keep_program(false);
+        r.unwrap();
+        assert!(l.bin.exists());
+        assert!(!l.unit.exists() && !l.paths.state_dir.exists());
+        assert!(!l.polkit_rule().exists());
+        assert!(sys.user.borrow().is_none());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("kept the program"), "{out}");
+    }
+
     #[test]
     fn uninstall_leaves_no_service_user_or_program_and_keeps_the_folders() {
         let d = tempfile::tempdir().unwrap();
@@ -5181,7 +5218,11 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let mark = d.path().join("package");
         assert_eq!(package_at(&mark), None);
-        for (word, kind) in [("deb\n", Package::Deb), ("rpm", Package::Rpm)] {
+        for (word, kind) in [
+            ("deb\n", Package::Deb),
+            ("rpm", Package::Rpm),
+            ("pacman\n", Package::Pacman),
+        ] {
             std::fs::write(&mark, word).unwrap();
             assert_eq!(package_at(&mark), Some(kind));
         }
@@ -5192,9 +5233,21 @@ pub(crate) mod tests {
         let rpm = Package::Rpm.asset(app, "0.1.0");
         assert_eq!(deb, "nerve_0.1.0_amd64.deb");
         assert_eq!(rpm, "nerve-0.1.0.x86_64.rpm");
+        // The Arch package of #230, as makepkg names it.
+        let arch = Package::Pacman.asset(app, "0.1.0");
+        assert_eq!(arch, "nerve-0.1.0-1-x86_64.pkg.tar.zst");
         let v = |p: Package, n: &str| p.version_in(app, n).map(|v| v.to_string());
         assert_eq!(v(Package::Deb, &deb).as_deref(), Some("0.1.0"));
         assert_eq!(v(Package::Rpm, &rpm).as_deref(), Some("0.1.0"));
+        assert_eq!(v(Package::Pacman, &arch).as_deref(), Some("0.1.0"));
+        assert_eq!(v(Package::Pacman, &rpm), None);
+        // pacman takes a file, and the same version again, with one command,
+        // and the owner removes it with pacman.
+        assert_eq!(Package::Pacman.manager(), "pacman");
+        for again in [false, true] {
+            assert_eq!(Package::Pacman.install_args(again), ["-U", "--noconfirm"]);
+        }
+        assert_eq!(Package::Pacman.remove(app), "sudo pacman -R nerve");
         for other in [
             rpm.as_str(),
             "nerve-x86_64-linux",

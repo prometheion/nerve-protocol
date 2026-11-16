@@ -494,6 +494,65 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     assert!(!bad.status.success());
 }
 
+/// `nerve-center` with `stdin` on its input.
+fn owner_with(args: &[&str], state: &std::path::Path, stdin: &str) -> std::process::Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    bare(&mut c)
+        .args(args)
+        .arg("--state-dir")
+        .arg(state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The app's broker names no file (#232): a backup to `-` comes in the
+/// `--json` answer and a restore from `-` reads it from the input, the
+/// passphrase on the line after it; the backup round-trips.
+#[test]
+fn a_backup_is_handed_over_its_answer_and_its_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+    let mut center = spawn(&old);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+    let pass = "correct horse battery";
+    // Without --json there is nowhere to put it.
+    let plain = owner_with(&["backup", "-", "--passphrase-file", "-"], &old, pass);
+    assert!(!plain.status.success());
+    let made = owner_with(
+        &["--json", "backup", "-", "--passphrase-file", "-"],
+        &old,
+        &format!("{pass}\n"),
+    );
+    let answer: Value = serde_json::from_slice(&made.stdout).unwrap();
+    let sealed = answer["backup"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{answer}"));
+    assert!(!dir.path().join("-").exists());
+    let restored = owner_with(
+        &["--json", "restore", "-", "--passphrase-file", "-"],
+        &new,
+        &format!("{sealed}\n{pass}\n"),
+    );
+    let answer: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert!(answer.get("error").is_none(), "{answer}");
+    assert_eq!(
+        std::fs::read(old.join("tls.pem")).unwrap(),
+        std::fs::read(new.join("tls.pem")).unwrap()
+    );
+}
+
 /// A center that runs a node's link and a harness over stdio, stopped by a
 /// signal, and one that serves MCP over HTTP beyond loopback with port 0.
 #[cfg(unix)]

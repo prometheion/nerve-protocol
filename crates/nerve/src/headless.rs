@@ -69,6 +69,19 @@ impl Clock {
 struct Headless {
     window: Rc<Window>,
     clock: Rc<Clock>,
+    /// The clipboard, in memory (crate::hub::clip).
+    clipboard: std::cell::RefCell<Option<String>>,
+}
+
+thread_local! {
+    // Whether this thread draws on the headless platform: a copied secret
+    // then stays in its clipboard, never the desktop's (crate::hub::clip).
+    static HEADLESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the windows of this thread are headless ones.
+pub fn is_headless() -> bool {
+    HEADLESS.with(Cell::get)
 }
 
 impl Platform for Headless {
@@ -78,6 +91,18 @@ impl Platform for Headless {
 
     fn duration_since_start(&self) -> Duration {
         self.clock.now()
+    }
+
+    fn set_clipboard_text(&self, text: &str, clipboard: slint::platform::Clipboard) {
+        if clipboard == slint::platform::Clipboard::DefaultClipboard {
+            *self.clipboard.borrow_mut() = Some(text.to_string());
+        }
+    }
+
+    fn clipboard_text(&self, clipboard: slint::platform::Clipboard) -> Option<String> {
+        (clipboard == slint::platform::Clipboard::DefaultClipboard)
+            .then(|| self.clipboard.borrow().clone())
+            .flatten()
     }
 }
 
@@ -104,8 +129,10 @@ impl Screen {
         slint::platform::set_platform(Box::new(Headless {
             window: window.clone(),
             clock: clock.clone(),
+            clipboard: Default::default(),
         }))
         .map_err(|e| format!("the headless platform: {e}"))?;
+        HEADLESS.with(|h| h.set(true));
         window
             .window
             .dispatch_event(WindowEvent::ScaleFactorChanged {

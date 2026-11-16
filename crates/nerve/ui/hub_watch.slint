@@ -1,0 +1,772 @@
+// The center's Statistics, Audit and Log: a list on the left, the picked
+// entry's details on the right, as on the node's pages.
+
+import { Theme, Type, Space, Radius, Tone, Size, Shape } from "theme.slint";
+import { Hub, HubAudit, HubLog } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, Icon, IconTile,
+    StatusDot, Split, ListPane, DetailsPane, ListCard, ListGroup, ListItem, DetailCard, TextField,
+    Segmented, Picker, EmptyState, Code, CopyText,
+} from "widgets.slint";
+
+export component HubStatsPage inherits PageFrame {
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/gauge.svg");
+        title: "Statistics";
+        error-title: "The statistics could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.stat-rows.length > 0;
+        gap: Space.xl;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                ListCard {
+                    label: "Statistics";
+                    step(d) => {
+                        Hub.stats-picked(Math.max(0, Math.min(Hub.stat-rows.length - 1, Hub.stat-pick + d)));
+                    }
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for r[i] in Hub.stat-rows: VerticalLayout {
+                        if i == 1: ListGroup {
+                            text: "Machines";
+                            count: "" + (Hub.stat-rows.length - 1);
+                        }
+                        ListItem {
+                            first: i <= 1;
+                            selected: i == Hub.stat-pick;
+                            label: r.name;
+                            clicked => {
+                                Hub.stats-picked(i);
+                                Hub.details-open = true;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    source: r.id == "" ? @image-url("icons/overview.svg") : @image-url("icons/server.svg");
+                                    colorize: Theme.text-muted;
+                                }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: r.name;
+                                color: Theme.text;
+                                font-size: Type.body;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: r.calls;
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                DetailCard {
+                    HorizontalLayout {
+                        spacing: Space.md;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: Hub.stat-name;
+                            color: Theme.text;
+                            font-size: Type.title;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: Hub.stat-kept;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    FlexboxLayout {
+                        spacing-horizontal: Space.md;
+                        spacing-vertical: Space.md;
+                        for f in Hub.figures: Rectangle {
+                            min-width: 120px;
+                            horizontal-stretch: 1;
+                            border-radius: Radius.md;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            background: Theme.surface-alt;
+                            VerticalLayout {
+                                padding: Space.md;
+                                spacing: 2px;
+                                Text {
+                                    text: f.label;
+                                    color: Theme.text-muted;
+                                    font-size: Type.small;
+                                }
+                                Text {
+                                    text: f.value;
+                                    color: Theme.text;
+                                    font-size: Type.title;
+                                    font-weight: Type.semibold;
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Calls";
+                        color: Theme.text;
+                        font-size: Type.small;
+                        font-weight: Type.semibold;
+                    }
+                    if Hub.calls.length == 0: Text {
+                        text: "No call yet.";
+                        color: Theme.text-muted;
+                        font-size: Type.small;
+                    }
+                    if Hub.calls.length > 0: Rectangle {
+                        border-radius: Radius.md;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        VerticalLayout {
+                            for c[i] in Hub.calls: VerticalLayout {
+                                if i > 0: Rectangle {
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+                                HorizontalLayout {
+                                    padding-left: Space.lg;
+                                    padding-right: Space.lg;
+                                    padding-top: 10px;
+                                    padding-bottom: 10px;
+                                    spacing: Space.lg;
+                                    Text {
+                                        width: 110px;
+                                        text: c.name;
+                                        color: Theme.text;
+                                        font-size: Type.small;
+                                        font-family: Type.mono;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: c.count;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: c.time;
+                                        color: Theme.text-muted;
+                                        font-size: Type.small;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Errors";
+                        color: Theme.text;
+                        font-size: Type.small;
+                        font-weight: Type.semibold;
+                    }
+                    if Hub.errors.length == 0: Text {
+                        text: "None.";
+                        color: Theme.text-muted;
+                        font-size: Type.small;
+                    }
+                    if Hub.errors.length > 0: Rectangle {
+                        border-radius: Radius.md;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        VerticalLayout {
+                            for e[i] in Hub.errors: VerticalLayout {
+                                if i > 0: Rectangle {
+                                    height: 1px;
+                                    background: Theme.border;
+                                }
+                                HorizontalLayout {
+                                    padding-left: Space.lg;
+                                    padding-right: Space.lg;
+                                    padding-top: 10px;
+                                    padding-bottom: 10px;
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: e.name;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: e.count;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        font-weight: Type.semibold;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component AuditDetails inherits DetailCard {
+    in property <HubAudit> entry;
+    property <bool> waiting: Hub.busy == "audit";
+    HorizontalLayout {
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: center;
+            IconTile {
+                size: 36px;
+                tone: root.entry.tone;
+                icon: root.entry.kind == "allowed" ? @image-url("icons/ok.svg")
+                    : root.entry.kind == "checker" ? @image-url("icons/octagon.svg") : @image-url("icons/ban.svg");
+            }
+        }
+        Text {
+            text: root.entry.call;
+            color: Theme.text;
+            font-size: Type.title;
+            font-weight: Type.semibold;
+            font-family: Type.mono;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: min(80px, self.preferred-width);
+        }
+        VerticalLayout {
+            alignment: center;
+            Pill {
+                text: root.entry.badge;
+                tone: root.entry.tone;
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.entry.node + " · " + root.entry.when;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-label: root.entry.when-exact;
+        }
+    }
+    if root.entry.target != "": VerticalLayout {
+        spacing: Space.sm;
+        Text {
+            text: "The command";
+            color: Theme.text;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        Code {
+            text: root.entry.target;
+        }
+    }
+    Reveal {
+        shown: root.entry.detail != "";
+        Text {
+            text: root.entry.detail;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    Text {
+        text: root.entry.when-exact;
+        color: Theme.text-faint;
+        font-size: Type.caption;
+    }
+    if root.entry.rules || root.entry.trust: VerticalLayout {
+        spacing: Space.sm;
+        Text {
+            text: root.entry.trust ? "Let it skip the model next time" : "A rule for next time";
+            color: Theme.text;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        if root.entry.trust: FlexboxLayout {
+            spacing: 6px;
+            Button {
+                text: "Trust this";
+                icon: @image-url("icons/check.svg");
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-trust(root.entry.index, false, -1);
+                }
+            }
+            Button {
+                text: "Trust as wildcard";
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-trust(root.entry.index, true, -1);
+                }
+            }
+        }
+        if root.entry.rules: FlexboxLayout {
+            spacing: 6px;
+            if !root.entry.sudo: Button {
+                text: "Allow";
+                icon: @image-url("icons/check.svg");
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "allow", false, -1);
+                }
+            }
+            if !root.entry.sudo: Button {
+                text: "Allow as wildcard";
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "allow", true, -1);
+                }
+            }
+            Button {
+                text: "Deny";
+                icon: @image-url("icons/ban.svg");
+                kind: ButtonKind.danger-soft;
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "deny", false, -1);
+                }
+            }
+            Button {
+                text: "Deny as wildcard";
+                kind: ButtonKind.danger-soft;
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "deny", true, -1);
+                }
+            }
+        }
+        // One argument of the call pinned: the rule holds that value.
+        if root.entry.pins.length > 0: FlexboxLayout {
+            spacing: 6px;
+            Picker {
+                options: root.entry.pins;
+                current: min(Hub.audit-pin, max(0, root.entry.pins.length - 1));
+                label: "The argument to pin";
+                chosen(i) => {
+                    Hub.audit-pin = i;
+                }
+            }
+            if root.entry.trust: Button {
+                text: "Trust with this value";
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-trust(root.entry.index, false, Hub.audit-pin);
+                }
+            }
+            if root.entry.rules && !root.entry.sudo: Button {
+                text: "Allow with this value";
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "allow", false, Hub.audit-pin);
+                }
+            }
+            if root.entry.rules: Button {
+                text: "Deny with this value";
+                kind: ButtonKind.danger-soft;
+                small: true;
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.audit-rule(root.entry.index, "deny", false, Hub.audit-pin);
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: root.entry.sudo && root.entry.rules;
+        Text {
+            text: "Only the machine's owner puts a sudo command on its allow list, on that machine.";
+            color: Theme.text-faint;
+            font-size: Type.caption;
+            wrap: word-wrap;
+        }
+    }
+    Reveal {
+        shown: !root.entry.rules && !root.entry.trust && root.entry.rules-why != "";
+        Text {
+            text: root.entry.rules-why;
+            color: Theme.text-faint;
+            font-size: Type.caption;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component HubAuditPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Hub.audit-pick, Hub.audit.length - 1));
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/audit.svg");
+        title: "Audit";
+        error-title: "The audit could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    Rectangle {
+        height: Space.xl;
+    }
+    FlexboxLayout {
+        spacing-horizontal: Space.md;
+        spacing-vertical: Space.sm;
+        Segmented {
+            options: ["All " + Hub.audit-counts[0], "Allowed " + Hub.audit-counts[1], "Refused " + Hub.audit-counts[2]];
+            current: Hub.audit-decision;
+            label: "Decision";
+            chosen(i) => {
+                Hub.audit-decision = i;
+                Hub.audit-pick = 0;
+                Hub.audit-filtered();
+            }
+        }
+        TextField {
+            horizontal-stretch: 1;
+            min-width: 220px;
+            text <=> Hub.audit-text;
+            placeholder: "Find in target and reason";
+            label: "Find in target and reason";
+            edited => {
+                Hub.audit-pick = 0;
+                Hub.audit-filtered();
+            }
+        }
+        Picker {
+            options: Hub.audit-node-options;
+            current: Hub.audit-node;
+            label: "Machine";
+            chosen(i) => {
+                Hub.audit-node = i;
+                Hub.audit-pick = 0;
+                Hub.audit-filtered();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.audit.length == 0 && Hub.state != "";
+        gap: Space.lg;
+        Card {
+            EmptyState {
+                icon: @image-url("icons/audit.svg");
+                title: Hub.audit-text != "" || Hub.audit-decision != 0 || Hub.audit-node != 0 ? "Nothing matches" : "No decisions yet";
+                text: "The machines' decisions and the action checker's show here as they come.";
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.audit.length > 0;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                stretch: Shape.large ? 1 : 5;
+                least: 320px;
+                most: 100000px;
+                ListCard {
+                    label: "Audit";
+                    step(d) => {
+                        Hub.audit-pick = Math.max(0, Math.min(Hub.audit.length - 1, root.pick + d));
+                    }
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for e[i] in Hub.audit: ListItem {
+                        first: i == 0;
+                        selected: i == root.pick;
+                        label: e.badge + ", " + e.call + " " + e.target;
+                        clicked => {
+                            Hub.audit-pick = i;
+                            Hub.audit-pin = 0;
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: e.kind == "allowed" ? @image-url("icons/ok.svg")
+                                    : e.kind == "checker" ? @image-url("icons/octagon.svg") : @image-url("icons/ban.svg");
+                                colorize: Theme.tone(e.tone);
+                            }
+                        }
+                        Text {
+                            text: e.call;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: e.target;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: e.when;
+                            color: Theme.text-faint;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            accessible-label: e.when-exact;
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                stretch: Shape.large ? 1 : 6;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                AuditDetails {
+                    entry: Hub.audit[root.pick];
+                }
+            }
+        }
+    }
+}
+
+export component HubLogPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Hub.log-pick, Hub.log.length - 1));
+    property <HubLog> picked: Hub.log[root.pick];
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/log.svg");
+        title: "Log";
+        error-title: "The log could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+        Button {
+            text: "Download";
+            icon: @image-url("icons/download.svg");
+            kind: ButtonKind.ghost;
+            busy: Hub.busy == "log-download";
+            clicked => {
+                Hub.log-download();
+            }
+        }
+    }
+    Rectangle {
+        height: Space.xl;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Segmented {
+            options: ["All", "Problems"];
+            current: Hub.log-problems ? 1 : 0;
+            label: "Which lines";
+            chosen(i) => {
+                Hub.log-problems = i == 1;
+                Hub.log-pick = 0;
+                Hub.log-filtered();
+            }
+        }
+        TextField {
+            horizontal-stretch: 1;
+            text <=> Hub.log-search;
+            placeholder: "Search the messages";
+            label: "Search the messages";
+            accepted => {
+                Hub.log-pick = 0;
+                Hub.log-filtered();
+            }
+            edited => {
+                Hub.log-pick = 0;
+                Hub.log-filtered();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.log.length == 0 && Hub.state != "";
+        gap: Space.lg;
+        Card {
+            EmptyState {
+                icon: @image-url("icons/log.svg");
+                title: Hub.log-search != "" ? "No line matches" : Hub.log-problems ? "No problems" : "Nothing logged yet";
+                text: Hub.log-search != "" ? "Change or clear the search." : "The center writes its log while it runs.";
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.log.length > 0;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                stretch: Shape.large ? 1 : 5;
+                least: 320px;
+                most: 100000px;
+                ListCard {
+                    label: "Log";
+                    step(d) => {
+                        Hub.log-pick = Math.max(0, Math.min(Hub.log.length - 1, root.pick + d));
+                    }
+                    Rectangle {
+                        height: 6px;
+                    }
+                    for row[i] in Hub.log: ListItem {
+                        first: i == 0;
+                        selected: i == root.pick;
+                        label: row.level + ", " + row.when + ": " + row.msg;
+                        clicked => {
+                            Hub.log-pick = i;
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusDot {
+                                tone: row.tone;
+                                size: 7px;
+                            }
+                        }
+                        Text {
+                            width: 78px;
+                            text: row.when;
+                            color: Theme.text-faint;
+                            font-size: Type.caption;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-label: row.when-exact;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: row.msg;
+                            color: Theme.text;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if row.node != "": VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: row.node;
+                            }
+                        }
+                    }
+                    Reveal {
+                        shown: Hub.log-foot != "";
+                        HorizontalLayout {
+                            padding: Space.lg;
+                            Text {
+                                text: Hub.log-foot;
+                                color: Theme.text-faint;
+                                font-size: Type.caption;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                stretch: Shape.large ? 1 : 6;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                DetailCard {
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: root.picked.level;
+                                tone: root.picked.tone;
+                                dot: true;
+                            }
+                        }
+                        if root.picked.node != "": VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: root.picked.node;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.picked.when-exact;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    CopyText {
+                        text: root.picked.msg;
+                        copy-button: true;
+                    }
+                }
+            }
+        }
+    }
+}

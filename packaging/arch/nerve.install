@@ -1,0 +1,21 @@
+# Once installed or upgraded, the service that runs /usr/bin/nerve moves to
+# the new program, the node's or the center's, as the .deb's and the .rpm's
+# script does (.github/scripts/desktop-packages.sh). A service of a terminal
+# program is that program's to update; a package that `nerve update`
+# installs itself leaves it to the update (NERVE_PACKAGE_UPDATE).
+post_install() {
+  if [ -z "${NERVE_PACKAGE_UPDATE:-}" ]; then
+    if grep -qsE "^ExecStart=/usr/(local/)?bin/nerve " /etc/systemd/system/nerve-node.service; then
+      /usr/bin/nerve update --from=/usr/bin/nerve \
+        || echo "nerve: the node still runs the earlier program; the app's Update tries again" >&2
+    fi
+    if grep -qsE "^ExecStart=/usr/(local/)?bin/nerve __center " /etc/systemd/system/nerve-center.service; then
+      /usr/bin/nerve __center update --from=/usr/bin/nerve \
+        || echo "nerve: the center still runs the earlier program; sudo nerve-center update --from=/usr/bin/nerve tries again" >&2
+    fi
+  fi
+}
+
+post_upgrade() {
+  post_install
+}

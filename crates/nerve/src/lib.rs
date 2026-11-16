@@ -11,6 +11,7 @@ pub mod browser;
 pub mod deps;
 pub mod dialog;
 pub mod headless;
+pub mod hub;
 pub mod in_app;
 pub mod instance;
 pub mod motion;

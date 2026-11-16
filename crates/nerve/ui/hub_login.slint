@@ -1,0 +1,157 @@
+// The center's log-in: its pages need the owner token, pasted or read from
+// this machine with one administrator's prompt. Before the token goes out
+// the app checks that the port is the center service's.
+
+import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Hub } from "hub.slint";
+import { Install } from "store.slint";
+import {
+    Button, ButtonKind, Card, Banner, PageFrame, Reveal, IconTile, Icon, TextField, Fold,
+} from "widgets.slint";
+
+export component HubLoginPage inherits PageFrame {
+    gap: 0;
+    HorizontalLayout {
+        alignment: center;
+        padding-top: Space.lg;
+        Rectangle {
+            width: min(580px, root.width - 2 * Space.xxl);
+            Card {
+                pad: Space.xxl;
+                gap: Space.lg;
+                HorizontalLayout {
+                    spacing: Space.md;
+                    IconTile {
+                        icon: @image-url("icons/lock.svg");
+                    }
+                    Text {
+                        text: "Log in to this center";
+                        color: Theme.text;
+                        font-size: Type.title;
+                        font-weight: Type.semibold;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+                Text {
+                    text: Hub.keep-login ? "Its pages need the center's owner token. Nerve keeps it in your keyring."
+                        : "Its pages need the center's owner token. Nerve keeps it only while the app is open.";
+                    color: Theme.text-muted;
+                    font-size: Type.lead;
+                    wrap: word-wrap;
+                }
+                Reveal {
+                    shown: Hub.not-running;
+                    Banner {
+                        tone: Tone.warn;
+                        title: "The center is not running";
+                        text: Hub.login-check;
+                        action: "Start";
+                        acted => {
+                            Hub.start-service();
+                        }
+                    }
+                }
+                Reveal {
+                    shown: Hub.ui-off;
+                    Banner {
+                        tone: Tone.accent;
+                        title: "The center's web UI is off";
+                        text: "These pages use it, on this machine only.";
+                        action: "Turn it on for this machine";
+                        acted => {
+                            Hub.turn-ui-on();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    TextField {
+                        horizontal-stretch: 1;
+                        text <=> Hub.login-token;
+                        password: true;
+                        mono: true;
+                        placeholder: "nrv_owner_…";
+                        label: "Owner token";
+                        invalid: Hub.login-error != "";
+                        enabled: Hub.login-checked;
+                        accepted => {
+                            Hub.login();
+                        }
+                    }
+                    Button {
+                        text: "Log in";
+                        icon: @image-url("icons/unlock.svg");
+                        kind: ButtonKind.primary;
+                        busy: Hub.login-busy;
+                        enabled: Hub.login-checked && Hub.login-token != "";
+                        clicked => {
+                            Hub.login();
+                        }
+                    }
+                }
+                Reveal {
+                    shown: Hub.login-error != "";
+                    Text {
+                        text: Hub.login-error;
+                        color: Theme.danger;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.md;
+                    alignment: start;
+                    Text {
+                        text: "No token at hand?";
+                        color: Theme.text-faint;
+                        font-size: Type.small;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Read it from this machine…";
+                        icon: @image-url("icons/key.svg");
+                        small: true;
+                        enabled: Hub.login-checked && !Hub.login-busy;
+                        clicked => {
+                            Hub.login-read();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: Hub.login-checked ? @image-url("icons/ok.svg") : @image-url("icons/alert.svg");
+                            colorize: Hub.login-checked ? Theme.text-faint : Theme.warn;
+                            size: 14px;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: Hub.login-check;
+                        color: Theme.text-faint;
+                        font-size: Type.small;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    if !Hub.login-checked && !Hub.not-running && !Hub.ui-off: Button {
+                        text: "Check again";
+                        kind: ButtonKind.ghost;
+                        small: true;
+                        clicked => {
+                            Hub.check-again();
+                        }
+                    }
+                }
+                Fold {
+                    summary: "Why a token";
+                    more: "The token switches the action checker off and changes what your machines allow. A harness's agent runs as you, so the center keeps these powers behind its token, not behind your account."
+                        + (Install.windows ? " Any program of yours can read the open app's memory, as it can a browser tab's: run the harness under another account." : "");
+                }
+            }
+        }
+    }
+}

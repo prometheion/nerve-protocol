@@ -1,0 +1,741 @@
+// The center's Action checker: its three switches; a switch above the list
+// for one group at a time (the blocklist, the rules that skip the model,
+// the decision model, each machine's own settings); the picked one's
+// details beside it. Blocklist and Skip the model end in Add a rule…,
+// whose form takes the details pane.
+
+import { Theme, Type, Space, Radius, Tone, Size } from "theme.slint";
+import { Hub, HubRule, HubMachine } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, Icon, StatusDot,
+    Split, ListPane, DetailsPane, ListCard, ListItem, ListSwitch, AddItem, DetailCard, Fact,
+    TextField, RemoveAsk, PaneForm, Field, Segmented, Switch, CheckBox, Fold,
+} from "widgets.slint";
+
+component RuleItem inherits ListItem {
+    in property <HubRule> rule;
+    in property <bool> skip;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: root.skip ? @image-url("icons/check.svg") : @image-url("icons/ban.svg");
+            colorize: root.rule.on ? Theme.text-muted : Theme.text-faint;
+        }
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.rule.rule;
+        color: root.rule.on ? Theme.text : Theme.text-faint;
+        font-size: Type.small;
+        font-family: Type.mono;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if !root.rule.on: Text {
+        text: "off";
+        color: Theme.text-faint;
+        font-size: Type.small;
+        vertical-alignment: center;
+    }
+    if root.rule.on && root.rule.where != "All machines": Text {
+        text: root.rule.where;
+        color: Theme.text-muted;
+        font-size: Type.small;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component RuleDetails inherits DetailCard {
+    in property <HubRule> rule;
+    in property <bool> skip;
+    FlexboxLayout {
+        spacing: Space.md;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: root.skip ? @image-url("icons/check.svg") : @image-url("icons/ban.svg");
+                    colorize: Theme.text;
+                    size: Size.icon-lg;
+                }
+            }
+            Text {
+                text: root.skip ? "Skips the model" : "Blocklist rule";
+                color: Theme.text;
+                font-size: Type.title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+            }
+            if root.rule.builtin: VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: "built-in";
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            if !root.skip: VerticalLayout {
+                alignment: center;
+                Switch {
+                    checked: root.rule.on;
+                    label: "The rule is on";
+                    toggled(on) => {
+                        Hub.rule-on(root.skip, root.rule.index, on);
+                    }
+                }
+            }
+            if !root.rule.builtin: RemoveAsk {
+                asking: Hub.asking == (root.skip ? "skip:" : "block:") + root.rule.index;
+                label: "Remove the rule " + root.rule.rule;
+                busy: Hub.busy == "checker";
+                ask => {
+                    Hub.asking = (root.skip ? "skip:" : "block:") + root.rule.index;
+                }
+                cancel => {
+                    Hub.asking = "";
+                }
+                confirmed => {
+                    Hub.rule-remove(root.skip, root.rule.index);
+                }
+            }
+        }
+    }
+    Text {
+        text: root.rule.rule;
+        color: Theme.text;
+        font-size: Type.lead;
+        font-family: Type.mono;
+        font-weight: Type.semibold;
+        wrap: char-wrap;
+    }
+    Reveal {
+        shown: root.rule.note != "";
+        Text {
+            text: root.rule.note;
+            color: Theme.text-muted;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+    }
+    if root.rule.stale: Banner {
+        tone: Tone.warn;
+        text: "A machine no longer has an argument this rule names.";
+    }
+    VerticalLayout {
+        spacing: Space.sm;
+        Text {
+            text: "Where";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        Reveal {
+            shown: root.rule.where != "All machines";
+            Text {
+                text: "Only on " + root.rule.where + ".";
+                color: Theme.text;
+                font-size: Type.body;
+                wrap: word-wrap;
+            }
+        }
+        if root.rule.where == "All machines" && Hub.rule-where.length == 0: Text {
+            text: "All machines.";
+            color: Theme.text;
+            font-size: Type.body;
+        }
+        if root.rule.where == "All machines": VerticalLayout {
+            spacing: Space.xs;
+            for w in Hub.rule-where: HorizontalLayout {
+                spacing: Space.md;
+                Text {
+                    horizontal-stretch: 1;
+                    text: w.name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: w.on ? "Counts here" : "Not here";
+                    color: Theme.text-muted;
+                    font-size: Type.small;
+                    vertical-alignment: center;
+                }
+                // Only a blocklist entry is switched off machine by machine.
+                if !root.skip: Switch {
+                    checked: w.on;
+                    enabled: root.rule.on;
+                    label: "Counts on " + w.name;
+                    toggled(on) => {
+                        Hub.rule-where-set(root.skip, root.rule.index, w.id, on);
+                    }
+                }
+            }
+        }
+    }
+    Fold {
+        summary: root.skip ? "What a skip rule covers" : "What a rule can name";
+        more: root.skip ? "A call a skip rule covers goes on without the model; the blocklist and the machine's own rules still decide."
+            : "capability.action:target, like exec.run:rm -rf * or fs.write:/etc/**; * stands for any text. A rule wins over the skip rules and the model.";
+    }
+}
+
+component RuleForm inherits PaneForm {
+    in property <bool> skip;
+    icon: root.skip ? @image-url("icons/check.svg") : @image-url("icons/ban.svg");
+    title: root.skip ? "Add a rule that skips the model" : "Add a blocklist rule";
+    subtitle: root.skip ? "Calls it covers go on without the model; the machine's rules still decide." : "The checker refuses the calls it names.";
+    error: Hub.rule-error;
+    error-title: "The center did not take it";
+    save-text: "Add";
+    busy: Hub.busy == "checker";
+    can-save: Hub.rule-text != "";
+    cancel => {
+        Hub.chk-pick = 0;
+        Hub.rule-error = "";
+    }
+    save => {
+        Hub.rule-save();
+    }
+    Field {
+        label: "Rule";
+        hint: "capability.action:target; * stands for any text.";
+        TextField {
+            text <=> Hub.rule-text;
+            mono: true;
+            placeholder: root.skip ? "exec.run:git log *" : "exec.run:shutdown *";
+            label: "Rule";
+        }
+    }
+    Field {
+        label: root.skip ? "Why it is safe (optional)" : "What it guards against (optional)";
+        TextField {
+            text <=> Hub.rule-note;
+            placeholder: root.skip ? "Only reads the history" : "Turns the machine off";
+            label: root.skip ? "Why it is safe" : "What it guards against";
+        }
+    }
+    Field {
+        label: "Where it counts";
+        Segmented {
+            options: ["All machines", "Chosen ones"];
+            current: Hub.rule-all ? 0 : 1;
+            small: true;
+            label: "Where it counts";
+            chosen(i) => {
+                Hub.rule-all = i == 0;
+            }
+        }
+    }
+    if !Hub.rule-all: VerticalLayout {
+        spacing: Space.xs;
+        for w[i] in Hub.rule-chosen: CheckBox {
+            text: w.name;
+            checked: w.on;
+            toggled(on) => {
+                Hub.rule-chosen[i] = { id: w.id, name: w.name, on: on };
+            }
+        }
+    }
+}
+
+component ModelDetails inherits DetailCard {
+    HorizontalLayout {
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                source: @image-url("icons/cpu.svg");
+                colorize: Theme.text;
+                size: Size.icon-lg;
+            }
+        }
+        Text {
+            text: "Decision model";
+            color: Theme.text;
+            font-size: Type.title;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        text: "Judges each call the rules let through. It can only refuse.";
+        color: Theme.text-muted;
+        font-size: Type.lead;
+        wrap: word-wrap;
+    }
+    Reveal {
+        shown: Hub.model-local;
+        Rectangle {
+            border-radius: Radius.md;
+            border-width: 1px;
+            border-color: Theme.border;
+            HorizontalLayout {
+                padding: 12px;
+                spacing: Space.md;
+                VerticalLayout {
+                    alignment: center;
+                    StatusDot {
+                        tone: Hub.model-tone;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: "Local model";
+                        color: Theme.text;
+                        font-size: Type.body;
+                        font-weight: Type.semibold;
+                    }
+                    Text {
+                        text: Hub.model-line;
+                        color: Theme.text-muted;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                    }
+                }
+                if Hub.model-installed && !Hub.model-installing: VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: Hub.model-gpu ? "Use the CPU" : "Use the GPU";
+                        kind: ButtonKind.ghost;
+                        small: true;
+                        enabled: Hub.model-gpu || Hub.model-supported;
+                        busy: Hub.busy == "model";
+                        clicked => {
+                            Hub.model-install(!Hub.model-gpu);
+                        }
+                    }
+                }
+                if Hub.model-installed && !Hub.model-installing: VerticalLayout {
+                    alignment: center;
+                    RemoveAsk {
+                        asking: Hub.asking == "model";
+                        label: "Remove the local model";
+                        busy: Hub.busy == "model";
+                        ask => {
+                            Hub.asking = "model";
+                        }
+                        cancel => {
+                            Hub.asking = "";
+                        }
+                        confirmed => {
+                            Hub.model-remove();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if Hub.model-local && !Hub.model-installed && !Hub.model-installing: HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        Button {
+            text: "Install on the CPU";
+            icon: @image-url("icons/download.svg");
+            kind: ButtonKind.primary;
+            enabled: Hub.model-supported;
+            busy: Hub.busy == "model";
+            clicked => {
+                Hub.model-install(false);
+            }
+        }
+        Button {
+            text: "Install for the GPU";
+            enabled: Hub.model-supported;
+            clicked => {
+                Hub.model-install(true);
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.model-gpu-hint != "";
+        Text {
+            text: Hub.model-gpu-hint;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    Reveal {
+        shown: !Hub.model-local;
+        VerticalLayout {
+            spacing: Space.sm;
+            Text {
+                text: Hub.model-line;
+                color: Theme.text;
+                font-size: Type.body;
+                wrap: word-wrap;
+            }
+            Field {
+                label: "Token of the model server";
+                hint: Hub.model-has-token ? "One is set; a new one replaces it." : "None set.";
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    TextField {
+                        horizontal-stretch: 1;
+                        text <=> Hub.model-token;
+                        password: true;
+                        label: "Token of the model server";
+                    }
+                    Button {
+                        text: "Save";
+                        small: true;
+                        busy: Hub.busy == "model";
+                        clicked => {
+                            Hub.model-token-save();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.model-wanted && !Hub.model-on;
+        Text {
+            text: "A machine has the model on by its own setting.";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component MachineDetails inherits DetailCard {
+    in property <HubMachine> item;
+    HorizontalLayout {
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                source: @image-url("icons/server.svg");
+                colorize: Theme.text;
+                size: Size.icon-lg;
+            }
+        }
+        Text {
+            text: root.item.name;
+            color: Theme.text;
+            font-size: Type.title;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    Text {
+        text: root.item.line + ".";
+        color: Theme.text-muted;
+        font-size: Type.lead;
+        wrap: word-wrap;
+    }
+    VerticalLayout {
+        spacing: Space.md;
+        Fact {
+            label: "Blocklist";
+            Segmented {
+                options: ["The center's", "On", "Off"];
+                current: root.item.blocklist;
+                small: true;
+                label: "Blocklist on " + root.item.name;
+                chosen(i) => {
+                    Hub.machine-set(root.item.id, 0, i);
+                }
+            }
+        }
+        Fact {
+            label: "Decision model";
+            Segmented {
+                options: ["The center's", "On", "Off"];
+                current: root.item.model;
+                small: true;
+                label: "Decision model on " + root.item.name;
+                chosen(i) => {
+                    Hub.machine-set(root.item.id, 1, i);
+                }
+            }
+        }
+    }
+    Text {
+        text: "Taint marking counts for every machine.";
+        color: Theme.text-faint;
+        font-size: Type.small;
+        wrap: word-wrap;
+    }
+}
+
+export component HubCheckerPage inherits PageFrame {
+    property <int> count: Hub.chk-view == 0 ? Hub.block-rules.length : Hub.chk-view == 1 ? Hub.skip-rules.length : Hub.chk-view == 3 ? Hub.machines.length : 1;
+    property <int> pick: Hub.chk-pick < 0 ? -1 : Math.min(Hub.chk-pick, root.count - 1);
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/octagon.svg");
+        title: "Action checker";
+        error-title: "The checker could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    Reveal {
+        shown: true;
+        gap: Space.xl;
+        Card {
+            pad: 0;
+            FlexboxLayout {
+                padding-left: Space.xl;
+                padding-right: Space.xl;
+                padding-top: Space.md;
+                padding-bottom: Space.md;
+                spacing-horizontal: 22px;
+                spacing-vertical: Space.sm;
+                cross-axis-alignment: center;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    Switch {
+                        checked: Hub.blocklist-on;
+                        label: "Blocklist";
+                        enabled: Hub.busy != "checker";
+                        toggled(on) => {
+                            Hub.checker-switch(0, on);
+                        }
+                    }
+                    Text {
+                        text: "Blocklist";
+                        color: Theme.text;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    Switch {
+                        checked: Hub.model-on;
+                        label: "Decision model";
+                        enabled: Hub.busy != "checker";
+                        toggled(on) => {
+                            Hub.checker-switch(1, on);
+                        }
+                    }
+                    Text {
+                        text: "Decision model";
+                        color: Theme.text;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    Switch {
+                        checked: Hub.taint-on;
+                        label: "Taint marking";
+                        enabled: Hub.busy != "checker";
+                        toggled(on) => {
+                            Hub.checker-switch(2, on);
+                        }
+                    }
+                    Text {
+                        text: "Taint marking";
+                        color: Theme.text;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: "It can only refuse. A change counts from the next call.";
+                    color: Theme.text-muted;
+                    font-size: Type.small;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.chk-warning != "";
+        gap: Space.lg;
+        Banner {
+            tone: Tone.warn;
+            text: Hub.chk-warning;
+        }
+    }
+    Reveal {
+        shown: true;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                least: 340px;
+                most: 560px;
+                ListCard {
+                    label: "Action checker";
+                    step(d) => {
+                        Hub.rule-pick(Math.max(0, Math.min(root.count - 1, root.pick + d)));
+                    }
+                    HorizontalLayout {
+                        padding: Space.md;
+                        ListSwitch {
+                            horizontal-stretch: 1;
+                            options: ["Blocklist", "Skip the model", "Decision model", "Per machine"];
+                            counts: ["" + Hub.block-rules.length, "" + Hub.skip-rules.length, "", "" + Hub.machines.length];
+                            current: Hub.chk-view;
+                            label: "Group";
+                            chosen(i) => {
+                                Hub.chk-view = i;
+                                Hub.asking = "";
+                                Hub.rule-pick(0);
+                            }
+                        }
+                    }
+                    for r[i] in Hub.block-rules: RuleItem {
+                        collapsed: Hub.chk-view != 0;
+                        rule: r;
+                        selected: i == root.pick;
+                        label: r.rule;
+                        clicked => {
+                            Hub.rule-pick(i);
+                            Hub.details-open = true;
+                        }
+                    }
+                    for r[i] in Hub.skip-rules: RuleItem {
+                        collapsed: Hub.chk-view != 1;
+                        rule: r;
+                        skip: true;
+                        selected: i == root.pick;
+                        label: r.rule;
+                        clicked => {
+                            Hub.rule-pick(i);
+                            Hub.details-open = true;
+                        }
+                    }
+                    Reveal {
+                        shown: Hub.chk-view == 1 && Hub.skip-rules.length == 0;
+                        HorizontalLayout {
+                            padding: Space.lg;
+                            Text {
+                                text: "No rule yet: every call the blocklist lets through goes to the model.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    if Hub.chk-view < 2: AddItem {
+                        text: "Add a rule…";
+                        active: root.pick < 0;
+                        clicked => {
+                            Hub.rule-add();
+                            Hub.details-open = true;
+                        }
+                    }
+                    if Hub.chk-view == 2: ListItem {
+                        selected: true;
+                        label: "Decision model";
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: @image-url("icons/cpu.svg");
+                                colorize: Theme.text-muted;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: Hub.model-local ? "Local model" : "A model server";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusDot {
+                                tone: Hub.model-tone;
+                            }
+                        }
+                        clicked => {
+                            Hub.details-open = true;
+                        }
+                    }
+                    for m[i] in Hub.machines: ListItem {
+                        collapsed: Hub.chk-view != 3;
+                        selected: i == root.pick;
+                        label: m.name;
+                        clicked => {
+                            Hub.rule-pick(i);
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: @image-url("icons/server.svg");
+                                colorize: Theme.text-muted;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: m.name;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: m.line == "Follows the center" ? "" : m.line;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if Hub.chk-view == 3 && Hub.machines.length == 0: HorizontalLayout {
+                        padding: Space.lg;
+                        Text {
+                            text: "No machine paired yet.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                if Hub.chk-view < 2 && root.pick < 0: RuleForm {
+                    skip: Hub.chk-view == 1;
+                }
+                if Hub.chk-view == 0 && root.pick >= 0: RuleDetails {
+                    rule: Hub.block-rules[root.pick];
+                }
+                if Hub.chk-view == 1 && root.pick >= 0: RuleDetails {
+                    rule: Hub.skip-rules[root.pick];
+                    skip: true;
+                }
+                if Hub.chk-view == 2: ModelDetails { }
+                if Hub.chk-view == 3 && root.pick >= 0: MachineDetails {
+                    item: Hub.machines[root.pick];
+                }
+            }
+        }
+    }
+}

@@ -1193,7 +1193,6 @@ fn every_page_light_and_dark() {
     shots.take("installer-role-center");
     install.set_step("welcome-center".into());
     shots.take("installer-welcome-center");
-    install.set_center_ui("http://127.0.0.1:7480".into());
     install.set_step("center".into());
     shots.take("installer-center");
     install.invoke_ask_uninstall_center();

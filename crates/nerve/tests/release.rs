@@ -24,9 +24,9 @@ fn job(name: &str) -> String {
 /// From 0.1.0 every release publishes Windows too (the switch of the
 /// releases before is gone): the Windows job builds the app and the center,
 /// no `nerve-node`, and releases the app alone; the publish job needs it and
-/// its install test like every other job, counts eight files (the Linux
-/// programs, the app's .deb and .rpm, Windows' app) and names them in its
-/// one footer.
+/// its install test like every other job, counts nine files (the Linux
+/// programs, the app's .deb, .rpm and Arch package, Windows' app) and names
+/// them in its one footer.
 #[test]
 fn every_release_has_windows_the_app_and_the_center() {
     assert!(!RELEASE.contains("inputs.windows"), "a switch is left");
@@ -68,6 +68,8 @@ fn every_release_has_windows_the_app_and_the_center() {
         "desktop-linux",
         "desktop-packages",
         "desktop-packages-test",
+        "desktop-arch-package",
+        "desktop-arch-package-test",
         "windows",
         "windows-installed",
         "conformance",
@@ -79,7 +81,7 @@ fn every_release_has_windows_the_app_and_the_center() {
         !publish.lines().any(|l| l.starts_with("    if:")),
         "{publish}"
     );
-    assert!(publish.contains("want=8\n"), "{publish}");
+    assert!(publish.contains("want=9\n"), "{publish}");
     // No center of its own for Windows in the release (owner, 2026-11-14):
     // it is built for the install test only.
     assert!(
@@ -148,6 +150,86 @@ fn the_release_installs_its_own_windows_programs_before_it_publishes() {
     assert!(ci.contains(".github/scripts/windows-test-programs.sh dist/tests"));
 }
 
+/// The Linux desktop app comes as an Arch package too (#230): makepkg packs
+/// packaging/arch/PKGBUILD from the program the release built, in an
+/// archlinux container; pacman installs it there before anything is
+/// published, the app starts and its menu entry is valid; it is in
+/// SHA256SUMS under the name the app's update looks for, and its install
+/// hook moves the service as the .deb's and the .rpm's script does. No AUR
+/// package.
+#[test]
+fn the_release_lists_the_linux_app_as_an_arch_package() {
+    use nerve_node::service::Package;
+    let app = nerve::parts::PROGRAM;
+    let pack = job("desktop-arch-package");
+    let name = "dist/nerve-${VERSION}-1-x86_64.pkg.tar.zst";
+    assert_eq!(
+        format!("dist/{}", Package::Pacman.asset(app, "${VERSION}")),
+        name
+    );
+    for line in [
+        "needs: [check, desktop-linux]",
+        "container: archlinux:latest",
+        "name: nerve-desktop-x86_64-linux",
+        "pacman -Syu --noconfirm --needed base-devel fontconfig",
+        ".github/scripts/arch-package.sh program/nerve-x86_64-linux dist",
+        name,
+        "name: nerve-desktop-arch-package",
+    ] {
+        assert!(pack.contains(line), "{line}: {pack}");
+    }
+    let test = job("desktop-arch-package-test");
+    for line in [
+        "needs: desktop-arch-package",
+        "container: archlinux:latest",
+        "pacman -U --noconfirm \"./dist/nerve-${VERSION}-1-x86_64.pkg.tar.zst\"",
+        "said=$(nerve --version)",
+        "desktop-file-validate \"$entry\"",
+        "grep -qx 'Exec=/usr/bin/nerve %u' \"$entry\"",
+        "test \"$(cat /usr/share/nerve/package)\" = pacman",
+        "pacman -R --noconfirm nerve",
+    ] {
+        assert!(test.contains(line), "{line}: {test}");
+    }
+    let pkgbuild = include_str!("../../../packaging/arch/PKGBUILD");
+    for line in [
+        "pkgname=nerve\n",
+        "arch=(x86_64)",
+        "depends=('glibc>=2.35' 'fontconfig')",
+        "conflicts=(nerve-node-desktop)",
+        "replaces=(nerve-node-desktop)",
+        "install=nerve.install",
+        "source=(\"nerve-x86_64-linux\")",
+        "__package-root \"$pkgdir\" pacman",
+    ] {
+        assert!(pkgbuild.contains(line), "{line}: {pkgbuild}");
+    }
+    assert!(!pkgbuild.contains("aur"), "{pkgbuild}");
+    let script = include_str!("../../../.github/scripts/arch-package.sh");
+    for line in [
+        "s/^pkgver=.*/pkgver=$version/",
+        "s/^sha256sums=.*/sha256sums=('$sum')/",
+        "makepkg --nodeps --noconfirm",
+        "\"$work/nerve-$version-1-x86_64.pkg.tar.zst\"",
+    ] {
+        assert!(script.contains(line), "{line}: {script}");
+    }
+    // The install hook moves the same services as the other packages' script.
+    let hook = include_str!("../../../packaging/arch/nerve.install");
+    let packages = include_str!("../../../.github/scripts/desktop-packages.sh");
+    for line in packages
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains("grep -qs") || l.starts_with("/usr/bin/nerve "))
+    {
+        assert!(hook.contains(line), "{line}: {hook}");
+    }
+    assert!(
+        hook.contains("post_upgrade() {\n  post_install\n}"),
+        "{hook}"
+    );
+}
+
 /// The Linux desktop app comes as a .deb and an .rpm too (#212): packed
 /// with the system's tools from the program the release built, with the
 /// dependencies it links, installed on Ubuntu 22.04 and 24.04 and Fedora
@@ -200,7 +282,7 @@ fn the_release_lists_the_linux_app_as_a_deb_and_an_rpm() {
     assert!(publish.contains("pattern: nerve-*"), "{publish}");
     assert!(
         publish.contains(
-            "files=(nerve-center-* nerve-node-* nerve-x86_64-* nerve_*_amd64.deb nerve-[0-9]*.x86_64.rpm)"
+            "files=(nerve-center-* nerve-node-* nerve-x86_64-* nerve_*_amd64.deb nerve-[0-9]*.x86_64.rpm nerve-[0-9]*-1-x86_64.pkg.tar.zst)"
         ),
         "{publish}"
     );

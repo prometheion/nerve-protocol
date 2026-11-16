@@ -509,7 +509,7 @@ export component InstallerView inherits Rectangle {
                                     icon: @image-url("icons/ok.svg");
                                     tone: Tone.ok;
                                     title: "This machine is a center";
-                                    text: "Its web UI manages it: open it here, and log in with the owner token" + (Install.center-ui != "" ? " (" + Install.center-ui + ")." : ".") + (Install.also != "" ? " " + Install.also : "");
+                                    text: "Nerve manages it: open it, and log in with the owner token." + (Install.also != "" ? " " + Install.also : "");
                                 }
                                 StepFoot {
                                     Button {
@@ -528,11 +528,10 @@ export component InstallerView inherits Rectangle {
                                         }
                                     }
                                     Button {
-                                        text: "Open the web UI";
-                                        icon: @image-url("icons/globe.svg");
+                                        text: "Open Nerve";
                                         kind: ButtonKind.primary;
                                         clicked => {
-                                            Install.open-center-ui();
+                                            Install.open-app();
                                         }
                                     }
                                 }
@@ -747,7 +746,7 @@ export component InstallerView inherits Rectangle {
                                         : "Nerve is installed";
                                     text: Install.action == "update" ? "The service runs the new version."
                                         : Install.action == "uninstall" || Install.action == "uninstall-center" ? (Install.purge ? "Nerve and its data are gone." : "Nerve is gone. Its data stays for a new install.")
-                                        : Install.action == "install-center" ? "It runs and starts with the machine. Its web UI asks for the owner token, which the steps above show; keep it in your password manager."
+                                        : Install.action == "install-center" ? "It runs and starts with the machine. Open Nerve to manage it; it asks for the owner token, which the steps above show. Keep it in your password manager."
                                         : "The node runs and starts with the machine. Open Nerve to pair it with a center.";
                                 }
                                 DidList { }
@@ -760,19 +759,11 @@ export component InstallerView inherits Rectangle {
                                             Install.close();
                                         }
                                     }
-                                    if Install.action == "install" || Install.action == "update": Button {
+                                    if Install.action == "install" || Install.action == "update" || Install.action == "install-center": Button {
                                         text: "Open Nerve";
                                         kind: ButtonKind.primary;
                                         clicked => {
                                             Install.open-app();
-                                        }
-                                    }
-                                    if Install.action == "install-center": Button {
-                                        text: "Open the web UI";
-                                        icon: @image-url("icons/globe.svg");
-                                        kind: ButtonKind.primary;
-                                        clicked => {
-                                            Install.open-center-ui();
                                         }
                                     }
                                 }

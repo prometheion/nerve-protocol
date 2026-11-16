@@ -620,12 +620,9 @@ export global Install {
     in-out property <string> step: "welcome";
     // The role picked in the first step: 0 a node, 1 a center.
     in-out property <int> role;
-    // The address of the center's web UI, once it is installed.
-    in-out property <string> center-ui;
     // What the center step says of a node installed in the terminal beside it.
     in-out property <string> also;
     callback install-center();
-    callback open-center-ui();
     // Asks keep or delete for the center's uninstall.
     callback ask-uninstall-center();
     // What runs or ran: install, update or uninstall; install-center or

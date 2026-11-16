@@ -279,7 +279,13 @@ pub async fn execute(
             let layout = crate::service::with_release(layout, pre, tag).await?;
             update(&layout, sys, from.as_deref(), out).await
         }
-        Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
+        Cmd::Uninstall {
+            purge,
+            keep_program,
+        } => {
+            nerve_service::set_keep_program(keep_program);
+            uninstall(layout, sys, purge, out)
+        }
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         _ => Err("only install, set, service, update and uninstall are service commands".into()),
     }
@@ -522,7 +528,9 @@ pub fn uninstall(
     for gone in crate::service::remove_parts(layout)? {
         steps.did(gone);
     }
-    if layout.bin.exists() {
+    if nerve_service::keeps_program() {
+        steps.did(nerve_service::kept_program(&layout.bin));
+    } else if layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
         } else {

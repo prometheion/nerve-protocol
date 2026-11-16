@@ -47,6 +47,11 @@ pub fn start() {
     ALSO.with(|a| *a.borrow_mut() = Some(Map::new()));
 }
 
+/// Whether the command that runs answers with `--json`.
+pub fn on() -> bool {
+    ALSO.with(|a| a.borrow().is_some())
+}
+
 /// Adds `key` to the `--json` answer of the command that runs; nothing
 /// without `--json`.
 pub fn also(key: &str, value: Value) {

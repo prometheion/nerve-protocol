@@ -329,8 +329,9 @@ impl Places {
 pub const ICON: &[u8] = include_bytes!("../ui/icons/app.svg");
 
 /// The hidden argument that writes the files of the app's package (#212):
-/// `__package-root <folder> deb|rpm`, which the release packs with
-/// dpkg-deb and rpmbuild (.github/scripts/desktop-packages.sh).
+/// `__package-root <folder> deb|rpm|pacman`, which the release packs with
+/// dpkg-deb and rpmbuild (.github/scripts/desktop-packages.sh) and makepkg
+/// (packaging/arch/PKGBUILD, #230).
 pub const PACKAGE_ROOT_ARG: &str = "__package-root";
 
 /// The files of the app's package below `root`, with this program `exe`:
@@ -365,14 +366,14 @@ pub fn package_root(root: &Path, exe: &Path, package: Package) -> Result<Vec<Pat
     Ok(wrote)
 }
 
-/// [`package_root`] for the command line: `<folder> deb|rpm`.
+/// [`package_root`] for the command line: `<folder> deb|rpm|pacman`.
 pub fn package_root_main(args: &[String]) -> i32 {
     let (Some(root), Some(package), None) = (
         args.first(),
         args.get(1).and_then(|w| Package::of_word(w)),
         args.get(2),
     ) else {
-        eprintln!("usage: nerve {PACKAGE_ROOT_ARG} <folder> deb|rpm");
+        eprintln!("usage: nerve {PACKAGE_ROOT_ARG} <folder> deb|rpm|pacman");
         return 2;
     };
     let r = std::env::current_exe()

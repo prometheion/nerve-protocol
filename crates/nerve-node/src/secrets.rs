@@ -1684,6 +1684,42 @@ pub(crate) mod store {
     }
 }
 
+/// The user's keyring for the app's own secret: the center's owner token,
+/// where the owner chose to keep the log-in there (the app's Settings,
+/// #232). Under a service name of the app's, apart from the node's entries.
+pub mod user_keyring {
+    fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
+        keyring::Entry::new(service, account).map_err(|e| {
+            match (&e, keyring::Entry::store_status()) {
+                (keyring::Error::NoDefaultStore, Err(why)) => why.to_string(),
+                _ => e.to_string(),
+            }
+        })
+    }
+
+    pub fn get(service: &str, account: &str) -> Result<Option<String>, String> {
+        match entry(service, account)?.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn set(service: &str, account: &str, value: &str) -> Result<(), String> {
+        entry(service, account)?
+            .set_password(value)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn delete(service: &str, account: &str) -> Result<bool, String> {
+        match entry(service, account)?.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 /// The test builds' keyring: a map in memory, shared by every thread of the
 /// test process (each test's node has its own config folder, so its own
 /// account), and a switch per thread that makes it unreachable, as on a

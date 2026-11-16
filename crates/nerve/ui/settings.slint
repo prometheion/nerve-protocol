@@ -3,6 +3,7 @@
 // sections in a list, the picked one beside it (on a small window: the
 // list, then the section with Back to the list).
 
+import { Hub } from "hub.slint";
 import { Theme, Type, Space, Radius, Size, Tone, Shape } from "theme.slint";
 import { Load, RelayNodeRow, Limit } from "data.slint";
 import { Store, Prefs, Install, Perm } from "store.slint";
@@ -722,6 +723,27 @@ export component SettingsPage inherits PageFrame {
                                     toggled(on) => {
                                         Install.set-pre-releases(on);
                                     }
+                                }
+                            }
+                        }
+                        Divider { }
+                        // One role per machine: the other one takes this
+                        // one's place (#232).
+                        HorizontalLayout {
+                            spacing: Space.lg;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Role: node. Changing it backs up the node, removes it with its data, then installs a center.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            Button {
+                                text: "Change the role…";
+                                clicked => {
+                                    Hub.role-node = true;
+                                    Hub.role-ask();
                                 }
                             }
                         }

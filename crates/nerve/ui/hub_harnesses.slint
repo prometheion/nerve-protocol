@@ -1,0 +1,486 @@
+// The center's Harnesses: Connect a harness at the top of the list, then a
+// switch between the harness tokens and the sessions; the picked one's
+// details beside them.
+
+import { Theme, Type, Space, Radius, Tone, Size } from "theme.slint";
+import { Hub, HubToken, HubSession } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, IconTile, Icon,
+    StatusDot, Split, ListPane, DetailsPane, ListCard, ListItem, ListSwitch, DetailCard, Fact,
+    TextField, RemoveAsk, EmptyState,
+} from "widgets.slint";
+
+// A line a harness takes: its name, the text (the token hidden until
+// shown) and its Copy button, which copies it whole.
+component ConnectLine inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> shown;
+    in property <string> whole;
+    property <bool> copied;
+    spacing: Space.md;
+    Text {
+        width: 96px;
+        text: root.label;
+        color: Theme.text;
+        font-size: Type.small;
+        font-weight: Type.semibold;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+        background: Theme.inset;
+        border-radius: Radius.md;
+        border-width: 1px;
+        border-color: Theme.border;
+        min-height: line.preferred-height + 16px;
+        line := Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.shown;
+            color: Theme.text;
+            font-size: Type.small;
+            font-family: Type.mono;
+            wrap: char-wrap;
+            vertical-alignment: center;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        Button {
+            text: root.copied ? "Copied" : "Copy";
+            icon: root.copied ? @image-url("icons/check.svg") : @image-url("icons/copy.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            accessible-label: "Copy the " + root.label;
+            clicked => {
+                Hub.copy-secret(root.whole);
+                root.copied = true;
+            }
+        }
+    }
+    changed whole => {
+        root.copied = false;
+    }
+}
+
+// Connect a harness: a token made here, and the lines a harness takes with
+// it. The token is shown only now; a copy leaves the clipboard after a
+// minute.
+component ConnectCard inherits DetailCard {
+    HorizontalLayout {
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: start;
+            IconTile {
+                icon: @image-url("icons/plug.svg");
+                size: 32px;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: "Connect a harness";
+                color: Theme.text;
+                font-size: Type.heading;
+                font-weight: Type.semibold;
+            }
+            Text {
+                text: Hub.mcp-http ? "Harnesses reach this center at " + Hub.mcp-url + " with a harness token. It opens /mcp only, not the web UI."
+                    : Hub.mcp-why;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if Hub.mcp-http && Hub.new-token == "": HorizontalLayout {
+        spacing: Space.sm;
+        TextField {
+            horizontal-stretch: 1;
+            text <=> Hub.token-label;
+            placeholder: "Label, for example the harness name";
+            label: "Label of the new token";
+            accepted => {
+                Hub.token-create();
+            }
+        }
+        Button {
+            text: "Make a token";
+            icon: @image-url("icons/key.svg");
+            kind: ButtonKind.primary;
+            busy: Hub.busy == "token-create";
+            clicked => {
+                Hub.token-create();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.new-token != "";
+        VerticalLayout {
+            spacing: 10px;
+            Rectangle {
+                background: Theme.tone-soft(Tone.warn);
+                border-radius: Radius.md;
+                border-width: 1px;
+                border-color: Theme.tone(Tone.warn).transparentize(0.6);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: Space.sm;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/eye.svg");
+                            colorize: Theme.tone(Tone.warn);
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Shown only now. A copy leaves the clipboard after a minute.";
+                        color: Theme.text-muted;
+                        font-size: Type.small;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            for line[i] in Hub.connect-lines: ConnectLine {
+                label: line.label;
+                whole: line.value;
+                shown: Hub.token-shown ? line.value : Hub.connect-masked[i].value;
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: Space.sm;
+                Button {
+                    text: Hub.token-shown ? "Hide the token" : "Show the token";
+                    icon: Hub.token-shown ? @image-url("icons/eye-off.svg") : @image-url("icons/eye.svg");
+                    small: true;
+                    clicked => {
+                        Hub.token-shown = !Hub.token-shown;
+                    }
+                }
+                Button {
+                    text: "Done";
+                    kind: ButtonKind.ghost;
+                    small: true;
+                    clicked => {
+                        Hub.new-token = "";
+                        Hub.token-shown = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component TokenDetails inherits DetailCard {
+    in property <HubToken> item;
+    FlexboxLayout {
+        spacing: Space.md;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: @image-url("icons/key.svg");
+                    colorize: Theme.text;
+                    size: Size.icon-lg;
+                }
+            }
+            Text {
+                text: root.item.label;
+                color: Theme.text;
+                font-size: Type.title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if !root.item.settings: RemoveAsk {
+            asking: Hub.asking == "token:" + root.item.id;
+            label: "Remove the token " + root.item.label;
+            question: "Remove it? Its harness stops at once.";
+            busy: Hub.busy == root.item.id;
+            ask => {
+                Hub.asking = "token:" + root.item.id;
+            }
+            cancel => {
+                Hub.asking = "";
+            }
+            confirmed => {
+                Hub.token-delete(root.item.id);
+            }
+        }
+    }
+    Text {
+        text: root.item.settings ? "The harness token of the center's settings: only a change of them removes it."
+            : "A harness token: it opens /mcp only, not the web UI.";
+        color: Theme.text-muted;
+        font-size: Type.body;
+        wrap: word-wrap;
+    }
+    if root.item.made != "": Fact {
+        label: "Made";
+        Text {
+            text: root.item.made;
+            color: Theme.text;
+            font-size: Type.body;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SessionDetails inherits DetailCard {
+    in property <HubSession> item;
+    FlexboxLayout {
+        spacing: Space.md;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                StatusDot {
+                    tone: Tone.ok;
+                }
+            }
+            Text {
+                text: root.item.client;
+                color: Theme.text;
+                font-size: Type.title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.item.tainted: VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: "tainted";
+                    tone: Tone.warn;
+                }
+            }
+        }
+        Button {
+            text: "End the session";
+            icon: @image-url("icons/x.svg");
+            kind: ButtonKind.danger-soft;
+            busy: Hub.busy == root.item.id;
+            clicked => {
+                Hub.session-end(root.item.id);
+            }
+        }
+    }
+    VerticalLayout {
+        spacing: Space.md;
+        Fact {
+            label: "Nodes";
+            Text {
+                text: root.item.nodes;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        Fact {
+            label: "Connected";
+            Text {
+                text: root.item.since + " · " + root.item.transport;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+        }
+        Fact {
+            label: "Calls";
+            Text {
+                text: root.item.calls;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component HubHarnessesPage inherits PageFrame {
+    property <int> count: Hub.harn-view == 0 ? Hub.tokens.length : Hub.sessions.length;
+    property <int> pick: Hub.harn-pick < 0 ? -1 : Math.min(Hub.harn-pick, root.count - 1);
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/terminal.svg");
+        title: "Harnesses";
+        error-title: "The harnesses could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    Reveal {
+        shown: true;
+        gap: Space.xl;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                ListCard {
+                    label: "Harnesses";
+                    step(d) => {
+                        Hub.harn-pick = Math.max(-1, Math.min(root.count - 1, Hub.harn-pick + d));
+                    }
+                    ListItem {
+                        first: true;
+                        selected: root.pick < 0;
+                        label: "Connect a harness";
+                        clicked => {
+                            Hub.harn-pick = -1;
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: @image-url("icons/plus.svg");
+                                colorize: Theme.text;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Connect a harness";
+                            color: Theme.text;
+                            font-size: Type.body;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    HorizontalLayout {
+                        padding: Space.md;
+                        ListSwitch {
+                            horizontal-stretch: 1;
+                            options: ["Tokens", "Sessions"];
+                            counts: ["" + Hub.tokens.length, "" + Hub.sessions.length];
+                            current: Hub.harn-view;
+                            label: "Show";
+                            chosen(i) => {
+                                Hub.harn-view = i;
+                                Hub.harn-pick = -1;
+                                Hub.asking = "";
+                            }
+                        }
+                    }
+                    if Hub.harn-view == 0 && Hub.tokens.length == 0: HorizontalLayout {
+                        padding: Space.lg;
+                        Text {
+                            text: "No token yet.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                        }
+                    }
+                    if Hub.harn-view == 1 && Hub.sessions.length == 0: HorizontalLayout {
+                        padding: Space.lg;
+                        Text {
+                            text: "No harness is connected now.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                        }
+                    }
+                    for t[i] in Hub.tokens: ListItem {
+                        collapsed: Hub.harn-view != 0;
+                        selected: i == root.pick;
+                        label: t.label;
+                        clicked => {
+                            Hub.harn-pick = i;
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: @image-url("icons/key.svg");
+                                colorize: Theme.text-muted;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: t.label;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: t.made;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                    for s[i] in Hub.sessions: ListItem {
+                        collapsed: Hub.harn-view != 1;
+                        selected: i == root.pick;
+                        label: s.client;
+                        clicked => {
+                            Hub.harn-pick = i;
+                            Hub.details-open = true;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            StatusDot {
+                                tone: Tone.ok;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: s.client;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: s.calls;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                if root.pick < 0: ConnectCard { }
+                if root.pick >= 0 && Hub.harn-view == 0: TokenDetails {
+                    item: Hub.tokens[root.pick];
+                }
+                if root.pick >= 0 && Hub.harn-view == 1: SessionDetails {
+                    item: Hub.sessions[root.pick];
+                }
+            }
+        }
+    }
+}
