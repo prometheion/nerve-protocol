@@ -495,7 +495,9 @@ async fn listen(
         );
     }
     let acceptor = Acceptor::new(&id)?;
-    let listener = TcpListener::bind(at).await.map_err(|e| e.to_string())?;
+    let listener = nerve_service::listen::bind(at)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok((listener, acceptor))
 }
 

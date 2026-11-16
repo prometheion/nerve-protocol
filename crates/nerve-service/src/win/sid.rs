@@ -74,16 +74,22 @@ pub fn is_admin() -> bool {
 
 /// The SID of the local account `name`.
 pub fn sid_of(name: &str) -> Result<Vec<u8>, String> {
+    // The machine's name first, so a domain account of that name is not it.
+    sid_of_qualified(&format!(
+        "{}\\{name}",
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| ".".into())
+    ))
+    .map_err(|e| format!("cannot find the SID of {name}: {e}"))
+}
+
+/// The SID of the account `domain\name`, as Windows names it.
+pub fn sid_of_qualified(qualified: &str) -> Result<Vec<u8>, String> {
     let mut sid = vec![0u8; 68];
     let mut len = sid.len() as u32;
     let mut domain = vec![0u16; 256];
     let mut dlen = domain.len() as u32;
     let mut kind: SID_NAME_USE = 0;
-    // The machine's name first, so a domain account of that name is not it.
-    let full = wide(format!(
-        "{}\\{name}",
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| ".".into())
-    ));
+    let full = wide(qualified);
     // SAFETY: buffers of the sizes given.
     let ok = unsafe {
         LookupAccountNameW(
@@ -97,7 +103,7 @@ pub fn sid_of(name: &str) -> Result<Vec<u8>, String> {
         )
     };
     if ok == 0 {
-        return Err(format!("cannot find the SID of {name}: {}", last()));
+        return Err(last().to_string());
     }
     // The call leaves `len` at the buffer's size when the SID fits, so the
     // SID's own length cuts it: a SID compared as bytes must have no tail.

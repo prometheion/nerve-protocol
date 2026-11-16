@@ -32,7 +32,7 @@ use crate::service::{
 pub const SERVICE_NAME: &str = "nerve-node";
 /// Why a command for the service does nothing here, and where the node is
 /// installed: the app is the only way to the node on Windows.
-pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve-node-desktop file";
+pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve file";
 /// What puts back what the install made: the install again, which the app
 /// runs when the owner's password is saved.
 pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save your password under Settings › General › Account for commands, which installs the node again";
@@ -242,6 +242,9 @@ pub trait WinSystem {
     /// its SID and its name. The desktop app's user when its broker names
     /// one, else the account this runs as.
     fn owner_sid(&self) -> Option<(String, String)>;
+    /// The program the registered service `name` starts; `None` where it is
+    /// not registered (nerve_service::win::service::command_line).
+    fn program_of(&self, name: &str) -> Option<PathBuf>;
     /// The owner the service's registry key names: its SID and its name.
     fn owner(&self) -> Result<Option<(String, String)>, String>;
     /// Writes `sid` as the owner, and gives it the right to start, stop and
@@ -815,7 +818,7 @@ fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
 /// administrator, and where the app does it, asking Windows for the rights.
 pub(crate) fn needs_admin(what: &str) -> String {
     let place = match what {
-        "install" => "the installer, which opens with the downloaded nerve-node-desktop file,",
+        "install" => "the installer, which opens with the downloaded nerve file,",
         "update" => "Settings › App › Update",
         _ => "Settings › App › Uninstall",
     };
@@ -841,6 +844,13 @@ pub fn install(
     {
         return Err(not_local(&name));
     }
+    // The app installs one role per machine: not a node where the center is
+    // installed.
+    #[cfg(windows)]
+    nerve_service::role::one_role(
+        nerve_service::role::Role::Node,
+        nerve_service::role::Roles::here().center,
+    )?;
     // Before anything is written, the audit log too: a folder another
     // account owns is not written in.
     check_install_folders(layout, sys)?;
@@ -1287,6 +1297,18 @@ fn uninstall_steps(
             None => {}
         }
     }
+    // The app's program serves the center here too: the program and the
+    // app's entries are the center's now, and stay.
+    if sys
+        .program_of(nerve_service::role::Role::Center.service())
+        .is_some_and(|p| nerve_service::role::same_program(&p, &layout.bin))
+    {
+        steps.did(format!(
+            "left the program {} and the app's Start menu entry: the center's service runs it",
+            layout.bin.display()
+        ));
+        return Ok(());
+    }
     uninstall_parts(layout, steps)?;
     for left in [staged(&layout.bin), previous(&layout.bin)] {
         if left.exists() {
@@ -1353,7 +1375,7 @@ async fn update_steps(
         service: SERVICE_NAME,
         services: &[SERVICE_NAME, PROFILE_SERVICE],
         settings_args: settings_args(owner.as_deref()),
-        install: "the installer (the downloaded nerve-node-desktop file)",
+        install: "the installer (the downloaded nerve file)",
     };
     let machine = Machine { sys, layout };
     if nerve_service::win::update::update(&p, &machine, from, steps).await? {
@@ -1647,6 +1669,8 @@ pub(crate) mod tests {
         pub(crate) profile_service: Cell<Option<bool>>,
         /// Whether the command account can read the owner's registry.
         pub(crate) hive_open: Cell<bool>,
+        /// The other services registered, with the program each starts.
+        others: RefCell<Vec<(String, PathBuf)>>,
     }
 
     impl Fake {
@@ -1682,6 +1706,7 @@ pub(crate) mod tests {
                 owner_of: RefCell::new(None),
                 profile_service: Cell::new(None),
                 hive_open: Cell::new(false),
+                others: RefCell::new(Vec::new()),
             }
         }
 
@@ -1985,6 +2010,14 @@ pub(crate) mod tests {
         }
         fn owner_sid(&self) -> Option<(String, String)> {
             self.installer.borrow().clone()
+        }
+
+        fn program_of(&self, name: &str) -> Option<PathBuf> {
+            let others = self.others.borrow();
+            others
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, p)| p.clone())
         }
 
         /// The SIDs here end in the account's number.
@@ -3706,7 +3739,7 @@ pub(crate) mod tests {
     }
 
     static DESKTOP: crate::edition::Edition = crate::edition::Edition {
-        program: "nerve-node-desktop",
+        program: "nerve",
         parts: Some(&Entry),
     };
 
@@ -3715,18 +3748,16 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = Layout {
-            bin: d.path().join("Program Files/Nerve/nerve-node-desktop.exe"),
+            bin: d.path().join("Program Files/Nerve/nerve.exe"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         let e = control(&l, &sys, ServiceAction::Start, &mut Vec::new()).unwrap_err();
         assert!(e.contains("not installed as a service"), "{e}");
         let link = l.bin.with_file_name("Nerve.lnk");
-        let exe = d
-            .path()
-            .join("Downloads/nerve-node-desktop-x86_64-windows.exe");
+        let exe = d.path().join("Downloads/nerve-x86_64-windows.exe");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         sys.types("alice's");
         let mut out = Vec::new();
         install(&l, &sys, &exe, false, &mut out).unwrap();
@@ -3747,19 +3778,13 @@ pub(crate) mod tests {
 
         std::fs::remove_file(&link).unwrap();
         let new = d.path().join("new.exe");
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&new), &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.1.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.1.0"), "{out}");
         assert!(link.exists(), "{out}");
-        assert_eq!(
-            staged(&l.bin).file_name().unwrap(),
-            "nerve-node-desktop.new.exe"
-        );
+        assert_eq!(staged(&l.bin).file_name().unwrap(), "nerve.new.exe");
         assert!(!staged(&l.bin).exists() && !previous(&l.bin).exists());
 
         let mut out = Vec::new();
@@ -3772,6 +3797,40 @@ pub(crate) mod tests {
         assert!(!link.exists());
     }
 
+    /// The node's uninstall by the app on a machine whose center runs the
+    /// app's program (the app's center role) leaves the program and the
+    /// app's entries to the center; beside a center of its own program it
+    /// removes them.
+    #[test]
+    fn the_node_s_uninstall_leaves_the_program_the_center_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = Layout {
+            bin: d.path().join("Program Files/Nerve/nerve.exe"),
+            edition: &DESKTOP,
+            ..layout(d.path())
+        };
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        let link = l.bin.with_file_name("Nerve.lnk");
+        let put = || {
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+            std::fs::write(&link, "link").unwrap();
+        };
+        put();
+        sys.others
+            .borrow_mut()
+            .push(("nerve-center".into(), l.bin.clone()));
+        let mut out = Vec::new();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists() && link.exists(), "{out}");
+        assert!(out.contains("the center's service runs it"), "{out}");
+        // A center of its own program: the node's uninstall removes the app.
+        sys.others.borrow_mut()[0].1 = l.bin.with_file_name("nerve-center.exe");
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists() && !link.exists());
+    }
+
     /// Windows has no node alone to take over (#176): the app's install
     /// leaves a `nerve-node.exe` beside it as it is, and says nothing of it.
     #[test]
@@ -3780,12 +3839,12 @@ pub(crate) mod tests {
         let sys = Fake::new();
         let node = installed(d.path(), &sys, "1.0.0").bin;
         let l = Layout {
-            bin: d.path().join("Program Files/Nerve/nerve-node-desktop.exe"),
+            bin: d.path().join("Program Files/Nerve/nerve.exe"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
-        let exe = d.path().join("Downloads/nerve-node-desktop.exe");
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        let exe = d.path().join("Downloads/nerve.exe");
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();

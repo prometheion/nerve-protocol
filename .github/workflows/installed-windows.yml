@@ -9,7 +9,7 @@
 # with random passwords and their profiles loaded (nobody signs in on a
 # runner), then runs:
 # - the desktop app's own install, control, update and uninstall
-#   (crates/nerve-node-desktop/tests/real.rs);
+#   (crates/nerve/tests/real.rs);
 # - an install over a folder in C:\ProgramData\Nerve that the standard
 #   account made first, which the install refuses before it changes anything;
 # - with the node installed again by that account, its owner: the sudo
@@ -30,7 +30,9 @@
 #   it, a command the folder sync refuses in the audit log and a granted
 #   folder that becomes a link to another machine (also where the node
 #   cannot log on as the owner), a capability of node.toml and one a center
-#   added with values that cmd or PowerShell would run, and with the node installed again by a
+#   added with values that cmd or PowerShell would run, a container's command
+#   that reaches no web UI port of the machine (the center's and the node's,
+#   on 127.0.0.1, ::1 and its own address), and with the node installed again by a
 #   standard account named with a blank and an umlaut, that owner's folder
 #   and commands. The install makes
 #   nerve-run and its profile itself, by a logon that loads it, as nobody
@@ -49,7 +51,10 @@
 # - what the install puts on the machine as Windows has it: the Start menu's
 #   link, the handler of nerve:// links, the entry in Apps & features; then
 #   the entry's quiet uninstall (winget's), which keeps the data, and
-#   `--silent`, which installs again without a question.
+#   `--silent`, which installs again without a question;
+# - the app as a center, once the node is gone: `nerve.exe __center install`,
+#   its service's command line, its web UI's file, its firewall rule by
+#   service, and its uninstall, which leaves the app's program.
 # The release calls it too, with the release-profile programs it is about to
 # publish.
 # A test that skips fails the job. The account's password is masked in the
@@ -60,7 +65,7 @@ on:
   workflow_call:
     inputs:
       programs:
-        description: "The artifact with nerve-node-desktop.exe and nerve-center.exe (CI's debug ones, or the release's)"
+        description: "The artifact with nerve.exe and nerve-center.exe (CI's debug ones, or the release's)"
         type: string
         required: true
       tests:
@@ -151,7 +156,7 @@ jobs:
           "NERVE_WIN_STD_PASSWORD=$pw" >> $env:GITHUB_ENV
       - name: The app installs, controls, updates and uninstalls Nerve
         run: |
-          $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve-node-desktop.exe).Path
+          $env:NERVE_DESKTOP_REAL = (Resolve-Path dist/nerve.exe).Path
           $said = & dist/tests/real.exe --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/real.log" | Out-String
           Write-Host $said
@@ -172,7 +177,7 @@ jobs:
             -Credential $cred -WorkingDirectory "$env:SystemRoot" -Wait
           $owner = (Get-Acl "$data\config").Owner
           if ($owner -notlike "*\$env:NERVE_WIN_STD_ACCOUNT") { throw "the folder is $owner's" }
-          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
+          $said = $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $said
           if ($code -eq 0) { throw 'the install took the folder' }
@@ -190,7 +195,7 @@ jobs:
       # password goes on stdin.
       - name: The node installed by the account, nerve-run for commands
         run: |
-          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve-node-desktop.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
+          $env:NERVE_WIN_SUDO_PASSWORD | & dist/nerve.exe --desktop-user-sid $env:NERVE_TEST_SID install 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/install.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($said in "run commands as $env:NERVE_WIN_SUDO_ACCOUNT", 'made the user nerve-run',
@@ -202,12 +207,14 @@ jobs:
           $run = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like '*\nerve-run' }
           if (-not $run) { throw 'nerve-run has no profile' }
           if ((Get-Service nerve-run-profile).Status -ne 'Running') { throw 'nerve-run-profile does not run' }
+          # A firewall rule by service matches the service's SID, which a service that logs on as an account has only when it is asked for.
+          if ((sc.exe qsidtype nerve-node | Out-String) -notmatch 'UNRESTRICTED') { throw "the node's service has no SID of its own, so a firewall rule by service lets nothing in" }
       # What the install put on the machine, read as Windows reads it: the
       # Start menu's link, the handler of nerve:// links, and the entry in
       # Apps & features with the quiet uninstall winget runs.
       - name: The Start menu, nerve:// and Apps & features
         run: |
-          $exe = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          $exe = "$env:ProgramFiles\Nerve\nerve.exe"
           $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk"
           if (-not (Test-Path $link)) { throw "no Start menu link at $link" }
           $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
@@ -241,6 +248,7 @@ jobs:
             @('win_account.exe', 'a_granted_folder_that_becomes_a_link_to_another_machine_is_not_followed_by_the_sync'),
             @('win_account.exe', 'a_link_to_another_machine_is_not_followed_where_the_node_cannot_act_as_the_owner'),
             @('win_account.exe', 'a_capability_s_value_is_one_argument_on_windows'),
+            @('win_account.exe', 'a_container_command_reaches_no_web_ui_on_this_machine'),
             @('nerve_node_lib.exe', 'win_host::tests::an_administrators_batch_logon_has_the_full_token'),
             @('nerve_sandbox_lib.exe', 'tests::a_folder_on_a_volume_mounted_in_a_folder_is_found_again'),
             @('nerve_service_lib.exe', 'win::dacl::tests::a_folder_on_a_volume_without_lists_is_held'),
@@ -302,7 +310,7 @@ jobs:
           Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'exit' `
             -Credential $cred -LoadUserProfile -WorkingDirectory "$env:SystemRoot" -Wait
           $sid = (Get-LocalUser $name).SID.Value
-          $pw | & dist/nerve-node-desktop.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
+          $pw | & dist/nerve.exe --desktop-user-sid $sid install 2>&1 | Tee-Object "$env:RUNNER_TEMP/install-umlaut.log"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # The name comes back in the console's code page: its ASCII start.
           if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP/install-umlaut.log" -Pattern 'run commands as Nerve M')) {
@@ -381,7 +389,7 @@ jobs:
           if (Test-Path 'Registry::HKEY_CLASSES_ROOT\nerve') { throw 'the nerve:// handler stays' }
           if (-not (Test-Path 'C:\ProgramData\Nerve\config\node.toml')) { throw 'the data went with it' }
           $env:NERVE_DESKTOP_USER_SID = $env:NERVE_TEST_SID
-          & dist/nerve-node-desktop.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
+          & dist/nerve.exe --silent 2>&1 | Tee-Object "$env:RUNNER_TEMP/silent.log" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "the silent install failed ($LASTEXITCODE)" }
           if ((Get-Service nerve-node).Status -ne 'Running') { throw 'the node does not run after the silent install' }
           if (-not (Test-Path $key)) { throw 'no Apps & features entry after the silent install' }
@@ -391,7 +399,7 @@ jobs:
         run: |
           # The app's program is a Windows program, not a console one:
           # PowerShell waits for it to end only when its output is piped.
-          $bin = "$env:ProgramFiles\Nerve\nerve-node-desktop.exe"
+          $bin = "$env:ProgramFiles\Nerve\nerve.exe"
           if (Test-Path $bin) {
             & $bin uninstall --purge 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -399,6 +407,40 @@ jobs:
             if (Get-LocalUser nerve-run -ErrorAction SilentlyContinue) { throw 'nerve-run stays' }
             if (Get-Service nerve-run-profile -ErrorAction SilentlyContinue) { throw 'nerve-run-profile stays' }
           }
+      # The app as a center (#232), once the node is gone: the service runs
+      # the app's program behind __center, says where its web UI listens in
+      # a file every account reads, its firewall rule names the service, the
+      # app is in the Start menu and Apps & features (whose quiet uninstall
+      # removes the center) without the nerve:// handler, and its uninstall
+      # takes all of it and the app's program, which served the center alone.
+      - name: The app as a center
+        run: |
+          $exe = (Resolve-Path dist/nerve.exe).Path
+          $bin = "$env:ProgramFiles\Nerve\nerve.exe"
+          & $exe __center --json install 2>&1 | Tee-Object "$env:RUNNER_TEMP/app-center.log" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the app's center did not install ($LASTEXITCODE)" }
+          $image = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\nerve-center').ImagePath
+          $want = "`"$bin`" __center service --state-dir `"$env:ProgramData\nerve-center\state`""
+          if ($image -ne $want) { throw "the service runs $image, not $want" }
+          $ui = Get-Content "$env:ProgramData\nerve-center\run\ui" -Raw | ConvertFrom-Json
+          if ($ui.url -ne 'http://127.0.0.1:7480') { throw "the web UI's file says $($ui.url)" }
+          $rule = Get-NetFirewallRule -DisplayName 'Nerve center' | Get-NetFirewallServiceFilter
+          if ($rule.Service -ne 'nerve-center') { throw "the firewall rule is for '$($rule.Service)', not the service" }
+          $status = & $bin __center --json status | ConvertFrom-Json
+          if (-not $status.installed) { throw "status: $($status | ConvertTo-Json)" }
+          $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Nerve.lnk"
+          $apps = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve'
+          if (-not (Test-Path $link)) { throw 'the center role put no Start menu entry' }
+          $quiet = (Get-ItemProperty $apps).QuietUninstallString
+          if ($quiet -ne "`"$bin`" __center uninstall") { throw "Apps & features' quiet uninstall runs $quiet" }
+          if (Test-Path 'HKLM:\Software\Classes\nerve') { throw 'the center role opens nerve:// links' }
+          & $exe __center --json uninstall --purge 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "the app's center did not uninstall ($LASTEXITCODE)" }
+          if (Get-Service nerve-center -ErrorAction SilentlyContinue) { throw 'the service stays' }
+          if (Test-Path $bin) { throw "the center's uninstall left the app's program" }
+          if ((Test-Path $link) -or (Test-Path $apps)) { throw "the center's uninstall left the app's entries" }
+          if (Get-NetFirewallRule -DisplayName 'Nerve center' -ErrorAction SilentlyContinue) { throw 'the firewall rule stays' }
+          "the app as a center: installed, its service, web UI file, firewall rule and app entries, uninstalled" >> $env:GITHUB_STEP_SUMMARY
       # A test that returns early says so with `skipped` at the start of a
       # line, or behind `test <name> ... ` with one test thread.
       - name: No test skipped

@@ -22,6 +22,7 @@ use crate::paths::NodePaths;
 use crate::service::{Host, Layout};
 
 mod backup;
+mod beside;
 mod cap;
 mod center;
 mod config;

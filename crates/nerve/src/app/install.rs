@@ -1,0 +1,803 @@
+//! Installing, updating and removing Nerve: the installer, which a program
+//! that is not the installed one shows (the file just downloaded), and the
+//! update and uninstall of Settings. Each runs this program's `install`,
+//! `update` or `uninstall` (the node's, with the app's parts,
+//! crate::parts) with the rights the system gives, through the broker.
+
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use serde_json::Value;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+
+use super::{Choose, Ctl, Exec, Launcher};
+use crate::Install;
+use crate::broker::{self, Launch};
+use crate::runner::Runner;
+
+/// Starts `bin` without arguments, as the menu entry does, apart from this
+/// program: it opens the installed app.
+pub(super) fn system_launcher() -> Launcher {
+    std::sync::Arc::new(|bin: &Path| {
+        std::process::Command::new(bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("cannot start {}: {e}", bin.display()))
+    })
+}
+
+/// The version of the program at `file`, from its `--version`
+/// (`nerve 0.0.6`); none when it does not say.
+pub fn version_of(file: &Path) -> Option<String> {
+    let out = std::process::Command::new(file)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let (name, version) = text.trim().split_once(' ')?;
+    (out.status.success() && name == crate::parts::PROGRAM).then(|| version.to_string())
+}
+
+/// Whether version `a` is newer than `b` (both `x.y.z`).
+pub fn newer(a: &str, b: &str) -> bool {
+    let parse =
+        |v: &str| -> Option<Vec<u64>> { v.trim().split('.').map(|p| p.parse().ok()).collect() };
+    match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => a > b,
+        _ => false,
+    }
+}
+
+/// Whether the installer adds the app to a node installed alone: on Linux,
+/// where the app takes it over. Windows has no node alone (#176): there the
+/// installer installs Nerve as on a machine without it.
+fn adds_the_app(installed: bool, app: bool, windows: bool) -> bool {
+    installed && !app && !windows
+}
+
+/// The arguments of the uninstall `action`: the node's, or the center's
+/// behind its hidden word; `purge` deletes the data.
+fn uninstall_args(action: &str, purge: bool) -> Vec<String> {
+    let mut args = match action {
+        "uninstall-center" => vec![nerve_center::edition::APP_WORD.to_string()],
+        _ => Vec::new(),
+    };
+    args.push("uninstall".into());
+    if purge {
+        args.push("--purge".into());
+    }
+    args
+}
+
+/// Whether an install or uninstall error says that the keys and the proxy's
+/// login could not be put aside, and the owner may go on without them.
+fn offers_forget(error: &str) -> bool {
+    error.contains(nerve_node::service::SECRETS_KEPT)
+}
+
+/// `args` of an install or uninstall, with the owner's choice to go on
+/// without the keys and the proxy's login of the service's Credential
+/// Manager. An update has no such flag: a choice left over from a dialog
+/// that was cancelled must not reach it.
+fn with_forget(action: &str, mut args: Vec<String>, forget: bool) -> Vec<String> {
+    if forget && matches!(action, "install" | "uninstall") {
+        args.push("--forget-secrets".into());
+    }
+    args
+}
+
+/// The arguments of an update: from the file `from`, or else from the
+/// latest release, with `pre` the newest one, a pre-release too (Settings ›
+/// App › Pre-releases).
+fn update_args(from: Option<String>, pre: bool) -> Vec<String> {
+    let mut args = vec!["update".to_string()];
+    match from {
+        Some(from) => args.push(format!("--from={from}")),
+        None if pre => args.push("--pre".into()),
+        None => {}
+    }
+    args
+}
+
+/// What a service command said, as the steps it did and what it warned
+/// about. Its advice for what comes next (`Next: …`) is the app's to give,
+/// in its own words: the app asked for root through pkexec, and opens its
+/// first-run steps. Where the Windows password is entered again the node
+/// says in the app's words itself (nerve_node::account::NO_ACCOUNT_INSTALL).
+pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
+    let (mut did, mut warn) = (Vec::new(), Vec::new());
+    for line in v["messages"].as_array().into_iter().flatten() {
+        let Some(line) = line.as_str() else { continue };
+        if line.starts_with("Next:") {
+            continue;
+        }
+        let line = line.to_string();
+        if line.starts_with("Warning:") || line.starts_with(nerve_node::account::NO_COMMANDS_AS_YOU)
+        {
+            warn.push(line);
+        } else {
+            did.push(line);
+        }
+    }
+    (did, warn)
+}
+
+fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        lines
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// The installer's first step: the app added to a node installed alone
+/// (Linux), Nerve installed already as a node, a center installed here, or
+/// what this machine becomes (the role is read from the installed
+/// services). The app's program without a role's service, as a package
+/// leaves it, is not installed yet.
+pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) -> &'static str {
+    if node_only {
+        "welcome"
+    } else if app && roles.node {
+        "installed"
+    } else if roles.center {
+        "center"
+    } else {
+        "role"
+    }
+}
+
+/// Whether the app at its installed place opens as the installer: where no
+/// role is installed (the program from a package, before its first start)
+/// it asks what the machine becomes; on a center it shows the center's step,
+/// where the center's web UI opens and the center is removed. A node this
+/// user runs by hand (`by_hand`: its folders named, or no systemd) keeps the
+/// app's pages, as no service is installed for it.
+pub fn opens_the_installer(roles: nerve_node::role::Roles, by_hand: bool) -> bool {
+    !roles.node && (roles.center || !by_hand)
+}
+
+/// What the center step says of a node that a terminal program installed
+/// beside the app's center: nothing where there is none.
+pub fn also_node(
+    roles: nerve_node::role::Roles,
+    node_in_terminal: impl FnOnce() -> bool,
+) -> &'static str {
+    if roles.center && node_in_terminal() {
+        ALSO_NODE
+    } else {
+        ""
+    }
+}
+
+/// The twin of the Overview's note, on the center's step.
+pub const ALSO_NODE: &str = "Also a node, installed in the terminal: the app leaves it as it is.";
+
+/// Where the installed center's web UI listens, as it says in its file
+/// (nerve_center::ui_file); `None` while it does not run or it is off.
+fn center_ui() -> Option<String> {
+    let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
+    nerve_center::ui_file::read(&file).ok()??.url
+}
+
+/// Opens the center's web UI in the browser once the center's service is
+/// found to hold its port (nerve_center::holder): a program that took the
+/// port while the center was stopped would get the owner token a password
+/// manager fills there.
+pub fn open_center_ui() -> Result<(), String> {
+    open_center_ui_in(
+        &nerve_center::service::Layout::system().run,
+        nerve_center::holder::of,
+        crate::browser::open,
+    )
+}
+
+/// [`open_center_ui`] for the center's run folder `run`, the holder `held`
+/// says and the browser `open`.
+fn open_center_ui_in(
+    run: &Path,
+    held: impl FnOnce(std::net::SocketAddr) -> Result<nerve_center::holder::Holder, String>,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let file = nerve_center::ui_file::path_in(run);
+    let said = nerve_center::ui_file::read(&file)?.ok_or("The center is not running.")?;
+    let url = nerve_center::holder::open_target(&said, held)?;
+    open(&url)
+}
+
+impl Ctl {
+    /// Makes the window the installer for the app at `bin`: what will be
+    /// installed, or, when Nerve is installed, what it can do with it. `how`
+    /// starts the broker once the owner goes on.
+    pub fn installer(self: &Rc<Self>, how: Launch, bin: &Path) {
+        self.elevate.set(Some(how));
+        *self.program.borrow_mut() = bin.to_path_buf();
+        // The service's commands work on the installed node's folders only.
+        let plain = Runner::new(self.runner().exe().clone(), None, None);
+        *self.runner.borrow_mut() = plain;
+        self.with_install(|i| {
+            i.set_shown(true);
+            i.set_program(bin.display().to_string().into());
+            i.set_windows(cfg!(windows));
+            i.set_account(
+                std::env::var("USERNAME")
+                    .or_else(|_| std::env::var("USER"))
+                    .unwrap_or_default()
+                    .into(),
+            );
+            i.set_step("working".into());
+        });
+        // The service's state, in `status`, needs no rights.
+        self.command(vec!["status".into()], None, |c, answer| {
+            let v = answer.unwrap_or_default()["service"].clone();
+            let app = v["present"] == true;
+            let installed = v["installed"] == true;
+            let version = v["version"].as_str().unwrap_or_default().to_string();
+            let node_only = adds_the_app(installed, app, cfg!(windows));
+            let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
+            c.with_install(|i| {
+                i.set_installed_version(version.as_str().into());
+                i.set_newer(app && newer(&i.get_version(), &version));
+                i.set_node_only(node_only);
+                i.set_center_ui(center_ui().unwrap_or_default().into());
+                i.set_also(
+                    also_node(roles, || {
+                        nerve_node::role::in_terminal(
+                            nerve_node::role::Role::Node,
+                            crate::parts::PROGRAM,
+                        )
+                    })
+                    .into(),
+                );
+                // Apps & features' Uninstall of the center role asked for
+                // the uninstall before the step was known.
+                let step = match (first_step(app, node_only, roles), i.get_action().as_str()) {
+                    ("center", "uninstall-center") => "choose",
+                    (step, _) => step,
+                };
+                i.set_step(step.into());
+            });
+        });
+    }
+
+    /// The app at its installed place: its service's state is asked for
+    /// when `service` (the node is the service's), and Settings updates and
+    /// removes `bin`.
+    pub fn watch_service(&self, service: bool, bin: &Path) {
+        self.service.set(service);
+        *self.program.borrow_mut() = bin.to_path_buf();
+        self.with_install(|i| i.set_program(bin.display().to_string().into()));
+    }
+
+    /// Opens the installed app with `launcher` instead of starting it.
+    pub fn set_launcher(&self, launcher: Launcher) {
+        *self.launcher.borrow_mut() = launcher;
+    }
+
+    /// Runs `then` with a runner that has the rights `args` needs: the
+    /// app's own when it needs none or has them, else one through a broker
+    /// started after the system's question, which ends with that runner.
+    fn with_rights(
+        self: &Rc<Self>,
+        args: &[String],
+        then: impl FnOnce(&Rc<Ctl>, Runner) + Send + 'static,
+    ) {
+        let Some(how) = self.admin_for(args) else {
+            let r = self.runner();
+            return then(self, r);
+        };
+        let exe = self.runner().exe().clone();
+        self.with_install(|i| {
+            i.set_asking(true);
+            i.set_step("working".into());
+        });
+        self.job(
+            move |_| broker::launch(&exe, how),
+            move |c, launched| {
+                c.with_install(|i| i.set_asking(false));
+                match launched {
+                    Ok(b) => {
+                        let r = c.runner().through(b);
+                        then(c, r);
+                    }
+                    Err(e) => c.failed(e),
+                }
+            },
+        );
+    }
+
+    /// A step that did not finish: back where the owner was, with why.
+    fn failed(&self, e: String) {
+        self.with_install(|i| {
+            let back = match i.get_action().as_str() {
+                "uninstall" | "uninstall-center" => "choose",
+                "install-center" => "welcome-center",
+                "update" if !i.get_shown() => "choose",
+                "update" => "installed",
+                _ => "welcome",
+            };
+            i.set_can_forget(offers_forget(&e));
+            i.set_forget(false);
+            i.set_error(e.into());
+            i.set_error_title(SharedString::new());
+            i.set_step(back.into());
+        });
+    }
+
+    /// Runs a service command with the rights, then shows what it did; the
+    /// installed version comes after it.
+    fn run_service_command(
+        self: &Rc<Self>,
+        action: &str,
+        args: Vec<String>,
+        input: Option<String>,
+    ) {
+        // The choice to go on without what could not be put aside holds for
+        // this run only.
+        let forget = self
+            .with_install(|i| {
+                let forget = i.get_can_forget() && i.get_forget();
+                i.set_can_forget(false);
+                i.set_forget(false);
+                forget
+            })
+            .unwrap_or(false);
+        let args = with_forget(action, args, forget);
+        self.with_install(|i| {
+            i.set_action(action.into());
+            i.set_error(SharedString::new());
+            i.set_error_title(SharedString::new());
+            i.set_did(ModelRc::default());
+            i.set_warnings(ModelRc::default());
+        });
+        self.with_rights(&args.clone(), move |c, runner| {
+            c.with_install(|i| i.set_step("working".into()));
+            c.job_on(
+                runner,
+                move |r| r.run_with(&super::strings(&args), input.as_deref()),
+                |c, answer| match answer {
+                    Ok(v) => {
+                        let (did, warn) = steps(&v);
+                        c.with_install(|i| {
+                            i.set_password(SharedString::new());
+                            i.set_did(shared(did));
+                            i.set_warnings(shared(warn));
+                        });
+                        c.command(vec!["status".into()], None, |c, v| {
+                            let version = v
+                                .ok()
+                                .and_then(|v| v["service"]["version"].as_str().map(str::to_string))
+                                .unwrap_or_default();
+                            c.with_install(|i| {
+                                if i.get_action() != "uninstall" {
+                                    i.set_installed_version(version.into());
+                                }
+                                i.set_step("done".into());
+                            });
+                        });
+                    }
+                    Err(e) => c.failed(e),
+                },
+            );
+        });
+    }
+
+    /// The center's install, as the role picked in the first step: the app's
+    /// program runs it behind its hidden word, with the rights.
+    fn install_center_go(self: &Rc<Self>) {
+        self.run_service_command(
+            "install-center",
+            vec![nerve_center::edition::APP_WORD.into(), "install".into()],
+            None,
+        );
+    }
+
+    fn install_go(self: &Rc<Self>) {
+        // Windows asks for the password of the account commands run as;
+        // it goes on stdin, never as an argument.
+        let input = self
+            .with_install(|i| i.get_password().to_string())
+            .filter(|p| !p.is_empty());
+        self.run_service_command("install", vec!["install".into()], input);
+    }
+
+    /// The update: the installer's from this program, Settings' from the
+    /// latest release or the file chosen.
+    fn update_go(self: &Rc<Self>) {
+        let Some((shown, source, file, pre)) = self.with_install(|i| {
+            (
+                i.get_shown(),
+                i.get_source(),
+                i.get_file().to_string(),
+                i.get_pre_releases(),
+            )
+        }) else {
+            return;
+        };
+        // The installer updates with itself: the program its commands run.
+        let from = if shown {
+            Some(self.runner().exe().display().to_string())
+        } else {
+            (source == 1).then_some(file)
+        };
+        self.run_service_command("update", update_args(from, pre), None);
+    }
+
+    fn uninstall_go(self: &Rc<Self>) {
+        let Some((purge, action)) = self.with_install(|i| (i.get_purge(), i.get_action())) else {
+            return;
+        };
+        let action = action.to_string();
+        let args = uninstall_args(&action, purge);
+        self.run_service_command(&action, args, None);
+    }
+
+    /// Opens the center's uninstall: keep or delete its data, then go.
+    pub fn ask_uninstall_center(&self) {
+        self.with_install(|i| {
+            i.set_action("uninstall-center".into());
+            i.set_purge(false);
+            i.set_error(SharedString::new());
+            i.set_step("choose".into());
+        });
+    }
+
+    /// Another copy of the program was started while the app is open, such
+    /// as the file just downloaded: the app says which version it is and
+    /// offers the update with it, or the uninstall, as the installer would.
+    pub(super) fn offer_other(self: &Rc<Self>, file: PathBuf) {
+        let shown = file.display().to_string();
+        self.job(
+            move |_| version_of(&file),
+            move |c, version| {
+                c.with_install(|i| {
+                    let version = version.unwrap_or_default();
+                    i.set_other_newer(!version.is_empty() && newer(&version, &i.get_version()));
+                    i.set_other_version(version.into());
+                    i.set_other_file(shown.into());
+                    i.set_other_open(true);
+                });
+            },
+        );
+    }
+
+    /// The update with the other copy's program.
+    fn other_update(self: &Rc<Self>) {
+        let Some(file) = self.with_install(|i| i.get_other_file()) else {
+            return;
+        };
+        self.ask_update();
+        self.with_install(|i| {
+            i.set_other_open(false);
+            i.set_source(1);
+            i.set_file(file);
+        });
+        self.update_go();
+    }
+
+    /// Opens the uninstall: keep or delete the node's data, then go.
+    pub fn ask_uninstall(&self) {
+        self.with_install(|i| {
+            i.set_action("uninstall".into());
+            i.set_purge(false);
+            i.set_can_forget(false);
+            i.set_forget(false);
+            i.set_error(SharedString::new());
+            i.set_step("choose".into());
+            if !i.get_shown() {
+                i.set_uninstall_open(true);
+            }
+        });
+    }
+
+    fn ask_update(&self) {
+        self.with_install(|i| {
+            i.set_action("update".into());
+            i.set_source(0);
+            i.set_file(SharedString::new());
+            i.set_can_forget(false);
+            i.set_forget(false);
+            i.set_error(SharedString::new());
+            i.set_error_title(SharedString::new());
+            i.set_step("choose".into());
+            i.set_update_open(true);
+        });
+    }
+
+    fn choose_file(self: &Rc<Self>) {
+        let chooser = self.chooser.borrow().clone();
+        self.job(
+            move |_| chooser(Choose::Program),
+            |c, picked: Result<Option<PathBuf>, String>| match picked {
+                // The update dialog is open: it says why, under its own
+                // heading, since the update did not start.
+                Err(e) => {
+                    c.with_install(|i| {
+                        i.set_error(e.into());
+                        i.set_error_title("No file dialog".into());
+                    });
+                }
+                Ok(None) => {}
+                Ok(Some(p)) => {
+                    c.with_install(|i| {
+                        i.set_source(1);
+                        i.set_file(p.display().to_string().into());
+                        i.set_error(SharedString::new());
+                        i.set_error_title(SharedString::new());
+                    });
+                }
+            },
+        );
+    }
+
+    /// Opens the installed app and closes this window: the installer's
+    /// end, and the app's start again after an update.
+    fn open_app(self: &Rc<Self>) {
+        let bin = self.program.borrow().clone();
+        let launcher = self.launcher.borrow().clone();
+        // The new window is the user's one window from its start; this one
+        // lets go first.
+        self.instance.borrow_mut().take();
+        match launcher(&bin) {
+            Ok(()) => self.close_app(),
+            Err(e) => {
+                self.with_install(|i| i.set_error(e.into()));
+            }
+        }
+    }
+
+    fn close_app(&self) {
+        self.with_install(|i| i.set_closed(true));
+        self.end();
+        if self.exec == Exec::Threads {
+            let _ = slint::quit_event_loop();
+        }
+    }
+}
+
+pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
+    let i = window.global::<Install>();
+    let c = ctl.clone();
+    i.on_install(move || c.install_go());
+    let c = ctl.clone();
+    i.on_install_center(move || c.install_center_go());
+    let c = ctl.clone();
+    i.on_ask_uninstall_center(move || c.ask_uninstall_center());
+    let c = ctl.clone();
+    i.on_open_center_ui(move || {
+        if let Err(e) = open_center_ui() {
+            c.with_install(|i| i.set_error(e.into()));
+        }
+    });
+    let c = ctl.clone();
+    i.on_update(move || c.update_go());
+    let c = ctl.clone();
+    i.on_uninstall(move || c.uninstall_go());
+    let c = ctl.clone();
+    i.on_ask_uninstall(move || c.ask_uninstall());
+    let c = ctl.clone();
+    i.on_ask_update(move || c.ask_update());
+    let c = ctl.clone();
+    i.on_set_pre_releases(move |on| c.set_pre_releases(on));
+    let c = ctl.clone();
+    i.on_other_update(move || c.other_update());
+    let c = ctl.clone();
+    i.on_choose_file(move || c.choose_file());
+    let c = ctl.clone();
+    i.on_open_app(move || c.open_app());
+    let c = ctl.clone();
+    i.on_close(move || c.close_app());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The installed app opens as the installer where it has no role yet,
+    /// and on a center; on a node, and for a node run by hand, as the app.
+    #[test]
+    fn the_installed_app_opens_by_the_machine_s_role() {
+        use nerve_node::role::Roles;
+        let none = Roles::default();
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        let node = Roles {
+            center: false,
+            node: true,
+        };
+        assert!(opens_the_installer(none, false));
+        assert!(opens_the_installer(center, false));
+        assert!(opens_the_installer(center, true));
+        assert!(!opens_the_installer(node, false));
+        assert!(!opens_the_installer(none, true));
+    }
+
+    /// A node a terminal program installed beside the app's center is said
+    /// on its step, and only there.
+    #[test]
+    fn the_center_step_says_a_node_installed_in_the_terminal() {
+        use nerve_node::role::Roles;
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        assert_eq!(also_node(center, || true), ALSO_NODE);
+        assert_eq!(also_node(center, || false), "");
+        // Not a center: the step is not shown, and nothing is asked.
+        assert_eq!(also_node(Roles::default(), || unreachable!()), "");
+    }
+
+    /// The app's center with a node a terminal program installed beside it
+    /// (design of #232, 6): the app opens the center's step, says the node,
+    /// and the broker runs the center's commands, not the node's; the app's
+    /// node with a center of the terminal beside it stays the app's node.
+    #[test]
+    fn a_role_of_the_terminal_beside_the_app_s_is_not_the_app_s() {
+        use nerve_node::role::Roles;
+        let d = tempfile::tempdir().unwrap();
+        let unit = |name: &str, exec: &str| {
+            std::fs::write(
+                d.path().join(format!("{name}.service")),
+                format!("[Service]\nExecStart={exec}\n"),
+            )
+            .unwrap()
+        };
+        unit(
+            "nerve-center",
+            "/usr/local/bin/nerve __center --state-dir x",
+        );
+        unit("nerve-node", "/usr/local/bin/nerve-node --state-dir y run");
+        let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
+        assert!(opens_the_installer(roles, false));
+        assert_eq!(first_step(true, false, roles), "center");
+        assert_eq!(also_node(roles, || true), ALSO_NODE);
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(crate::broker::allowed(&args(&["__center", "--json", "uninstall"]), roles).is_ok());
+        assert!(crate::broker::allowed(&args(&["--json", "uninstall"]), roles).is_err());
+        // The other way round.
+        unit("nerve-center", "/usr/local/bin/nerve-center --state-dir x");
+        unit("nerve-node", "/usr/local/bin/nerve --state-dir y run");
+        let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
+        assert!(!opens_the_installer(roles, false));
+        assert_eq!(first_step(true, false, roles), "installed");
+        assert!(crate::broker::allowed(&args(&["__center", "--json", "status"]), roles).is_err());
+    }
+
+    /// **Open the web UI** on the center's step opens the address the
+    /// center's file says only once the center's service holds the port.
+    #[test]
+    fn the_center_s_web_ui_opens_only_where_its_service_holds_the_port() {
+        use nerve_center::holder::Holder;
+        let d = tempfile::tempdir().unwrap();
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |url: &str| {
+            opened.borrow_mut().push(url.to_string());
+            Ok(())
+        };
+        let e = open_center_ui_in(d.path(), |_| Ok(Holder::Service), open).unwrap_err();
+        assert_eq!(e, "The center is not running.");
+        let said =
+            nerve_center::ui_file::UiAddress::of(Some("127.0.0.1:7480".parse().unwrap()), None);
+        nerve_center::ui_file::write(&nerve_center::ui_file::path_in(d.path()), &said).unwrap();
+        assert!(open_center_ui_in(d.path(), |_| Ok(Holder::Other), open).is_err());
+        assert!(opened.borrow().is_empty());
+        open_center_ui_in(d.path(), |_| Ok(Holder::Service), open).unwrap();
+        assert_eq!(*opened.borrow(), ["http://127.0.0.1:7480"]);
+    }
+
+    /// The installer starts with what this machine becomes where no role is
+    /// installed; a center installed here is said, not offered a node.
+    #[test]
+    fn the_first_step_follows_the_installed_roles() {
+        use nerve_node::role::Roles;
+        let none = Roles::default();
+        let center = Roles {
+            center: true,
+            node: false,
+        };
+        let node = Roles {
+            center: false,
+            node: true,
+        };
+        assert_eq!(first_step(false, false, none), "role");
+        assert_eq!(first_step(false, false, center), "center");
+        assert_eq!(first_step(true, false, node), "installed");
+        assert_eq!(first_step(false, true, node), "welcome");
+        // The app's program without a node's service: from its package
+        // before its first start, or the program of the center role.
+        assert_eq!(first_step(true, false, none), "role");
+        assert_eq!(first_step(true, false, center), "center");
+        // The center's uninstall goes behind its word.
+        assert_eq!(
+            uninstall_args("uninstall-center", true),
+            ["__center", "uninstall", "--purge"]
+        );
+        assert_eq!(uninstall_args("uninstall", false), ["uninstall"]);
+        // The center's commands always need the rights.
+        assert!(crate::app::needs_admin(&[
+            "__center".into(),
+            "status".into()
+        ]));
+    }
+
+    /// Update takes a file, else the latest release, or with Settings ›
+    /// App › Pre-releases on the newest release, a pre-release too (#213).
+    #[test]
+    fn the_update_follows_the_pre_release_switch() {
+        assert_eq!(update_args(None, false), ["update"]);
+        assert_eq!(update_args(None, true), ["update", "--pre"]);
+        assert_eq!(
+            update_args(Some("/x/nerve".into()), true),
+            ["update", "--from=/x/nerve"]
+        );
+    }
+
+    /// The way past a node that cannot put its keys aside is offered for
+    /// that error only, and becomes a flag of the command.
+    #[test]
+    fn going_on_without_the_keys_is_offered_for_their_error_only() {
+        let kept = format!(
+            "the service did not ({}): {}.",
+            "x",
+            nerve_node::service::SECRETS_KEPT
+        );
+        assert!(offers_forget(&kept));
+        assert!(!offers_forget("a user nerve exists already"));
+        let args = vec!["uninstall".to_string(), "--purge".to_string()];
+        assert_eq!(with_forget("uninstall", args.clone(), false), args);
+        assert_eq!(
+            with_forget("uninstall", args.clone(), true),
+            ["uninstall", "--purge", "--forget-secrets"]
+        );
+        // The update refuses the flag: a tick left from a cancelled dialog
+        // stays out of it.
+        let update = vec!["update".to_string()];
+        assert_eq!(with_forget("update", update.clone(), true), update);
+    }
+
+    /// Only Linux takes a node installed alone over.
+    #[test]
+    fn the_app_is_added_to_a_node_alone_on_linux_only() {
+        assert!(adds_the_app(true, false, false));
+        assert!(!adds_the_app(true, false, true));
+        assert!(!adds_the_app(true, true, false));
+        assert!(!adds_the_app(false, false, false));
+    }
+
+    #[test]
+    fn a_newer_version_and_the_steps_of_an_install() {
+        assert!(newer("0.0.6", "0.0.5"));
+        assert!(newer("0.10.0", "0.9.9"));
+        assert!(!newer("0.0.5", "0.0.5"));
+        assert!(!newer("0.0.5", ""));
+        let v = serde_json::json!({"messages": [
+            "made the user nerve (uid 991)",
+            "Warning: no owner: there is no account bob; only root changes the node and user mode runs no command",
+            format!("no commands as you: the password of alice is wrong; {}", nerve_node::account::NO_ACCOUNT_INSTALL),
+            "the service nerve-node.service runs as nerve and starts with the machine",
+            "Next: `nerve-node center add -` pairs the node with a center.",
+        ]});
+        let (did, warn) = steps(&v);
+        assert_eq!(did.len(), 2);
+        assert_eq!(warn.len(), 2);
+        assert!(warn[0].starts_with("Warning: no owner"), "{}", warn[0]);
+        assert!(
+            warn[1].starts_with("no commands as you")
+                && warn[1].ends_with(
+                    "enter your password under Settings › General › Account for commands in the app"
+                )
+        );
+        // Nothing sends the owner to a terminal.
+        for line in did.iter().chain(&warn) {
+            assert!(!line.contains('`'), "{line}");
+        }
+    }
+}

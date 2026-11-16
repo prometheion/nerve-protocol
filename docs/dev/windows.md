@@ -8,7 +8,7 @@ version, task by task.
 ## Linux and Windows
 
 The center and the node run on Linux (x86_64, aarch64) and Windows (x86_64),
-the [desktop app](desktop.md) (`nerve-node-desktop`, the node with an app) on
+the [desktop app](desktop.md) (`nerve`, the node with an app) on
 Linux x86_64 and Windows x86_64. The node behaves the same except where this
 page says so. The Linux programs are static and run on any distribution;
 installing them as a service needs systemd ([distributions](service.md#linux-distributions)).
@@ -111,8 +111,20 @@ what they do.
 
 ### The node's web UI
 
-The installed node on Linux can serve a [web UI](web-uis.md#the-nodes-web-ui). On Windows
-there is none: the desktop app is the node's UI there.
+The installed node serves a [web UI](web-uis.md#the-nodes-web-ui) on Windows
+too, off until the app's **Settings › Network › Web UI** turns it on. Who may
+connect is told by session there, not by account
+([who can reach it](web-uis.md#who-can-reach-it)), and listening beyond
+loopback is an administrator's step, with a firewall rule for the service
+`nerve-node` and its port.
+
+### The listeners
+
+Every listener of the node and the center (the web UIs, the node port, HTTP
+MCP, the relay) is bound with `SO_EXCLUSIVEADDRUSE`
+(`nerve_service::listen`): while the service listens, no program of another
+account can bind the same address and port with `SO_REUSEADDR` and take its
+connections.
 
 ### The control pipe
 
@@ -153,10 +165,13 @@ The user guide's [Windows page](../user/windows.md) has the download, the
 check with `Get-FileHash`, SmartScreen, the install and the first run. The
 app does everything for the node from then on: pairing, settings, folders,
 rules, sudo, backups, update and uninstall. No terminal command is needed or
-offered. The center's `install` puts it in `%ProgramFiles%\Nerve` as
-`nerve-center.exe` and that folder on the machine's `Path` (its uninstall
-takes it off again), where a harness starts it, and runs it as a
-[service](#the-center-as-a-windows-service). A double-click on the
+offered. The app installs the center too, as its role: its service runs
+`nerve.exe __center service --state-dir …` ([one program](desktop.md#one-program-two-roles)),
+and harnesses reach it over HTTP MCP. The release has no `nerve-center.exe`
+for Windows; one built from source keeps what follows. Its `install` puts it
+in `%ProgramFiles%\Nerve` as `nerve-center.exe` and that folder on the
+machine's `Path` (its uninstall takes it off again), where a harness starts
+it, and runs it as a [service](#the-center-as-a-windows-service). A double-click on the
 downloaded center runs that `install`: with no arguments, its console as
 stdin and alone on that console (`GetConsoleProcessList`), it starts itself
 again as `install` with `runas` (the UAC prompt), and the new window waits
@@ -167,7 +182,7 @@ get the MCP center.
 ## The node as a service on Windows
 
 On Windows the node is the [desktop app](desktop.md). Open the downloaded
-`nerve-node-desktop-x86_64-windows.exe`: its installer installs the node as a
+`nerve-x86_64-windows.exe`: its installer installs the node as a
 service, and the app does everything else for it
 ([install](desktop.md#install)). There is no `nerve-node` for a terminal on
 Windows, and the node runs only as the service: started any other way, it
@@ -207,7 +222,7 @@ The install does this, and the installer shows each step:
    with `--as-owner`, and sudo; and for the permission entries of `folder`
    and `allowlist` mode, which the node changes on your folders as you. A
    stored password that still works is not asked for again.
-5. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
+5. Copies the program to `C:\Program Files\Nerve\nerve.exe`.
 6. Registers and starts the service `nerve-run-profile`, which runs as
    `nerve-run` and does nothing but keep its profile loaded: Windows starts a
    process in an AppContainer only for an account whose registry is loaded,
@@ -228,7 +243,7 @@ The install does this, and the installer shows each step:
 |---|---|
 | `node.toml`, one key per center, `nerve-run`'s password and yours | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logging.md#the-log-as-the-owner-reads-it), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
-| The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
+| The program | `C:\Program Files\Nerve\nerve.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](#the-windows-event-log)) |
 
 The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
@@ -399,7 +414,7 @@ command gets them.
 ### Update and uninstall on Windows
 
 **Settings**, **App**, **Update** downloads
-`nerve-node-desktop-x86_64-windows.exe` and checks it as above, or takes a
+`nerve-x86_64-windows.exe` and checks it as above, or takes a
 file you downloaded. It stops the service, moves the old program aside, puts
 the new one in its place, gives the services the settings the new program
 names, and starts the service; if the new one does not start, the old one
@@ -449,7 +464,15 @@ remove it after a restart.
 
 As on Linux, the center runs as a service of its own, so an agent's shell
 command, which runs as you or as the node's account, cannot read its owner
-token or its TLS key. In a terminal opened with **Run as administrator**:
+token or its TLS key.
+
+What follows is the `nerve-center.exe` built from source, which the release
+does not have. The app's center (**A center** in its installer, or
+`nerve.exe __center install`) does the same with the app's own program: it
+stays `C:\Program Files\Nerve\nerve.exe`, its service runs
+`nerve.exe __center service`, no folder goes on the `Path`, and the Start
+menu and Apps & features get the app's entries. In a terminal opened with
+**Run as administrator**:
 
 ```powershell
 nerve-center install --name lab --public-url https://lab.example:7443
@@ -469,7 +492,8 @@ The install does this, and says each step:
 2. Makes the owner token in the state folder (one made before is kept) and
    writes `settings\center.env` with a new harness token; `--name`,
    `--public-url`, `--listen`, `--ui` and `--mcp` go into it.
-3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe`.
+3. Copies the program to `C:\Program Files\Nerve\nerve-center.exe` (the
+   app's center keeps `nerve.exe` there).
 4. Registers the service `nerve-center`. It runs as its virtual account
    `NT SERVICE\nerve-center`, which Windows makes and removes with the
    service: no password, no user to keep. Its start, stop and failures also
@@ -483,9 +507,12 @@ The install does this, and says each step:
    also a value mistyped in `center.env`.
    It keeps no privilege but passing through folders.
 5. Adds the Windows Firewall rule `Nerve center`: other machines may reach
-   the node port (`--listen`, 7443 by default) of that program, and nothing
-   else. The web UI and MCP stay on loopback; beyond it their ports need a
-   rule of their own, whose `New-NetFirewallRule` line `set` prints.
+   the node port (`--listen`, 7443 by default) of the service `nerve-center`,
+   and nothing else. The rule names the service, not its program: another
+   process of the same program (the node's service, the desktop app) gets
+   nothing from it. The web UI and MCP stay on loopback; beyond it their
+   ports need a rule of their own, `Nerve center web UI` or `Nerve center
+   MCP`, whose `New-NetFirewallRule -Service nerve-center` line `set` prints.
 6. Starts the service and waits until the center runs, then says the web
    UI's address, the owner token and where harnesses connect.
 
@@ -527,7 +554,8 @@ without the administrators' rights, with an environment of `SystemRoot`
 alone, in the system folder, and in a job object that ends what it starts;
 it still runs as the administrator's own account, so it comes from the
 administrator's own hand (`--from`) or a release asset. `nerve-center
-uninstall` removes the service, its account, the firewall rule, the Event
+uninstall` removes the service, its account, its firewall rules (the two
+that `set` prints too), the Event
 Log source `nerve-center` and the program; the folders stay,
 open to the administrators only, and `--purge` deletes them. Run from the
 installed program, it moves that aside, and Windows deletes it at its next

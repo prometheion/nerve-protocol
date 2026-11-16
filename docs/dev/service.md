@@ -9,7 +9,7 @@ guide's [install page](../user/install.md) has the commands.
 
 Put `nerve-center` on the machine where your agent harness runs. Put a node
 on every machine the agent may use: `nerve-node`, or on a machine with a
-desktop `nerve-node-desktop`, the node with an app
+desktop `nerve`, the node with an app
 ([desktop app](desktop.md)). On Windows the node is always the desktop app.
 A center and a node can share a machine.
 
@@ -17,18 +17,24 @@ A center and a node can share a machine.
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has these nine files, seven for Linux and two for Windows, and a
+release has these eight files, seven for Linux and one for Windows, and a
 `SHA256SUMS` file.
 
 | System | Files |
 |---|---|
-| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux`, which also comes as `nerve-node-desktop_<version>_amd64.deb` and `nerve-node-desktop-<version>.x86_64.rpm` |
+| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-x86_64-linux`, which also comes as `nerve_<version>_amd64.deb` and `nerve-<version>.x86_64.rpm` |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
+| Windows, x86_64 | `nerve-x86_64-windows.exe` |
 
-`nerve-node-desktop` is the node with a desktop app, which installs itself
-when you open it ([desktop app](desktop.md)). Windows has no `nerve-node` of
-its own: there the app is the only way to the node.
+`nerve` is the app, one program for both roles, which installs one role per
+machine when you open it ([desktop app](desktop.md)). Its first word picks
+what it is: none, the window; `__center`, the center's command line (as a
+link named `nerve-center` on Linux); anything else, the node's command line
+(also as a link named `nerve-node`). Its center's service runs
+`nerve __center --state-dir …` (on Windows `nerve.exe __center service
+--state-dir …`), and its update takes the app's file. Windows has no
+`nerve-node` or `nerve-center` of its own: there the app is the only way to
+either.
 
 The Linux programs except the desktop app are static and need no libraries. The Windows programs
 need no Visual C++ runtime. The programs are not signed, so check them
@@ -477,7 +483,7 @@ log. `--purge` deletes them, keys and audit log included. The
 [desktop app](desktop.md)'s uninstall also removes its menu entry, its link
 handler and the `nerve-node` link it made. Where the app took over the node,
 `nerve-node uninstall` of a `nerve-node` downloaded on its own hands over to the app's
-(`nerve-node-desktop uninstall`, with `--purge` if given), so the app goes
+(`nerve uninstall`, with `--purge` if given), so the app goes
 with the node.
 
 ### The rules for these commands
@@ -627,6 +633,15 @@ is the service's account, not the caller's own (an administrator's
 unelevated programs run as it, and one could make the pipe while the
 service is stopped); for a center run by hand it is the caller's. `log` reads `log.jsonl` (and
 `log.jsonl.1`) in the state folder, so it works with the center stopped.
+
+`--json` gives the administrator's commands (`install`, `set`, `update`,
+`uninstall`, `service start|stop|restart`, `owner-token`, `backup`, `restore`)
+and `status` an answer for programs, as the node's commands have one: the
+lines they print as `{"messages": [...]}`, with their data beside them
+(`owner-token`'s `token` and `made`; `status`'s `installed`, `service` and
+`running`), and an error as `{"error": "..."}` on stdout too. The other
+commands refuse it. The desktop app runs all of these but `backup` and `restore` through its
+broker (see desktop.md, the broker's closed lists).
 
 ### Update
 

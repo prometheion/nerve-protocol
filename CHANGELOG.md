@@ -3,9 +3,10 @@
 ## 0.1.0
 
 The first release of Nerve for Linux and Windows: `nerve-center` and
-`nerve-node` for Linux x86_64 and aarch64, the desktop app for Linux x86_64
-(also as a `.deb` and an `.rpm`) and Windows x64, and `nerve-center` for
-Windows x64. It is a beta, not 1.0.0.
+`nerve-node` for Linux x86_64 and aarch64, and the app `nerve`, which is a
+node or a center, for Linux x86_64 (also as a `.deb` and an `.rpm`) and
+Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
+`nerve-node-desktop` first; the `nerve` package replaces it.
 
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
 0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
@@ -35,6 +36,10 @@ and every limit is in
   the first.
 - `nerve-center set` shows the service's settings and changes one, such as
   `set ui 0.0.0.0:7480`, then restarts it; `install` takes them as flags.
+- `--json` for the center's administrator commands (`install`, `set`,
+  `update`, `uninstall`, `service`, `owner-token`, `backup`, `restore`) and
+  `status`: their lines as `{"messages": [...]}` with their data, an error
+  as `{"error": ...}`.
 - The center's owner commands in the terminal, also with the web UI off:
   `service start|stop|restart`, `pair`, `nodes list|disable|enable|rm`,
   `token new|list|rm` and `log`. They ask the running center through
@@ -80,6 +85,13 @@ and every limit is in
   switch needs the Windows Firewall service.
 - `user` mode and allowlist as you run as the owner; root may be the owner
   on Linux, and an administrator on Windows, with a warning.
+- Where a center runs on the same machine (the terminal programs), `mode
+  user`, `allowlist --as-owner` and a folder over your home or a harness's
+  settings say that what runs as you, or `nerve-run` there, can read the
+  harness tokens that reach the center.
+- The guard refuses the app's program `nerve` for the file tools where a
+  program is installed (`/usr/bin`, `Program Files\Nerve`), not for any path
+  called `nerve`: `rm -rf ~/src/nerve` runs.
 
 ### Capabilities
 
@@ -109,11 +121,16 @@ and every limit is in
 - Linux: `sudo nerve-node install` and `sudo nerve-center install` as
   services, which ask the first questions; tested on Ubuntu 22.04, 24.04 and
   26.04 and Debian 12 and 13 (x86_64), and Ubuntu 24.04 (aarch64).
-- Windows: the desktop app's installer (also `--silent`, and a quiet
-  uninstall that keeps the data), and the center by a double-click (or
-  `nerve-center install` in an administrator's terminal), which installs it
-  as a service and puts it on the machine's `Path`;
-  tested on Windows 11 Pro and Windows Server 2025.
+- Windows: the app's installer, which asks whether this machine is a node
+  or a center and installs that role as a service (also `--silent` for a
+  node, and a quiet uninstall that keeps the data); a harness reaches the
+  center over HTTP MCP; tested on Windows 11 Pro and Windows Server 2025.
+- The package's update restarts the service that runs the app's program,
+  the node's or the center's, also one the plain program installed (its
+  program, menu entry and `nerve-center` command move to the package's too);
+  one a terminal program installed is that program's to update. Where that restart failed, `status` and the app say
+  that the service still runs the earlier program (for a service that starts
+  the app's program only).
 - `update` checks the download against the release's `SHA256SUMS` and puts
   the old program back if the new one does not start. The programs are not
   signed yet.
@@ -127,11 +144,30 @@ and every limit is in
 
 ### The desktop app
 
+- One app, `nerve`, for both roles: its first step asks what this machine
+  is, a node or a center, and installs that role; one role per machine
+  (for both, use the terminal programs `nerve-node` and `nerve-center`).
+  On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
+  link to it (a link to another program stays as it is). The `.deb` and `.rpm` are named `nerve` and replace
+  `nerve-node-desktop`: a pre-release tester removes that first. The
+  package's app asks the role at its first start. In the center role
+  **Nerve** in the menu opens the center's web UI and removes the center
+  (also Apps & features on Windows). A role a terminal program installed
+  beside it is said, as "Also a center, installed in the terminal", and left
+  alone; uninstalling one role keeps the program while the other role's
+  service runs it. The package's menu entry opens no `nerve://` links; the node role
+  adds the handler, so a center answers none.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
-- The node's own web UI on Linux, off until `nerve-node ui on`.
+- The node's own web UI, on Linux and Windows, off until it is turned on in
+  **Settings › Network › Web UI** (or `nerve-node ui on`), with its tokens.
+  **Open** checks first that the node holds the port, and opens it over TLS
+  where the node serves it so. On Windows only the owner's own session gets
+  in, and beyond loopback is an administrator's step, also as the setting
+  `ui.listen` (`config set`, a changed node.toml or a restore); what the
+  web UI changes is audited as the owner's account.
 
 ### On Windows
 
@@ -148,6 +184,10 @@ and every limit is in
   only the app turns it on.
 - A capability's template whose program reads its line again as commands
   (`cmd`, a `.bat` file, PowerShell without `-File`) is refused.
+- The center's firewall rules name its service, not its program, and
+  `uninstall` removes the web UI's and MCP's rules that `set` printed too.
+- The node's and the center's listeners hold their ports alone
+  (`SO_EXCLUSIVEADDRUSE`): no other program can bind them while they listen.
 
 ### Since 0.0.8
 

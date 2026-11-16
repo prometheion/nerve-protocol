@@ -143,6 +143,10 @@ fn owner_row(owner: Option<&str>, full: bool, p: &mut Page) {
     };
 }
 
+/// What `status` says when the service runs an older program than the
+/// installed one (nerve_service::stale).
+pub const OLDER_PROGRAM: &str = "The service still runs the program it started with, older than the installed one: `nerve-node service restart` starts the new one.";
+
 /// What `status` shows of the node, from `status --json`'s `v` (a running
 /// node's answer, or what the config says of a stopped one): the node and
 /// its service, its limits, each center, the warnings, and the next step.
@@ -185,6 +189,9 @@ fn status_page(v: &Value) -> Page {
     }
     if v["locked"] == true {
         p.warn("Panic: nothing runs until it is unlocked.");
+    }
+    if v["service"]["older"] == true {
+        p.warn(OLDER_PROGRAM);
     }
     if let Some(why) = v["unread"].as_str() {
         p.note(format!(
@@ -489,6 +496,26 @@ mod tests {
             line(true)
         );
         assert!(!line(false).contains("as you"), "{}", line(false));
+    }
+
+    /// A service that still runs the program a package replaced says so,
+    /// with the restart that starts the new one (design of #232, 1).
+    #[test]
+    fn the_status_says_when_the_service_runs_an_older_program() {
+        let service = |older: bool| {
+            text(&json!({
+                "daemon": "running",
+                "service": {"installed": true, "state": "running", "enabled": true, "version": "0.1.0", "older": older},
+                "centers": [],
+            }))
+        };
+        assert!(
+            service(true).contains("older than the installed one"),
+            "{}",
+            service(true)
+        );
+        assert!(service(true).contains("nerve-node service restart"));
+        assert!(!service(false).contains("older"), "{}", service(false));
     }
 
     /// `status` is one place to look: the node and its service in the head

@@ -248,3 +248,82 @@ fn a_loopback_ui_answers_to_its_own_address_and_loopback_names_only() {
         true
     ));
 }
+
+/// The Windows rule: a process of the owner's interactive session is let in
+/// and counted by its session; session 0, a command's process, another
+/// account's session and what cannot be told are closed; a connection
+/// Windows does not list is another machine only when it is not from this
+/// one.
+#[test]
+fn on_windows_only_the_owner_s_session_gets_in() {
+    // Session 0 is closed even where it would name the owner.
+    let owner = |s: u32| s == 2 || s == 0;
+    let judge = |pid, local, session: Option<u32>, command: bool| {
+        judge_windows(pid, local, |_| session, |_| command, owner)
+    };
+    assert_eq!(
+        judge(Some(10), true, Some(2), false),
+        WinVerdict::Session(2)
+    );
+    assert!(matches!(
+        judge(Some(10), true, Some(0), false),
+        WinVerdict::Closed(_)
+    ));
+    assert!(matches!(
+        judge(Some(10), true, Some(3), false),
+        WinVerdict::Closed(_)
+    ));
+    assert!(matches!(
+        judge(Some(10), true, None, false),
+        WinVerdict::Closed(_)
+    ));
+    // A command's process, in the owner's session too.
+    assert!(matches!(
+        judge(Some(10), true, Some(2), true),
+        WinVerdict::Closed(_)
+    ));
+    assert!(matches!(
+        judge(None, true, Some(2), false),
+        WinVerdict::Closed(_)
+    ));
+    assert_eq!(judge(None, false, None, false), WinVerdict::Remote);
+}
+
+/// Each session has its own places: one that holds them all leaves the
+/// owner's other session, and other machines, theirs.
+#[test]
+fn the_places_are_kept_per_session() {
+    let ui = Arc::new(WebUi::default());
+    let held: Vec<Place> = (0..PER_PEER)
+        .map(|_| ui.place_for(Who::Session(2)).unwrap())
+        .collect();
+    assert!(ui.place_for(Who::Session(2)).is_none());
+    assert!(ui.place_for(Who::Session(3)).is_some());
+    drop(held);
+    assert!(ui.place_for(Who::Session(2)).is_some());
+}
+
+/// On Windows the owners are SIDs, and the audit names the one whose browser
+/// made a change as the owner pipe names it, not as `root`, an account
+/// Windows does not have.
+#[test]
+fn the_owner_of_a_web_change_is_named_as_the_pipe_names_them() {
+    let sid = "S-1-5-21-1-2-3-1001".to_string();
+    let named = |s: &str| {
+        (s == sid)
+            .then(|| "PC\\alice".to_string())
+            .ok_or_else(|| "no account".to_string())
+    };
+    assert_eq!(
+        owner_name(&Owners::Sids(vec![sid.clone()]), named),
+        "PC\\alice"
+    );
+    // No account found: the SID, as the pipe says it.
+    assert_eq!(
+        owner_name(&Owners::Sids(vec!["S-1-5-21-9".into()]), named),
+        "S-1-5-21-9"
+    );
+    assert_ne!(owner_name(&Owners::Sids(Vec::new()), named), "root");
+    assert_eq!(owner_name(&Owners::Named("alice".into()), named), "alice");
+    assert_eq!(owner_name(&Owners::Uids(Vec::new()), named), "root");
+}

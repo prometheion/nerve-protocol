@@ -16,7 +16,7 @@ exe() {
     | python -c 'import json,sys; [e] = [m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable") and m["profile"]["test"]]; print(e)'
 }
 
-cp "$(exe -p nerve-node-desktop --test real)" "$OUT/real.exe"
+cp "$(exe -p nerve --test real)" "$OUT/real.exe"
 cp "$(exe -p nerve-node --test win_sudo)" "$OUT/win_sudo.exe"
 cp "$(exe -p nerve-node --test win_limits)" "$OUT/win_limits.exe"
 cp "$(exe -p nerve-node --test win_account)" "$OUT/win_account.exe"

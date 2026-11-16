@@ -3,7 +3,7 @@
 `nerve-node --help` lists the commands in groups, and
 `nerve-node help <command>` has the rest of one. The owner of the installed
 node runs them without `sudo`; `install`, `update`, `uninstall` and
-`sudo on` need it. The desktop app's `nerve-node-desktop` takes the same
+`sudo on` need it. The desktop app's `nerve` takes the same
 commands.
 
 ## `nerve-node`

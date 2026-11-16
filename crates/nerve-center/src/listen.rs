@@ -50,9 +50,10 @@ pub const PER_PREFIX: usize = 64;
 /// The largest pairing request body.
 const PAIR_BODY: usize = 16 * 1024;
 
-/// Binds a TCP listener.
+/// Binds a TCP listener, on Windows for this process alone
+/// ([`nerve_service::listen`]).
 pub async fn tcp(addr: &str) -> Result<TcpListener, String> {
-    TcpListener::bind(addr).await.map_err(|e| match e.kind() {
+    nerve_service::listen::bind(addr).await.map_err(|e| match e.kind() {
         std::io::ErrorKind::AddrInUse => format!(
             "cannot listen on {addr}: another program listens there; if it is a center, `nerve-center status` says so (the installed one runs as the service), else give another address (--listen, --ui, --mcp)"
         ),

@@ -19,7 +19,7 @@
 # `#[ignore = "<reason>"]`, so every run lists them as ignored with the
 # reason; the `windows-installed` job runs them on a runner of its own
 # (.github/workflows/installed-windows.yml). Its programs, the debug
-# `nerve-node-desktop.exe` and `nerve-center.exe`, are an artifact of the
+# `nerve.exe` and `nerve-center.exe`, are an artifact of the
 # `windows` job for three days, to try on a Windows test machine.
 #
 # `pull_request` runs the merge of the branch into main, with a read-only token
@@ -97,7 +97,7 @@ jobs:
             ~/.cargo/git/db
             target
           key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-      # The desktop app (crates/nerve-node-desktop) links the system's fontconfig.
+      # The desktop app (crates/nerve) links the system's fontconfig.
       - name: Build dependencies of the desktop app
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -281,7 +281,7 @@ jobs:
       binaries: linux-musl-{0}
       tests: linux-musl-tests-{0}
 
-  # The desktop app's own install on Linux (crates/nerve-node-desktop/tests/real.rs):
+  # The desktop app's own install on Linux (crates/nerve/tests/real.rs):
   # through the code its buttons run, as root, it installs the node as a
   # service with the app's menu entry and link handler, stops, starts and
   # restarts the service, updates the program from a file and uninstalls it
@@ -311,11 +311,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
       - name: Build the app and the test program
         run: |
-          cargo test --locked -p nerve-node-desktop --test real --no-run --message-format=json \
+          cargo test --locked -p nerve --test real --no-run --message-format=json \
             | python3 -c 'import json,sys; print(*[m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["name"] == "real"])' \
             > "$RUNNER_TEMP/real.path"
           cat "$RUNNER_TEMP/real.path"
-          test -x target/debug/nerve-node-desktop
+          test -x target/debug/nerve
       # As root, as the app's install runs once a person said yes; the
       # runner's account is the owner (SUDO_USER).
       # A test that returns early says so with `skipped` at the start of a
@@ -323,7 +323,7 @@ jobs:
       # the step.
       - name: Install, control, update and uninstall
         run: |
-          sudo NERVE_DESKTOP_REAL="$PWD/target/debug/nerve-node-desktop" "$(cat "$RUNNER_TEMP/real.path")" \
+          sudo NERVE_DESKTOP_REAL="$PWD/target/debug/nerve" "$(cat "$RUNNER_TEMP/real.path")" \
             --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 \
             | tee "$RUNNER_TEMP/real.log"
           if grep -E '(^|\.\.\. )skipped' "$RUNNER_TEMP/real.log"; then exit 1; fi
@@ -386,9 +386,9 @@ jobs:
       # the `windows-installed` job, each under a name of its own.
       - name: The programs and the test programs
         run: |
-          cargo build --locked -p nerve-node-desktop -p nerve-center
+          cargo build --locked -p nerve -p nerve-center
           mkdir -p dist/tests
-          cp target/debug/nerve-node-desktop.exe target/debug/nerve-center.exe dist/
+          cp target/debug/nerve.exe target/debug/nerve-center.exe dist/
           .github/scripts/windows-test-programs.sh dist/tests
           ls -l dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

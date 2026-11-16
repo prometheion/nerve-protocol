@@ -95,7 +95,7 @@ takes, and a `lock`, `read` or `write` that is unwrapped, turned into an
 `Option` or an error, or matched on. It goes by the names, so a plain
 `.lock().await` or an own method that returns a guard passes.
 
-The exception is the window part of `nerve-node-desktop` (`broker.rs`,
+The exception is the window part of `nerve` (`broker.rs`,
 `runner.rs`, `instance.rs`, `app/live.rs`): its locks still shrug off a
 poisoning and go on, so a panic there does not end the service. They guard
 the app's own windows and the elevated broker's pipes, not the node's rules or
@@ -127,8 +127,8 @@ The Event Viewer takes an entry's text from the source's message file.
 `build.rs` writes a `.res` file with one message table (`%1` for each id,
 `eventlog::resource`) and links it into every program of the crate on
 windows-msvc, and the desktop app's `build.rs` links the same table into
-`nerve-node-desktop`, the node's program on Windows; `install` registers the
-installed program (`nerve-node-desktop.exe`) as the message file under
+`nerve`, the node's program on Windows; `install` registers the
+installed program (`nerve.exe`) as the message file under
 `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node`,
 and `uninstall` removes the key. `nerve-center install` and `uninstall` do the
 same for the source `nerve-center`, with the center's program as the message

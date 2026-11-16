@@ -118,10 +118,25 @@ pub fn pipe_name() -> String {
 /// or of root, so they stay root's: the node refuses them from an owner.
 pub const ROOT_ONLY: [&str; 3] = ["machine.allow_root", "machine.sudo_path", "machine.shell"];
 
-/// The first of [`ROOT_ONLY`] that differs between `old` and `new`.
+/// The setting that opens the web UI to other machines: on Windows an
+/// administrator's too, as the firewall rule for it is (`ui on --listen`
+/// says so for the command, this for the setting, a restore and a changed
+/// node.toml).
+pub const WEB_UI_LISTEN: &str = "ui.listen";
+
+/// The first of [`ROOT_ONLY`] that differs between `old` and `new`, and on
+/// Windows a change of [`WEB_UI_LISTEN`] to an address beyond loopback.
 pub fn root_only_change(
     old: &nerve_policy::NodeConfig,
     new: &nerve_policy::NodeConfig,
+) -> Option<&'static str> {
+    root_only_change_on(old, new, cfg!(windows))
+}
+
+fn root_only_change_on(
+    old: &nerve_policy::NodeConfig,
+    new: &nerve_policy::NodeConfig,
+    windows: bool,
 ) -> Option<&'static str> {
     let (o, n) = (&old.machine, &new.machine);
     [
@@ -132,6 +147,33 @@ pub fn root_only_change(
     .iter()
     .position(|d| *d)
     .map(|i| ROOT_ONLY[i])
+    .or_else(|| opens_web_ui(old, new, windows).then_some(WEB_UI_LISTEN))
+}
+
+/// Whether `new` lets the web UI listen beyond loopback where `old` did not
+/// (on `windows`, where that is an administrator's step).
+fn opens_web_ui(
+    old: &nerve_policy::NodeConfig,
+    new: &nerve_policy::NodeConfig,
+    windows: bool,
+) -> bool {
+    windows
+        && new.ui.listen != old.ui.listen
+        && new
+            .ui
+            .listen
+            .as_deref()
+            .is_some_and(crate::cli::ui::beyond_loopback)
+}
+
+/// What `key`, a [`root_only_change`], does, and so why it stays an
+/// administrator's.
+fn why_root_only(key: &str) -> String {
+    if key == WEB_UI_LISTEN {
+        format!("{key} opens the node's web UI to other machines")
+    } else {
+        format!("{key} decides which account or program commands run as")
+    }
 }
 
 /// The owner a command runs for, when the node runs it for one.
@@ -183,7 +225,8 @@ pub fn check_change(
     }
     match root_only_change(old, new) {
         Some(key) => Err(format!(
-            "{key} decides which account or program commands run as, so only {} changes it: {}",
+            "{}, so only {} changes it: {}",
+            why_root_only(key),
             admin(),
             with_rights("config set …")
         )),
@@ -207,7 +250,8 @@ pub const RESTORE_BY_ADMIN: &str = "a backup that changes it is restored by";
 /// [`ROOT_ONLY`].
 pub fn restore_needs_admin(key: &str) -> String {
     format!(
-        "the backup sets {key} other than it is here, and {key} decides which account or program commands run as: {RESTORE_BY_ADMIN} {}; {}",
+        "the backup sets {key} other than it is here, and {}: {RESTORE_BY_ADMIN} {}; {}",
+        why_root_only(key),
         admin(),
         with_rights("restore …")
     )
@@ -257,6 +301,16 @@ pub fn refused(cmd: &Cmd) -> Option<String> {
             "setup",
             "it can install a system keyring and restart the service",
         ),
+        // On Windows the web UI beyond loopback is an administrator's step,
+        // as its firewall rule is.
+        Cmd::Ui {
+            cmd: Some(crate::cli::UiCmd::On {
+                listen: Some(at), ..
+            }),
+        } if cfg!(windows) && crate::cli::ui::beyond_loopback(at) => (
+            "ui on --listen",
+            "it opens the node's web UI to other machines",
+        ),
         Cmd::Sudo {
             cmd: Some(SudoCmd::On),
         } => (
@@ -289,9 +343,29 @@ pub fn needs_admin(cmd: &Cmd) -> bool {
             | ConfigCmd::Unset { key }
             | ConfigCmd::Add { key, .. }
             | ConfigCmd::Rm { key, .. },
-        ) => ROOT_ONLY.contains(&key.as_str()),
+        ) => config_needs_admin(cmd, key, cfg!(windows)),
         c => refused(c).is_some(),
     }
+}
+
+/// Whether the change of the setting `key` by `cmd` is an administrator's:
+/// a setting of [`ROOT_ONLY`], and on `windows` the web UI's address
+/// beyond loopback.
+fn config_needs_admin(cmd: &Cmd, key: &str, windows: bool) -> bool {
+    ROOT_ONLY.contains(&key) || sets_web_ui_wide(cmd, windows)
+}
+
+/// Whether `cmd` is `config set ui.listen` to an address beyond loopback,
+/// on `windows`, where that is an administrator's step
+/// ([`WEB_UI_LISTEN`]).
+fn sets_web_ui_wide(cmd: &Cmd, windows: bool) -> bool {
+    use crate::cli::ConfigCmd;
+    windows
+        && matches!(
+            cmd,
+            Cmd::Config(ConfigCmd::Set { key, value })
+                if key == WEB_UI_LISTEN && crate::cli::ui::beyond_loopback(value)
+        )
 }
 
 /// [`needs_admin`] for a command line without the program's name; one that
@@ -2601,6 +2675,70 @@ mod tests {
         ] {
             assert!(!needs_admin(&cli(args).cmd), "{args:?}");
         }
+    }
+
+    /// On Windows the web UI beyond loopback is an administrator's step, as
+    /// its firewall rule is; on loopback it is the owner's, as on Linux.
+    #[test]
+    fn the_web_ui_beyond_loopback_is_an_administrator_s_on_windows() {
+        let wide = cli(&["ui", "on", "--listen", "0.0.0.0:7470"]);
+        assert_eq!(needs_admin(&wide.cmd), cfg!(windows));
+        for args in [
+            &["ui", "on"][..],
+            &["ui", "on", "--listen", "127.0.0.1:7471"],
+            &["ui", "on", "--listen", "[::1]:7470"],
+            &["ui", "off"],
+        ] {
+            assert!(!needs_admin(&cli(args).cmd), "{args:?}");
+        }
+    }
+
+    /// On Windows the setting, a changed node.toml and a restore open the web
+    /// UI beyond loopback as little as `ui on --listen` does: that is an
+    /// administrator's; narrowing it, loopback and Linux are not.
+    #[test]
+    fn the_web_ui_listen_setting_is_an_administrator_s_beyond_loopback_on_windows() {
+        let set = |at: &str| cli(&["config", "set", "ui.listen", at]);
+        assert!(sets_web_ui_wide(&set("0.0.0.0:7470").cmd, true));
+        assert!(sets_web_ui_wide(&set("[::]:7470").cmd, true));
+        assert!(sets_web_ui_wide(&set("192.0.2.7:7470").cmd, true));
+        assert!(!sets_web_ui_wide(&set("127.0.0.1:7470").cmd, true));
+        assert!(!sets_web_ui_wide(&set("[::1]:7470").cmd, true));
+        assert!(!sets_web_ui_wide(&set("0.0.0.0:7470").cmd, false));
+        assert!(!sets_web_ui_wide(
+            &cli(&["config", "set", "log.level", "debug"]).cmd,
+            true
+        ));
+        assert_eq!(needs_admin(&set("0.0.0.0:7470").cmd), cfg!(windows));
+        let wide = set("0.0.0.0:7470");
+        assert!(config_needs_admin(&wide.cmd, WEB_UI_LISTEN, true));
+        assert!(!config_needs_admin(&wide.cmd, WEB_UI_LISTEN, false));
+        assert!(config_needs_admin(&wide.cmd, "machine.shell", false));
+        assert!(!config_needs_admin(
+            &set("127.0.0.1:7470").cmd,
+            WEB_UI_LISTEN,
+            true
+        ));
+        let at = |l: Option<&str>| {
+            let mut c = nerve_policy::NodeConfig::default();
+            c.ui.listen = l.map(String::from);
+            c
+        };
+        let (off, near, wide) = (
+            at(None),
+            at(Some("127.0.0.1:7470")),
+            at(Some("0.0.0.0:7470")),
+        );
+        assert!(opens_web_ui(&off, &wide, true));
+        assert!(opens_web_ui(&near, &wide, true));
+        assert!(!opens_web_ui(&wide, &wide, true));
+        assert!(!opens_web_ui(&wide, &near, true));
+        assert!(!opens_web_ui(&wide, &off, true));
+        assert!(!opens_web_ui(&off, &wide, false));
+        assert_eq!(root_only_change_on(&off, &wide, true), Some(WEB_UI_LISTEN));
+        assert_eq!(root_only_change_on(&off, &wide, false), None);
+        assert!(why_root_only(WEB_UI_LISTEN).contains("web UI"));
+        assert!(why_root_only("machine.shell").contains("account"));
     }
 
     /// The settings that pick the account and the programs of the commands
