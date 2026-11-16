@@ -293,6 +293,39 @@ describe("Audit, while entries come in", () => {
   });
 });
 
+describe("Audit, after Clear", () => {
+  it("shows the next entry, not the cleared one, when the answer takes a while", async () => {
+    const d = nodeData();
+    const { el } = await node("audit", {
+      "GET /api/audit": async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        return d.audit;
+      },
+      "POST /api/audit/clear": () => {
+        d.audit.entries = [] as typeof d.audit.entries;
+        return {};
+      },
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+    expect(text(el.querySelector(".dcol")!)).toContain("git push --force origin main");
+    await click(button(el, "Clear"));
+    await click(button(document.querySelector("[role=dialog]")!, "Clear"));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    const one = nodeData().audit.entries[1];
+    d.audit.entries = [{ ...one, ts: Date.now(), target: "/srv/new-file", rule_preview: "/srv/new-file" }] as typeof d.audit.entries;
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    expect(text(el.querySelector(".dcol")!)).toContain("/srv/new-file");
+    expect(text(el.querySelector(".dcol")!)).not.toContain("git push --force");
+  });
+});
+
 describe("Audit, once the picked entry is gone from the answer", () => {
   it("keeps the picked entry and acts on it", async () => {
     const d = nodeData();

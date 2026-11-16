@@ -113,8 +113,10 @@ export function AuditPage() {
             const yes = await ask({ title: "Clear the audit?", message: "The entries so far are kept in the audit's older file.", confirm: "Clear", danger: true });
             if (!yes) return;
             await api("POST", "/api/audit/clear");
-            setSel(null);
+            // Only once the empty answer is in: before it, the effect
+            // would pick the old newest entry again and keep it.
             await audit.reload();
+            setSel(null);
           }}
         >
           Clear

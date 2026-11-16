@@ -233,8 +233,10 @@ function MachineSettings({ n }: { n: Node }) {
     setSudo(s.sudo);
   };
   const ready = n.settings_write && n.online;
+  // Loaded once per machine: a link that drops and comes back must not
+  // replace what is being typed. Reload fetches again on purpose.
   useEffect(() => {
-    if (ready) load().catch((e) => setMsg(e.message));
+    if (ready && version === null) load().catch((e) => setMsg(e.message));
   }, [n.id, ready]);
   if (!n.settings_write) {
     return (

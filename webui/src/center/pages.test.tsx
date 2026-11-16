@@ -25,6 +25,9 @@ describe("Pair a machine", () => {
     // alone; a Windows machine opens the link.
     expect(text(dialog)).toContain("nerve-node center add -");
     expect(text(dialog)).toContain(pairing.link);
+    // Never the link as an argument: it would sit in the process list (#198).
+    expect(text(dialog)).not.toContain("center add '");
+    expect(text(dialog).split(pairing.link)).toHaveLength(2);
     expect(text(dialog)).toContain("then paste the link on the next line");
     expect(text(dialog)).toContain("On a Windows machine, open the link on the machine");
     expect(text(dialog)).not.toContain("Certificate pin");
@@ -171,7 +174,7 @@ describe("Audit", () => {
 
   it("gives the exact sudo rule to paste, and none where no shell reads it the same", () => {
     expect(sudoRuleLine("sudo apt update *")).toBe("nerve-node rule add allow --action exec.run --exact 'sudo apt update *'");
-    for (const odd of ["sudo echo 'x'", "sudo a\\b", "sudo a\nrm -rf /"]) expect(sudoRuleLine(odd)).toBeNull();
+    for (const odd of ["sudo echo 'x'", "sudo a\\b", "sudo a\nrm -rf /", "sudo a\rb", "sudo a\u0000b", "sudo a\tb"]) expect(sudoRuleLine(odd)).toBeNull();
   });
 
   it("disables the machine's rules without its settings grant and says why", async () => {
@@ -422,6 +425,48 @@ describe("Settings", () => {
     await click(button(el.querySelector(".dcol")!, "Save"));
     expect(f.to("POST", "/api/nodes/settings").map((c) => c.body)).toEqual([{ id: "n-dev", document: { node: { name: "dev-2" } }, if_version: 4 }]);
     expect(text(el)).toContain("Saved, version 5.");
+  });
+
+  it("keeps what is typed in a machine's settings when its link drops and comes back", async () => {
+    const d = centerData();
+    let gets = 0;
+    const { el, f } = await center("settings", {
+      "GET /api/overview": () => d.overview,
+      "GET /api/nodes/settings": () => (gets++, { document: { node: { name: "dev" } }, version: 4, sudo: "off" }),
+    });
+    await click(allByText(el, /^Machines/, ".lrow")[0]);
+    const area = () => el.querySelector("textarea[aria-label='Settings of dev']") as HTMLTextAreaElement;
+    await type(area(), '{"node":{"name":"dev-2"}}');
+    const poll = async () => {
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await settle(4);
+    };
+    d.overview.nodes[0].online = false;
+    await poll();
+    expect(text(el)).toContain("Offline; its settings");
+    d.overview.nodes[0].online = true;
+    await poll();
+    expect(area().value).toBe('{"node":{"name":"dev-2"}}');
+    expect(f.to("GET", "/api/nodes/settings")).toHaveLength(1);
+    expect(gets).toBe(1);
+  });
+
+  it("asks a Windows machine for no sudo password and says where to turn it on", async () => {
+    const d = centerData();
+    d.overview.nodes[1].settings_write = true;
+    const { el } = await center("settings", {
+      "GET /api/overview": () => d.overview,
+      "GET /api/nodes/settings": () => ({ document: {}, version: 1, sudo: "off" }),
+    });
+    await click(allByText(el, /^Machines/, ".lrow")[0]);
+    await click(allByText(el, "office-pc", "button")[0]);
+    await settle(4);
+    expect(el.querySelector("input[aria-label='Sudo password of office-pc']")).toBeNull();
+    expect(text(el)).toContain("Turn it on in the Nerve app on that machine, Permissions, Sudo.");
+    expect(allByText(el, "Turn sudo off", "button")).toHaveLength(1);
+    expect(allByText(el, "Turn sudo on", "button")).toHaveLength(0);
   });
 
   it("seals the sudo password for the machine's offer, and empties its field", async () => {
