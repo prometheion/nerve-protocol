@@ -83,10 +83,14 @@ pub async fn within<T>(
 /// ([`missing_pipe`]), and when the pipe is another account's but no node
 /// runs (`node_runs`, asked only then), so a pipe someone made of the node's
 /// name does not keep the owner from changing folders with the node stopped.
-/// Any other failure is the answer.
+/// On Windows also when the pipe closed without an answer and no node runs:
+/// a node that was stopping as it was reached leaves its last pipe instance
+/// a moment longer. Any other failure is the answer.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn file_instead(e: &str, node_runs: impl FnOnce() -> bool) -> bool {
-    e == nerve_transport::ctl::NOT_RUNNING || (e.starts_with(NOT_THE_NODES) && !node_runs())
+    use nerve_transport::ctl::{CLOSED, NOT_RUNNING};
+    let gone = e.starts_with(NOT_THE_NODES) || (cfg!(windows) && e == CLOSED);
+    e == NOT_RUNNING || (gone && !node_runs())
 }
 
 /// Whether the outcome of a call over the pipe says that a node answered: an
@@ -356,6 +360,11 @@ mod tests {
         ] {
             assert!(!file_instead(other, runs(false)), "{other}");
         }
+        // A pipe that closed unanswered: on Windows a node that was
+        // stopping, so no node when none runs; on Linux a node that runs.
+        use nerve_transport::ctl::CLOSED;
+        assert_eq!(file_instead(CLOSED, runs(false)), cfg!(windows));
+        assert!(!file_instead(CLOSED, runs(true)));
     }
 
     /// No pipe of the node's name is no node only when none runs: a node
