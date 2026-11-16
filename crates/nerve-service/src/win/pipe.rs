@@ -46,8 +46,8 @@ pub fn name_for(prefix: &str, dir: &str) -> String {
 
 #[cfg(windows)]
 pub use sys::{
-    Descriptor, PIPE_BUSY, client_pid, foreign_owner, instance, node_owner_check, open_identified,
-    open_limited, owner_of,
+    Descriptor, PIPE_BUSY, client_identity, client_pid, foreign_owner, instance, node_owner_check,
+    open_identified, open_limited, owner_of,
 };
 
 #[cfg(windows)]
@@ -146,6 +146,58 @@ mod sys {
         let ok =
             unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } != 0;
         (ok && pid != 0).then_some(pid)
+    }
+
+    /// The account of the client of the connected `pipe` (its SID), and
+    /// whether its token holds the administrators' group enabled: an
+    /// elevated administrator, or SYSTEM. Read at identification level,
+    /// which [`open_identified`] and [`open_limited`] allow, once the server
+    /// read from the pipe; `None` when the account cannot be read.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn client_identity(pipe: HANDLE) -> Option<(Vec<u8>, bool)> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            CheckTokenMembership, GetTokenInformation, RevertToSelf, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        };
+        use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        let admins = well_known_sid(WinBuiltinAdministratorsSid).ok()?;
+        // SAFETY: a connected pipe the server read from; the thread's token
+        // is opened while impersonating, then reverted at once, and closed
+        // after it was read.
+        unsafe {
+            if ImpersonateNamedPipeClient(pipe) == 0 {
+                return None;
+            }
+            let mut token: HANDLE = std::ptr::null_mut();
+            let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token);
+            RevertToSelf();
+            if opened == 0 {
+                return None;
+            }
+            let mut buf = vec![0u64; 64];
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut len,
+            );
+            let mut member = 0;
+            let checked = CheckTokenMembership(token, admins.as_ptr() as PSID, &mut member);
+            CloseHandle(token);
+            if ok == 0 {
+                return None;
+            }
+            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            let n = GetLengthSid(user.User.Sid) as usize;
+            let sid = std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), n).to_vec();
+            // A membership that cannot be read is no administrator's: the
+            // caller then gives the owner token.
+            Some((sid, checked != 0 && member != 0))
+        }
     }
 
     /// The SID that owns the pipe `pipe` is open on.

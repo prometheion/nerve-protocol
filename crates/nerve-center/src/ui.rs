@@ -186,16 +186,46 @@ const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is r
 
 const API_BODY: usize = 1024 * 1024;
 
-/// The requests of the web UI the owner's commands in the terminal make
-/// ([`Ui::owner_call`]).
+/// The requests of the web UI that the local owner channel takes
+/// ([`Ui::owner_call`]): every call of the web UI's pages, so the owner's
+/// commands in the terminal and the app's pages can do all the web UI can
+/// (design of #232, owner 2026-11-16: nothing is GUI-only). Only the
+/// browser's own (the login, the session, the page) are not here.
 pub const OWNER_CALLS: &[(&str, &str)] = &[
     ("GET", "/api/overview"),
+    ("GET", "/api/stats"),
+    ("GET", "/api/audit"),
+    ("GET", "/api/log"),
+    ("GET", "/api/log/download"),
+    ("GET", "/api/help"),
     ("POST", "/api/pair"),
+    ("POST", "/api/pair/status"),
+    ("POST", "/api/nodes/rename"),
     ("POST", "/api/nodes/disable"),
     ("POST", "/api/nodes/remove"),
+    ("POST", "/api/sessions/end"),
+    ("GET", "/api/nodes/settings"),
+    ("POST", "/api/nodes/settings"),
+    ("POST", "/api/nodes/sudo/offer"),
+    ("POST", "/api/nodes/sudo"),
+    ("GET", "/api/caps"),
+    ("POST", "/api/caps/check"),
+    ("POST", "/api/caps/save"),
+    ("POST", "/api/caps/remove"),
+    ("POST", "/api/audit/rule"),
+    ("GET", "/api/checker"),
+    ("POST", "/api/checker"),
+    ("POST", "/api/checker/token"),
+    ("POST", "/api/checker/install"),
+    ("POST", "/api/checker/remove"),
+    ("POST", "/api/checker/allow"),
     ("GET", "/api/tokens"),
     ("POST", "/api/tokens/create"),
     ("POST", "/api/tokens/delete"),
+    ("POST", "/api/center/key/rotate"),
+    ("POST", "/api/center/key/finish"),
+    ("GET", "/api/center"),
+    ("POST", "/api/center"),
 ];
 /// How many log entries a view gets unless it asks for another number, and
 /// the most it may ask for.
@@ -239,31 +269,110 @@ impl Ui {
         })
     }
 
-    /// One request of the owner's commands in the terminal (`pair`,
-    /// `nodes`, `token`), which come over the attach socket or pipe
-    /// (crate::attach): the web UI's own handlers answer them ([`Ui::api`]),
-    /// so they take the same checks and limits and leave the same log
-    /// lines. Only these requests; nothing else of the web UI.
+    /// One request of the local owner channel (crate::attach): the owner's
+    /// commands in the terminal and the app's center pages. The web UI's
+    /// own handlers answer them ([`Ui::api`]), so they take the same checks
+    /// and limits and leave the same log lines. `query` is a GET's query
+    /// string (`id=…` of a machine, the log's question). The log file comes
+    /// as `{"text"}`, one JSON object per line.
     pub async fn owner_call(
         &self,
         method: &str,
         path: &str,
+        query: &str,
         body: &Value,
     ) -> Result<Value, (u16, Value)> {
         if !OWNER_CALLS.contains(&(method, path)) {
             return Err((
                 404,
-                json!({"error": format!("{method} {path} is none of the owner's commands")}),
+                json!({"error": format!("{method} {path} is none of the owner's calls")}),
             ));
+        }
+        if path == "/api/log/download" {
+            let r = self.log_download();
+            return match r.status {
+                200 => Ok(json!({"text": String::from_utf8_lossy(&r.body)})),
+                status => Err((
+                    status,
+                    serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+                )),
+            };
         }
         let req = Request {
             method: method.into(),
             path: path.into(),
-            query: String::new(),
+            query: query.into(),
             headers: Default::default(),
             body: Vec::new(),
         };
         self.api(&req, body).await
+    }
+
+    /// Checks the owner token a caller of the local owner channel gave
+    /// that is neither root nor an administrator (crate::attach), as the
+    /// login checks the web UI's: the same refusals and log lines, and a
+    /// wrong token's answer waits as the login's does, in the same line.
+    /// `login` is the app's log-in, which the log tells as the web UI's
+    /// sign-in is told; the token of each later call is not.
+    pub async fn channel_login(&self, given: &str, login: bool) -> Result<(), String> {
+        match self.refusal(
+            given,
+            (
+                "an owner sign-in on this machine",
+                "owner sign-ins on this machine",
+            ),
+        ) {
+            None => {
+                if login {
+                    self.center
+                        .log()
+                        .record(Level::Info, None, "signed in on this machine");
+                }
+                Ok(())
+            }
+            Some(answer) => {
+                self.wrong.wait().await;
+                Err(answer)
+            }
+        }
+    }
+
+    /// Why the owner token `given` does not sign in, `None` when it does: a
+    /// wrong token, or one that is also a harness token. A refusal is told
+    /// in the log by `what` (one, and several: "a web UI sign-in", "web UI
+    /// sign-ins"), without the token.
+    fn refusal(&self, given: &str, what: (&str, &str)) -> Option<String> {
+        let log = self.center.log();
+        // A secret that also opens /mcp would give the agent's own token
+        // the way into this UI (review round 7 of the center's sign-in).
+        let why = if given.is_empty() || !self.owner.ok(given) {
+            let wrong = format!(
+                "{WRONG_TOKEN} `{}`{} shows it.",
+                token_command(self.center.dir(), self.loopback),
+                token_where_here(self.center.dir())
+            );
+            ("wrong owner token", wrong)
+        } else if crate::mcp::token_ok(&self.center, self.env_token.as_deref(), given) {
+            (
+                "the owner token is also a harness token",
+                SHARED_TOKEN.into(),
+            )
+        } else {
+            return None;
+        };
+        let (why, answer) = why;
+        // The token that was tried is not logged: a typo of a good one is
+        // as good as the token.
+        match self.wrong.note() {
+            Some(1) => log.record(Level::Warn, None, &format!("{} was refused: {why}", what.0)),
+            Some(n) => log.record(
+                Level::Warn,
+                None,
+                &format!("{n} {} were refused in the last minute: {why}", what.1),
+            ),
+            None => {}
+        }
+        Some(answer)
     }
 
     /// Says how this center serves MCP: `mode` stdio, http or off, and for
@@ -417,44 +526,16 @@ impl Ui {
     /// the page to keep, or the reason it was refused, which waits before it
     /// goes ([`Ui::answer`]); the token never appears in a URL or a log.
     fn login(&self, req: &Request) -> Response {
-        let log = self.center.log();
         let given = webui::posted_secret(req);
-        // A secret that also opens /mcp would give the agent's own token
-        // the way into this UI (review round 7 of the center's sign-in).
-        let wrong = format!(
-            "{WRONG_TOKEN} `{}`{} shows it.",
-            token_command(self.center.dir(), self.loopback),
-            token_where_here(self.center.dir())
-        );
-        let why = if given.is_empty() || !self.owner.ok(&given) {
-            Some(("wrong owner token", wrong.as_str()))
-        } else if crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given) {
-            Some(("the owner token is also a harness token", SHARED_TOKEN))
-        } else {
-            None
-        };
-        if let Some((why, answer)) = why {
-            // The token that was tried is not logged: a typo of a good one is
-            // as good as the token.
-            match self.wrong.note() {
-                Some(1) => log.record(
-                    Level::Warn,
-                    None,
-                    &format!("a web UI sign-in was refused: {why}"),
-                ),
-                Some(n) => log.record(
-                    Level::Warn,
-                    None,
-                    &format!("{n} web UI sign-ins were refused in the last minute: {why}"),
-                ),
-                None => {}
-            }
+        if let Some(answer) = self.refusal(&given, ("a web UI sign-in", "web UI sign-ins")) {
             return Response::json(401, &json!({"error": answer}));
         }
         let token = self
             .sessions
             .start(Some(util::sha256_hex(given.as_bytes())));
-        log.record(Level::Info, None, "signed in to the web UI");
+        self.center
+            .log()
+            .record(Level::Info, None, "signed in to the web UI");
         Response::json(200, &json!({"session": token}))
     }
 
@@ -1092,51 +1173,70 @@ mod tests {
         );
     }
 
-    /// The owner's commands in the terminal reach only their own requests
-    /// of the web UI (round 1 of #213's second pass, spec 1 and security
-    /// 5): each listed one is a route the web UI answers; any other, which
-    /// the web UI would take from a logged-in owner, is refused over the
-    /// attach socket or pipe and changes nothing.
+    /// The local owner channel takes every call of the web UI's pages
+    /// (owner, 2026-11-16: nothing is GUI-only), and nothing of the
+    /// browser's own: each listed call is a route the web UI answers, each
+    /// route of the API is listed, and the login, the session and the page
+    /// are refused there.
     #[tokio::test]
-    async fn the_owner_channel_takes_only_the_owners_requests() {
+    async fn the_owner_channel_takes_every_call_of_the_pages() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
         let ui = Ui::new(&c, None, true);
-        let refused = "is none of the owner's commands";
         for (method, path) in OWNER_CALLS {
-            if let Err((_, e)) = ui.owner_call(method, path, &json!({})).await {
-                assert!(!e.to_string().contains(refused), "{method} {path}: {e}");
+            if let Err((code, e)) = ui.owner_call(method, path, "", &json!({})).await {
+                assert!(
+                    code != 404 || e["error"] != "unknown API call",
+                    "{method} {path}: {e}"
+                );
+                assert!(
+                    !e.to_string().contains("none of the owner's calls"),
+                    "{method} {path}: {e}"
+                );
             }
         }
-        let center_before = ui
-            .api(&req("GET", "/api/center", &[], ""), &json!({}))
-            .await
-            .unwrap();
-        let pin = c.pin();
-        for (method, path, body) in [
-            ("POST", "/api/center", json!({"name": "other"})),
-            ("POST", "/api/center/key/rotate", json!({})),
-            ("POST", "/api/checker", json!({})),
-            ("POST", "/api/nodes/rename", json!({"id": "x", "name": "y"})),
-            ("GET", "/api/stats", json!({})),
-            ("GET", "/api/center", json!({})),
-        ] {
-            let (code, e) = ui.owner_call(method, path, &body).await.unwrap_err();
-            assert_eq!(code, 404, "{method} {path}");
-            assert!(e.to_string().contains(refused), "{method} {path}: {e}");
+        // Every route of the API, as this file names them.
+        let source = include_str!("ui.rs");
+        let api = &source[source.find("    async fn api(").unwrap()..];
+        let api = &api[..api.find("\n/// The log view's question").unwrap()];
+        let mut routes = 0;
+        for line in api.lines() {
+            let line = line.trim();
+            for method in ["GET", "POST"] {
+                let head = format!("(\"{method}\", \"");
+                if let Some(rest) = line.strip_prefix(&head) {
+                    let path = &rest[..rest.find('"').unwrap()];
+                    routes += 1;
+                    assert!(
+                        OWNER_CALLS.contains(&(method, path)),
+                        "{method} {path} is not an owner call"
+                    );
+                }
+            }
         }
-        // The web UI itself answers them.
-        assert!(
-            ui.api(&req("GET", "/api/stats", &[], ""), &json!({}))
+        assert!(routes > 30, "{routes}");
+        for (method, path) in [
+            ("POST", "/login"),
+            ("GET", "/api/session"),
+            ("POST", "/logout"),
+            ("GET", "/"),
+        ] {
+            let (code, e) = ui
+                .owner_call(method, path, "", &json!({}))
                 .await
-                .is_ok()
-        );
-        let center_after = ui
-            .api(&req("GET", "/api/center", &[], ""), &json!({}))
+                .unwrap_err();
+            assert_eq!(code, 404, "{method} {path}");
+            assert!(
+                e.to_string().contains("none of the owner's calls"),
+                "{method} {path}: {e}"
+            );
+        }
+        // A GET's query reaches its handler: the log's question.
+        let (code, e) = ui
+            .owner_call("GET", "/api/log", "level=nonsense", &json!({}))
             .await
-            .unwrap();
-        assert_eq!(center_after, center_before);
-        assert_eq!(c.pin(), pin);
+            .unwrap_err();
+        assert_eq!(code, 400, "{e}");
     }
 
     async fn pair_status(ui: &Ui, code: &str) -> Value {

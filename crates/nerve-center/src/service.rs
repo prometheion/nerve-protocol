@@ -1049,6 +1049,7 @@ pub fn install_with(
         // refused.
         let _owner = as_owner_of(state)?;
         set_mode(state, 0o700)?;
+        crate::attach::keep_owner_account(state, crate::attach::installing_account().as_deref())?;
         crate::owner::ensure(state)?.0
     };
     // The folder may be left from an earlier install, whose user had

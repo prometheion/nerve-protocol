@@ -1430,7 +1430,7 @@ pub fn run(start: crate::instance::Asked) -> Result<(), Failed> {
         }
         ctl.installer(Launch::Elevated, &layout.bin);
     } else if opens == install::Opens::Center {
-        ctl.center_role(nerve_center::service::Layout::system().run);
+        ctl.center_role(crate::hub::endpoint());
     } else {
         // The node's default folders: the service's when it is installed.
         let paths = nerve_node::NodePaths::from_args(None, None);

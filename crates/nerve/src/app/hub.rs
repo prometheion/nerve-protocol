@@ -1,5 +1,5 @@
-//! The center role's pages: the log-in and every page of the center, from
-//! its web UI API on loopback (crate::hub), and the administrator's
+//! The center role's pages: the log-in and every page of the center, over
+//! its local owner channel (crate::hub), and the administrator's
 //! commands (`nerve __center ...`), each through a broker of its own that
 //! ends with it (design of #232, sections 2 and 3).
 
@@ -15,7 +15,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{Choose, Ctl, Exec};
 use crate::broker::Launch;
-use crate::hub::{self, Failed, Found, Hub as Client, keep, view};
+use crate::hub::{self, Failed, Hub as Client, keep, view};
 use crate::{Hub, HubPage, HubRef, HubTask, HubWhere, Tone};
 
 /// Runs an administrator's command (`__center` and its words) with `input`
@@ -24,8 +24,8 @@ pub type Admin = Arc<dyn Fn(&[String], Option<&str>) -> Result<Value, String> + 
 
 /// The center role's state, kept by the app's controller.
 pub struct HubState {
-    /// The center's run folder, where its address file is.
-    run: RefCell<PathBuf>,
+    /// The center's owner endpoint (crate::hub::endpoint).
+    at: RefCell<PathBuf>,
     client: RefCell<Option<Client>>,
     judge: RefCell<hub::Judge>,
     keyring: RefCell<keep::Shared>,
@@ -62,7 +62,7 @@ pub struct HubState {
 impl Default for HubState {
     fn default() -> HubState {
         HubState {
-            run: RefCell::new(nerve_center::service::Layout::system().run),
+            at: RefCell::new(hub::endpoint()),
             client: RefCell::new(None),
             judge: RefCell::new(hub::system_judge()),
             keyring: RefCell::new(Arc::new(keep::System)),
@@ -204,8 +204,8 @@ impl Ctl {
         Some(f(&h))
     }
 
-    /// Who holds a port, for tests: the test's center runs as the test's
-    /// user, not as the center's service.
+    /// Whether the endpoint's other end is the center, for tests: the
+    /// test's center runs as the test's user, not as the center's service.
     pub fn set_hub_judge(&self, judge: hub::Judge) {
         *self.hub.judge.borrow_mut() = judge;
     }
@@ -227,10 +227,10 @@ impl Ctl {
     }
 
     /// The window shows the center's pages: this machine is a center the
-    /// app installed, its address file in `run`. It logs in at once with a
+    /// app installed, its owner endpoint at `at`. It logs in at once with a
     /// token kept in the keyring, where the owner chose so.
-    pub fn center_role(self: &Rc<Self>, run: PathBuf) {
-        *self.hub.run.borrow_mut() = run;
+    pub fn center_role(self: &Rc<Self>, at: PathBuf) {
+        *self.hub.at.borrow_mut() = at;
         let (groups, tasks) = task_map();
         let counts: Vec<i32> = (0..groups.len() as i32)
             .map(|g| tasks.iter().filter(|t| t.group == g).count() as i32)
@@ -278,38 +278,27 @@ impl Ctl {
         }
     }
 
-    /// Finds the center's web UI and checks that its port is the center
-    /// service's: the log-in says what it found.
+    /// Checks that the center's owner endpoint is the center service's: the
+    /// log-in says what it found.
     fn hub_connect(self: &Rc<Self>) -> Option<Client> {
-        let run = self.hub.run.borrow().clone();
-        let found = hub::find(&run);
-        let (client, checked, line, off, not_running) = match found {
-            Err(e) => (None, false, e, false, false),
-            Ok(Found::NotRunning) => (None, false, hub::NOT_RUNNING.to_string(), false, true),
-            Ok(Found::Off) => (None, false, hub::UI_OFF.to_string(), true, false),
-            Ok(Found::Ui(address)) => {
-                let client = Client::new(address.clone(), self.hub.judge.borrow().clone());
-                match client.check() {
-                    Ok(()) => (
-                        Some(client),
-                        true,
-                        format!("This is the center's service on {}.", address.at),
-                        false,
-                        false,
-                    ),
-                    Err(Failed::NotTheCenter(e)) if e == hub::NOT_RUNNING => {
-                        (None, false, e, false, true)
-                    }
-                    Err(e) => (None, false, e.text(), false, false),
-                }
-            }
-        };
-        // A client of an earlier check keeps its session where the address
-        // is the same.
-        let kept = self.hub.client.borrow().clone();
-        let client = match (kept, client) {
-            (Some(k), Some(c)) if k.address() == c.address() => Some(k),
-            (_, c) => c,
+        let at = self.hub.at.borrow().clone();
+        // A client of an earlier check keeps its log-in.
+        let client = self
+            .hub
+            .client
+            .borrow()
+            .clone()
+            .filter(|c| c.at() == at.as_path())
+            .unwrap_or_else(|| Client::new(at, self.hub.judge.borrow().clone()));
+        let (client, checked, line, not_running) = match client.check() {
+            Ok(()) => (
+                Some(client),
+                true,
+                "This is the center's service.".to_string(),
+                false,
+            ),
+            Err(Failed::NotTheCenter(e)) if e == hub::NOT_RUNNING => (None, false, e, true),
+            Err(e) => (None, false, e.text(), false),
         };
         *self.hub.client.borrow_mut() = client.clone();
         self.with_hub(|h| {
@@ -321,7 +310,6 @@ impl Ctl {
             }
             h.set_login_checked(checked);
             h.set_login_check(line.into());
-            h.set_ui_off(off);
             h.set_not_running(not_running);
             if not_running {
                 h.set_state("stopped".into());
@@ -1753,12 +1741,11 @@ impl Ctl {
     }
 
     /// Opens the center's web UI in the browser, once its service holds the
-    /// port.
+    /// port: its address file and that check are only for this now.
     fn hub_open_web_ui(&self) {
-        let run = self.hub.run.borrow().clone();
-        let judge = self.hub.judge.borrow().clone();
+        let run = nerve_center::service::Layout::system().run;
         if let Err(e) =
-            super::install::open_center_ui_in(&run, |at| judge(at), crate::browser::open)
+            super::install::open_center_ui_in(&run, nerve_center::holder::of, crate::browser::open)
         {
             self.toast(e, Tone::Danger);
         }
@@ -1934,17 +1921,6 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     });
     let c = ctl.clone();
     h.on_start_service(move || c.hub_service_action("start"));
-    let c = ctl.clone();
-    h.on_turn_ui_on(move || {
-        // The web UI's default address, on loopback.
-        let ui = "127.0.0.1:7480".to_string();
-        c.hub_admin(vec!["set".into(), "ui".into(), ui], None, |c, answer| {
-            if let Err(e) = answer {
-                c.toast(e, Tone::Danger);
-            }
-            c.hub_connect();
-        });
-    });
     let c = ctl.clone();
     h.on_service(move |what| c.hub_service_action(&what));
     let c = ctl.clone();

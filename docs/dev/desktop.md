@@ -79,32 +79,42 @@ machine (#232):
 
 On a center the app installed, the window shows the center's pages
 (`src/app/hub.rs`, `ui/hub*.slint`, global `Hub`), drawn in the layout of
-the node's (#231, proposal B; Pair a machine is an overlay). They use the
-center's web UI API on loopback, as a browser does (`src/hub.rs`), not its
-attach socket: the center's owner powers stay behind the owner token, which
-a harness's agent, a program of the same user, does not have (design of
-#232, section 2).
+the node's (#231, proposal B; Pair a machine is an overlay). They ask the
+center as its CLI does, over its local owner channel (`src/hub.rs`,
+`nerve_center::attach`), not through the web UI, which may be off (owner,
+2026-11-16). The channel's owner calls (`nerve_center::ui::OWNER_CALLS`) are
+every call of the web UI's pages, answered by the same handlers.
 
-- **Where.** The center writes its web UI's address into
-  `/run/nerve-center/ui` (`C:\ProgramData\nerve-center\run\ui`); the app
-  reads it on every check. Off, or not running, the log-in says so and offers
-  `set ui 127.0.0.1:7480` or a start, each through the broker.
-- **The peer check.** Before the token or the session goes out, on every
-  request, `nerve_center::holder::of` must say that the port is the center
-  service's (Linux: the listening socket's uid is `nerve-center`; Windows: its
-  PID is the service's). Another holder gets nothing.
-- **The log-in.** The owner token, typed or read with `__center owner-token`
-  through one broker, goes once to `POST /login`; the app keeps the session
-  and the token in memory (a restart of the center ends the session, and the
-  app logs in again with it). On Linux the app is made undumpable before it
-  holds them (`broker::shut_out_the_user`). **Remember the log-in in my
+- **Where.** The installed center serves an owner endpoint for the account
+  that installed it (`attach::OWNER_FILE` in its state folder, the uid that
+  sudo or pkexec named, or on Windows the app's user the broker names with
+  `--desktop-user-sid`): the socket `/run/nerve-center/owner.sock` (mode
+  0666 in the service's runtime folder; the center checks the peer's uid) or
+  the pipe `\\.\pipe\nerve-center-owner` (open to that account with
+  `CLIENT_RIGHTS`, the center's account, SYSTEM and the administrators; the
+  caller is named by its token at identification level). Not there, or
+  nobody listening: the log-in says the center is not running and offers a
+  start through the broker.
+- **The peer check.** Before anything goes out, on every request,
+  `attach::is_center_service` must say that the other end is the center's:
+  Linux, the socket's peer is `nerve-center` or root; Windows, the pipe's
+  owner is the service's account, SYSTEM or the administrators. Another one
+  gets nothing.
+- **The log-in.** Every caller but root and an administrator gives the owner
+  token in the hello (`attach::owner_hello`), checked as the web UI's login
+  checks it (`Ui::channel_login`: the same refusals, log lines and wait). The
+  app sends it once to `/login`, which only checks it, then with every call;
+  it keeps the token in memory. On Linux the app is made undumpable before
+  it holds it (`broker::shut_out_the_user`). **Remember the log-in in my
   keyring** (`settings.json`'s `keep_center_login`, off by default) keeps the
   token in the user's keyring (`hub::keep`, service `nerve-app`), and logging
   out or a token the center refuses forgets it.
 - **The calls** are the web UI's (`/api/overview`, `/api/checker`,
   `/api/caps`, `/api/audit/rule`, ...), with its checks; the checker is saved
   whole with the version it was read at, and a change in between is refused
-  and read again (409).
+  and read again (409). **Open the web UI** still reads the address file
+  (`/run/nerve-center/ui`) and checks the port's holder
+  (`nerve_center::holder`) before the browser opens it.
 - **Administrator's commands** (`service`, `set`, `update`, `uninstall`,
   `owner-token`, `backup -`, `restore -`) each start a broker of their own,
   which ends with the command (one Save that changes two addresses runs both

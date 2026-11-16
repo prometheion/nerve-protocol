@@ -38,6 +38,7 @@ pub fn main(argv: Vec<std::ffi::OsString>) -> std::process::ExitCode {
         Err(e) if !is_service => e.exit(),
         Err(e) => return refuse(&layout, is_service, &e.to_string()),
     };
+    crate::attach::set_desktop_user(args.desktop_user_sid.as_deref());
     // `--json` is for the commands the desktop app runs (crate::json).
     if args.json && !crate::json::takes(args.cmd.as_ref()) {
         return answered(true, &[], Err(crate::json::ONLY_FOR.into()));

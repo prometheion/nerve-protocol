@@ -340,6 +340,12 @@ pub fn install(
     // Made here, before the service first starts, so that install can say
     // it; one an earlier install made is kept.
     let owner_token = crate::owner::ensure(&layout.state)?.0;
+    // The account whose app (or terminal) installs it may ask it over the
+    // owner pipe, with the owner token (crate::attach).
+    crate::attach::keep_owner_account(
+        &layout.state,
+        crate::attach::installing_account().as_deref(),
+    )?;
     crate::service::settings_file(layout, set, steps.out)?;
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {

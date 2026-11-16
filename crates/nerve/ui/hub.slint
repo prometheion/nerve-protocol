@@ -1,5 +1,5 @@
-// The center role's state and actions (src/app/hub.rs fills it from the
-// center's web UI API; nothing here decides anything about the center).
+// The center role's state and actions (src/app/hub.rs fills it over the
+// center's local owner channel; nothing here decides anything about it).
 
 import { Tone } from "theme.slint";
 
@@ -178,19 +178,17 @@ export global Hub {
     in-out property <string> login-token;
     in-out property <bool> login-busy;
     in-out property <string> login-error;
-    // The check of the port: whether it is the center's service, and the
-    // line that says so ("This is the center's service on 127.0.0.1:7480.").
+    // The check of the owner endpoint: whether it is the center's service,
+    // and the line that says so ("This is the center's service.").
     in-out property <bool> login-checked;
     in-out property <string> login-check;
-    // The center runs with its web UI off, or does not run.
-    in-out property <bool> ui-off;
+    // The center does not run.
     in-out property <bool> not-running;
     callback login();
     callback login-read();
     callback logout();
     callback check-again();
     callback start-service();
-    callback turn-ui-on();
 
     // ---- The sidebar's state and the Overview ----
     in-out property <string> state: "";

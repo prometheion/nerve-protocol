@@ -230,11 +230,28 @@ pub struct Args {
     /// For the administrator's commands and status: the lines they print as {"messages": [...]} with their data, an error as {"error": ...}.
     #[arg(long, global = true, hide = true)]
     pub json: bool,
+    // The app's user, by SID, which the app's broker names (Windows): the
+    // account whose app installs the center may ask it with the owner token
+    // (crate::attach::OWNER_FILE). A variable would be one the account's
+    // unelevated programs may set, so it is an argument.
+    /// The app's user (Windows)
+    #[arg(
+        long = "desktop-user-sid",
+        global = true,
+        hide = true,
+        value_name = "SID"
+    )]
+    pub desktop_user_sid: Option<String>,
     /// Where the running center says where its web UI listens
     /// ([`crate::ui_file`]): the installed service's file, which
     /// [`crate::server::run`] names; no flag sets it.
     #[arg(skip)]
     pub ui_file: Option<PathBuf>,
+    /// Where the running center serves the account that installed it
+    /// (crate::attach::owner_endpoint): the installed service's socket or
+    /// pipe, which [`crate::server::run`] names; no flag sets it.
+    #[arg(skip)]
+    pub owner_endpoint: Option<PathBuf>,
 }
 
 /// What the owner runs by hand; a harness never does. Without one,

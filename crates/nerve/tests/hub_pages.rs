@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use nerve::app::{Choose, Ctl, Exec};
 use nerve::headless::Screen;
 use nerve::hub::keep::{self, Keyring};
-use nerve::hub::{Failed, Holder};
+use nerve::hub::{Failed, Holder, Peer};
 use nerve::runner::Runner;
 use nerve::{AppWindow, Hub, HubPage};
 use nerve_center::config::Args;
@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use slint::{ComponentHandle, Model};
 
 #[test]
-fn the_center_s_pages_drive_its_web_ui_api() {
+fn the_center_s_pages_drive_it_over_its_owner_channel() {
     let _screen = Screen::install(1440, 900, 1.0).unwrap();
     nerve_transport::init_crypto();
     let dir = tempfile::tempdir().unwrap();
@@ -38,20 +38,26 @@ fn the_center_s_pages_drive_its_web_ui_api() {
         "--mcp",
         "127.0.0.1:0",
         "--ui",
-        "127.0.0.1:0",
+        "off",
     ])
     .unwrap();
+    // The pages work with the center's web UI off: they use its owner
+    // endpoint, as the installed service serves it.
+    let mut args = args;
+    let at = match cfg!(windows) {
+        true => format!(
+            r"\\.\pipe\nerve-center-owner-test-{}",
+            nerve_transport::keys::random_token(12)
+        )
+        .into(),
+        false => run.join("owner.sock"),
+    };
+    args.owner_endpoint = Some(at.clone());
     let lock = nerve_center::attach::try_lock(&state).unwrap().unwrap();
     let center = rt
         .block_on(nerve_center::server::start(&args, lock))
         .unwrap();
-    let ui = center.ui.unwrap();
-    // The address file the installed center writes into its run folder.
-    nerve_center::ui_file::write(
-        &nerve_center::ui_file::path_in(&run),
-        &nerve_center::ui_file::UiAddress::of(Some(ui), None),
-    )
-    .unwrap();
+    assert!(center.ui.is_none());
     let token = nerve_center::owner::read(&state).unwrap().unwrap();
 
     let window = AppWindow::new().unwrap();
@@ -62,7 +68,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     let up = Arc::new(AtomicBool::new(true));
     let judge: nerve::hub::Judge = {
         let up = up.clone();
-        Arc::new(move |_| {
+        Arc::new(move |_: &Peer| {
             Ok(match up.load(Ordering::SeqCst) {
                 true => Holder::Service,
                 false => Holder::Nobody,
@@ -105,7 +111,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     let settings = dir.path().join("nerve-app/settings.json");
     nerve::settings::save_keep_login(&settings, true).unwrap();
     ctl.keep_settings(settings.clone());
-    ctl.center_role(run.clone());
+    ctl.center_role(at.clone());
     let hub = window.global::<Hub>();
     assert!(!hub.get_keep_login());
     // The app closes itself to the user's other programs only once it
@@ -115,13 +121,10 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     #[cfg(target_os = "linux")]
     assert_eq!(dumpable(), 1);
 
-    // The log-in first, with the check of the port said.
+    // The log-in first, with the check of the endpoint said.
     assert!(hub.get_shown() && !hub.get_logged_in());
     assert!(hub.get_login_checked());
-    assert_eq!(
-        hub.get_login_check(),
-        format!("This is the center's service on {ui}.")
-    );
+    assert_eq!(hub.get_login_check(), "This is the center's service.");
     hub.set_login_token("nrv_owner_not_it".into());
     hub.invoke_login();
     assert!(!hub.get_logged_in());
@@ -202,14 +205,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     // Off and back on through its switch.
     hub.invoke_checker_switch(1, true);
     assert!(hub.get_model_on());
-    let client = nerve::hub::Hub::new(
-        nerve::hub::Address {
-            url: format!("http://{ui}"),
-            at: ui,
-            pin: None,
-        },
-        Arc::new(|_| Ok(Holder::Service)),
-    );
+    let client = nerve::hub::Hub::new(at.clone(), Arc::new(|_: &Peer| Ok(Holder::Service)));
     client.login(&token).unwrap();
     let checker: Value = client.get("/api/checker").unwrap();
     assert_eq!(checker["config"]["model_on"], true);
@@ -221,7 +217,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     // root's.
     assert_eq!(
         (hub.get_set_listen().as_str(), hub.get_set_ui().as_str()),
-        ("127.0.0.1:0", "127.0.0.1:0")
+        ("127.0.0.1:0", "off")
     );
     let before = asked.lock().unwrap().len();
     hub.set_set_name("lab".into());
@@ -344,9 +340,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     // Stop in Settings: the pages show the log-in, which says the center is
     // not running; once it runs again the app logs in with the token it
     // holds.
-    let address_file = nerve_center::ui_file::path_in(&run);
-    let address = std::fs::read(&address_file).unwrap();
-    std::fs::remove_file(&address_file).unwrap();
+    up.store(false, Ordering::SeqCst);
     hub.invoke_service("stop".into());
     assert_eq!(
         asked.lock().unwrap().last().unwrap()[1..],
@@ -356,7 +350,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     assert!(hub.get_not_running());
     hub.invoke_reload();
     assert!(!hub.get_logged_in());
-    std::fs::write(&address_file, &address).unwrap();
+    up.store(true, Ordering::SeqCst);
     hub.invoke_reload();
     assert!(hub.get_logged_in(), "{}", hub.get_login_check());
     // A reading while the center restarts: the log-in, then logged in
@@ -367,20 +361,12 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     up.store(true, Ordering::SeqCst);
     hub.invoke_reload();
     assert!(hub.get_logged_in(), "{}", hub.get_login_check());
-    // It restarted on a port that does not answer yet: the log-in fails,
-    // and the app keeps the token for the next try.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    nerve_center::ui_file::write(
-        &address_file,
-        &nerve_center::ui_file::UiAddress::of(Some(closed), None),
-    )
-    .unwrap();
+    // It restarted and does not answer yet: the log-in fails, and the app
+    // keeps the token for the next try.
+    up.store(false, Ordering::SeqCst);
     hub.invoke_service("restart".into());
     assert!(!hub.get_logged_in());
-    std::fs::write(&address_file, &address).unwrap();
+    up.store(true, Ordering::SeqCst);
     hub.invoke_reload();
     assert!(hub.get_logged_in(), "{}", hub.get_login_check());
 
@@ -487,7 +473,7 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     nerve::settings::save_keep_login(&settings2, true).unwrap();
     ctl2.keep_settings(settings2);
     up.store(false, Ordering::SeqCst);
-    ctl2.center_role(run.clone());
+    ctl2.center_role(at.clone());
     let hub2 = window2.global::<Hub>();
     assert!(hub2.get_keep_login() && !hub2.get_logged_in());
     up.store(true, Ordering::SeqCst);

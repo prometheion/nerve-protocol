@@ -151,6 +151,16 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
     Ok(())
 }
 
+/// Whether `args` (`__center` and its words) are the center's install.
+fn is_center_install(args: &[String]) -> bool {
+    let argv = std::iter::once(nerve_center::edition::TERMINAL_NAME)
+        .chain(args.iter().skip(1).map(String::as_str));
+    matches!(
+        nerve_center::config::command_given(argv),
+        Some((nerve_center::config::Cmd::Install, _))
+    )
+}
+
 /// Whether a center backup's file is the one handed over the command's
 /// answer and input (nerve_center::backup::HANDED).
 fn handed(file: &std::path::Path) -> bool {
@@ -244,11 +254,14 @@ fn serve_with(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
-        // The center's command line has no such option: its commands are
-        // the administrator's, whoever asked, and `__center` must stay the
-        // first word, by which this program runs as the center.
+        // The center's commands are the administrator's, whoever asked, and
+        // `__center` must stay the first word, by which this program runs
+        // as the center. Only its install takes the app's user, which may
+        // then ask the center with the owner token (nerve_center::attach).
         if args.first().map(String::as_str) != Some(nerve_center::edition::APP_WORD) {
             args.splice(0..0, named.iter().cloned());
+        } else if is_center_install(&args) {
+            args.splice(1..1, named.iter().cloned());
         }
         let input = req["input"].as_str().map(str::to_string);
         let (out, exe) = (out.clone(), exe.clone());
@@ -1244,9 +1257,11 @@ mod tests {
     }
 
     /// The broker on Windows names the app's user for the node's commands
-    /// only: a center's command keeps `__center` first, by which this
-    /// program runs as the center (before, it ran as the node and refused
-    /// the word, so the app could not install a center).
+    /// and the center's install only: a center's command keeps `__center`
+    /// first, by which this program runs as the center (before, it ran as
+    /// the node and refused the word, so the app could not install a
+    /// center). The install's user may then ask the center with the owner
+    /// token (nerve_center::attach::OWNER_FILE).
     #[cfg(unix)]
     #[test]
     fn a_center_command_keeps_its_word_first() {
@@ -1261,7 +1276,10 @@ mod tests {
                 Box::new(ans_w),
                 exe,
                 Some("S-1-5-21-1-2-3-1001"),
-                Roles::default,
+                || Roles {
+                    node: false,
+                    center: true,
+                },
             )
         });
         let mut lines = BufReader::new(ans_r).lines();
@@ -1273,12 +1291,24 @@ mod tests {
         )
         .unwrap();
         let done = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
+        writeln!(
+            req_w,
+            "{}",
+            json!({"id": 2, "args": ["__center", "--json", "status"]})
+        )
+        .unwrap();
+        let status = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
         drop(req_w);
         t.join().unwrap();
         assert_eq!(
             done["done"]["stdout"].as_str().unwrap().trim(),
-            "__center --json install unset",
+            "__center --desktop-user-sid S-1-5-21-1-2-3-1001 --json install unset",
             "{done}"
+        );
+        assert_eq!(
+            status["done"]["stdout"].as_str().unwrap().trim(),
+            "__center --json status unset",
+            "{status}"
         );
     }
 

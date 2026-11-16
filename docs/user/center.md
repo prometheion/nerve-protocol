@@ -26,12 +26,11 @@ it in memory until it closes; **Settings › Owner token › Remember the log-in
 in my keyring** keeps it for the next start, where other programs of yours,
 an agent among them, could read it.
 
-Before the token goes out, the app checks that the port is the center
-service's; another program that took it gets nothing. The pages use the web
-UI on this machine (on Linux the web UI must be on; the log-in offers to turn
-it on). What only an administrator may do (start and stop, an address in
-**Settings › Center**, update, uninstall, the owner token, backup and
-restore) asks for the password each time.
+The pages ask the center as its terminal commands do, with the web UI on or
+off. Before the token goes out, the app checks that the center's service
+answers; another program gets nothing. What only an administrator may do
+(start and stop, an address in **Settings › Center**, update, uninstall, the
+owner token, backup and restore) asks for the password each time.
 
 A copied harness token, harness line or pairing link leaves the clipboard
 after a minute, or when the app closes.

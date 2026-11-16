@@ -67,6 +67,30 @@ pub async fn call(
     path: &str,
     body: Value,
 ) -> Result<Value, String> {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    call_with(state, installed, method, path, query, body).await
+}
+
+/// Whether this process makes the owner's requests without the owner
+/// token: root, or an administrator in an elevated terminal.
+fn privileged() -> bool {
+    #[cfg(windows)]
+    return nerve_service::win::sid::is_admin();
+    #[cfg(not(windows))]
+    return nerve_transport::net::euid() == 0;
+}
+
+/// [`call`] with the GET's `query` apart. Root and an administrator ask as
+/// they are; the center's own account gives the owner token of its folder
+/// (crate::attach).
+async fn call_with(
+    state: &Path,
+    installed: bool,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: Value,
+) -> Result<Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     if crate::owner::not_yours(state) {
         return Err(only_the_owner("ask the installed center"));
@@ -87,9 +111,14 @@ pub async fn call(
             Some(true) => e,
             _ => not_running(),
         })?;
+    let token = match privileged() {
+        true => None,
+        false => crate::owner::read(state).ok().flatten(),
+    };
     let (r, mut w) = tokio::io::split(stream);
-    let request = json!({"method": method, "path": path, "body": body});
-    w.write_all(format!("{}\n{request}\n", crate::attach::OWNER_HELLO).as_bytes())
+    let request = json!({"method": method, "path": path, "query": query, "body": body});
+    let hello = crate::attach::owner_hello(token.as_deref());
+    w.write_all(format!("{hello}\n{request}\n").as_bytes())
         .await
         .map_err(|e| format!("cannot ask the center: {e}"))?;
     let mut line = String::new();

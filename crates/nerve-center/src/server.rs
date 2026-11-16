@@ -27,10 +27,17 @@ pub struct Running {
     tasks: Vec<JoinHandle<()>>,
     /// The web UI's address file this center wrote (crate::ui_file).
     ui_file: Option<std::path::PathBuf>,
+    /// Where it serves the account that installed it (crate::attach).
+    owner_endpoint: Option<std::path::PathBuf>,
     _lock: Lock,
 }
 
 impl Running {
+    /// The owner endpoint it serves, where it serves one.
+    pub fn owner_endpoint(&self) -> Option<&std::path::Path> {
+        self.owner_endpoint.as_deref()
+    }
+
     /// Says bye to every node and stops the listeners.
     pub async fn stop(self) {
         self.center.shutdown().await;
@@ -98,7 +105,6 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
         let u = Ui::new(&center, token.as_deref(), !tls);
-        u.set_started(&args.listen, &a, &args.mcp.setting());
         page = Some(u.clone());
         tasks.push(tokio::spawn(u.serve(server)));
     }
@@ -109,6 +115,12 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     let owner_ui = page
         .clone()
         .unwrap_or_else(|| Ui::new(&center, token.as_deref(), true));
+    // What the app's Settings show, the web UI off too.
+    owner_ui.set_started(
+        &args.listen,
+        if args.ui_off() { "off" } else { &args.ui },
+        &args.mcp.setting(),
+    );
     let mut mcp = None;
     let mut mcp_url = None;
     let told = |mode: &str, url: Option<String>, pin: Option<String>| {
@@ -150,29 +162,67 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         ));
     }
 
+    // The account that installed the center, which may ask it over the
+    // owner endpoint with the owner token (crate::attach).
+    let installer = crate::attach::owner_account(&args.state_dir());
     #[cfg(unix)]
     {
+        let owner = installer.as_deref().and_then(|u| u.parse::<u32>().ok());
         let listener = crate::attach::bind(&args.state_dir())?;
         tasks.push(tokio::spawn(crate::attach::serve(
             center.clone(),
-            owner_ui,
+            owner_ui.clone(),
             listener,
+            owner,
         )));
+        if let Some(at) = &args.owner_endpoint {
+            match crate::attach::bind_owner(at) {
+                Ok(l) => tasks.push(tokio::spawn(crate::attach::serve(
+                    center.clone(),
+                    owner_ui.clone(),
+                    l,
+                    owner,
+                ))),
+                Err(e) => center.log().record(
+                    Level::Warn,
+                    None,
+                    &format!("{e}; the app cannot reach the center"),
+                ),
+            }
+        }
     }
     // A pipe's name is open to every account, which could take it first:
     // then the center runs, and a second one cannot attach.
     #[cfg(windows)]
-    match crate::attach::bind(&args.state_dir()) {
-        Ok(listener) => tasks.push(tokio::spawn(crate::attach::serve(
-            center.clone(),
-            owner_ui,
-            listener,
-        ))),
-        Err(e) => center.log().record(
-            Level::Warn,
-            None,
-            &format!("{e}; a second nerve-center on this state folder cannot attach"),
-        ),
+    {
+        match crate::attach::bind(&args.state_dir()) {
+            Ok(listener) => tasks.push(tokio::spawn(crate::attach::serve(
+                center.clone(),
+                owner_ui.clone(),
+                listener,
+                None,
+            ))),
+            Err(e) => center.log().record(
+                Level::Warn,
+                None,
+                &format!("{e}; a second nerve-center on this state folder cannot attach"),
+            ),
+        }
+        if let Some(at) = &args.owner_endpoint {
+            match crate::attach::bind_owner(&at.to_string_lossy(), installer.as_deref()) {
+                Ok(l) => tasks.push(tokio::spawn(crate::attach::serve(
+                    center.clone(),
+                    owner_ui.clone(),
+                    l,
+                    None,
+                ))),
+                Err(e) => center.log().record(
+                    Level::Warn,
+                    None,
+                    &format!("{e}; the app cannot reach the center"),
+                ),
+            }
+        }
     }
 
     // State changes are batched; this writes them out now and then, notes
@@ -233,6 +283,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         mcp,
         tasks,
         ui_file: args.ui_file.clone(),
+        owner_endpoint: args.owner_endpoint.clone(),
         _lock: lock,
     })
 }
@@ -322,6 +373,10 @@ pub async fn run(mut args: Args) -> Result<(), String> {
     let layout = crate::service::Layout::system();
     if args.ui_file.is_none() && layout.is_state(&state) && layout.run.is_dir() {
         args.ui_file = Some(crate::ui_file::path_in(&layout.run));
+    }
+    // And it serves the app of the account that installed it.
+    if args.owner_endpoint.is_none() && layout.is_state(&state) {
+        args.owner_endpoint = crate::attach::owner_endpoint(&layout);
     }
     let Some(lock) = crate::attach::try_lock(&state)? else {
         // Another nerve-center owns this state folder.

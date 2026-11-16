@@ -1,22 +1,24 @@
-//! The center role's pages reach the installed center as a browser does:
-//! over its web UI's API on loopback, logged in with the owner token
-//! (design of #232, section 2). No owner account on the center and no
-//! broker for the daily pages: the center's owner powers stay behind the
-//! owner token, which a harness's agent, a program of the same user, does
-//! not have. Only an administrator's command (install, update, `set`,
-//! showing the owner token, backup) goes through the elevated broker, one
-//! command at a time ([`crate::app`]).
+//! The center role's pages reach the installed center as its CLI does:
+//! over its local owner channel (nerve_center::attach), the owner endpoint
+//! it serves for the account that installed it, not through the web UI
+//! (owner, 2026-11-16). So they work with the web UI off. Each request's
+//! hello carries the owner token, which the center checks as its web UI's
+//! login does: a program of the same user, a harness's agent among them,
+//! gets nothing without it. Only an administrator's command (install,
+//! update, `set`, showing the owner token, backup) goes through the
+//! elevated broker, one command at a time ([`crate::app`]).
 //!
-//! Before anything goes out, the token or the session, the port is checked
-//! to be the center service's ([`nerve_center::holder`]): a program that
-//! took it while the center was stopped gets nothing.
+//! Before anything goes out, the token or a request, the other end is
+//! checked to be the center's: on Linux the socket's peer is the
+//! `nerve-center` account (or root), on Windows the pipe's owner is the
+//! service's account, SYSTEM or the administrators. A program that made
+//! the endpoint while the center was stopped gets nothing.
 
 pub mod clip;
 pub mod keep;
 pub mod view;
 
-use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,75 +30,42 @@ pub use nerve_center::holder::Holder;
 /// that reaches a machine (its settings, a capability) waits for it.
 const WAIT: Duration = Duration::from_secs(40);
 /// The most an answer may hold: the log's download is the largest.
-const MAX_BODY: usize = 64 * 1024 * 1024;
+const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 
-/// What the page says when the port's holder is not the center's service.
+/// What the page says when the endpoint is not the center's service.
 pub const NOT_RUNNING: &str = "The center is not running.";
-/// What the page says when its web UI is off.
-pub const UI_OFF: &str = "The center's web UI is off.";
 
-/// Where the installed center's web UI listens, as its address file says
-/// (nerve_center::ui_file).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Address {
-    /// The URL a program here opens: `http://127.0.0.1:7480`, or https
-    /// with `pin` where the web UI listens beyond loopback.
-    pub url: String,
-    pub at: SocketAddr,
-    pub pin: Option<String>,
-}
+pub use nerve_center::attach::Peer;
 
-/// What the center's address file says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Found {
-    Ui(Address),
-    /// The center runs with its web UI off.
-    Off,
-    /// No file: the center does not run.
-    NotRunning,
-}
+/// Whether a peer is the center's service; tests answer for it.
+pub type Judge = Arc<dyn Fn(&Peer) -> Result<Holder, String> + Send + Sync>;
 
-/// Reads the address file in the center's run folder `run`.
-pub fn find(run: &Path) -> Result<Found, String> {
-    let file = nerve_center::ui_file::path_in(run);
-    let Some(said) = nerve_center::ui_file::read(&file)? else {
-        return Ok(Found::NotRunning);
-    };
-    let Some(url) = said.url else {
-        return Ok(Found::Off);
-    };
-    let at: SocketAddr = url
-        .split_once("://")
-        .map(|(_, a)| a)
-        .unwrap_or_default()
-        .parse()
-        .map_err(|_| format!("{url} names no address"))?;
-    Ok(Found::Ui(Address {
-        url,
-        at,
-        pin: said.pin,
-    }))
-}
-
-/// Who holds a port (nerve_center::holder::of); tests answer for it.
-pub type Judge = Arc<dyn Fn(SocketAddr) -> Result<Holder, String> + Send + Sync>;
-
-/// The system's answer: the center's service, by its account (Linux) or
-/// its process (Windows).
+/// The system's answer (nerve_center::attach::is_center_service).
 pub fn system_judge() -> Judge {
-    Arc::new(nerve_center::holder::of)
+    Arc::new(|peer: &Peer| {
+        Ok(match nerve_center::attach::is_center_service(peer)? {
+            true => Holder::Service,
+            false => Holder::Other,
+        })
+    })
+}
+
+/// The installed center's owner endpoint on this machine.
+pub fn endpoint() -> PathBuf {
+    nerve_center::attach::owner_endpoint_at(&nerve_center::service::Layout::system())
 }
 
 /// Why a call did not give an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failed {
-    /// The port is not the center service's (or nobody's): nothing was
+    /// The endpoint is not the center service's (or nobody's): nothing was
     /// sent.
     NotTheCenter(String),
-    /// The session ended (a new owner token, a restart of the center):
-    /// the page logs in again.
+    /// The token no longer works (a new owner token): the page logs in
+    /// again.
     LoggedOut,
-    /// The center answered with an error, in its words.
+    /// The center answered with an error, in its words, with the status its
+    /// web UI gives it.
     Refused(u16, String),
     /// It could not be reached.
     Unreachable(String),
@@ -107,209 +76,182 @@ impl Failed {
     pub fn text(&self) -> String {
         match self {
             Failed::NotTheCenter(e) | Failed::Unreachable(e) => e.clone(),
-            Failed::LoggedOut => "Log in again: the center ended the session.".into(),
+            Failed::LoggedOut => "Log in again: the owner token changed.".into(),
             Failed::Refused(_, e) => e.clone(),
         }
     }
 }
 
-/// One center's web UI, and the app's session on it. Shared by the threads
-/// that ask it.
+/// The installed center's owner endpoint, and the owner token the app logged
+/// in with, in memory. Shared by the threads that ask it.
 #[derive(Clone)]
 pub struct Hub {
-    address: Address,
+    at: PathBuf,
     judge: Judge,
-    session: Arc<Mutex<Option<String>>>,
+    token: Arc<Mutex<Option<String>>>,
 }
 
 impl Hub {
-    pub fn new(address: Address, judge: Judge) -> Hub {
+    /// `at` is the endpoint: the socket's path, or the pipe's name.
+    pub fn new(at: PathBuf, judge: Judge) -> Hub {
         Hub {
-            address,
+            at,
             judge,
-            session: Arc::default(),
+            token: Arc::default(),
         }
     }
 
-    pub fn address(&self) -> &Address {
-        &self.address
+    pub fn at(&self) -> &Path {
+        &self.at
     }
 
-    /// Whether the app holds a session.
+    /// Whether the app logged in.
     pub fn logged_in(&self) -> bool {
-        self.session().is_some()
+        self.token().is_some()
     }
 
-    fn session(&self) -> Option<String> {
-        self.session
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+    fn token(&self) -> Option<String> {
+        self.token.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    fn set_session(&self, s: Option<String>) {
-        *self.session.lock().unwrap_or_else(|p| p.into_inner()) = s;
+    fn set_token(&self, t: Option<String>) {
+        *self.token.lock().unwrap_or_else(|p| p.into_inner()) = t;
     }
 
-    /// The port is the center service's, or why not.
+    /// The endpoint is the center service's, or why not. Nothing is sent.
     pub fn check(&self) -> Result<(), Failed> {
-        match (self.judge)(self.address.at) {
-            Ok(Holder::Service) => Ok(()),
-            Ok(Holder::Nobody) => Err(Failed::NotTheCenter(NOT_RUNNING.into())),
-            Ok(Holder::Other) => Err(Failed::NotTheCenter(format!(
-                "Another program listens on {}, not the center's service: the owner token is not sent there.",
-                self.address.at
-            ))),
-            Err(e) => Err(Failed::NotTheCenter(format!(
-                "Cannot tell which program listens on {}: {e}",
-                self.address.at
-            ))),
-        }
+        let rt = runtime()?;
+        rt.block_on(async { self.open().await.map(drop) })
     }
 
-    /// Logs in with the owner token: the app keeps the session it gets.
+    /// Logs in with the owner token: the center checks it, and the app keeps
+    /// it for the calls that follow.
     pub fn login(&self, token: &str) -> Result<(), Failed> {
-        self.check()?;
-        let (status, body) = self.send(
-            "POST",
-            "/login",
-            Some(&json!({"token": token.trim()})),
-            None,
-        )?;
-        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        match (status, v["session"].as_str()) {
-            (200, Some(s)) => {
-                self.set_session(Some(s.to_string()));
+        let token = token.trim();
+        match self.send(token, "POST", nerve_center::attach::LOGIN, &json!({})) {
+            Ok(_) => {
+                self.set_token(Some(token.to_string()));
                 Ok(())
             }
-            // The center's text names its terminal command; the app has a
-            // button for that.
-            (401, _) => Err(Failed::Refused(401, WRONG_TOKEN.into())),
-            (s, _) => Err(Failed::Refused(s, error_of(&v, s))),
+            Err(Failed::LoggedOut) => Err(Failed::Refused(401, WRONG_TOKEN.into())),
+            Err(e) => Err(e),
         }
     }
 
-    /// Ends the session on the center too.
+    /// Forgets the token here; the center keeps no session of the app.
     pub fn logout(&self) {
-        if let Some(s) = self.session()
-            && self.check().is_ok()
-        {
-            let _ = self.send("POST", "/logout", Some(&json!({})), Some(&s));
-        }
-        self.set_session(None);
+        self.set_token(None);
     }
 
-    /// `GET path` (with its query) of the API.
+    /// `GET path` (with its query) of the center's calls.
     pub fn get(&self, target: &str) -> Result<Value, Failed> {
-        self.call("GET", target, None)
+        self.call("GET", target, &json!({}))
     }
 
-    /// `POST path` of the API with `body`.
+    /// `POST path` of the center's calls with `body`.
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, Failed> {
-        self.call("POST", path, Some(body))
+        self.call("POST", path, body)
     }
 
     /// The log file the center keeps, as its web UI downloads it.
     pub fn log_file(&self) -> Result<Vec<u8>, Failed> {
-        let s = self.session().ok_or(Failed::LoggedOut)?;
-        self.check()?;
-        match self.send("GET", "/api/log/download", None, Some(&s))? {
-            (200, body) => Ok(body),
-            (401, _) => {
-                self.set_session(None);
-                Err(Failed::LoggedOut)
-            }
-            (status, body) => {
-                let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                Err(Failed::Refused(status, error_of(&v, status)))
-            }
-        }
+        let v = self.get("/api/log/download")?;
+        Ok(v["text"].as_str().unwrap_or_default().as_bytes().to_vec())
     }
 
-    fn call(&self, method: &str, target: &str, body: Option<&Value>) -> Result<Value, Failed> {
-        let s = self.session().ok_or(Failed::LoggedOut)?;
-        self.check()?;
-        let (status, bytes) = self.send(method, target, body, Some(&s))?;
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        match status {
-            200 => Ok(v),
-            401 => {
-                self.set_session(None);
-                Err(Failed::LoggedOut)
-            }
-            s => Err(Failed::Refused(s, error_of(&v, s))),
+    fn call(&self, method: &str, target: &str, body: &Value) -> Result<Value, Failed> {
+        let token = self.token().ok_or(Failed::LoggedOut)?;
+        let r = self.send(&token, method, target, body);
+        if r == Err(Failed::LoggedOut) {
+            self.set_token(None);
         }
+        r
     }
 
-    /// One request: its status and body.
-    fn send(
-        &self,
-        method: &str,
-        target: &str,
-        body: Option<&Value>,
-        session: Option<&str>,
-    ) -> Result<(u16, Vec<u8>), Failed> {
-        let body = body.map(Value::to_string).unwrap_or_default();
-        let mut head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: nerve/{}\r\nContent-Length: {}\r\n",
-            self.address.at,
-            env!("CARGO_PKG_VERSION"),
-            body.len()
+    /// One request with `token` in its hello: the center's answer.
+    fn send(&self, token: &str, method: &str, target: &str, body: &Value) -> Result<Value, Failed> {
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let request = json!({"method": method, "path": path, "query": query, "body": body});
+        let lines = format!(
+            "{}\n{request}\n",
+            nerve_center::attach::owner_hello(Some(token))
         );
-        if !body.is_empty() {
-            head.push_str("Content-Type: application/json\r\n");
-        }
-        if let Some(s) = session {
-            head.push_str(&format!(
-                "{}: {s}\r\n",
-                nerve_transport::webui::SESSION_HEADER
-            ));
-        }
-        head.push_str("\r\n");
-        head.push_str(&body);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Failed::Unreachable(e.to_string()))?;
-        let address = self.address.clone();
-        rt.block_on(async move {
-            use tokio::io::AsyncWriteExt;
-            let mut io = open(&address).await.map_err(Failed::Unreachable)?;
-            // Asked again once connected, before a byte goes out: the center
-            // may have let go of the port since the first check (a restart),
-            // and another program taken it.
-            self.check()?;
-            io.write_all(head.as_bytes())
+        let rt = runtime()?;
+        let line = rt.block_on(async {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+            // The other end is checked before a byte goes out.
+            let io = self.open().await?;
+            let (r, mut w) = tokio::io::split(io);
+            w.write_all(lines.as_bytes())
                 .await
-                .map_err(|e| Failed::Unreachable(e.to_string()))?;
-            let r = nerve_transport::http::read_client_response(&mut io, MAX_BODY, WAIT)
-                .await
-                .map_err(Failed::Unreachable)?;
-            Ok((r.status, r.body))
-        })
+                .map_err(|e| Failed::Unreachable(format!("Cannot ask the center: {e}")))?;
+            let mut line = String::new();
+            let mut r = tokio::io::BufReader::new(r).take(MAX_ANSWER);
+            match tokio::time::timeout(WAIT, r.read_line(&mut line)).await {
+                Ok(Ok(n)) if n > 0 => Ok(line),
+                Ok(Ok(_)) => Err(Failed::Unreachable(
+                    "The center ended the connection without an answer.".into(),
+                )),
+                Ok(Err(e)) => Err(Failed::Unreachable(format!(
+                    "Cannot read the center's answer: {e}"
+                ))),
+                Err(_) => Err(Failed::Unreachable(
+                    "The center did not answer in time.".into(),
+                )),
+            }
+        })?;
+        let v: Value = serde_json::from_str(&line)
+            .map_err(|e| Failed::Unreachable(format!("The center's answer: {e}")))?;
+        if let Some(ok) = v.get("ok") {
+            return Ok(ok.clone());
+        }
+        if v["login"] == true {
+            return Err(Failed::LoggedOut);
+        }
+        let status = v["status"].as_u64().unwrap_or(400) as u16;
+        Err(Failed::Refused(status, error_of(&v, status)))
+    }
+
+    /// The connection to the endpoint, once its other end proved to be the
+    /// center's.
+    async fn open(&self) -> Result<Stream, Failed> {
+        let (io, peer) = connect(&self.at).await?;
+        match (self.judge)(&peer) {
+            Ok(Holder::Service) => Ok(io),
+            Ok(Holder::Nobody) => Err(Failed::NotTheCenter(NOT_RUNNING.into())),
+            Ok(Holder::Other) => Err(Failed::NotTheCenter(format!(
+                "Another program answers at {}, not the center's service: the owner token is not sent there.",
+                self.at.display()
+            ))),
+            Err(e) => Err(Failed::NotTheCenter(format!(
+                "Cannot tell which program answers at {}: {e}",
+                self.at.display()
+            ))),
+        }
     }
 }
 
-/// What the login says to a wrong token.
+/// What the log-in says to a wrong token.
 pub const WRONG_TOKEN: &str = "That is not the center's owner token.";
 
-/// The connection to the web UI: plain on loopback, TLS pinned to the
-/// center's certificate beyond it.
-async fn open(a: &Address) -> Result<nerve_transport::BoxIo, String> {
-    match &a.pin {
-        None => {
-            let tcp =
-                tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(a.at))
-                    .await
-                    .map_err(|_| format!("{} did not answer", a.at))?
-                    .map_err(|e| format!("cannot reach {}: {e}", a.at))?;
-            Ok(Box::new(tcp))
-        }
-        Some(pin) => {
-            let url = nerve_proto::link::CenterUrl::parse(&a.url)?;
-            nerve_transport::net::open(&url, Some(pin), None).await
-        }
-    }
+fn runtime() -> Result<tokio::runtime::Runtime, Failed> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Failed::Unreachable(e.to_string()))
+}
+
+type Stream = nerve_center::attach::OwnerStream;
+
+/// Opens the owner endpoint `at`, and says whose it is. One that is not
+/// there, or that nobody listens on, is a center that does not run.
+async fn connect(at: &Path) -> Result<(Stream, Peer), Failed> {
+    nerve_center::attach::open_owner(at)
+        .await
+        .map_err(|e| match e {
+            None => Failed::NotTheCenter(NOT_RUNNING.into()),
+            Some(e) => Failed::Unreachable(e),
+        })
 }
 
 /// The error an answer names, or its status.
@@ -320,95 +262,79 @@ fn error_of(v: &Value, status: u16) -> String {
         .unwrap_or_else(|| format!("The center answered {status}."))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
+    /// Nothing goes to an endpoint another account made, or nobody: not
+    /// the token, not a request.
     #[test]
-    fn the_address_file_says_where_the_web_ui_is() {
-        let d = tempfile::tempdir().unwrap();
-        assert_eq!(find(d.path()).unwrap(), Found::NotRunning);
-        let file = nerve_center::ui_file::path_in(d.path());
-        nerve_center::ui_file::write(&file, &nerve_center::ui_file::UiAddress::of(None, None))
-            .unwrap();
-        assert_eq!(find(d.path()).unwrap(), Found::Off);
-        let at: SocketAddr = "127.0.0.1:7480".parse().unwrap();
-        nerve_center::ui_file::write(&file, &nerve_center::ui_file::UiAddress::of(Some(at), None))
-            .unwrap();
-        assert_eq!(
-            find(d.path()).unwrap(),
-            Found::Ui(Address {
-                url: "http://127.0.0.1:7480".into(),
-                at,
-                pin: None
-            })
-        );
-    }
-
-    /// Nothing goes to a port another program holds, or nobody: not the
-    /// token, not the session.
-    #[test]
-    fn nothing_goes_out_before_the_port_is_the_center_s() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let at = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = Address {
-            url: format!("http://{at}"),
-            at,
-            pin: None,
-        };
-        for (holder, said) in [
-            (Holder::Other, "Another program"),
-            (Holder::Nobody, NOT_RUNNING),
-        ] {
-            let hub = Hub::new(address.clone(), Arc::new(move |_| Ok(holder)));
-            match hub.login("nrv_owner_secret") {
-                Err(Failed::NotTheCenter(e)) => assert!(e.contains(said), "{e}"),
-                other => panic!("{other:?}"),
-            }
-            hub.set_session(Some("s".into()));
-            assert!(matches!(
-                hub.get("/api/overview"),
-                Err(Failed::NotTheCenter(_))
-            ));
-        }
-        // Nobody connected.
-        assert!(listener.accept().is_err());
-    }
-
-    /// The port is asked about again once connected: a program that took it
-    /// between the first check and the connection gets nothing.
-    #[test]
-    fn nothing_goes_out_when_the_port_changed_hands_before_the_connection() {
+    fn nothing_goes_out_before_the_endpoint_is_the_center_s() {
         use std::io::Read;
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let at = listener.local_addr().unwrap();
-        let asked = Arc::new(AtomicU32::new(0));
-        let n = asked.clone();
-        // The center's service at the first check, another program after.
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("owner.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&at).unwrap();
+        let got = std::thread::spawn(move || {
+            let mut all = Vec::new();
+            for _ in 0..2 {
+                let (mut c, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let _ = c.read_to_end(&mut bytes);
+                all.extend(bytes);
+            }
+            all
+        });
+        let mine = nerve_transport::net::euid();
+        let asked: Arc<Mutex<Vec<Peer>>> = Arc::default();
+        let said = asked.clone();
         let hub = Hub::new(
-            Address {
-                url: format!("http://{at}"),
-                at,
-                pin: None,
-            },
-            Arc::new(move |_| match n.fetch_add(1, Ordering::SeqCst) {
-                0 => Ok(Holder::Service),
-                _ => Ok(Holder::Other),
+            at.clone(),
+            Arc::new(move |p: &Peer| {
+                said.lock().unwrap().push(p.clone());
+                Ok(Holder::Other)
             }),
         );
-        let got = std::thread::spawn(move || {
-            let (mut c, _) = listener.accept().unwrap();
-            let mut bytes = Vec::new();
-            let _ = c.read_to_end(&mut bytes);
-            bytes
-        });
         match hub.login("nrv_owner_secret") {
             Err(Failed::NotTheCenter(e)) => assert!(e.contains("Another program"), "{e}"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(asked.load(Ordering::SeqCst), 2);
-        assert!(got.join().unwrap().is_empty(), "the token went out");
+        hub.set_token(Some("nrv_owner_secret".into()));
+        assert!(matches!(
+            hub.get("/api/overview"),
+            Err(Failed::NotTheCenter(_))
+        ));
+        assert!(got.join().unwrap().is_empty(), "something went out");
+        // The judge was asked about the account at the other end.
+        assert_eq!(*asked.lock().unwrap(), [Peer::Uid(mine), Peer::Uid(mine)]);
+        // No socket: the center does not run.
+        let gone = Hub::new(d.path().join("none.sock"), system_judge());
+        assert_eq!(
+            gone.login("x"),
+            Err(Failed::NotTheCenter(NOT_RUNNING.into()))
+        );
+    }
+
+    /// The system's judge takes root and the center's account, nobody
+    /// else; on Windows the service's account, SYSTEM and the
+    /// administrators.
+    #[test]
+    fn the_system_judge_takes_the_center_s_accounts_only() {
+        let judge = system_judge();
+        assert_eq!(judge(&Peer::Uid(0)).unwrap(), Holder::Service);
+        let me = nerve_transport::net::euid();
+        if me != 0 {
+            assert_eq!(judge(&Peer::Uid(me)).unwrap(), Holder::Other);
+        }
+        for sid in ["S-1-5-18", "S-1-5-32-544"] {
+            assert_eq!(judge(&Peer::Sid(sid.into())).unwrap(), Holder::Service);
+        }
+        assert_eq!(
+            judge(&Peer::Sid(nerve_center::winsvc::account_sid())).unwrap(),
+            Holder::Service
+        );
+        assert_eq!(
+            judge(&Peer::Sid("S-1-5-21-1-2-3-1001".into())).unwrap(),
+            Holder::Other
+        );
     }
 }

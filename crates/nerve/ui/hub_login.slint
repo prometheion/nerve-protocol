@@ -53,18 +53,6 @@ export component HubLoginPage inherits PageFrame {
                         }
                     }
                 }
-                Reveal {
-                    shown: Hub.ui-off;
-                    Banner {
-                        tone: Tone.accent;
-                        title: "The center's web UI is off";
-                        text: "These pages use it, on this machine only.";
-                        action: "Turn it on for this machine";
-                        acted => {
-                            Hub.turn-ui-on();
-                        }
-                    }
-                }
                 HorizontalLayout {
                     spacing: Space.sm;
                     TextField {
@@ -137,7 +125,7 @@ export component HubLoginPage inherits PageFrame {
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
-                    if !Hub.login-checked && !Hub.not-running && !Hub.ui-off: Button {
+                    if !Hub.login-checked && !Hub.not-running: Button {
                         text: "Check again";
                         kind: ButtonKind.ghost;
                         small: true;

@@ -53,7 +53,7 @@ fn every_center_page_fits_the_window() {
         Runner::new(env!("CARGO_BIN_EXE_nerve").into(), None, None),
         Exec::Inline,
     );
-    ctl.center_role(dir.path().to_path_buf());
+    ctl.center_role(dir.path().join("owner.sock"));
     let hub = window.global::<Hub>();
     // The sidebar says what the machine is.
     assert!(hub.get_shown());

@@ -43,8 +43,10 @@ and every limit is in
 - The center's owner commands in the terminal, also with the web UI off:
   `service start|stop|restart`, `pair`, `nodes list|disable|enable|rm`,
   `token new|list|rm` and `log`. They ask the running center through
-  its own socket or pipe, which only root, an administrator and the center's
-  account may use.
+  its own socket or pipe, which root, an administrator, the center's
+  account and the account that installed it may use; everyone but root and
+  an administrator gives the owner token, so a program of yours, an agent
+  among them, gets nothing without it.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
   fails closed by default.
@@ -168,8 +170,9 @@ and every limit is in
   checker (the blocklist, the rules that skip the model, the decision model,
   each machine's own switches), Capabilities per machine, Statistics, Audit,
   Log, Settings (the center, this machine, the owner token, the center key,
-  backup) and Help. They use the center's web UI on this machine, with its
-  checks, after making sure the port is the center service's.
+  backup) and Help. They ask the center as its terminal commands do, over
+  its own socket or pipe, so they work with the web UI off; the app first
+  makes sure the other end is the center's service.
 - The center's pages log in with the owner token: pasted, or **Read it from
   this machine…** with one administrator's prompt. It is kept in memory until
   the app closes; **Settings › Owner token** can keep it in your keyring
