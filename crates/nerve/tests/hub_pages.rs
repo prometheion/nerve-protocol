@@ -249,6 +249,11 @@ fn the_center_s_pages_drive_its_web_ui_api() {
         ]]
     );
 
+    // The keyring switch off for what follows: only the token in memory
+    // logs in again after the center was away.
+    hub.invoke_keep_login_set(false);
+    assert_eq!(keyring.get().unwrap(), None);
+
     // Restore: the file read and handed over; another center's backup only
     // where the owner ticked it, the refusal naming that box.
     let backup = dir.path().join("old.nrvbak");
@@ -389,6 +394,9 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     assert!(hub.get_uninstall_open());
     assert!(!install.get_uninstall_open());
     hub.set_uninstall_open(false);
+
+    hub.invoke_keep_login_set(true);
+    assert_eq!(keyring.get().unwrap().as_deref(), Some(token.as_str()));
 
     // A new owner token ends the session: the old token in memory no longer
     // logs in, so the log-in shows, and the kept one is forgotten.
