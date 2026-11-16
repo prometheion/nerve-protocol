@@ -1162,8 +1162,12 @@ nerve-node rule rm 'git status *'
 entry as `rule` prints it, then what it becomes. That is an entry in the
 same form (`'exec.run:git *'`, `'fs.read:~/notes/*'`), or a plain command
 line, which becomes the rule `rule add` makes of it. It works on every list,
-but not on the rules of the guard. The desktop app's Permissions page edits a
-rule the same way (the pencil beside it).
+but not on the rules of the guard. On the sudo list the new text is taken as
+the list shows it, and is refused where `rule add` would refuse it or store
+something narrower: `sudo *` and `sudo -i *` name no command, and a `*` inside
+a command is written `[*]` (only a ` *` at the end is a wildcard). The desktop
+app's Permissions page and the node's web UI edit a rule the same way (the
+pencil beside it).
 
 `rule rm` takes the command line `rule add` was given, or an entry as `rule`
 prints it, such as `'exec.run:git *'`. The list is needed only when the entry

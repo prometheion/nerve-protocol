@@ -111,6 +111,20 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
         },
+        // An entry changed in its place, as `rule edit` does it: the entry
+        // as listed, so a stored rule is never typed through `rule add` a
+        // second time, and one that would not change is refused.
+        ("POST", "/api/rules/edit") => match (center(b), list(b), rule(b), new_rule(b)) {
+            (Ok(c), Ok(l), Ok(r), Ok(n)) => {
+                run(
+                    ctx,
+                    args(&["rule", "edit"], &[("center", c)], &[l, r, n]),
+                    None,
+                )
+                .await
+            }
+            (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), _) | (.., Err(e)) => Err(e),
+        },
         ("POST", "/api/sudo/off") => command(ctx, &["sudo", "off"], None).await,
         // ---- Audit ----
         ("GET", "/api/audit") => {
@@ -334,6 +348,15 @@ fn rule(b: &Value) -> Result<&str, (u16, String)> {
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .ok_or_else(|| (400, "rule is missing".to_string()))
+}
+
+/// What an edited rule becomes, as typed.
+fn new_rule(b: &Value) -> Result<&str, (u16, String)> {
+    b["new"]
+        .as_str()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| (400, "the new rule is missing".to_string()))
 }
 
 /// What a whole path starts with, as the refusal says it.

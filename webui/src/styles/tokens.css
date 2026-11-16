@@ -1,0 +1,161 @@
+/* The design tokens of the desktop app (crates/nerve/ui/theme.slint): every
+   colour, type size, space, radius and control size the web UIs use comes
+   from here, so they look like the app. src/tokens.test.ts checks that each
+   value matches the app's; change theme.slint first, then this file. */
+:root {
+  --window: #f4f5f9;
+  --sidebar: #eceef8;
+  --surface: #ffffff;
+  --surface-alt: #f6f7fb;
+  --inset: #f1f3f8;
+  --hover: #0f172a0a;
+  --pressed: #0f172a14;
+  --selected: #ffffff;
+  --scrim: #0b0d1266;
+  --border: #e1e4ea;
+  --border-strong: #c9ced7;
+  --switch-off: #78818f;
+  --text: #12151c;
+  --text-muted: #4a5262;
+  --text-faint: #5f6776;
+  --accent: #4655d4;
+  --accent-hover: #3b49c2;
+  --accent-pressed: #323fae;
+  --accent-soft: #eceefc;
+  --accent-text: #3542b8;
+  --on-accent: #ffffff;
+  --ok: #17784d;
+  --ok-soft: #e4f4eb;
+  --warn: #93590a;
+  --warn-soft: #fcf1dd;
+  --danger: #c0353d;
+  --danger-hover: #b3323a;
+  --danger-pressed: #9c2b32;
+  --danger-soft: #fbeaeb;
+  --on-danger: #ffffff;
+
+  --type-caption: 12px;
+  --type-small: 13px;
+  --type-body: 14px;
+  --type-lead: 15px;
+  --type-heading: 16px;
+  --type-title: 22px;
+  --type-display: 26px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --space-xxs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-xxl: 24px;
+  --space-page: 32px;
+  --space-section: 28px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+  --size-control: 34px;
+  --size-control-sm: 28px;
+  --size-field: 38px;
+  --size-icon: 16px;
+  --size-icon-lg: 20px;
+  --size-sidebar: 236px;
+  --size-page-max: 2000px;
+  --size-dialog: 520px;
+  --motion-quick: 100ms;
+  --motion-base: 150ms;
+  --motion-enter: 200ms;
+  --motion-leave: 120ms;
+  --motion-rise: 8px;
+  --motion-ease: cubic-bezier(0.25, 1, 0.5, 1);
+  --mono: ui-monospace, "Cascadia Mono", "Noto Sans Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --sans: "Inter", "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+}
+
+/* Dark, as the app has it: the theme the page chose (src/theme.ts), or the
+   system's before the page's script runs. */
+:root[data-theme="dark"] {
+  --window: #0f1116;
+  --sidebar: #0d0f18;
+  --surface: #171a21;
+  --surface-alt: #1c2029;
+  --inset: #0f1116;
+  --hover: #ffffff0d;
+  --pressed: #ffffff17;
+  --selected: #ffffff12;
+  --scrim: #000000a6;
+  --border: #262a32;
+  --border-strong: #363b46;
+  --switch-off: #656e7e;
+  --text: #eceef2;
+  --text-muted: #b4bbc7;
+  --text-faint: #8a93a2;
+  --accent: #8b96ff;
+  --accent-hover: #9ea8ff;
+  --accent-pressed: #7884f2;
+  --accent-soft: #232849;
+  --accent-text: #b0b8ff;
+  --on-accent: #0d1022;
+  --ok: #4cd294;
+  --ok-soft: #13301f;
+  --warn: #eab554;
+  --warn-soft: #33280f;
+  --danger: #ff7a81;
+  --danger-hover: #ff888e;
+  --danger-pressed: #f0646b;
+  --danger-soft: #3a1b1e;
+  --on-danger: #1f0b0d;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --window: #0f1116;
+    --sidebar: #0d0f18;
+    --surface: #171a21;
+    --surface-alt: #1c2029;
+    --inset: #0f1116;
+    --hover: #ffffff0d;
+    --pressed: #ffffff17;
+    --selected: #ffffff12;
+    --scrim: #000000a6;
+    --border: #262a32;
+    --border-strong: #363b46;
+    --switch-off: #656e7e;
+    --text: #eceef2;
+    --text-muted: #b4bbc7;
+    --text-faint: #8a93a2;
+    --accent: #8b96ff;
+    --accent-hover: #9ea8ff;
+    --accent-pressed: #7884f2;
+    --accent-soft: #232849;
+    --accent-text: #b0b8ff;
+    --on-accent: #0d1022;
+    --ok: #4cd294;
+    --ok-soft: #13301f;
+    --warn: #eab554;
+    --warn-soft: #33280f;
+    --danger: #ff7a81;
+    --danger-hover: #ff888e;
+    --danger-pressed: #f0646b;
+    --danger-soft: #3a1b1e;
+    --on-danger: #1f0b0d;
+    color-scheme: dark;
+  }
+}
+
+/* As the app: nothing moves when the system asks for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-quick: 0ms;
+    --motion-base: 0ms;
+    --motion-enter: 0ms;
+    --motion-leave: 0ms;
+    --motion-rise: 0px;
+  }
+}

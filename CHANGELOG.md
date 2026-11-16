@@ -28,9 +28,13 @@ and every limit is in
   tools never change as machines come and go.
 - A call still running after 20 seconds becomes a job; a command's output
   streams while it runs.
-- A web UI behind the owner token: Get started, **Connect a harness** (a
-  harness token and its entry), the machines, Audit, Log, Statistics,
-  Capabilities, Settings and Help.
+- A web UI behind the owner token: Overview with Get started, Nodes with
+  **Pair a machine**, Harnesses with **Connect a harness** (a harness token
+  and its entry), Action checker, Capabilities, Statistics, Audit, Log,
+  Settings and Help.
+- The center's and the node's web UIs have the app's layout: a list and the
+  picked row's details on every page, adding in the details, removing asked
+  in the row ([#232](https://github.com/prometheion/nerve-protocol/issues/232)).
 - Runs as a service (systemd on Linux, the service `nerve-center` on
   Windows), or started by a harness over stdio; a second center attaches to
   the first.

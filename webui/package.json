@@ -1,0 +1,27 @@
+{
+  "name": "nerve-webui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The web UIs of the Nerve center and node, built into webui/dist and embedded by the Rust programs.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "happy-dom": "21.0.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "4.1.12"
+  }
+}

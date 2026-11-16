@@ -249,10 +249,10 @@ whether there is a file. `GET /api/log/download` sends the file, the older half
 first, as `application/x-ndjson` with `Content-Disposition: attachment`. Both
 need a signed-in browser like every API call.
 
-The page polls every two seconds. The level and machine lists are the
-searchable list of the Statistics page (`picker` in `app.js`); the page builds
-its boxes once and fills them in place, so a poll does not cut off what is
-typed.
+The page polls every two seconds while **Live** is on. The level and the
+machine are picked from searchable lists (`Picker` in `webui/src/ui.tsx`);
+a poll leaves them and the search field as they are, so it does not cut off
+what is typed.
 
 ## The node's changes
 
