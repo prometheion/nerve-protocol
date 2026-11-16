@@ -641,7 +641,9 @@ export function Overlay({ title, sub, onClose, children, foot }: { title: string
   close.current = onClose;
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null;
-    const first = box.current?.querySelector("input, textarea, button.primary, button") as HTMLElement | null;
+    // The first field, else the main button, else any: each looked for in
+    // turn, or the header's Close, which comes first, would always win.
+    const first = ["input, textarea", "button.primary", "button"].map((s) => box.current?.querySelector<HTMLElement>(s)).find(Boolean);
     first?.focus();
     const esc = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") close.current();

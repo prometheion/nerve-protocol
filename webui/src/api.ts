@@ -39,10 +39,13 @@ export function keepSession(s: string | null) {
   }
 }
 
-/** Where the tab goes when its session has ended; a test replaces it. */
+/** Where the tab goes when its session has ended; a test replaces it.
+ * `replace` for a page that never was usable signed out, so Back skips it
+ * instead of coming back to it and being sent on again. */
 export const nav = {
-  toLogin() {
-    location.assign("/login");
+  toLogin(replace = false) {
+    if (replace) location.replace("/login");
+    else location.assign("/login");
   },
 };
 
@@ -90,7 +93,7 @@ export async function startSession(): Promise<boolean> {
   const s = await json(r);
   if (!r.ok || !s.logged_in) {
     keepSession(null);
-    nav.toLogin();
+    nav.toLogin(true);
     return false;
   }
   return true;

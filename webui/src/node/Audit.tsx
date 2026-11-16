@@ -1,7 +1,7 @@
 // Audit: what the node allowed and refused, newest first, as a list; the
 // details show the picked entry and the rules its buttons store, as they
 // will be stored.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../frame";
 import { ago, when } from "../format";
@@ -76,6 +76,12 @@ export function AuditPage() {
   const list = all.filter((e) => !t || `${whatOf(e)} ${e.target || ""} ${e.reason || ""} ${e.center || ""}`.toLowerCase().includes(t));
   const key = (e: Entry) => `${e.ts}:${e.seq}:${whatOf(e)}`;
   const e = list.find((x) => key(x) === sel) || list[0];
+  // The details keep the entry they show: a newer one only adds a row, so
+  // a rule button never acts on an entry that came in while it was read.
+  const shownKey = e ? key(e) : null;
+  useEffect(() => {
+    if (shownKey && shownKey !== sel) setSel(shownKey);
+  }, [shownKey, sel]);
   return (
     <>
       <PageHead icon="audit" title="Audit" sub="What the node allowed and refused.">

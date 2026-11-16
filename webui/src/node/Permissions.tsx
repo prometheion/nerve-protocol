@@ -63,7 +63,9 @@ function ModeStrip({ c, o }: { c: CenterEntry; o: Json }) {
           kind={changed ? "primary" : ""}
           icon="check"
           act={async () => {
-            await api("POST", "/api/mode", { center: c.name, mode, hours: Number(hours) || undefined, as_owner: owner });
+            // As the owner goes with allowlist mode only; its box is hidden
+            // in the others, and the node refuses it there.
+            await api("POST", "/api/mode", { center: c.name, mode, hours: Number(hours) || undefined, as_owner: mode === "allowlist" && owner });
             setHours("");
             await status.reload();
           }}
@@ -187,26 +189,30 @@ function FolderForm({ start, fixed, save, cancel }: { start: Folder; fixed?: boo
   );
 }
 
-/** The form row of a rule: the command, and Wildcard (every command that
- * starts so). */
-function RuleForm({ sec, start, save, cancel }: { sec: Sec; start: string; save: (rule: string, wildcard: boolean) => Promise<unknown>; cancel: () => void }) {
+/** The form row of a rule: the command, and for a new one Wildcard (every
+ * command of its program). An edited rule starts as listed, and Save waits
+ * for a change, as in the app. */
+function RuleForm({ sec, start, edit, save, cancel }: { sec: Sec; start: string; edit?: boolean; save: (rule: string, wildcard: boolean) => Promise<unknown>; cancel: () => void }) {
   const [rule, setRule] = useState(start);
   const [wild, setWild] = useState(false);
+  const same = !rule.trim() || (edit && rule.trim() === start);
   return (
     <div className="prow form">
       <div className="pl">
         <Icon name={ICON[sec]} />
-        <TextInput value={rule} onChange={setRule} mono placeholder={PLACEHOLDER[sec]} aria-label="A new rule" autoFocus />
+        <TextInput value={rule} onChange={setRule} mono placeholder={PLACEHOLDER[sec]} aria-label={edit ? "The rule" : "A new rule"} autoFocus />
       </div>
       <div className="pl2">
-        <Switch checked={wild} onChange={setWild}>
-          Wildcard: every command that starts so
-        </Switch>
+        {edit ? null : (
+          <Switch checked={wild} onChange={setWild}>
+            Wildcard: every command of this program
+          </Switch>
+        )}
         <span className="sp" />
         <Btn kind="ghost" onClick={cancel}>
           Cancel
         </Btn>
-        <Btn kind="primary" icon="check" act={() => save(rule, wild)}>
+        <Btn kind="primary" icon="check" disabled={!!same} act={() => save(rule, wild)}>
           Save
         </Btn>
       </div>
@@ -277,13 +283,14 @@ function PermOf({ c }: { c: CenterEntry }) {
         <RuleForm
           key={r}
           sec={sec}
-          start={r.replace(/^exec\.run:/, "")}
+          start={r}
+          edit
           cancel={() => setEdit(null)}
-          save={async (rule, wildcard) => {
-            // A changed rule is the new one added, then the old one taken
-            // away: a refused new one leaves the old in place.
-            await addRule(l)(rule, wildcard);
-            await api("POST", "/api/rules/remove", { center: c.name, list: l, rule: r });
+          save={async (rule) => {
+            // One change in its place (`rule edit`), from the entry as
+            // listed: typed through `rule add` again, a stored rule would
+            // be escaped a second time and name another command.
+            await api("POST", "/api/rules/edit", { center: c.name, list: l, rule: r, new: rule });
             await after();
           }}
         />

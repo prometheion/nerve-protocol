@@ -71,6 +71,21 @@ it("closes an overlay with Esc", async () => {
   expect(close).toHaveBeenCalled();
 });
 
+it("puts the focus in an overlay's field, not on its Close", async () => {
+  await render(
+    <Overlay title="Rename" onClose={() => {}} foot={<Btn kind="primary">Rename</Btn>}>
+      <input aria-label="Name" />
+    </Overlay>,
+  );
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Name");
+  await render(
+    <Overlay title="Sure?" onClose={() => {}} foot={<Btn kind="primary">Yes</Btn>}>
+      x
+    </Overlay>,
+  );
+  expect(document.activeElement?.textContent).toBe("Yes");
+});
+
 it("picks an entry of a long list by its search", async () => {
   const pick = vi.fn();
   const items = ["alpha", "beta", "gamma"].map((v) => ({ value: v, text: v }));

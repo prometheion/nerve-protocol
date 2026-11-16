@@ -1297,6 +1297,91 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
     daemon.stop().await;
 }
 
+/// A rule is edited in its place, from the entry as listed: one saved
+/// unchanged is refused and stays, and a stored rule with a glob character
+/// keeps matching what it was made for (it is not typed through `rule add`
+/// a second time).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_is_edited_in_its_place_and_an_unchanged_one_stays() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+    for rule in ["git push --force", "rm -rf /tmp/*"] {
+        change(
+            addr,
+            &s,
+            "/api/rules/add",
+            json!({"center": "lab", "list": "deny", "rule": rule}),
+        )
+        .await;
+    }
+    let listed = |v: Value| -> Vec<String> {
+        v["rules"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    let before = listed(get(addr, "/api/perm?center=lab", &s).await.json());
+    let stored = before
+        .iter()
+        .find(|r| r.contains("rm -rf"))
+        .unwrap()
+        .clone();
+    // The `*` is stored as a literal character: typed again, it would be
+    // escaped a second time and name another command.
+    assert_eq!(stored, "exec.run:rm -rf /tmp/[*]");
+
+    let a = post(
+        addr,
+        "/api/rules/edit",
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": stored, "new": stored}),
+    )
+    .await;
+    assert_ne!(a.status, 200, "an unchanged rule is refused: {}", a.body);
+    assert_eq!(
+        listed(get(addr, "/api/perm?center=lab", &s).await.json()),
+        before
+    );
+
+    change(
+        addr,
+        &s,
+        "/api/rules/edit",
+        json!({"center": "lab", "list": "deny", "rule": "exec.run:git push --force", "new": "git push --force origin"}),
+    )
+    .await;
+    let after = listed(get(addr, "/api/perm?center=lab", &s).await.json());
+    let at = before
+        .iter()
+        .position(|r| r == "exec.run:git push --force")
+        .unwrap();
+    assert_eq!(after[at], "exec.run:git push --force origin", "{after:?}");
+    assert_eq!(after.len(), before.len(), "{after:?}");
+    assert!(after.contains(&stored), "{after:?}");
+    let a = post(
+        addr,
+        "/api/rules/edit",
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": stored}),
+    )
+    .await;
+    assert_eq!(a.status, 400, "{}", a.body);
+    daemon.stop().await;
+}
+
 /// `center add -` takes the link from the first line of its
 /// input, as the web UI passes it, and only then.
 #[test]

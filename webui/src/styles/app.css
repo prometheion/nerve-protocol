@@ -115,6 +115,8 @@ h1, h2, h3, h4, p { margin: 0; }
 .grow { flex: 1; min-width: 0; }
 .name { font-weight: var(--weight-semibold); }
 .meta { color: var(--text-muted); font-size: var(--type-small); }
+ul.lines { margin: 0; padding-left: 1.2em; }
+ul.lines li + li { margin-top: 2px; }
 .faint { color: var(--text-faint); font-size: var(--type-small); }
 .wrap { overflow-wrap: anywhere; }
 .cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

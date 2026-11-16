@@ -81,10 +81,35 @@ function fieldsHint(meta: Json, rule: string): string {
   return fields && fields.length ? `${scope} takes ${fields.join(", ")}. Pin them after a colon, joined by commas: ${scope}:${fields[0].split(" ")[0]}=…` : "";
 }
 
-const MORE_BLOCK =
-  "Exact commands or wildcards in the machine's own rule syntax (exec.run:…, fs.write:…); a re: regex form where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes. Any other action is named whole (lamp.set, or lamp for all its actions), or with conditions on its arguments (lamp.set:room=office,brightness>50); a call that gives such an argument another type, or leaves it out, is refused too. The blocklist wins over the skip rules and the model. An entry for every machine can be switched off for single machines under Per machine.";
-const MORE_SKIP =
-  "A command rule covers a line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare *), no wrapper with words of its own (env A=B, sudo -u), and nothing run inside another command ($( ), sh -c, env -S); a re: rule covers a line of one command; exec.run:exact:… covers one line exactly. It does not allow a call: the machine's own rules still decide.";
+// What a rule can say, folded under More: one short line per point, not a
+// paragraph of small print.
+const MORE_BLOCK = [
+  "Commands and paths in the machine's own rule syntax, exact or with wildcards: exec.run:…, fs.write:….",
+  "re:… is a regex, where a glob is not enough.",
+  "An fs.read: or fs.write: path also holds what any other capability reads or writes there.",
+  "Another action by its name (lamp.set, or lamp for all its actions), or with conditions: lamp.set:room=office,brightness>50.",
+  "A call that gives such an argument another type, or leaves it out, is refused too.",
+  "The blocklist wins over the skip rules and the model.",
+  "An entry for every machine can be switched off for one machine under Per machine.",
+];
+const MORE_SKIP = [
+  "A command rule covers a line only when every command in it meets the rule.",
+  "No flag or operand the rule does not name, but after a bare *.",
+  "No wrapper with words of its own (env A=B, sudo -u).",
+  "Nothing run inside another command ($( ), sh -c, env -S).",
+  "A re: rule covers a line of one command; exec.run:exact:… covers one line exactly.",
+  "It does not allow a call: the machine's own rules still decide.",
+];
+
+function Lines({ lines }: { lines: string[] }) {
+  return (
+    <ul className="meta lines">
+      {lines.map((l) => (
+        <li key={l}>{l}</li>
+      ))}
+    </ul>
+  );
+}
 
 export function CheckerPage() {
   const { ov } = useCenter();
@@ -411,7 +436,7 @@ function BlockDetail({ e, ctx }: { e: Block; ctx: Ctx }) {
       </DSec>
       <DSec>
         <More summary="What a rule can name">
-          <p className="meta">{MORE_BLOCK}</p>
+          <Lines lines={MORE_BLOCK} />
         </More>
         <p className="meta">It catches names, not shell variables, aliases, a script written then run, or base64.</p>
         <More summary="Why">
@@ -446,7 +471,7 @@ function SkipDetail({ a, ctx }: { a: Allow; ctx: Ctx }) {
       <DSec>
         <p className="meta">A matching call skips the decision model, never the blocklist.</p>
         <More summary="What a skip rule covers">
-          <p className="meta">{MORE_SKIP}</p>
+          <Lines lines={MORE_SKIP} />
         </More>
       </DSec>
     </Detail>
@@ -509,11 +534,11 @@ function RuleForm({ block, ctx, done, cancel }: { block?: boolean; ctx: Ctx; don
       {where === "one" ? <Picker label="Machine" items={ctx.nodes.map((n) => ({ value: n.id, text: n.name }))} value={node} onPick={setNode} search="Search machines" none="No machine matches." /> : null}
       {block ? (
         <More summary="What a rule can name">
-          <p className="meta">{MORE_BLOCK}</p>
+          <Lines lines={MORE_BLOCK} />
         </More>
       ) : (
         <More summary="What a skip rule covers">
-          <p className="meta">{MORE_SKIP}</p>
+          <Lines lines={MORE_SKIP} />
         </More>
       )}
     </FormCard>

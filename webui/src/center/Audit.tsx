@@ -2,7 +2,7 @@
 // show the picked one and the rules it can become: allow or deny on the
 // machine (with its settings grant), or a rule of the action checker that
 // skips the model.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../frame";
 import { ago, when } from "../format";
@@ -229,9 +229,27 @@ export function AuditPage() {
       (!q.trim() || `${d.cap}.${d.action} ${d.target || ""} ${d.checker?.detail || ""}`.toLowerCase().includes(q.trim().toLowerCase())),
   );
   const shown = list.slice(0, SHOWN);
-  // A decision has no id; its time, machine and call name it.
-  const key = (d: Decision) => `${d.ts}:${d.node_id}:${d.cap}.${d.action}`;
+  // A decision has no id; its time, machine, call and target name it, and a
+  // count, oldest first, the same call twice in one millisecond.
+  const keys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return new Map(
+      (audit.data ? audit.data.decisions : []).map((x) => {
+        const k = `${x.ts}:${x.node_id}:${x.cap}.${x.action}:${x.target || ""}`;
+        const n = seen.get(k) || 0;
+        seen.set(k, n + 1);
+        return [x, `${k}#${n}`];
+      }),
+    );
+  }, [audit.data]);
+  const key = (x: Decision) => keys.get(x) || "";
   const d = shown.find((x) => key(x) === sel) || shown[0];
+  // The details keep the entry they show: a newer one only adds a row, so
+  // a rule button never acts on an entry that came in while it was read.
+  const first = d ? key(d) : null;
+  useEffect(() => {
+    if (first && first !== sel) setSel(first);
+  }, [first, sel]);
   const machines = [{ value: null, text: "Every machine" }, ...ov.nodes.map((n) => ({ value: n.id as string | null, text: n.name }))];
   return (
     <>

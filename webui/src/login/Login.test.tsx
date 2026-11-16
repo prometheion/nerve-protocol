@@ -1,3 +1,4 @@
+import { act } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { SESSION_KEY } from "../api";
 import { click, render, text } from "../test/dom";
@@ -45,4 +46,18 @@ it("reads its words from the page as data", () => {
   m.content = "{{LOGIN}}";
   expect(readInfo().secret).toBe("Token");
   m.remove();
+});
+
+it("is ready again when the browser shows it from its cache after a sign-in", async () => {
+  fakeServer({ "POST /login": () => ({ session: "s9" }) });
+  const el = await render(<Login info={info} />);
+  (el.querySelector(".login-input") as HTMLInputElement).value = "t0k";
+  await click(el.querySelector(".login-submit"));
+  const submit = el.querySelector(".login-submit") as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  await act(async () => {
+    window.dispatchEvent(new Event("pageshow"));
+  });
+  expect(submit.disabled).toBe(false);
+  expect(text(submit)).toBe("Log in");
 });

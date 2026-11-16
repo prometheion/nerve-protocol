@@ -1,7 +1,11 @@
 // Page tests of the node's web UI against a fake server.
+import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { nav } from "../api";
 import { node } from "../test/apps";
+import { nodeData } from "../test/fixtures";
+// The app's Permissions page, which says the same words.
+import appPermissions from "../../../crates/nerve/ui/permissions.slint?raw";
 import { allByText, button, click, settle, text, type } from "../test/dom";
 
 describe("Overview", () => {
@@ -17,6 +21,53 @@ describe("Overview", () => {
     await settle(4);
     expect(f.to("POST", "/api/panic")).toHaveLength(1);
     expect(out).toHaveBeenCalled();
+  });
+});
+
+describe("Overview, locked", () => {
+  it("unlocks the node without asking", async () => {
+    const d = nodeData();
+    d.overview.locked = true;
+    const { el, f } = await node("overview", { "GET /api/overview": () => d.overview, "POST /api/unlock": () => ({}) });
+    expect(text(el)).toContain("The node is locked");
+    expect(allByText(el, "Panic", "button")).toHaveLength(0);
+    await click(button(el, "Unlock"));
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+    expect(f.to("POST", "/api/unlock")).toHaveLength(1);
+  });
+});
+
+describe("Relay", () => {
+  it("adds a node with a link shown once, makes it a new link, and removes it after asking in place", async () => {
+    const { el, f } = await node("relay", {
+      "POST /api/relay/add": () => ({ token: { node: "lab-pc-2", link: "https://lab-pc-2:secret@relay.example:7490" } }),
+      "POST /api/relay/token": () => ({ token: { node: "laptop-2", link: "https://laptop-2:fresh@relay.example:7490" } }),
+      "POST /api/relay/remove": () => ({}),
+    });
+    await click(button(el, "Add a node…"));
+    await type(el.querySelector(".dcol input[placeholder='lab-pc']"), "lab-pc-2");
+    await click(button(el, "Make the link"));
+    expect(f.to("POST", "/api/relay/add").map((c) => c.body)).toEqual([{ name: "lab-pc-2" }]);
+    expect(text(el)).toContain("The link for lab-pc-2, shown once: https://lab-pc-2:secret@relay.example:7490");
+    await click(allByText(el, /^laptop-2/, ".lrow")[0]);
+    await click(button(el, "New link"));
+    expect(f.to("POST", "/api/relay/token").map((c) => c.body)).toEqual([{ name: "laptop-2" }]);
+    expect(text(el)).toContain("https://laptop-2:fresh@relay.example:7490");
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(f.to("POST", "/api/relay/remove")).toHaveLength(0);
+    await click(el.querySelector(".ask .btn.danger-solid"));
+    expect(f.to("POST", "/api/relay/remove").map((c) => c.body)).toEqual([{ name: "laptop-2" }]);
+  });
+
+  it("connects through a relay and empties its password field", async () => {
+    const { el, f } = await node("relay", { "POST /api/proxy/set": () => ({}) });
+    const d = el.querySelector(".dcol")!;
+    await type(d.querySelector("input[placeholder^='https://']"), "https://lab-pc@relay.example:7490");
+    const pw = d.querySelector("input[type=password]") as HTMLInputElement;
+    await type(pw, "s3cret");
+    await click(button(d, "Connect"));
+    expect(f.to("POST", "/api/proxy/set").map((c) => c.body)).toEqual([{ url: "https://lab-pc@relay.example:7490", password: "s3cret" }]);
+    expect(pw.value).toBe("");
   });
 });
 
@@ -87,9 +138,34 @@ describe("Permissions", () => {
     expect(guard.closest("details")).toBeNull();
     await click(button(el, "Add a forbidden command…"));
     await type(el.querySelector(".prow.form input"), "git push");
+    // The node keeps only the program: the switch says so.
+    expect(text(el.querySelector(".prow.form [role=switch]")!.closest(".pl2")!)).toContain("Wildcard: every command of this program");
+    expect(appPermissions).toContain('"Wildcard: every command of this program"');
     await click(el.querySelector(".prow.form [role=switch]"));
     await click(button(el.querySelector(".prow.form")!, "Save"));
     expect(f.to("POST", "/api/rules/add")[0].body).toEqual({ center: "home", list: "deny", rule: "git push", wildcard: true });
+  });
+
+  it("edits a rule in its place from the entry as listed, and sends nothing while it is unchanged", async () => {
+    const { el, f } = await node("permissions", { "POST /api/rules/edit": () => ({}), "POST /api/rules/add": () => ({}), "POST /api/rules/remove": () => ({}) });
+    await click(button(el.querySelector(".pnav")!, /^Forbidden commands/));
+    await click(allByText(el, "exec.run:git push --force origin main", ".prow")[0].querySelector("button[aria-label=Edit]"));
+    const form = el.querySelector(".prow.form")!;
+    const field = form.querySelector("input")!;
+    expect(field.value).toBe("exec.run:git push --force origin main");
+    expect(form.querySelector("[role=switch]")).toBeNull();
+    const save = button(form, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    await type(field, " exec.run:git push --force origin main ");
+    expect(button(form, "Save").disabled).toBe(true);
+    await click(button(form, "Save"));
+    expect(f.to("POST", "/api/rules/edit")).toHaveLength(0);
+    await type(field, "git push --force");
+    await click(button(form, "Save"));
+    expect(f.to("POST", "/api/rules/edit").map((c) => c.body)).toEqual([{ center: "home", list: "deny", rule: "exec.run:git push --force origin main", new: "git push --force" }]);
+    expect(f.to("POST", "/api/rules/add")).toHaveLength(0);
+    expect(f.to("POST", "/api/rules/remove")).toHaveLength(0);
   });
 
   it("sets a mode for some hours", async () => {
@@ -98,6 +174,16 @@ describe("Permissions", () => {
     await type(el.querySelector("input[aria-label='For hours']"), "2");
     await click(button(el, "Set the mode"));
     expect(f.to("POST", "/api/mode")[0].body).toEqual({ center: "home", mode: "user", hours: 2, as_owner: false });
+  });
+
+  it("leaves allowlist mode as the owner for another mode without as the owner", async () => {
+    const d = nodeData();
+    Object.assign(d.overview.centers[0], { mode: "allowlist", as_owner: true });
+    const { el, f } = await node("permissions", { "GET /api/overview": () => d.overview, "POST /api/mode": () => ({}) });
+    expect((el.querySelector("label.check input") as HTMLInputElement).checked).toBe(true);
+    await click(button(el, "Folder"));
+    await click(button(el, "Set the mode"));
+    expect(f.to("POST", "/api/mode")[0].body).toEqual({ center: "home", mode: "folder", as_owner: false });
   });
 });
 
@@ -123,6 +209,59 @@ describe("Audit", () => {
     await click(button(document.querySelector("[role=dialog]")!, "Add"));
     await settle(4);
     expect(f.to("POST", "/api/audit/rule")[0].body).toMatchObject({ center: "home", list: "allow", wildcard: true });
+  });
+});
+
+describe("Audit, while entries come in", () => {
+  it("keeps the entry its details show while newer ones come in", async () => {
+    const d = nodeData();
+    const { el, f } = await node("audit", { "GET /api/audit": () => d.audit, "POST /api/audit/rule": () => ({}) });
+    expect(text(el.querySelector(".dcol")!)).toContain("git push --force origin main");
+    const newer = { ...d.audit.entries[1], ts: Date.now(), seq: 3, target: "rm -rf /srv", rule_preview: "rm -rf /srv" };
+    d.audit.entries = [...d.audit.entries, newer] as typeof d.audit.entries;
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await settle(4);
+    expect(allByText(el, /rm -rf \/srv/, ".lrow")).toHaveLength(1);
+    await click(button(el.querySelector(".dcol")!, "Allow"));
+    await click(button(document.querySelector("[role=dialog]")!, "Add"));
+    await settle(4);
+    expect(f.to("POST", "/api/audit/rule")[0].body).toMatchObject({ target: "git push --force origin main" });
+  });
+});
+
+describe("Log", () => {
+  it("shows the problems only, finds in the lines, and clears after asking", async () => {
+    const { el, f } = await node("log", { "POST /api/log/clear": () => ({}) });
+    await click(button(el, "Problems"));
+    expect(f.to("GET", "/api/log").at(-1)!.query.get("problems")).toBe("1");
+    await type(el.querySelector("input[aria-label='Search the messages']"), "time limit");
+    expect(el.querySelectorAll(".lrow")).toHaveLength(1);
+    expect(text(el.querySelector(".dcol")!)).toContain("a command of home was stopped at its time limit");
+    await click(button(el, "Clear"));
+    await click(button(document.querySelector("[role=dialog]")!, "Cancel"));
+    await settle(4);
+    expect(f.to("POST", "/api/log/clear")).toHaveLength(0);
+    await click(button(el, "Clear"));
+    await click(button(document.querySelector("[role=dialog]")!, "Clear"));
+    await settle(4);
+    expect(f.to("POST", "/api/log/clear")).toHaveLength(1);
+  });
+});
+
+describe("Settings", () => {
+  it("saves the machine's name as TOML, and revokes a web UI token after asking in place", async () => {
+    const { el, f } = await node("settings", { "POST /api/settings/set": () => ({}), "POST /api/ui/revoke": () => ({}) });
+    await type(el.querySelector(".dcol input"), 'work "station"');
+    await click(button(el.querySelector(".dcol")!, "Save"));
+    expect(f.to("POST", "/api/settings/set").map((c) => c.body)).toEqual([{ key: "node.name", value: '"work \\"station\\""' }]);
+    await click(allByText(el, /^Web UI/, ".lrow")[0]);
+    await click(button(el.querySelector(".dcol")!, "Revoke"));
+    expect(text(el)).toContain("Revoke laptop?");
+    expect(f.to("POST", "/api/ui/revoke")).toHaveLength(0);
+    await click(el.querySelector(".ask .btn.danger-solid"));
+    expect(f.to("POST", "/api/ui/revoke").map((c) => c.body)).toEqual([{ label: "laptop" }]);
   });
 });
 

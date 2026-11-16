@@ -52,6 +52,18 @@ it("asks whether the tab is signed in before the page draws", async () => {
   expect(await startSession()).toBe(true);
 });
 
+it("replaces the page with the login when the tab is not signed in, so Back does not loop", async () => {
+  vi.mocked(nav.toLogin).mockRestore();
+  const replace = vi.spyOn(location, "replace").mockImplementation(() => {});
+  const assign = vi.spyOn(location, "assign").mockImplementation(() => {});
+  fakeServer({ "GET /api/session": () => ({ login: true, logged_in: false }) });
+  expect(await startSession()).toBe(false);
+  expect(replace).toHaveBeenCalledWith("/login");
+  expect(assign).not.toHaveBeenCalled();
+  replace.mockRestore();
+  assign.mockRestore();
+});
+
 it("links the user guide of this release", () => {
   const m = document.createElement("meta");
   m.name = "nerve-guide";

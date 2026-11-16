@@ -3,7 +3,7 @@
 // as a header with every API call. The secret never appears in a URL, and
 // nothing is kept in a cookie. What the page says comes from the server, in
 // <meta name="nerve-login"> (nerve_transport::webui::login_page).
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { keepSession } from "../api";
 import { Icon } from "../ui";
 
@@ -36,6 +36,13 @@ export function Login({ info }: { info: LoginInfo }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [shown, setShown] = useState(false);
+  // A page the browser kept and shows again (Back after signing in) comes
+  // back as it was left, its button busy: it is ready again.
+  useEffect(() => {
+    const ready = () => setBusy(false);
+    window.addEventListener("pageshow", ready);
+    return () => window.removeEventListener("pageshow", ready);
+  }, []);
   const submit = async (ev: FormEvent) => {
     ev.preventDefault();
     // Read from the field itself: a password manager or a script may fill
