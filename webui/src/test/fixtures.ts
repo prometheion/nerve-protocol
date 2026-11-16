@@ -266,10 +266,9 @@ export function nodeData() {
   };
   const audit = {
     entries: [
-      { ts: now - 30 * min, seq: 1, center: "home", cap: "fs", action: "read", target: "/home/alex/projects/site/README.md", decision: "allowed" },
+      { ts: now - 30 * min, center: "home", cap: "fs", action: "read", target: "/home/alex/projects/site/README.md", decision: "allowed" },
       {
         ts: now - 10 * min,
-        seq: 2,
         center: "home",
         cap: "exec",
         action: "run",

@@ -1,7 +1,7 @@
 // Audit: what the node allowed and refused, newest first, as a list; the
 // details show the picked entry and the rules its buttons store, as they
 // will be stored.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../frame";
 import { ago, when } from "../format";
@@ -68,20 +68,37 @@ export function AuditPage() {
   const [denied, setDenied] = useState(false);
   const [live, setLive] = useState(true);
   const [q, setQ] = useState("");
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<{ key: string; e: Entry } | null>(null);
   const [open, setOpen] = useState(false);
   const audit = usePoll(() => api<{ entries: Entry[] }>("GET", `/api/audit${denied ? "?denied=1" : ""}`), [denied, live], live ? 2000 : 0);
-  const all: Entry[] = audit.data ? audit.data.entries.slice().reverse() : [];
   const t = q.trim().toLowerCase();
-  const list = all.filter((e) => !t || `${whatOf(e)} ${e.target || ""} ${e.reason || ""} ${e.center || ""}`.toLowerCase().includes(t));
-  const key = (e: Entry) => `${e.ts}:${e.seq}:${whatOf(e)}`;
-  const e = list.find((x) => key(x) === sel) || list[0];
-  // The details keep the entry they show: a newer one only adds a row, so
-  // a rule button never acts on an entry that came in while it was read.
-  const shownKey = e ? key(e) : null;
+  const pass = (e: Entry) => (!denied || refusedOf(e)) && (!t || `${whatOf(e)} ${e.target || ""} ${e.reason || ""} ${e.center || ""}`.toLowerCase().includes(t));
+  const all: Entry[] = audit.data ? audit.data.entries.slice().reverse() : [];
+  const list = all.filter(pass);
+  // An entry has no id; its time, center, call and target name it, and a
+  // count, oldest first, the same call twice in one millisecond.
+  const keys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return new Map(
+      (audit.data ? audit.data.entries : []).map((x) => {
+        const k = `${x.ts}:${x.center || ""}:${whatOf(x)}:${x.target || ""}`;
+        const n = seen.get(k) || 0;
+        seen.set(k, n + 1);
+        return [x, `${k}#${n}`];
+      }),
+    );
+  }, [audit.data]);
+  const key = (x: Entry) => keys.get(x) || "";
+  // The details keep the entry that was picked, also once newer ones push
+  // it out of the answer: a rule button never acts on another entry than
+  // the one that was read. Only a filter that no longer lets it through
+  // (or none picked yet) shows the newest.
+  const picked = list.find((x) => key(x) === sel?.key) || (sel && pass(sel.e) ? sel.e : undefined);
+  const e = picked || list[0];
+  const first = e ? key(e) : null;
   useEffect(() => {
-    if (shownKey && shownKey !== sel) setSel(shownKey);
-  }, [shownKey, sel]);
+    if (e && !picked && first) setSel({ key: first, e });
+  }, [e, picked, first]);
   return (
     <>
       <PageHead icon="audit" title="Audit" sub="What the node allowed and refused.">
@@ -96,6 +113,7 @@ export function AuditPage() {
             const yes = await ask({ title: "Clear the audit?", message: "The entries so far are kept in the audit's older file.", confirm: "Clear", danger: true });
             if (!yes) return;
             await api("POST", "/api/audit/clear");
+            setSel(null);
             await audit.reload();
           }}
         >
@@ -133,7 +151,7 @@ export function AuditPage() {
                   key={`${idx}:${key(x)}`}
                   current={x === e}
                   onPick={() => {
-                    setSel(key(x));
+                    setSel({ key: key(x), e: x });
                     setOpen(true);
                   }}
                 >
@@ -149,7 +167,7 @@ export function AuditPage() {
               ))}
             </ListCard>
           }
-          detail={e ? <EntryDetail key={key(e)} e={e} /> : null}
+          detail={e ? <EntryDetail key={first || sel?.key} e={e} /> : null}
         />
       ) : (
         <div className="card">

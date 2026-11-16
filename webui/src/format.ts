@@ -33,3 +33,8 @@ export function clock(ms: number): string {
 }
 
 export const gb = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
+
+/** A rule as `rule` prints it: its tab, carriage return and line feed
+ * written `\t`, `\r` and `\n`. A one-line field would drop a real line
+ * break, and with it the rule's meaning. */
+export const escapeControls = (rule: string) => rule.replace(/[\t\r\n]/g, (c) => (c === "\t" ? "\\t" : c === "\r" ? "\\r" : "\\n"));

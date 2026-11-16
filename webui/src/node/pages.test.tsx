@@ -168,6 +168,23 @@ describe("Permissions", () => {
     expect(f.to("POST", "/api/rules/remove")).toHaveLength(0);
   });
 
+  it("edits a rule with a line break in the form `rule` prints it", async () => {
+    const d = nodeData();
+    d.perm.rules.deny.push("exec.run:cat <<EOF > /etc/x\n*");
+    const { el, f } = await node("permissions", { "GET /api/perm": () => d.perm, "POST /api/rules/edit": () => ({}) });
+    await click(button(el.querySelector(".pnav")!, /^Forbidden commands/));
+    // Listed as `rule` prints it, on one line.
+    const row = allByText(el, "exec.run:cat <<EOF > /etc/x\\n*", ".prow")[0];
+    await click(row.querySelector("button[aria-label=Edit]"));
+    const field = el.querySelector(".prow.form input")!;
+    expect((field as HTMLInputElement).value).toBe("exec.run:cat <<EOF > /etc/x\\n*");
+    await type(field, "exec.run:cat <<EOF > /etc/y\\n*");
+    await click(button(el.querySelector(".prow.form")!, "Save"));
+    expect(f.to("POST", "/api/rules/edit").map((c) => c.body)).toEqual([
+      { center: "home", list: "deny", rule: "exec.run:cat <<EOF > /etc/x\\n*", new: "exec.run:cat <<EOF > /etc/y\\n*" },
+    ]);
+  });
+
   it("sets a mode for some hours", async () => {
     const { el, f } = await node("permissions", { "POST /api/mode": () => ({}) });
     await click(button(el, "User"));
@@ -217,7 +234,7 @@ describe("Audit, while entries come in", () => {
     const d = nodeData();
     const { el, f } = await node("audit", { "GET /api/audit": () => d.audit, "POST /api/audit/rule": () => ({}) });
     expect(text(el.querySelector(".dcol")!)).toContain("git push --force origin main");
-    const newer = { ...d.audit.entries[1], ts: Date.now(), seq: 3, target: "rm -rf /srv", rule_preview: "rm -rf /srv" };
+    const newer = { ...d.audit.entries[1], ts: Date.now(), target: "rm -rf /srv", rule_preview: "rm -rf /srv" };
     d.audit.entries = [...d.audit.entries, newer] as typeof d.audit.entries;
     await act(async () => {
       document.dispatchEvent(new Event("visibilitychange"));
@@ -228,6 +245,53 @@ describe("Audit, while entries come in", () => {
     await click(button(document.querySelector("[role=dialog]")!, "Add"));
     await settle(4);
     expect(f.to("POST", "/api/audit/rule")[0].body).toMatchObject({ target: "git push --force origin main" });
+  });
+});
+
+describe("Audit, once the picked entry is gone from the answer", () => {
+  it("keeps the picked entry and acts on it", async () => {
+    const d = nodeData();
+    const { el, f } = await node("audit", { "GET /api/audit": () => d.audit, "POST /api/audit/rule": () => ({}) });
+    await click(allByText(el, /git push --force/, ".lrow")[0]);
+    // 600 newer entries: the answer holds 500, so the picked one is gone.
+    const base = Date.now();
+    const newer = Array.from({ length: 600 }, (_, i) => ({ ts: base + i, center: "home", cap: "fs", action: "read", target: `/srv/f${i}`, decision: "allowed" }));
+    d.audit.entries = [...d.audit.entries, ...newer].slice(-500) as typeof d.audit.entries;
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await settle(4);
+    expect(allByText(el, /git push --force/, ".lrow")).toHaveLength(0);
+    expect(text(el.querySelector(".dcol")!)).toContain("git push --force origin main");
+    await click(button(el.querySelector(".dcol")!, "Allow"));
+    await click(button(document.querySelector("[role=dialog]")!, "Add"));
+    await settle(4);
+    expect(f.to("POST", "/api/audit/rule")[0].body).toMatchObject({ target: "git push --force origin main" });
+  });
+
+  it("shows the newest again when a search no longer lets the picked entry through", async () => {
+    const { el } = await node("audit");
+    await click(allByText(el, /git push --force/, ".lrow")[0]);
+    expect(text(el.querySelector(".dcol")!)).toContain("git push --force origin main");
+    await type(el.querySelector("input[aria-label='Find in target and reason']"), "README");
+    expect(text(el.querySelector(".dcol")!)).toContain("README.md");
+    expect(text(el.querySelector(".dcol")!)).not.toContain("git push --force");
+  });
+
+  it("tells apart the same call twice in one millisecond", async () => {
+    const d = nodeData();
+    const one = { ...d.audit.entries[1], ts: 1 };
+    d.audit.entries = [{ ...one }, { ...one, reason: "the second call" }] as typeof d.audit.entries;
+    const { el } = await node("audit", { "GET /api/audit": () => d.audit });
+    const rows = allByText(el, /git push --force/, ".lrow");
+    expect(rows).toHaveLength(2);
+    // Newest first: the second call is the first row.
+    await click(rows[1]);
+    expect(rows[1].getAttribute("aria-current")).toBe("true");
+    expect(rows[0].getAttribute("aria-current")).toBeNull();
+    expect(text(el.querySelector(".dcol")!)).not.toContain("the second call");
+    await click(rows[0]);
+    expect(text(el.querySelector(".dcol")!)).toContain("the second call");
   });
 });
 

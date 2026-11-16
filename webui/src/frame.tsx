@@ -39,17 +39,22 @@ export type Poll<T> = {
 
 /** What `load` answers, asked when the page opens and again every `every`
  * ms while the tab is in view (0: only when asked). An answer that comes
- * after a newer question is dropped. When `deps` change, what was shown is
+ * after a newer question is dropped, and a tick waits while the last
+ * question is still open, so a slow answer is shown and not overtaken by
+ * the next one. When `deps` change, what was shown is
  * dropped too, unless `keep` (a filter changed: the old list stays until
  * the new one comes). */
 export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000, keep = false): Poll<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const run = useRef(0);
+  // The question still open, 0 when the last one has been answered.
+  const open = useRef(0);
   const fn = useRef(load);
   fn.current = load;
   const reload = useCallback(async () => {
     const n = ++run.current;
+    open.current = n;
     try {
       const v = await fn.current();
       if (n !== run.current) return;
@@ -59,6 +64,8 @@ export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000
       if (n !== run.current) return;
       if (e instanceof ApiError && e.auth) return;
       setError(e as Error);
+    } finally {
+      if (open.current === n) open.current = 0;
     }
   }, []);
   useEffect(() => {
@@ -67,7 +74,7 @@ export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000
     reload();
     if (!every) return;
     const t = setInterval(() => {
-      if (!document.hidden) reload();
+      if (!document.hidden && !open.current) reload();
     }, every);
     const seen = () => {
       if (!document.hidden) reload();
@@ -77,6 +84,7 @@ export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000
       clearInterval(t);
       document.removeEventListener("visibilitychange", seen);
       run.current++;
+      open.current = 0;
     };
   }, deps);
   return { data, error, reload, set: setData };

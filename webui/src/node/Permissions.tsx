@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../frame";
-import { when } from "../format";
+import { escapeControls, when } from "../format";
 import { Btn, Icon, ListCard, Loading, LRow, More, PageHead, Pill, RemoveAsk, Seg, Switch, TextInput, failed, toast } from "../ui";
 import { useNode } from "./App";
 import { CenterTabs } from "./CenterTabs";
@@ -278,10 +278,14 @@ function PermOf({ c }: { c: CenterEntry }) {
     );
   } else {
     const l = list!;
-    rows = (rules[l] || []).map((r) =>
-      edit === r ? (
+    rows = (rules[l] || []).map((raw) => {
+      // The entry as `rule` prints it, its line breaks written `\n`: a
+      // one-line field cannot hold a real one, and `rule edit` takes the
+      // entry and the new text in this form.
+      const r = escapeControls(raw);
+      return edit === raw ? (
         <RuleForm
-          key={r}
+          key={raw}
           sec={sec}
           start={r}
           edit
@@ -295,24 +299,24 @@ function PermOf({ c }: { c: CenterEntry }) {
           }}
         />
       ) : (
-        <div key={r} className="prow">
+        <div key={raw} className="prow">
           <Icon name={ICON[sec]} />
           <span className="mono cut pth" title={r}>
             {r}
           </span>
-          {rules.stale && rules.stale[r] ? <Pill tone="warn">{rules.stale[r]}</Pill> : null}
-          <Btn kind="ghost" icon="edit" label="Edit" title="Edit" onClick={() => setEdit(r)} />
+          {rules.stale && rules.stale[raw] ? <Pill tone="warn">{rules.stale[raw]}</Pill> : null}
+          <Btn kind="ghost" icon="edit" label="Edit" title="Edit" onClick={() => setEdit(raw)} />
           <RemoveAsk
             bare
             question="Remove this rule?"
             onConfirm={async () => {
-              await api("POST", "/api/rules/remove", { center: c.name, list: l, rule: r });
+              await api("POST", "/api/rules/remove", { center: c.name, list: l, rule: raw });
               await after();
             }}
           />
         </div>
-      ),
-    );
+      );
+    });
   }
   const note =
     sec === "allow" ? (

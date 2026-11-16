@@ -162,6 +162,36 @@ describe("Audit", () => {
     expect(f.to("POST", "/api/checker/allow")[0].body).toMatchObject({ target: "rm -rf build/" });
   });
 
+  it("keeps the picked entry once newer ones push it out of the list", async () => {
+    const d = centerData();
+    d.audit.decisions.splice(4);
+    const { el, f } = await center("audit", { "GET /api/audit": () => d.audit, "POST /api/checker/allow": () => ({ rule: "x" }) });
+    expect(text(el.querySelector(".dcol")!)).toContain("rm -rf build/");
+    // 250 newer decisions: the page lists the newest 200, so the one it
+    // shows is no longer a row.
+    const base = Date.now();
+    const newer = Array.from({ length: 250 }, (_, i) => ({ ...d.audit.decisions[0], ts: base + i, target: `/srv/f${i}` }));
+    d.audit = { decisions: [...d.audit.decisions, ...newer] };
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await settle(4);
+    expect(allByText(el, /rm -rf build/, ".lrow")).toHaveLength(0);
+    expect(text(el.querySelector(".dcol")!)).toContain("rm -rf build/");
+    await click(button(el, "Trust this"));
+    expect(f.to("POST", "/api/checker/allow")[0].body).toMatchObject({ target: "rm -rf build/" });
+  });
+
+  it("shows the newest again when a search no longer lets the picked entry through", async () => {
+    const d = centerData();
+    d.audit.decisions.splice(4);
+    const { el } = await center("audit", { "GET /api/audit": () => d.audit });
+    expect(text(el.querySelector(".dcol")!)).toContain("rm -rf build/");
+    await type(el.querySelector("input[aria-label='Find in target and reason']"), "README");
+    expect(text(el.querySelector(".dcol")!)).toContain("README.md");
+    expect(text(el.querySelector(".dcol")!)).not.toContain("rm -rf build/");
+  });
+
   it("tells apart the same call twice in one millisecond", async () => {
     const d = centerData();
     const one = { ...d.audit.decisions[3], ts: 1 };

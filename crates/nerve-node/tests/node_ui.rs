@@ -1382,6 +1382,80 @@ async fn a_rule_is_edited_in_its_place_and_an_unchanged_one_stays() {
     daemon.stop().await;
 }
 
+/// The Sudo list's edit makes the checks an add makes: `*` and a `*` inside a
+/// command are refused and the list stays; a rule with a line break is listed
+/// with the break written out, and edited from that form it keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_the_sudo_list_is_checked_and_a_line_break_survives() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "sudo", "rule": "sudo apt update"}),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "deny", "rule": "cat a\nb *"}),
+    )
+    .await;
+    let listed = |v: Value, list: &str| -> Vec<String> {
+        v["rules"][list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    let perm = || async { get(addr, "/api/perm?center=lab", &s).await.json() };
+    let sudo = listed(perm().await, "sudo");
+    assert_eq!(sudo, ["sudo apt update"]);
+    for new in ["*", "sudo *", "chmod 644 /srv/*.conf"] {
+        let a = post(
+            addr,
+            "/api/rules/edit",
+            &s,
+            json!({"center": "lab", "list": "sudo", "rule": "sudo apt update", "new": new}),
+        )
+        .await;
+        assert_ne!(a.status, 200, "{new}: {}", a.body);
+        assert_eq!(listed(perm().await, "sudo"), sudo, "{new}");
+    }
+
+    // The page lists the rule with its line break in it. It edits and sends
+    // the entry as `rule` prints it, the break written `\n`, and the rule
+    // stays one rule with the break in it.
+    let deny = listed(perm().await, "deny");
+    let raw = deny.iter().find(|r| r.contains("cat a")).unwrap().clone();
+    assert!(raw.contains('\n'), "{raw:?}");
+    let shown = raw.replace('\n', "\\n");
+    change(
+        addr,
+        &s,
+        "/api/rules/edit",
+        json!({"center": "lab", "list": "deny", "rule": shown, "new": shown.replace("cat a", "cat c")}),
+    )
+    .await;
+    let after = listed(perm().await, "deny");
+    assert!(after.contains(&raw.replace("cat a", "cat c")), "{after:?}");
+    daemon.stop().await;
+}
+
 /// `center add -` takes the link from the first line of its
 /// input, as the web UI passes it, and only then.
 #[test]

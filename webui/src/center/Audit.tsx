@@ -217,17 +217,16 @@ export function AuditPage() {
   const [kind, setKind] = useState<"all" | "allowed" | "refused">("all");
   const [machine, setMachine] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<{ key: string; d: Decision } | null>(null);
   const [open, setOpen] = useState(false);
   const nodes = useMemo(() => Object.fromEntries(ov.nodes.map((n) => [n.id, n])), [ov.nodes]);
   const all = useMemo(() => (audit.data ? audit.data.decisions.slice().reverse() : []), [audit.data]);
   const refused = (d: Decision) => d.decision !== "allowed";
-  const list = all.filter(
-    (d) =>
-      (kind === "all" || (kind === "refused") === refused(d)) &&
-      (machine === null || d.node_id === machine) &&
-      (!q.trim() || `${d.cap}.${d.action} ${d.target || ""} ${d.checker?.detail || ""}`.toLowerCase().includes(q.trim().toLowerCase())),
-  );
+  const pass = (d: Decision) =>
+    (kind === "all" || (kind === "refused") === refused(d)) &&
+    (machine === null || d.node_id === machine) &&
+    (!q.trim() || `${d.cap}.${d.action} ${d.target || ""} ${d.checker?.detail || ""}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const list = all.filter(pass);
   const shown = list.slice(0, SHOWN);
   // A decision has no id; its time, machine, call and target name it, and a
   // count, oldest first, the same call twice in one millisecond.
@@ -243,13 +242,16 @@ export function AuditPage() {
     );
   }, [audit.data]);
   const key = (x: Decision) => keys.get(x) || "";
-  const d = shown.find((x) => key(x) === sel) || shown[0];
-  // The details keep the entry they show: a newer one only adds a row, so
-  // a rule button never acts on an entry that came in while it was read.
+  // The details keep the decision that was picked, also once newer ones
+  // push it out of the list or the answer: a rule button never acts on
+  // another decision than the one that was read. Only a filter that no
+  // longer lets it through (or none picked yet) shows the newest.
+  const picked = shown.find((x) => key(x) === sel?.key) || (sel && pass(sel.d) ? sel.d : undefined);
+  const d = picked || shown[0];
   const first = d ? key(d) : null;
   useEffect(() => {
-    if (first && first !== sel) setSel(first);
-  }, [first, sel]);
+    if (d && !picked && first) setSel({ key: first, d });
+  }, [d, picked, first]);
   const machines = [{ value: null, text: "Every machine" }, ...ov.nodes.map((n) => ({ value: n.id as string | null, text: n.name }))];
   return (
     <>
@@ -291,7 +293,7 @@ export function AuditPage() {
                         key={`${idx}:${key(x)}`}
                         current={d === x}
                         onPick={() => {
-                          setSel(key(x));
+                          setSel({ key: key(x), d: x });
                           setOpen(true);
                         }}
                       >
@@ -311,7 +313,7 @@ export function AuditPage() {
                   {list.length > shown.length ? <p className="lnote top">Showing the latest {shown.length} of {list.length}.</p> : null}
                 </ListCard>
               }
-              detail={d ? <DecisionDetail key={key(d)} d={d} n={nodes[d.node_id] as Json} /> : null}
+              detail={d ? <DecisionDetail key={first || sel?.key} d={d} n={nodes[d.node_id] as Json} /> : null}
             />
           ) : (
             <div className="card">
