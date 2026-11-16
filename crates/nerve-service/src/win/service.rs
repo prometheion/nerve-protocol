@@ -214,15 +214,16 @@ pub struct Spec<'a> {
     /// arguments.
     pub line: &'a str,
     /// The local account it runs as and that account's password; `None`:
-    /// its own virtual account, with the service's SID in its token.
+    /// its own virtual account. Either way the service's SID is in its
+    /// token.
     pub logon: Option<(&'a str, &'a str)>,
     pub settings: &'a Settings,
 }
 
 #[cfg(windows)]
 pub use sys::{
-    configure, delete, delete_at_restart, put, registered, set_dacl, start, state, stop,
-    wait_running,
+    command_line, configure, delete, delete_at_restart, pid, put, registered, set_dacl, start,
+    state, stop, wait_running,
 };
 
 #[cfg(windows)]
@@ -275,6 +276,16 @@ mod sys {
             .is_ok_and(|s| s.is_some())
     }
 
+    /// The process of the service `name` while it runs, as anyone may ask;
+    /// `None` when it is not registered or does not run.
+    pub fn pid(name: &str) -> Result<Option<u32>, String> {
+        let Some(s) = Scm::open(SC_MANAGER_CONNECT)?.service(name, SERVICE_QUERY_STATUS)? else {
+            return Ok(None);
+        };
+        let st = s.status()?;
+        Ok((st.dwCurrentState == SERVICE_RUNNING && st.dwProcessId != 0).then_some(st.dwProcessId))
+    }
+
     /// The state of the service `name`; `None` when it is not registered.
     pub fn state(name: &str) -> Result<Option<State>, String> {
         let access = SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG;
@@ -291,6 +302,16 @@ mod sys {
             SERVICE_STOPPED => "stopped",
             _ => "running",
         };
+        let automatic = config_of(&s, |config| config.dwStartType == SERVICE_AUTO_START);
+        Ok(Some(State {
+            state: state.into(),
+            automatic,
+        }))
+    }
+
+    /// What `f` reads of the configuration of the service `s`, opened with
+    /// SERVICE_QUERY_CONFIG; `None` when it cannot be read.
+    fn config_of<T>(s: &Scm, f: impl FnOnce(&QUERY_SERVICE_CONFIGW) -> T) -> Option<T> {
         // The configuration's size first, then the configuration.
         let mut need = 0u32;
         // SAFETY: a query of the size only, with no buffer.
@@ -306,15 +327,22 @@ mod sys {
                 &mut need,
             )
         };
-        let automatic = (ok != 0).then(|| {
-            // SAFETY: the call filled the struct at the buffer's start.
-            let config = unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
-            config.dwStartType == SERVICE_AUTO_START
-        });
-        Ok(Some(State {
-            state: state.into(),
-            automatic,
-        }))
+        // SAFETY: the call filled the struct at the buffer's start, and its
+        // strings in the buffer, which lives while `f` reads them.
+        (ok != 0).then(|| f(unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() }))
+    }
+
+    /// The command line the service `name` starts, as anyone may ask;
+    /// `None` when it is not registered or cannot be read.
+    pub fn command_line(name: &str) -> Option<String> {
+        let s = Scm::open(SC_MANAGER_CONNECT)
+            .ok()?
+            .service(name, SERVICE_QUERY_CONFIG)
+            .ok()??;
+        // SAFETY: a NUL-terminated string in the configuration's buffer.
+        config_of(&s, |config| unsafe {
+            crate::win::sid::from_wide(config.lpBinaryPathName)
+        })
     }
 
     /// A list of names as the manager takes it: each ended by a NUL, and
@@ -409,19 +437,19 @@ mod sys {
             (&raw const description).cast(),
             "its description",
         )?;
-        if spec.logon.is_none() {
-            // The service's own SID in its token: what its folders are
-            // opened to.
-            let sid = SERVICE_SID_INFO {
-                dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
-            };
-            change(
-                &s,
-                SERVICE_CONFIG_SERVICE_SID_INFO,
-                (&raw const sid).cast(),
-                "its SID",
-            )?;
-        }
+        // The service's own SID in its token: what its folders are opened
+        // to, and what a firewall rule by service (`-Service`) matches by:
+        // without it such a rule lets nothing in, found on a real machine
+        // with the node, which logs on as an account.
+        let sid = SERVICE_SID_INFO {
+            dwServiceSidType: SERVICE_SID_TYPE_UNRESTRICTED,
+        };
+        change(
+            &s,
+            SERVICE_CONFIG_SERVICE_SID_INFO,
+            (&raw const sid).cast(),
+            "its SID",
+        )?;
         settle(&s, spec.settings)
     }
 

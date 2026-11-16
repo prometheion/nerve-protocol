@@ -1,5 +1,5 @@
 //! Which program of the release this is: `nerve-node`, or the desktop app
-//! `nerve-node-desktop` (crates/nerve-node-desktop), which holds the node and
+//! `nerve` (crates/nerve), which holds the node and
 //! its CLI too. The name decides where `install` puts the program, which
 //! release file `update` takes, and what `--version` says; the desktop app
 //! also installs and removes its own parts (the menu entry, the `nerve://`
@@ -43,7 +43,7 @@ pub const NODE: Edition = Edition {
 /// The desktop app's name. The node alone knows it to find the app beside
 /// it on Linux: a node the app took over is the app's to uninstall
 /// (`crate::service::app_beside`).
-pub const DESKTOP_PROGRAM: &str = "nerve-node-desktop";
+pub const DESKTOP_PROGRAM: &str = "nerve";
 
 static EDITION: OnceLock<&'static Edition> = OnceLock::new();
 

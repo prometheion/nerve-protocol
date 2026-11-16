@@ -1,5 +1,5 @@
 //! What `nerve-node` does when it starts: the helpers it starts itself, then
-//! one command line. The desktop app (crates/nerve-node-desktop) is the same
+//! one command line. The desktop app (crates/nerve) is the same
 //! program with a window: started with arguments it runs this, so both
 //! binaries behave alike.
 

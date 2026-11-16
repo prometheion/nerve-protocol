@@ -1,19 +1,19 @@
 # Nerve on Windows
 
-On Windows the node is the desktop app: it installs the node as a service,
-and you do everything in its window. There is no `nerve-node` to type. The
-rest of this guide holds on Windows too; this page says where each task is
-in the app, and what differs. [Windows in depth](../dev/windows.md).
+On Windows the app `nerve` is the node or the center: it installs one of
+them as a service, and you do everything in its window and the web UIs.
+There is no `nerve-node` or `nerve-center` to type. The rest of this guide
+holds on Windows too; this page says where each task is in the app, and
+what differs. [Windows in depth](../dev/windows.md).
 
 ## Download and check
 
 From [Releases](https://github.com/prometheion/nerve-protocol/releases/latest)
-take `nerve-node-desktop-x86_64-windows.exe`, the node with its app, and for a
-center `nerve-center-x86_64-windows.exe`. Both are for x64. In PowerShell,
-compare the hash with its line in `SHA256SUMS`:
+take `nerve-x86_64-windows.exe`, the app, for x64. In PowerShell, compare
+the hash with its line in `SHA256SUMS`:
 
 ```powershell
-(Get-FileHash .\nerve-node-desktop-x86_64-windows.exe).Hash
+(Get-FileHash .\nerve-x86_64-windows.exe).Hash
 ```
 
 The programs are not signed yet. SmartScreen says "Windows protected your
@@ -22,9 +22,10 @@ on, can block them, with no way past.
 
 ## Install
 
-Double-click the file. The installer asks for your Windows password, then
-Windows asks once for an administrator (UAC). You become the node's owner.
-It installs:
+Double-click the file. The installer asks what this machine is: **A node**
+or **A center** (for a center, see [below](#the-center-as-a-service)). For a
+node it asks for your Windows password, then Windows asks once for an
+administrator (UAC). You become the node's owner. It installs:
 
 - the services `nerve-node` and `nerve-run-profile`, which start with Windows;
 - the users `nerve`, which runs the node, and `nerve-run`, which runs a
@@ -34,7 +35,7 @@ It installs:
 Then the first-run steps pair your first center, choose its mode and its
 network, and in folder mode give it a first folder.
 
-`nerve-node-desktop-x86_64-windows.exe --silent` installs without a window
+`nerve-x86_64-windows.exe --silent` installs without a window
 or a question, for scripts and winget. The app asks for your password later,
 where it needs it.
 
@@ -94,30 +95,20 @@ without `-File` read their line again as commands, so a template with
 
 ## The center as a service
 
-Double-click `nerve-center-x86_64-windows.exe`. After the UAC prompt it
-installs itself, and its window shows the web UI's address and the owner
-token until you press Enter. A newer one double-clicked later installs over
-it, and the settings stay. To give
-it a name or other settings, run it in a terminal opened with **Run as
-administrator**, in the download folder:
+Double-click the file and pick **A center**. After the UAC prompt it
+installs the center as the service `nerve-center`, which runs the app's
+program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
+`C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
+the node port (7443) of the center's service. Its last step shows what it
+did, the owner token among it, and **Open the web UI**, which checks first
+that the center holds the web UI's port. Keep the token in your password
+manager: the web UI asks for it. **Nerve** in the Start menu opens that step
+again; it opens no `nerve://` links.
 
-```powershell
-.\nerve-center-x86_64-windows.exe install --name lab
-```
-
-It puts itself in `C:\Program Files\Nerve` as `nerve-center.exe`, on the
-machine's `Path`, so a harness and every terminal opened after it find
-`nerve-center`. It runs as the service `nerve-center`, keeps its state in
-`C:\ProgramData\nerve-center`, and adds the firewall rule `Nerve center` for
-the node port. `nerve-center set` shows its settings, in
-`settings\center.env` there; `nerve-center set ui 0.0.0.0:7480` changes one
-and restarts the service. A new `listen` port takes the firewall rule along.
-The rule lets in the node port only: for the web UI or MCP beyond loopback,
-`set` prints the `New-NetFirewallRule` line for their port. These and the
-center's other commands work in an administrator's terminal: `status`,
-`service start|stop|restart`, `pair`, `nodes`, `token`, `log` and
-`owner-token` ([in the terminal](center.md#in-the-terminal)).
-[Run the center](center.md) says what comes next.
+Harnesses connect over HTTP MCP: the web UI's **Connect a harness** makes a
+harness token and the entry. The center's settings are in
+`settings\center.env` there; its web UI and MCP stay on this machine, and
+the app installs no second role beside it.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.
 
@@ -126,11 +117,11 @@ A relay on Windows needs a firewall rule for its port, which you add yourself.
 Update the center first, then the nodes. **Settings › App › Update…** checks
 the download against `SHA256SUMS`; if the new program does not start, the
 old one comes back. **Pre-releases** beside it makes Update take test
-builds too. The center: `nerve-center update` as an administrator, with
-`--pre` or `--tag <tag>` for a pre-release.
+builds too.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
-the data** or **Delete the data**. The quiet uninstall of Apps & features
+the data** or **Delete the data**. On a center, Apps & features or
+**Uninstall…** in the app's center step removes the center and the app. The quiet uninstall of Apps & features
 keeps it. The data holds your stored Windows password too, open to the
 administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
 `nerve-run` that Windows still holds goes after a restart; the uninstall
@@ -141,10 +132,19 @@ install this version, and pair the node again. The installer refuses to
 install or update over 0.0.6, whose settings it cannot read, and the app's
 **Update** of 0.0.6 puts the old program back.
 
+## The node's web UI
+
+The node's own web UI is off until you turn it on in **Settings › Network ›
+Web UI**. There you make its tokens (each is shown once) and revoke them.
+Open it with **Open** there, once the app says it listens: the app checks
+first that the node holds the port. From this machine it lets in programs
+of your own session only, and closes the services and the commands of the
+centers; everyone needs a token at its login
+([web UIs](web-uis.md#the-nodes-web-ui)).
+
 ## What Windows does not have
 
 - No `nerve-node` for a terminal: the app runs its commands for you.
-- No node web UI: the app is the node's window.
 - No node run by hand: it runs only as the installed service.
 
 ## Limits

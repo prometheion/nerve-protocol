@@ -83,7 +83,7 @@ pub enum Package {
 
 impl Package {
     /// The file the package brings that says its kind: `deb` or `rpm`.
-    pub const MARK: &str = "/usr/share/nerve-node-desktop/package";
+    pub const MARK: &str = "/usr/share/nerve/package";
 
     pub fn word(self) -> &'static str {
         match self {
@@ -176,7 +176,7 @@ impl Layout {
     }
 
     /// [`Layout::system`] for `edition`: the program is named after it,
-    /// `/usr/local/bin/nerve-node-desktop` for the desktop app.
+    /// `/usr/local/bin/nerve` for the desktop app.
     pub fn of(edition: &'static crate::edition::Edition) -> Layout {
         let package = if cfg!(target_os = "linux") {
             package_at(Path::new(Package::MARK))
@@ -1083,6 +1083,14 @@ pub fn install_asking(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a node where its center
+    // is installed (the terminal's nerve-node may).
+    if layout.edition.parts.is_some()
+        && let Some(units) = layout.unit.parent()
+    {
+        let center = nerve_service::role::Roles::in_units(units).center;
+        nerve_service::role::one_role(nerve_service::role::Role::Node, center)?;
+    }
     // Root is the owner only of an install that root runs itself: through
     // sudo the account that ran it becomes the owner. Refused before
     // anything changes.
@@ -1220,7 +1228,7 @@ fn install_steps(
         steps.did(format!("put the program at {}", layout.bin.display()));
     }
     // The old program goes over at once: a running one keeps its file.
-    install_parts(layout, steps)?;
+    install_parts(layout, sys, steps)?;
     // A node whose keys are in the system keyring does not start without
     // one that answers for its user; the installed program asks it.
     if in_keyring {
@@ -1840,6 +1848,18 @@ fn uninstall_steps(
         }
         None => {}
     }
+    // The app's program serves the center here (the app installs one role
+    // per machine, so a node beside it is a terminal's): the program and
+    // the app's menu entry are the center's, and stay.
+    if center_runs(layout) {
+        #[cfg(unix)]
+        unlink_node(layout, steps)?;
+        steps.did(format!(
+            "left the program {} and the app's menu entry: the center's service runs it",
+            layout.bin.display()
+        ));
+        return Ok(());
+    }
     uninstall_parts(layout, steps)?;
     if let Some(package) = layout.package {
         steps.did(format!(
@@ -1859,12 +1879,16 @@ fn uninstall_steps(
 /// install put in `/usr/local/bin` goes: the package's takes its place,
 /// and the command must not run the older one.
 #[cfg(not(windows))]
-fn drop_plain_program(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+fn drop_plain_program(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
     if layout.package.is_none() {
         return Ok(());
     }
     let plain = beside(layout, layout.edition.program);
     if !std::fs::symlink_metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    // A `nerve` of other software is not ours to remove.
+    if !nerve_service::is_the_app(sys, &plain, USER) {
         return Ok(());
     }
     std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
@@ -1947,6 +1971,7 @@ async fn update_steps(
         mark: USER_MARK,
         unit: UNIT_NAME,
         install: &install,
+        word: None,
         files_args,
         places: service_places(layout),
         before_restart: &|steps| {
@@ -1958,7 +1983,7 @@ async fn update_steps(
     };
     let started = || sys.wait_running(&layout.paths);
     if nerve_service::update(&p, sys, from, &started, steps).await? {
-        install_parts(layout, steps)?;
+        install_parts(layout, sys, steps)?;
     }
     Ok(())
 }
@@ -2155,11 +2180,17 @@ pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String
 /// drops its earlier plain program ([`drop_plain_program`]). Windows has no
 /// node alone to take over: the desktop app is the only way to the node
 /// there.
-pub(crate) fn install_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+pub(crate) fn install_parts(
+    layout: &Layout,
+    sys: &dyn System,
+    steps: &mut Steps,
+) -> Result<(), String> {
     put_parts(layout, steps)?;
+    #[cfg(windows)]
+    let _ = sys;
     #[cfg(not(windows))]
     {
-        drop_plain_program(layout, steps)?;
+        drop_plain_program(layout, sys, steps)?;
         link_node(layout, steps)?;
     }
     Ok(())
@@ -2176,6 +2207,18 @@ pub(crate) fn uninstall_parts(layout: &Layout, steps: &mut Steps) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Whether the center's unit beside the node's starts the program at
+/// `layout.bin`: the app's program serves the center then.
+fn center_runs(layout: &Layout) -> bool {
+    layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Center)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &layout.bin))
 }
 
 /// Where `install` of the node alone put its program, beside `layout`'s
@@ -2206,10 +2249,12 @@ fn beside(layout: &Layout, program: &str) -> PathBuf {
 }
 
 /// The desktop app's program beside `layout`'s, when the app is installed
-/// there and `layout` is the node alone's: the app took the node over, so
-/// the service, the parts and the program are the app's, and only its own
-/// uninstall removes them all ([`hand_over_uninstall`]). Not on Windows,
-/// where no node alone is installed beside the app.
+/// there, `layout` is the node alone's and the node's unit starts the app:
+/// the app took the node over, so the service, the parts and the program
+/// are the app's, and only its own uninstall removes them all
+/// ([`hand_over_uninstall`]). A node whose unit starts `nerve-node` is the
+/// terminal's, also beside the app's center, and removes itself. Not on
+/// Windows, where no node alone is installed beside the app.
 #[cfg(not(windows))]
 pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
     if layout.edition.program != crate::edition::NODE.program {
@@ -2223,9 +2268,12 @@ pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
         .and_then(Path::parent)
         .and_then(Path::parent)
         .map(|usr| usr.join("bin").join(app));
+    let started = layout.unit.parent().and_then(|units| {
+        nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+    })?;
     std::iter::once(beside(layout, app))
         .chain(packaged)
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && *p == started)
 }
 
 /// `uninstall` of the node alone where the desktop app took the node over:
@@ -2278,25 +2326,35 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
     }
 }
 
-/// A node installed with `nerve-node` and then taken over by the desktop
-/// app keeps its terminal command on Linux: the old program becomes a link
-/// to the app's, which runs the CLI as `nerve-node` does, so one program
-/// stays and it is never an older one. The edition comes from the program
-/// the link leads to (crate::edition), so `nerve-node update` through it
-/// updates the app. Nothing is made where no node alone was installed.
+/// The node the desktop app installs has its terminal command on Linux, as
+/// the center has: `nerve-node` is a link to the app's program, which runs
+/// the CLI as `nerve-node` does. A node installed with `nerve-node` and then
+/// taken over by the app keeps its command the same way: the old program
+/// becomes the link, so one program stays and it is never an older one. The
+/// edition comes from the program the link leads to (crate::edition), so
+/// `nerve-node update` through it updates the app. A link of another's
+/// stays.
 #[cfg(not(windows))]
 fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let Some(node) = node_beside(layout) else {
         return Ok(());
     };
+    let at = |e: std::io::Error| format!("{}: {e}", node.display());
     // A link is there already (this one, or another's to leave alone),
     // but for one to the plain program the package's replaced.
     let to_plain = layout.package.is_some()
         && std::fs::read_link(&node).is_ok_and(|t| t == beside(layout, layout.edition.program));
-    if !std::fs::symlink_metadata(&node).is_ok_and(|m| m.is_file()) && !to_plain {
-        return Ok(());
+    match std::fs::symlink_metadata(&node) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) if to_plain => {}
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = node.parent() {
+                std::fs::create_dir_all(dir).map_err(at)?;
+            }
+        }
+        Err(e) => return Err(at(e)),
     }
-    let at = |e: std::io::Error| format!("{}: {e}", node.display());
     // Made beside it first and moved over it, so the command is never
     // missing.
     let name = node
@@ -2413,6 +2471,9 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         .filter(|o| o.status.success())
         .and_then(|o| program_version(layout, &String::from_utf8_lossy(&o.stdout)))
         .map(|v| v.to_string());
+    // A package replaced the program and the restart its script ran failed.
+    let older = state.is_some_and(|s| s.state == "running")
+        && nerve_service::stale::service_runs_older(UNIT_NAME, &layout.bin);
     serde_json::json!({
         "installed": state.is_some(),
         "state": state.map(|s| s.state.as_str()),
@@ -2420,7 +2481,19 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         "program": layout.bin.display().to_string(),
         "present": layout.bin.is_file(),
         "version": version,
+        "older": older,
+        "also_center": also_center(layout),
     })
+}
+
+/// Whether the app's node has a center beside it that was installed in the
+/// terminal: the app shows it and leaves it alone.
+fn also_center(layout: &Layout) -> bool {
+    layout.edition.program != crate::edition::NODE.program
+        && nerve_service::role::in_terminal(
+            nerve_service::role::Role::Center,
+            layout.edition.program,
+        )
 }
 
 /// The state of the unit, `None` when the node is not installed here.
@@ -4915,23 +4988,87 @@ pub(crate) mod tests {
     }
 
     static DESKTOP: crate::edition::Edition = crate::edition::Edition {
-        program: "nerve-node-desktop",
+        program: "nerve",
         parts: Some(&Entry),
     };
+
+    /// The app installs one role per machine: no node where the center's
+    /// unit is; the node alone (the terminal's) may.
+    #[test]
+    fn the_app_installs_no_node_on_a_center() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = Layout {
+            bin: d.path().join("usr/local/bin/nerve"),
+            edition: &DESKTOP,
+            ..layout(d.path())
+        };
+        std::fs::create_dir_all(l.unit.parent().unwrap()).unwrap();
+        std::fs::write(l.unit.with_file_name("nerve-center.service"), "").unwrap();
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a center already"), "{e}");
+        assert!(!l.unit.exists() && !l.bin.exists());
+        let alone = layout(d.path());
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        install(&alone, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+    }
+
+    /// `nerve uninstall` on the app's center (by hand, or for a node a
+    /// terminal program installed beside it) leaves the program and the
+    /// app's menu entry, which the center's service runs and shows; beside
+    /// a center of the terminal it removes them.
+    #[test]
+    fn the_node_s_uninstall_leaves_the_program_the_center_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = Layout {
+            bin: d.path().join("usr/local/bin/nerve"),
+            edition: &DESKTOP,
+            ..layout(d.path())
+        };
+        let entry = l.bin.with_file_name("menu-entry");
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(l.unit.parent().unwrap()).unwrap();
+        let center = l.unit.with_file_name("nerve-center.service");
+        let put = |exec: &Path| {
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+            std::fs::write(&entry, "Exec").unwrap();
+            std::fs::write(
+                &center,
+                format!(
+                    "[Service]\nExecStart={} __center --state-dir x\n",
+                    exec.display()
+                ),
+            )
+            .unwrap();
+        };
+        put(&l.bin);
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists() && entry.exists(), "{out}");
+        assert!(out.contains("the center's service runs it"), "{out}");
+        put(&l.bin.with_file_name("nerve-center"));
+        uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists() && !entry.exists());
+    }
 
     #[tokio::test]
     async fn the_desktop_app_installs_updates_and_uninstalls_its_parts_with_the_node() {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = Layout {
-            bin: d.path().join("usr/local/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/local/bin/nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         let entry = l.bin.with_file_name("menu-entry");
-        let exe = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -4959,18 +5096,15 @@ pub(crate) mod tests {
         let e = update(&l, &sys, Some(&new), &mut Vec::new())
             .await
             .unwrap_err();
-        assert!(e.contains("is not nerve-node-desktop"), "{e}");
+        assert!(e.contains("is not nerve"), "{e}");
         std::fs::remove_file(&entry).unwrap();
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&new), &mut out).await.unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.1.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.1.0"), "{out}");
         assert!(entry.exists(), "{out}");
-        assert!(!l.bin.with_file_name(".nerve-node-desktop.new").exists());
+        assert!(!l.bin.with_file_name(".nerve.new").exists());
 
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
@@ -4987,25 +5121,22 @@ pub(crate) mod tests {
         // A node installed with nerve-node.
         let node = installed(d.path(), &sys, "1.0.0");
         let l = Layout {
-            bin: d.path().join("usr/local/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/local/bin/nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
         assert_eq!(node_beside(&l).as_ref(), Some(&node.bin));
         assert_eq!(node_beside(&node), None);
-        let exe = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::write(&exe, "nerve-node-desktop 1.0.0\n").unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("nerve-node is a link to"), "{out}");
         assert_eq!(std::fs::read_link(&node.bin).unwrap(), l.bin);
         // The command runs the app's program.
-        assert_eq!(
-            std::fs::read_to_string(&node.bin).unwrap(),
-            "nerve-node-desktop 1.0.0\n"
-        );
+        assert_eq!(std::fs::read_to_string(&node.bin).unwrap(), "nerve 1.0.0\n");
         assert!(!node.bin.with_file_name(".nerve-node.link").exists());
 
         // Again, and after an update, the link stays as it is.
@@ -5013,12 +5144,9 @@ pub(crate) mod tests {
         install(&l, &sys, &exe, "alice", &mut out).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("is a link"));
         let new = d.path().join("new");
-        std::fs::write(&new, "nerve-node-desktop 1.1.0\n").unwrap();
+        std::fs::write(&new, "nerve 1.1.0\n").unwrap();
         update(&l, &sys, Some(&new), &mut Vec::new()).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&node.bin).unwrap(),
-            "nerve-node-desktop 1.1.0\n"
-        );
+        assert_eq!(std::fs::read_to_string(&node.bin).unwrap(), "nerve 1.1.0\n");
 
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
@@ -5027,9 +5155,17 @@ pub(crate) mod tests {
         assert!(std::fs::symlink_metadata(&node.bin).is_err());
         assert!(!l.bin.exists());
 
-        // No node alone was there: no link is made; a link of another's
-        // stays.
-        install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap();
+        // No node alone was there: the app's node has the command too, and
+        // takes it with it; a link of another's stays.
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, "alice", &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("nerve-node is a link to")
+        );
+        assert_eq!(std::fs::read_link(&node.bin).unwrap(), l.bin);
+        uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
         assert!(std::fs::symlink_metadata(&node.bin).is_err());
         let other = d.path().join("other");
         std::os::unix::fs::symlink(&other, &node.bin).unwrap();
@@ -5051,25 +5187,25 @@ pub(crate) mod tests {
         }
         std::fs::write(&mark, "tar").unwrap();
         assert_eq!(package_at(&mark), None);
-        let app = "nerve-node-desktop";
+        let app = "nerve";
         let deb = Package::Deb.asset(app, "0.1.0");
         let rpm = Package::Rpm.asset(app, "0.1.0");
-        assert_eq!(deb, "nerve-node-desktop_0.1.0_amd64.deb");
-        assert_eq!(rpm, "nerve-node-desktop-0.1.0.x86_64.rpm");
+        assert_eq!(deb, "nerve_0.1.0_amd64.deb");
+        assert_eq!(rpm, "nerve-0.1.0.x86_64.rpm");
         let v = |p: Package, n: &str| p.version_in(app, n).map(|v| v.to_string());
         assert_eq!(v(Package::Deb, &deb).as_deref(), Some("0.1.0"));
         assert_eq!(v(Package::Rpm, &rpm).as_deref(), Some("0.1.0"));
         for other in [
             rpm.as_str(),
-            "nerve-node-desktop-x86_64-linux",
+            "nerve-x86_64-linux",
             "nerve-node_0.1.0_amd64.deb",
-            "nerve-node-desktop_0.1_amd64.deb",
-            "nerve-node-desktop_0.1.0_arm64.deb",
+            "nerve_0.1_amd64.deb",
+            "nerve_0.1.0_arm64.deb",
         ] {
             assert_eq!(v(Package::Deb, other), None, "{other}");
         }
         let l = Layout::of_package(&DESKTOP, Some(Package::Deb));
-        assert_eq!(l.bin, Path::new("/usr/bin/nerve-node-desktop"));
+        assert_eq!(l.bin, Path::new("/usr/bin/nerve"));
         assert_eq!(l.package, Some(Package::Deb));
         // What the package manager does not own stays in /usr/local.
         assert_eq!(
@@ -5122,30 +5258,37 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         // An earlier plain install of the app, which a node alone links to.
-        let plain = d.path().join("usr/local/bin/nerve-node-desktop");
+        let plain = d.path().join("usr/local/bin/nerve");
         let node = d.path().join("usr/local/bin/nerve-node");
-        write_file(&plain, b"nerve-node-desktop 0.9.0\n", 0o755).unwrap();
+        write_file(&plain, b"nerve 0.9.0\n", 0o755).unwrap();
         std::os::unix::fs::symlink(&plain, &node).unwrap();
         let mut l = Layout {
-            bin: d.path().join("usr/bin/nerve-node-desktop"),
+            bin: d.path().join("usr/bin/nerve"),
             edition: &DESKTOP,
             package: Some(Package::Deb),
             ..layout(d.path())
         };
         *sys.package_bin.borrow_mut() = Some(l.bin.clone());
         // Another program does not take the package's place.
-        let download = d.path().join("Downloads/nerve-node-desktop-x86_64-linux");
-        write_file(&download, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        let download = d.path().join("Downloads/nerve-x86_64-linux");
+        write_file(&download, b"nerve 1.0.0\n", 0o755).unwrap();
         let e = install(&l, &sys, &download, "alice", &mut Vec::new()).unwrap_err();
         assert!(e.contains("came from its deb package"), "{e}");
         assert!(!l.unit.exists() && sys.calls().is_empty());
         // The package's own.
-        write_file(&l.bin, b"nerve-node-desktop 1.0.0\n", 0o755).unwrap();
+        write_file(&l.bin, b"nerve 1.0.0\n", 0o755).unwrap();
         let mut out = Vec::new();
         install(&l, &sys, &l.bin.clone(), "alice", &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("is at") && out.contains("already"), "{out}");
         assert!(out.contains("removed the earlier program"), "{out}");
+        assert!(!plain.exists());
+        // A `nerve` of other software in its place is left, the app's goes.
+        write_file(&plain, b"other 1.0\n", 0o755).unwrap();
+        drop_plain_program(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file(), "a program that is not the app was removed");
+        write_file(&plain, b"nerve 0.9.0\n", 0o755).unwrap();
+        drop_plain_program(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
         assert!(!plain.exists());
         assert_eq!(std::fs::read_link(&node).unwrap(), l.bin);
         assert!(
@@ -5160,10 +5303,10 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(e.contains("only its package manager replaces it"), "{e}");
         // The release's package.
-        let program: &[u8] = b"nerve-node-desktop 1.3.0\n";
-        let deb = Package::Deb.asset("nerve-node-desktop", "1.3.0");
+        let program: &[u8] = b"nerve 1.3.0\n";
+        let deb = Package::Deb.asset("nerve", "1.3.0");
         let sums = format!(
-            "{}  nerve-node-desktop-x86_64-linux\n{}  {deb}\n",
+            "{}  nerve-x86_64-linux\n{}  {deb}\n",
             sha(b"x"),
             sha(program)
         );
@@ -5176,10 +5319,7 @@ pub(crate) mod tests {
             out.contains(&format!("installed {deb} with apt-get")),
             "{out}"
         );
-        assert!(
-            out.contains("replaced nerve-node-desktop 1.0.0 with 1.3.0"),
-            "{out}"
-        );
+        assert!(out.contains("replaced nerve 1.0.0 with 1.3.0"), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), program);
         let calls = sys.calls();
         let at = calls
@@ -5206,8 +5346,8 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(Package::Rpm.install_args(true), ["reinstall", "-y"]);
-        let older = Package::Deb.asset("nerve-node-desktop", "1.2.0");
-        let old_program: &[u8] = b"nerve-node-desktop 1.2.0\n";
+        let older = Package::Deb.asset("nerve", "1.2.0");
+        let old_program: &[u8] = b"nerve 1.2.0\n";
         l.release = release_of(
             &older,
             old_program,
@@ -5219,7 +5359,7 @@ pub(crate) mod tests {
         assert!(e.contains("older than the installed 1.3.0"), "{e}");
         assert_eq!(sys.calls().len(), calls);
         // The package's script after the package manager put it in place.
-        write_file(&l.bin, b"nerve-node-desktop 1.4.0\n", 0o755).unwrap();
+        write_file(&l.bin, b"nerve 1.4.0\n", 0o755).unwrap();
         let mut out = Vec::new();
         update(&l, &sys, Some(&l.bin.clone()), &mut out)
             .await
@@ -5230,10 +5370,7 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
-        assert!(
-            out.contains("`sudo apt remove nerve-node-desktop`"),
-            "{out}"
-        );
+        assert!(out.contains("`sudo apt remove nerve`"), "{out}");
         assert!(l.bin.is_file());
         assert!(std::fs::symlink_metadata(&node).is_err());
     }
@@ -5259,7 +5396,7 @@ pub(crate) mod tests {
     #[test]
     fn a_program_written_a_moment_ago_starts_once_it_is_closed() {
         let d = tempfile::tempdir().unwrap();
-        let app = d.path().join("nerve-node-desktop");
+        let app = d.path().join("nerve");
         let closer = held_open(&app, "#!/bin/sh\necho \"asked: $*\"\n");
         let mut out = Vec::new();
         hand_over_uninstall(&app, false, &mut out).unwrap();
@@ -5284,7 +5421,7 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let node = layout(d.path());
         let app = Layout {
-            bin: node.bin.with_file_name("nerve-node-desktop"),
+            bin: node.bin.with_file_name("nerve"),
             edition: &DESKTOP,
             ..layout(d.path())
         };
@@ -5300,6 +5437,13 @@ pub(crate) mod tests {
             .unwrap();
         };
         script(0);
+        // Only where the node's unit starts the app: a node of the terminal
+        // (beside the app's center) removes itself.
+        assert_eq!(app_beside(&node), None);
+        std::fs::create_dir_all(node.unit.parent().unwrap()).unwrap();
+        std::fs::write(&node.unit, node.unit_text(None)).unwrap();
+        assert_eq!(app_beside(&node), None);
+        std::fs::write(&node.unit, app.unit_text(None)).unwrap();
         assert_eq!(app_beside(&node).as_ref(), Some(&app.bin));
         // The app itself does its uninstall.
         assert_eq!(app_beside(&app), None);
@@ -5326,17 +5470,14 @@ pub(crate) mod tests {
     #[test]
     fn the_desktop_app_has_a_place_and_a_release_file_of_its_own() {
         let l = Layout::of(&DESKTOP);
-        assert_eq!(l.bin, Path::new("/usr/local/bin/nerve-node-desktop"));
+        assert_eq!(l.bin, Path::new("/usr/local/bin/nerve"));
         assert_eq!(l.paths, Layout::system().paths);
         assert_eq!(Layout::system().bin, Path::new("/usr/local/bin/nerve-node"));
         if std::env::consts::ARCH == "x86_64" {
-            assert_eq!(
-                asset_name("nerve-node-desktop").unwrap(),
-                "nerve-node-desktop-x86_64-linux"
-            );
+            assert_eq!(asset_name("nerve").unwrap(), "nerve-x86_64-linux");
         }
         assert_eq!(
-            program_version(&l, "nerve-node-desktop 0.2.0\n").map(|v| v.to_string()),
+            program_version(&l, "nerve 0.2.0\n").map(|v| v.to_string()),
             Some("0.2.0".into())
         );
         assert_eq!(program_version(&l, "nerve-node 0.2.0"), None);

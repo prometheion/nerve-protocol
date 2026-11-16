@@ -43,8 +43,9 @@ The Audit buttons and a machine's settings need that machine's
 
 ## The node's web UI
 
-The installed node can serve a web UI with the app's pages. It is off until
-you turn it on:
+The installed node can serve a web UI with the app's pages, on Linux and
+Windows. It is off until you turn it on, in the app's **Settings › Network ›
+Web UI** or in the terminal:
 
 ```sh
 nerve-node ui on                       # shows a first token once
@@ -62,8 +63,11 @@ the node keeps only its hash. From another machine, use an SSH tunnel:
 | `nerve-node ui token` | Lists the tokens by label, never a token |
 | `nerve-node ui token rm laptop` | Revokes it; its sessions end at once |
 
-Tokens are made only at the CLI. A command of a center as `nerve-run` cannot
-reach the UI. One as you (`user` mode) reaches only the login. A session
+Tokens are made only at the CLI or in the app. Open the UI with the app's
+**Open**, or once `nerve-node ui` says it listens: until then another program
+could hold the port. A command of a center as `nerve-run` cannot
+reach the UI. On Windows only your own session gets in
+([who can reach it](../dev/web-uis.md#who-can-reach-it)). One as you (`user` mode) reaches only the login. A session
 ends with **Sign out**, `ui off`, a revoked token, a restart and **Panic**.
 A node run by hand serves no web UI.
 
@@ -87,7 +91,7 @@ decide the account commands run as.
 The app is the node with a window ([install](install.md#the-desktop-app)).
 Open **Nerve** from the application menu. It does what `nerve-node` does,
 and runs the CLI for each action. Its node has the node's web UI too, off
-until `nerve-node-desktop ui on`.
+until **Settings › Network › Web UI** turns it on.
 
 | Page | Does |
 |---|---|

@@ -30,6 +30,10 @@ use crate::service::{Layout, check_setting, done_page, setting_in};
 pub const SERVICE_NAME: &str = "nerve-center";
 /// The Windows Firewall rule that lets other machines reach the node port.
 pub const FIREWALL_RULE: &str = "Nerve center";
+/// The rules `set` prints for the web UI's and MCP's ports beyond loopback
+/// ([`crate::service::set_page`]): `uninstall` removes them with the
+/// center's own.
+pub const PRINTED_RULES: &[&str] = &["Nerve center web UI", "Nerve center MCP"];
 /// The node port where the settings name none.
 const NODE_PORT: u16 = 7443;
 /// The start of the name a program gets when it moves aside, held by
@@ -43,6 +47,9 @@ pub const NOT_INSTALLED: &str = "the center is not installed as a service here; 
 pub trait WinSystem {
     /// Whether this process runs as an administrator, elevated.
     fn is_admin(&self) -> bool;
+    /// Whether the service `name` is registered: the node's, where the app
+    /// would install a second role.
+    fn registered(&self, name: &str) -> bool;
     /// Makes `dir` when it is missing, with the DACL `sddl` from its first
     /// moment, or gives the folder there that DACL; one another account made
     /// is refused, as is a link in its place
@@ -80,9 +87,10 @@ pub trait WinSystem {
     /// What `<program> --version` prints, run without the administrators'
     /// rights.
     fn version_of(&self, program: &Path) -> Result<String, String>;
-    /// What `<program> service-files` prints, run so too: the settings of
-    /// its service ([`service_settings`]).
-    fn settings_of(&self, program: &Path) -> Result<String, String>;
+    /// What `<program> service-files` prints (after the app's hidden
+    /// `word`), run so too: the settings of its service
+    /// ([`service_settings`]).
+    fn settings_of(&self, program: &Path, word: Option<&str>) -> Result<String, String>;
     /// Gives the registered service `name` the settings `s`
     /// (nerve_service::win::service::configure).
     fn configure_service(&self, name: &str, s: &Settings) -> Result<(), String>;
@@ -134,6 +142,13 @@ fn settings_dacl() -> String {
     owned_by_admins(&dacl_of(&["SY", "BA"], &[&account_sid()]))
 }
 
+/// The run folder, where the service says where its web UI listens
+/// (crate::ui_file): every account of the machine may read it, as Linux's
+/// `/run/nerve-center`; it holds no secret.
+fn run_dacl() -> String {
+    owned_by_admins(&dacl_of(&[&account_sid(), "SY", "BA"], &["BU"]))
+}
+
 /// The folder that holds the state and the settings folders.
 fn home(layout: &Layout) -> PathBuf {
     layout
@@ -142,11 +157,13 @@ fn home(layout: &Layout) -> PathBuf {
         .map_or_else(|| layout.state.clone(), Path::to_path_buf)
 }
 
-/// The command line the service control manager starts.
+/// The command line the service control manager starts: the app's
+/// program with its hidden word first (crate::edition).
 pub fn command_line(layout: &Layout) -> String {
     format!(
-        "\"{}\" service --state-dir \"{}\"",
+        "\"{}\" {}service --state-dir \"{}\"",
         layout.bin.display(),
+        layout.word.map(|w| format!("{w} ")).unwrap_or_default(),
         layout.state.display()
     )
 }
@@ -211,8 +228,10 @@ pub fn settings_env(text: &str) -> Result<Vec<(String, String)>, String> {
 }
 
 /// What `netsh` is asked to put the firewall rule in place: inbound TCP to
-/// `port`, for `program` only, in every profile.
-pub fn firewall_args(program: &Path, port: u16) -> Vec<String> {
+/// `port`, for the service `nerve-center` only, in every profile. Not for
+/// its program: the desktop app's program is the node's service's too, and
+/// a rule by program would let that one in on the port as well.
+pub fn firewall_args(port: u16) -> Vec<String> {
     vec![
         "advfirewall".into(),
         "firewall".into(),
@@ -221,7 +240,7 @@ pub fn firewall_args(program: &Path, port: u16) -> Vec<String> {
         format!("name={FIREWALL_RULE}"),
         "dir=in".into(),
         "action=allow".into(),
-        format!("program={}", program.display()),
+        format!("service={SERVICE_NAME}"),
         "protocol=TCP".into(),
         format!("localport={port}"),
         "profile=any".into(),
@@ -278,6 +297,14 @@ pub fn install(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a center where the node is
+    // installed.
+    if layout.word.is_some() {
+        nerve_service::role::one_role(
+            nerve_service::role::Role::Center,
+            sys.registered(nerve_service::role::Role::Node.service()),
+        )?;
+    }
     for (var, value) in set {
         check_setting(var, value)?;
     }
@@ -297,6 +324,7 @@ pub fn install(
     sys.secure(&home(layout), &top_dacl())?;
     sys.secure(&layout.state, &state_dacl())?;
     sys.secure(&layout.settings_dir, &settings_dacl())?;
+    sys.secure(&layout.run, &run_dacl())?;
     steps.did(format!(
         "{} is open to {} and the administrators only; {} to the administrators, and the service may read it",
         layout.state.display(),
@@ -326,7 +354,10 @@ pub fn install(
     clean_aside(&layout.bin, ASIDE);
     // As Linux puts the program in /usr/local/bin: found by name in a
     // terminal opened after the install, and by a harness that starts it.
-    if let Some(dir) = layout.bin.parent()
+    // Not the app's: Windows has no terminal for it, and harnesses reach its
+    // center over HTTP MCP.
+    if layout.word.is_none()
+        && let Some(dir) = layout.bin.parent()
         && sys.put_on_path(dir)?
     {
         steps.did(format!(
@@ -353,6 +384,7 @@ pub fn install(
     start(sys, layout)?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
+    crate::service::put_parts(layout, &mut steps)?;
     let page = done_page(layout, &file, Some(&owner_token), None, true);
     let _ = write!(
         steps.out,
@@ -442,6 +474,12 @@ pub fn uninstall(
         ));
     }
     let top = home(layout);
+    // The run folder holds only what a running service says: it goes
+    // either way.
+    if layout.run.exists() {
+        std::fs::remove_dir_all(&layout.run)
+            .map_err(|e| format!("{}: {e}", layout.run.display()))?;
+    }
     let folders = [&layout.state, &layout.settings_dir];
     if purge {
         for dir in folders {
@@ -470,6 +508,20 @@ pub fn uninstall(
             sys.remove_program(&left)?;
         }
     }
+    // The app's parts and its program go with the center: the program
+    // serves this role alone (one role per machine), but where the node's
+    // service is registered, which only the app installs on Windows: that
+    // one runs the program too.
+    if layout.word.is_some() && sys.registered(nerve_service::role::Role::Node.service()) {
+        steps.did(format!(
+            "left the program {} and the app's Start menu entry: the node's service runs it",
+            layout.bin.display()
+        ));
+        return Ok(());
+    }
+    for gone in crate::service::remove_parts(layout)? {
+        steps.did(gone);
+    }
     if layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
@@ -480,7 +532,8 @@ pub fn uninstall(
             ));
         }
     }
-    if let Some(dir) = layout.bin.parent()
+    if layout.word.is_none()
+        && let Some(dir) = layout.bin.parent()
         && sys.remove_from_path(dir)?
     {
         steps.did(format!("took {} off the machine's Path", dir.display()));
@@ -518,10 +571,12 @@ pub async fn update(
     let r = update_steps(layout, sys, from, &mut steps).await;
     crate::service::log_update(layout, &steps.done, &r, steps.out);
     let started = r?;
+    // Apps & features names the new version.
+    crate::service::put_parts(layout, &mut steps)?;
     let version = sys
         .version_of(&layout.bin)
         .ok()
-        .and_then(|said| nerve_service::Version::parse_of(SERVICE_NAME, &said))
+        .and_then(|said| nerve_service::Version::parse_of(crate::edition::get().program, &said))
         .map(|v| v.to_string());
     let page = done_page(layout, &file, None, version.as_deref(), started);
     let _ = write!(
@@ -539,7 +594,7 @@ async fn update_steps(
     steps: &mut Steps<'_>,
 ) -> Result<bool, String> {
     let p = nerve_service::win::update::Program {
-        name: SERVICE_NAME,
+        name: crate::edition::get().program,
         bin: &layout.bin,
         release: &layout.release,
         asset: crate::service::asset_name(),
@@ -571,7 +626,7 @@ impl nerve_service::win::update::Installed for Machine<'_> {
         self.sys.version_of(program)
     }
     fn settings_of(&self, program: &Path, _: &[String]) -> Result<String, String> {
-        self.sys.settings_of(program)
+        self.sys.settings_of(program, self.layout.word)
     }
     fn configure(&self, name: &str, s: &Settings) -> Result<(), String> {
         self.sys.configure_service(name, s)
@@ -687,6 +742,8 @@ mod tests {
         event_source: Cell<bool>,
         /// The machine's `Path`.
         path: RefCell<String>,
+        /// The other services registered: the node's.
+        others: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -703,6 +760,7 @@ mod tests {
                 started: RefCell::new(Vec::new()),
                 event_source: Cell::new(false),
                 path: RefCell::new(r"%SystemRoot%\system32".into()),
+                others: RefCell::new(Vec::new()),
             }
         }
 
@@ -727,6 +785,9 @@ mod tests {
     impl WinSystem for Fake {
         fn is_admin(&self) -> bool {
             self.admin
+        }
+        fn registered(&self, name: &str) -> bool {
+            self.others.borrow().iter().any(|o| o == name)
         }
         fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
             std::fs::create_dir_all(dir).unwrap();
@@ -818,7 +879,8 @@ mod tests {
             Ok(first.trim().replace(" broken", ""))
         }
         /// Its second line, where it has one; else what this build says.
-        fn settings_of(&self, program: &Path) -> Result<String, String> {
+        fn settings_of(&self, program: &Path, word: Option<&str>) -> Result<String, String> {
+            let _ = word;
             let said = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
             Ok(said
                 .lines()
@@ -851,7 +913,61 @@ mod tests {
             state: root.join("ProgramData/nerve-center/state"),
             settings_dir: root.join("ProgramData/nerve-center/settings"),
             release: "http://127.0.0.1:1/none".into(),
+            run: root.join("ProgramData/nerve-center/run"),
+            word: None,
+            parts: Default::default(),
         }
+    }
+
+    /// The app's center: the service starts the app's program with its
+    /// hidden word, its install puts no folder on the machine's Path, and
+    /// its uninstall removes the app's program, which serves this role
+    /// alone.
+    #[test]
+    fn the_app_s_center_runs_the_app_behind_its_word() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("Program Files/Nerve/nerve.exe");
+        l.word = Some(crate::edition::APP_WORD);
+        assert_eq!(
+            command_line(&l),
+            format!(
+                "\"{}\" __center service --state-dir \"{}\"",
+                l.bin.display(),
+                l.state.display()
+            )
+        );
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        install(&l, &sys, &l.bin, &[], &mut Vec::new()).unwrap();
+        assert!(
+            !sys.calls().iter().any(|c| c.starts_with("put_on_path")),
+            "{:?}",
+            sys.calls()
+        );
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists(), "the app's program goes with its role");
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|c| c.starts_with("remove_from_path")),
+            "{:?}",
+            sys.calls()
+        );
+        // Where the node's service is (the app's node), the center's
+        // uninstall leaves the program to it.
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        sys.others.borrow_mut().push("nerve-node".into());
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists(), "{said}");
+        assert!(said.contains("the node's service runs it"), "{said}");
+        // One role per machine: not where the node's service is.
+        let e = install(&l, &sys, &l.bin, &[], &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a node already"), "{e}");
+        assert_eq!(sys.service.get(), None);
     }
 
     /// A downloaded "program" that says `version`.
@@ -981,6 +1097,12 @@ mod tests {
         assert_eq!(
             sys.dacl_of(&l.settings_dir).unwrap(),
             format!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;{sid})")
+        );
+        // Where the service says where its web UI listens: every account
+        // reads it (crate::ui_file).
+        assert_eq!(
+            sys.dacl_of(&l.run).unwrap(),
+            format!("O:BAD:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)")
         );
         assert_eq!(
             sys.secured.borrow()[0],
@@ -1118,10 +1240,13 @@ mod tests {
             "uses TLS with the center's self-signed certificate",
             "The Windows Firewall rule \"Nerve center\" lets in the node port only",
             "-LocalPort 7480",
-            &format!("-Program '{}'", l.bin.display()),
+            "-Service nerve-center",
+            // A rule `uninstall` removes with the center.
+            &format!("-DisplayName '{}'", PRINTED_RULES[0]),
         ] {
             assert!(out.contains(want), "{want}: {out}");
         }
+        assert!(!out.contains("-Program"), "{out}");
         // A new node port: the firewall rule follows it.
         sys.calls.borrow_mut().clear();
         let mut out = Vec::new();
@@ -1251,6 +1376,8 @@ mod tests {
         assert_eq!(sys.firewall.get(), None);
         assert!(!l.bin.exists());
         assert!(l.state.join(crate::owner::FILE).exists());
+        // What a running service said goes with it, the data kept or not.
+        assert!(!l.run.exists());
         let admins = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string();
         assert_eq!(sys.dacl_of(&l.state), Some(admins.clone()));
         assert_eq!(sys.dacl_of(&l.settings_dir), Some(admins));
@@ -1556,14 +1683,13 @@ mod tests {
         assert_eq!(node_port("#NERVE_CENTER_LISTEN=0.0.0.0:1\n"), 7443);
         assert_eq!(node_port("NERVE_CENTER_LISTEN=0.0.0.0:9443\n"), 9443);
         assert_eq!(node_port("NERVE_CENTER_LISTEN=[::]:9444\n"), 9444);
-        let args = firewall_args(
-            Path::new("C:\\Program Files\\Nerve\\nerve-center.exe"),
-            7443,
-        );
+        let args = firewall_args(7443);
         assert!(args.contains(&"dir=in".to_string()));
         assert!(args.contains(&"localport=7443".to_string()));
         assert!(args.contains(&"protocol=TCP".to_string()));
-        assert!(args.contains(&"program=C:\\Program Files\\Nerve\\nerve-center.exe".to_string()));
+        // For the service, never for its program.
+        assert!(args.contains(&"service=nerve-center".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("program=")));
         // No rule for the web UI's or MCP's ports, nor for every port.
         assert_eq!(
             args.iter().filter(|a| a.starts_with("localport=")).count(),

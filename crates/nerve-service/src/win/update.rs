@@ -539,15 +539,9 @@ mod tests {
     #[test]
     fn what_an_update_leaves_goes_at_the_next_install() {
         let d = tempfile::tempdir().unwrap();
-        let bin = d.path().join("nerve-node-desktop.exe");
-        assert_eq!(
-            staged(&bin).file_name().unwrap(),
-            "nerve-node-desktop.new.exe"
-        );
-        assert_eq!(
-            previous(&bin).file_name().unwrap(),
-            "nerve-node-desktop.old.exe"
-        );
+        let bin = d.path().join("nerve.exe");
+        assert_eq!(staged(&bin).file_name().unwrap(), "nerve.new.exe");
+        assert_eq!(previous(&bin).file_name().unwrap(), "nerve.old.exe");
         for f in [
             staged(&bin),
             previous(&bin),

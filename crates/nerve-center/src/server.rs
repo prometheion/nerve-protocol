@@ -25,6 +25,8 @@ pub struct Running {
     pub ui: Option<SocketAddr>,
     pub mcp: Option<SocketAddr>,
     tasks: Vec<JoinHandle<()>>,
+    /// The web UI's address file this center wrote (crate::ui_file).
+    ui_file: Option<std::path::PathBuf>,
     _lock: Lock,
 }
 
@@ -34,6 +36,9 @@ impl Running {
         self.center.shutdown().await;
         for t in &self.tasks {
             t.abort();
+        }
+        if let Some(f) = &self.ui_file {
+            crate::ui_file::remove(f);
         }
         self.center
             .log()
@@ -182,6 +187,21 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         }
     }));
 
+    // Where the web UI listens, for the desktop app, once every listener
+    // is bound: a center that could not start says nothing there.
+    if let Some(f) = &args.ui_file {
+        let pin = ui
+            .filter(|u| !is_loopback(&u.to_string()))
+            .and(center.pin());
+        if let Err(e) = crate::ui_file::write(f, &crate::ui_file::UiAddress::of(ui, pin)) {
+            center.log().record(
+                Level::Warn,
+                None,
+                &format!("cannot say where the web UI listens: {e}"),
+            );
+        }
+    }
+
     // The address of the web UI stays last: the end-to-end tests read it from
     // this line.
     center.log().record(
@@ -211,6 +231,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         ui,
         mcp,
         tasks,
+        ui_file: args.ui_file.clone(),
         _lock: lock,
     })
 }
@@ -292,9 +313,15 @@ fn stderr_is_journal() -> bool {
 
 /// Runs `nerve-center` as `main` does: owner or attached, until stdin ends or
 /// a signal.
-pub async fn run(args: Args) -> Result<(), String> {
+pub async fn run(mut args: Args) -> Result<(), String> {
     nerve_transport::init_crypto();
     let state = args.state_dir();
+    // The installed service says where its web UI listens; a center a
+    // harness started does not.
+    let layout = crate::service::Layout::system();
+    if args.ui_file.is_none() && layout.is_state(&state) && layout.run.is_dir() {
+        args.ui_file = Some(crate::ui_file::path_in(&layout.run));
+    }
     let Some(lock) = crate::attach::try_lock(&state)? else {
         // Another nerve-center owns this state folder.
         if args.mcp != McpMode::Stdio {

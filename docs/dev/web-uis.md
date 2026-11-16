@@ -8,7 +8,7 @@ user guide's [web UIs page](../user/web-uis.md) is the short version.
 
 `nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`). Its pages,
 scripts and styles are built into the program. It loads nothing from another
-host. The installed node on Linux has a web UI of its own:
+host. The installed node, on Linux and Windows, has a web UI of its own:
 [node web UI](#the-nodes-web-ui).
 
 ### Log in
@@ -64,6 +64,25 @@ To reach a UI that listens on loopback from another machine, use an SSH tunnel:
 ```sh
 ssh -L 7480:127.0.0.1:7480 user@center-host
 ```
+
+### Where it listens
+
+The installed center says where its web UI listens in a file every account
+may read: `/run/nerve-center/ui` on Linux (the unit's runtime folder) and
+`C:\ProgramData\nerve-center\run\ui` on Windows (made by `install`). It holds
+JSON with no secret: the URL to open on this machine, the address it was
+bound to, and the certificate's pin beyond loopback; `"url": null` while the
+web UI is off. The file goes when the center stops.
+
+The file says where to look, not who listens: any account may listen on a
+free port while the center is stopped. So before a program of this machine
+sends the owner token there (the desktop app's log-in), it checks that every
+listener a connection could reach is the center's service
+(`nerve_center::holder`): on Linux a socket of the `nerve-center` account in
+`/proc/net/tcp` and `tcp6`; on Windows a socket of the process the service
+control manager names for `nerve-center`, in the table of TCP listeners. A
+port held by anyone else gets nothing; one held by nobody means the center is
+not running.
 
 ### Look
 
@@ -317,13 +336,20 @@ Parts that open and close on their own:
 
 ## The node's web UI
 
-The installed node on Linux can serve a web UI like the desktop app: the same
-pages, the same look. It is off unless you turn it on, and the CLI keeps
-working beside it. It is part of the service: no other program runs for it.
+The installed node, on Linux and Windows, can serve a web UI like the desktop
+app: the same pages, the same look. It is off unless you turn it on, and the
+CLI keeps working beside it. It is part of the service: no other program runs
+for it.
 
-This holds for both programs on Linux: the plain `nerve-node` and the desktop
-app `nerve-node-desktop` (its node and its CLI work the same). On Windows there
-is no node web UI: the desktop app is the node's UI there, and `ui` says so.
+The desktop app turns it on and off in **Settings › Network › Web UI**, makes
+and revokes its tokens there (by `ui` commands), and opens it with **Open**,
+which first checks that the node's service holds the port (as the center's
+log-in does, [where it listens](#where-it-listens)). On Windows, where there
+is no terminal, that is the way; listening beyond loopback is an
+administrator's step there (`ui on --listen` needs one, and so does a
+change of the setting `ui.listen` to such an address, by `config set`, a
+changed node.toml or a restore), with a Windows
+Firewall rule for the service `nerve-node` and its port, not for the program.
 
 ### Turn it on
 
@@ -337,8 +363,9 @@ nerve-node ui on
 - The running node takes the change at once. `ui on` waits up to 3 seconds and
   says what the node did: `listening on 127.0.0.1:7470`, or why it cannot
   (`cannot listen on 127.0.0.1:7470: …`).
-- Open the UI after `nerve-node ui` says `listening`. Until then
-  another program could hold the port.
+- Open the UI after `nerve-node ui` says `listening` (in the app, with
+  **Open**, which checks the port's holder). Until then another program could
+  hold the port.
 - On `127.0.0.1` the node holds `[::1]` at the same port too (and on `[::1]`,
   `127.0.0.1`), so `http://localhost:7470` reaches the node whichever address
   the browser tries first. If another account has the port at the other
@@ -374,7 +401,8 @@ A node you run by hand (`nerve-node run`) serves no web UI.
 | `nerve-node ui token` | Lists the labels and when each was made, never a token |
 | `nerve-node ui token rm <label>` | Revokes a token. The sessions it opened end at once |
 
-Tokens are made only at the CLI. In the UI you can revoke one
+Tokens are made only at the CLI (the app's **New token** runs it). In the UI
+you can revoke one
 (**Settings › Web UI**), but not make one: a browser session must not be able
 to give itself a login that outlives it.
 
@@ -428,6 +456,30 @@ From this machine, only your account and root may connect. The token is what
 keeps the commands of `user` mode out. A command of `user` mode can already
 change the node's settings as you can (see [modes](policy-engine.md#modes-and-folders-as-the-owner-sets-them)); the web UI adds
 no way for it.
+
+On Windows the node runs as `nerve`, which cannot open another account's
+process to read its account, so a local peer is told by its session:
+
+- the process at the other end, from Windows' table of connections; its
+  session, from the system's list of processes (which names it without
+  opening it); and the account signed in to that session, from the logon
+  screen's record of it (`LoggedOnSAMUser` under
+  `HKLM\…\Authentication\LogonUI\SessionData\<session>`). The Terminal
+  Services would name it too, but refuse an account like `nerve`, which is no
+  administrator. Every account may read the record, and only administrators
+  write it, which is what the rule rests on; it is written at each logon.
+  Only a process of a session of yours gets in.
+- Session 0 is closed: it holds every service, and the node's own commands.
+- A process in one of the node's job objects is closed, beside the
+  AppContainer's own block of loopback.
+- The 16 places per peer are kept per session.
+
+What remains on Windows: a program of another account started inside your
+session (`runas`) reaches the login, where it needs a token. So may a
+connection whose socket outlived the process that made it: the table names
+that process's number, which Windows may give to a process of yours later.
+The other account still needs a token at the login, but it can hold your
+session's places while it waits there.
 
 ### What the web UI does
 

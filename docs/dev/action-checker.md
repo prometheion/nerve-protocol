@@ -882,7 +882,7 @@ past it; a list of patterns cannot. Against that, what counts is the machine's
 own policy: its mode, its deny rules and the folder sandbox.
 
 The same goes for the entries that keep an agent off the node it runs on
-(`nerve-node`, `nerve-node-desktop`, `nerve-node-socket`,
+(`nerve-node`, `nerve`, `nerve-node-socket`,
 `nerve-node-folders` and the `fs-nerve-…` writes): they refuse an agent that
 tries to change the node by mistake, not one that hides the name. The real
 protection is that the machine runs commands as an account of their own, which
@@ -980,7 +980,7 @@ filesystem or a home folder, `mkfs`, `dd` to a disk, fork bombs,
 running a downloaded script unseen (`curl … | sh`, `sh -c "$(curl …)"`,
 `bash <(curl …)`, and on Windows `irm … | iex` or `iex (… DownloadString …)`),
 force-pushing `main`, the node itself (running `nerve-node` or
-`nerve-node-desktop`, a command that names its socket, pipe, config or state
+`nerve`, a command that names its socket, pipe, config or state
 folder, a write into those folders), and the Windows equivalents (`Format-Volume`,
 `format D:`, `rd /s /q C:\`, `Remove-Item -Recurse` of `~` or
 `C:\Users\<name>`, `vssadmin delete shadows`, disabling Defender, …) are

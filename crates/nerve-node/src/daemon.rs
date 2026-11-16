@@ -804,8 +804,8 @@ pub(crate) struct Shared {
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
     /// The relay for other nodes (crate::relay), and who is connected.
     pub relay: crate::relay::Relays,
-    /// Linux: the web UI's state and sessions (crate::webui).
-    #[cfg(target_os = "linux")]
+    /// The web UI's state and sessions (crate::webui).
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) webui: Arc<crate::webui::WebUi>,
     /// Linux: the installed node's owner ([`NodeOptions::owner`]).
     #[cfg_attr(windows, allow(dead_code))]
@@ -1472,11 +1472,11 @@ impl Shared {
                 // A folder of the web UI's request that a panic overtook is
                 // not added; checked under the store's lock, as
                 // `config.write` does.
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", windows))]
                 if web_locks.is_some_and(|n| n != self.webui.lock_count()) {
                     return Err(WEB_LOCKED.into());
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", windows)))]
                 let _ = web_locks;
                 applied = Some(apply_to(c, Some(center), &change)?);
                 Ok(())
@@ -1500,7 +1500,7 @@ impl Shared {
         let cfg = self.config();
         // Before the writer is answered: a panic has ended the web UI's
         // sessions and stopped their commands when the CLI prints it.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.webui.settle(&cfg);
         self.tell_confinement(&cfg);
     }
@@ -2070,9 +2070,9 @@ impl Shared {
 impl Shared {
     /// The web UI's state for `status`: none where there is no web UI.
     fn ui_status(&self, cfg: &NodeConfig) -> Value {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         return self.webui.status(cfg);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = cfg;
             Value::Null
@@ -2430,7 +2430,7 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             webui: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
@@ -2494,11 +2494,11 @@ impl Daemon {
         };
         // The web UI is the installed node's, for the owners of its
         // endpoint; it listens only while the config says so.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let webui = endpoint
             .clone()
             .map(|e| tokio::spawn(crate::webui::run(shared.clone(), e)));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         let webui = None;
         // A node whose owner endpoint cannot be made runs on without it:
         // its owners then need root, as before there was one.
@@ -3138,7 +3138,7 @@ async fn rotate_key(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ct
 }
 
 /// What a web UI request gets when a lock overtook it.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const WEB_LOCKED: &str = "the node was locked while the web UI's request ran; nothing was changed";
 
 /// Why a request without the control socket's token is refused.
@@ -3333,7 +3333,7 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     // was locked writes nothing after it. Checked under the store's
     // lock, where a lock is counted ([`crate::webui::WebUi::settle`]
     // below), so no write falls between.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
         && n != shared.webui.lock_count()
     {
@@ -3390,7 +3390,7 @@ fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport
     store.set_user(None);
     // A lock ends the web UI's sessions and counts, before another
     // write can be checked against the count.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if r.is_ok() {
         // A panic counts also when the node is locked already: the
         // owner's way to end a session that started in the lock.

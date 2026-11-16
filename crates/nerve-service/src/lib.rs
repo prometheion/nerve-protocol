@@ -17,8 +17,12 @@ pub mod eventlog;
 #[doc(hidden)]
 pub mod fake;
 mod files;
+pub mod holder;
+pub mod listen;
 pub mod out;
 pub mod prompt;
+pub mod role;
+pub mod stale;
 mod update;
 pub mod win;
 
@@ -68,6 +72,20 @@ pub trait System {
     fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
         self.output_of(program, Some(account), &["--version"])
     }
+}
+
+/// Whether the file at `program` is the Nerve app: it runs as the service's
+/// user `user` and says a version of `nerve`. Another program of that name
+/// (a `nerve` of other software in `/usr/local/bin`) is not the app's to
+/// remove.
+pub fn is_the_app(sys: &dyn System, program: &Path, user: &str) -> bool {
+    let Some(account) = sys.account(user).ok().flatten() else {
+        return false;
+    };
+    sys.version_of(program, &account)
+        .ok()
+        .and_then(|said| Version::parse_of("nerve", &said))
+        .is_some()
 }
 
 /// This machine.

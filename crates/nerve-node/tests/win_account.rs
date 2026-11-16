@@ -33,6 +33,8 @@
 //!   while the node cannot log on as the owner;
 //! - a capability of node.toml and one a center added get each value of a
 //!   call as one whole argument, and run nothing more;
+//! - a command in its container reaches neither the center's nor the
+//!   node's web UI port, on loopback or the machine's own address;
 //! - an owner with a blank and an umlaut in its name gets its folder
 //!   granted and its commands of user mode run as itself (installed again
 //!   by that account, `NERVE_WIN_UMLAUT_ACCOUNT` and `NERVE_WIN_UMLAUT_SID`).
@@ -1269,6 +1271,66 @@ async fn pair_d(
     .expect("the owner's edit");
     let conn = linked_skipping_ended(&mut center, WAIT).await;
     (center, conn)
+}
+
+/// A command in its pairing's AppContainer reaches no web UI of this
+/// machine: neither the center's port (7480) nor the node's (7470), on
+/// `127.0.0.1`, `::1` or the machine's own address. The container's
+/// loopback block holds it (with the Windows Firewall service), beside the
+/// node's refusal of its commands' processes. The test listens on both
+/// ports itself, and reaches each address from outside the container first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the node installed as a service on a Windows test machine"]
+async fn a_container_command_reaches_no_web_ui_on_this_machine() {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream as Stream};
+    let paths = Layout::of(&APP).paths.clone();
+    let owner_sid = env("NERVE_TEST_SID");
+    let drive = std::env::var("SystemDrive").unwrap_or("C:".into());
+    let base = PathBuf::from(drive + "\\nerve-w2-loopback");
+    let _ = std::fs::remove_dir_all(&base);
+    owners_folder(&base, &owner_sid);
+    let g = base.join("g");
+    std::fs::create_dir_all(&g).unwrap();
+    // The machine's own address: the one a route out of it leaves from (a
+    // UDP socket's connect sends nothing).
+    let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    probe.connect(("192.0.2.1", 9)).unwrap();
+    let own = probe.local_addr().unwrap().ip();
+    assert!(!own.is_loopback() && !own.is_unspecified(), "{own}");
+    let mut targets = Vec::new();
+    let mut held = Vec::new();
+    for port in [7480u16, 7470] {
+        for at in ["0.0.0.0", "[::]"] {
+            let l = TcpListener::bind(format!("{at}:{port}"))
+                .unwrap_or_else(|e| panic!("{at}:{port} is taken ({e}): stop what listens there"));
+            held.push(l);
+        }
+        for ip in ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap(), own] {
+            targets.push(SocketAddr::new(ip, port));
+        }
+    }
+    // Each is reached from outside a container.
+    for t in &targets {
+        Stream::connect_timeout(t, Duration::from_secs(3))
+            .unwrap_or_else(|e| panic!("{t} is not reached from the test itself: {e}"));
+    }
+    let (_center, mut conn) = pair_d(&paths, vec![folder(&g, "rwx")]).await;
+    for t in &targets {
+        let (host, port) = (t.ip().to_string(), t.port());
+        let connect = format!(
+            "try {{ $c = [Net.Sockets.TcpClient]::new(); if ($c.ConnectAsync('{host}', {port}).Wait(3000)) {{ 'connected' }} else {{ 'refused' }} }} catch {{ 'refused' }}"
+        );
+        let r = run_in(&mut conn, &g, &connect)
+            .await
+            .unwrap_or_else(|e| panic!("a command in its folder: {e:?}"));
+        assert!(
+            out(&r).contains("refused") && !out(&r).contains("connected"),
+            "{t}: {r}"
+        );
+    }
+    drop(held);
+    forget(&paths).await;
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A command the folder sync refuses (here: the record of the grants

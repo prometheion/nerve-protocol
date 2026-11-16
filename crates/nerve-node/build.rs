@@ -18,12 +18,14 @@ mod eventlog;
 /// The DLLs the Windows program imports that are not among Windows'
 /// KnownDLLs (`HKLM\SYSTEM\CurrentControlSet\Control\Session
 /// Manager\KnownDLLs`), as `llvm-readobj --coff-imports` lists them.
-const DELAYED: [&str; 5] = [
+const DELAYED: [&str; 7] = [
     "bcrypt.dll",
     "bcryptprimitives.dll",
     "crypt32.dll",
+    "iphlpapi.dll",
     "netapi32.dll",
     "userenv.dll",
+    "wtsapi32.dll",
 ];
 
 fn main() {

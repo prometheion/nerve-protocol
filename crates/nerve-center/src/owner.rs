@@ -126,6 +126,8 @@ pub fn run(state: &Path, new: bool, out: &mut dyn std::io::Write) -> Result<(), 
     } else {
         ensure(state)?
     };
+    crate::json::also("token", serde_json::json!(token));
+    crate::json::also("made", serde_json::json!(made));
     let page = token_page(&token, &path(state), made);
     let _ = out.write_all(page.render(nerve_service::out::Style::stdout()).as_bytes());
     Ok(())

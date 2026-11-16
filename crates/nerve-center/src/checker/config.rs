@@ -927,9 +927,9 @@ pub fn default_blocklist() -> Vec<BlockEntry> {
             "drives the node itself",
         ),
         b(
-            "nerve-node-desktop",
-            "exec.run:nerve-node-desktop",
-            "drives the node itself",
+            "nerve",
+            "exec.run:nerve",
+            "drives the node or the center itself (the app's program)",
         ),
         b(
             "nerve-node-socket",
@@ -971,7 +971,7 @@ pub fn default_blocklist() -> Vec<BlockEntry> {
 
 /// The end of a name in a `re:` entry: the line's end or a character that
 /// cannot go on in a name, so `/etc/nerve` is not `/etc/nervecenter` and
-/// `~/.config/nerve` is not the desktop app's `~/.config/nerve-node-desktop`.
+/// `~/.config/nerve` is not the desktop app's `~/.config/nerve-app`.
 const NAME_END: &str = "(?:$|[^a-z0-9_-])";
 
 /// How the blocklist is kept: only the owner's part of it, so a later

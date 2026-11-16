@@ -223,6 +223,11 @@ pub(super) async fn add_folder(
             format!("note: {given} leads to {stored}; the folder is stored there"),
         );
     }
+    if let Some(note) =
+        super::beside::folder_note(Path::new(&stored), access, &super::beside::homes())
+    {
+        w(out, note);
+    }
     // The running node says whether the folders hold the center's commands
     // (also allowlist mode as nerve-run); without one, folder mode alone is
     // sure to.
@@ -722,6 +727,30 @@ mod tests {
         // Added once more, it is recorded once more.
         run(&paths, &["folder", "add", work, "r"]).unwrap();
         assert_eq!(places(), std::slice::from_ref(&real));
+    }
+
+    /// A folder that holds the home, and so the harnesses' settings, says so
+    /// where a center runs on the machine too: `nerve-run` reads the tokens
+    /// of the center's owner there.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_over_the_home_says_a_center_runs_here_too() {
+        use crate::cli::beside::tests::with_center;
+        let (d, paths) = setup(&["home"]);
+        let home = crate::paths::home_dir();
+        let work = d.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let said = |center: bool, folder: &str, rights: &str| {
+            with_center(center, || {
+                run(&paths, &["folder", "add", folder, rights]).unwrap()
+            })
+            .contains("a center runs on this machine")
+        };
+        let home = home.to_str().unwrap();
+        assert!(said(true, home, "r"));
+        assert!(!said(false, home, "r"));
+        assert!(!said(true, home, "none"));
+        assert!(!said(true, work.to_str().unwrap(), "rw"));
     }
 
     /// A folder the CLI cannot look into (the installed node's CLI runs as

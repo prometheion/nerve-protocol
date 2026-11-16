@@ -50,7 +50,7 @@ confidence-threshold = 0.9
 private = { ignore = false }
 
 # Slint, for the desktop app only: it is used under Slint's Royalty-free
-# license 2.0 (crates/nerve-node-desktop/LICENSE.md), which is no licence of
+# license 2.0 (crates/nerve/LICENSE.md), which is no licence of
 # the list above, so only Slint's crates may have it. [bans] keeps Slint to
 # the desktop app.
 exceptions = [
@@ -67,16 +67,16 @@ exceptions = [
     { crate = "i-slint-renderer-software", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
     # The desktop app's own crate: its code is Apache-2.0, its program has
     # Slint's part (its LICENSE.md says both).
-    { crate = "nerve-node-desktop", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "nerve", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
 ]
 
 # The desktop app's licence file holds both: what it says is written here,
 # since a scan cannot read it. The hash is the file's: a change of the file
 # fails the check until this is looked at again.
 [[licenses.clarify]]
-crate = "nerve-node-desktop"
+crate = "nerve"
 expression = "Apache-2.0 AND LicenseRef-Slint-Royalty-free-2.0"
-license-files = [{ path = "LICENSE.md", hash = 0x5524ff9c }]
+license-files = [{ path = "LICENSE.md", hash = 0xe2223808 }]
 
 [bans]
 # A second version of a crate fails, except the ones named here, each with
@@ -111,8 +111,8 @@ allow-wildcard-paths = true
 deny = [
     # Slint's licence covers the desktop app; no other program of Nerve may
     # link it.
-    { crate = "slint", wrappers = ["nerve-node-desktop"] },
-    { crate = "slint-build", wrappers = ["nerve-node-desktop"] },
+    { crate = "slint", wrappers = ["nerve"] },
+    { crate = "slint-build", wrappers = ["nerve"] },
     # TLS is rustls with ring; OpenSSL would be a second, C, TLS stack.
     { crate = "openssl" },
     { crate = "openssl-sys" },

@@ -14,7 +14,10 @@ use windows_sys::Win32::Foundation::STATUS_INFO_LENGTH_MISMATCH;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSDomainName, WTSFreeMemory,
+    WTSQuerySessionInformationW, WTSUserName,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -127,6 +130,96 @@ pub fn session_listed(pid: u32) -> Option<u32> {
     None
 }
 
+/// The account signed in to the session `session`: as the Terminal Services
+/// name it (a name and its domain) where they answer the caller, which they
+/// do for an administrator, and else as the logon screen's record of it
+/// ([`logon_record_user`]), which is all the node's service gets (they
+/// refuse an account that is no administrator); `None` for a session
+/// without one, such as session 0, which holds the services.
+pub fn session_user(session: u32) -> Option<Vec<u8>> {
+    let ask = |class: WTS_INFO_CLASS| -> Option<String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        let mut bytes = 0u32;
+        // SAFETY: this machine's server handle, and places for the answer,
+        // which is freed with WTSFreeMemory.
+        let ok = unsafe {
+            WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                session,
+                class,
+                &mut text,
+                &mut bytes,
+            )
+        };
+        if ok == 0 || text.is_null() {
+            return None;
+        }
+        // SAFETY: a NUL-terminated string the call allocated, freed once.
+        let s = unsafe {
+            let s = super::sid::from_wide(text);
+            WTSFreeMemory(text.cast());
+            s
+        };
+        (!s.is_empty()).then_some(s)
+    };
+    let Some(user) = ask(WTSUserName) else {
+        return logon_record_user(session);
+    };
+    let domain = ask(WTSDomainName)?;
+    super::sid::sid_of_qualified(&format!("{domain}\\{user}")).ok()
+}
+
+/// The account signed in to the session `session` as the logon screen
+/// records it (`LoggedOnSAMUser`): written at each logon, readable by every
+/// account and writable by administrators only, so the rule that lets a
+/// session in rests on a record they alone can change. A service that is no
+/// administrator is refused by the Terminal Services when it asks for
+/// another account's session ([`session_user`]), and this is the record that
+/// is left to ask.
+fn logon_record_user(session: u32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let key = super::sid::wide(format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\LogonUI\\SessionData\\{session}"
+    ));
+    let value = super::sid::wide("LoggedOnSAMUser");
+    let mut len = 0u32;
+    // SAFETY: NUL-terminated names; a null buffer asks for the size, the
+    // second call fills one of that size.
+    unsafe {
+        if RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut len,
+        ) != 0
+        {
+            return None;
+        }
+        let mut buf = vec![0u16; (len as usize).div_ceil(2) + 1];
+        let mut len = (buf.len() * 2) as u32;
+        if RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+        ) != 0
+        {
+            return None;
+        }
+        let name = super::sid::from_wide(buf.as_ptr());
+        if name.is_empty() {
+            return None;
+        }
+        super::sid::sid_of_qualified(&name).ok()
+    }
+}
+
 /// The account and the session of the process `pid`, as far as they can be
 /// told: from its token where this process may open it, and else only the
 /// session, from the system's list of processes ([`session_listed`]), since
@@ -167,6 +260,32 @@ mod tests {
             std::mem::offset_of!(SYSTEM_PROCESS_INFORMATION, SessionId),
             super::super::procs::SESSION_OFFSET
         );
+    }
+
+    /// The account of a person's session is the account signed in there:
+    /// this test's own where it runs in one; session 0, which holds the
+    /// services, has none.
+    #[test]
+    fn a_session_names_the_account_signed_in_to_it() {
+        assert_eq!(session_user(0), None);
+        if let Some(s) = session_of(std::process::id()).filter(|&s| s != 0) {
+            assert_eq!(session_user(s), Some(user_of(None).unwrap()));
+        }
+    }
+
+    /// What the logon screen records of a session names the account signed in
+    /// to it, which is all a service that is no administrator can learn of
+    /// another account's session (the Terminal Services refuse it, found on
+    /// a real machine). Where this test runs in a session the machine has no
+    /// record of, nothing is asserted.
+    #[test]
+    fn the_logon_record_names_the_account_signed_in_to_a_session() {
+        assert_eq!(logon_record_user(u32::MAX - 3), None);
+        if let Some(s) = session_of(std::process::id()).filter(|&s| s != 0)
+            && let Some(sid) = logon_record_user(s)
+        {
+            assert_eq!(Some(sid), Some(user_of(None).unwrap()));
+        }
     }
 
     /// The first process of the machine, the System process, belongs to

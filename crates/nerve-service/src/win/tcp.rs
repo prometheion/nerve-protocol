@@ -4,6 +4,10 @@
 //! Both ends of a loopback connection are rows of the table, each with the
 //! process that holds it; the other end's row is the one whose local
 //! address is the peer's.
+//!
+//! The listeners are in a table of their own, with the process that holds
+//! each: the desktop app asks which process listens where it is about to
+//! send the center's owner token ([`listening_at`]).
 
 use std::net::SocketAddr;
 
@@ -28,8 +32,29 @@ pub fn other_end(rows: &[Row], peer: SocketAddr, local: SocketAddr) -> Option<u3
         .map(|r| r.pid)
 }
 
+/// The processes of the listeners in `rows` (the table of listeners) that
+/// a connection to `at` may reach: those on `at` itself and those on every
+/// address of its family, on its port. An IPv4 address that IPv6 carries
+/// is that address, as a dual-stack listener holds it.
+pub fn listening_at(rows: &[Row], at: SocketAddr) -> Vec<u32> {
+    let plain = |a: SocketAddr| SocketAddr::new(a.ip().to_canonical(), a.port());
+    let at = plain(at);
+    rows.iter()
+        .filter(|r| {
+            let l = plain(r.local);
+            l.port() == at.port()
+                && (l.ip() == at.ip()
+                    || (l.ip().is_unspecified() && l.is_ipv4() == at.is_ipv4())
+                    // `[::]` takes IPv4 too, unless it is IPv6 only, which
+                    // the table does not say: it counts.
+                    || r.local.ip() == std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+        })
+        .map(|r| r.pid)
+        .collect()
+}
+
 #[cfg(windows)]
-pub use sys::{client_pid, rows};
+pub use sys::{client_pid, listeners, rows};
 
 #[cfg(windows)]
 mod sys {
@@ -37,8 +62,8 @@ mod sys {
 
     use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
-        TCP_TABLE_OWNER_PID_CONNECTIONS,
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_CLASS,
+        TCP_TABLE_OWNER_PID_CONNECTIONS, TCP_TABLE_OWNER_PID_LISTENER,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
@@ -51,9 +76,9 @@ mod sys {
         u16::from_be_bytes([b[0], b[1]])
     }
 
-    /// The table of `family` as Windows writes it, in a buffer aligned for
-    /// its rows.
-    fn table(family: u16) -> std::io::Result<Vec<u32>> {
+    /// The table `class` of `family` as Windows writes it, in a buffer
+    /// aligned for its rows.
+    fn table(family: u16, class: TCP_TABLE_CLASS) -> std::io::Result<Vec<u32>> {
         let mut size = 0u32;
         let mut buf: Vec<u32> = Vec::new();
         for _ in 0..8 {
@@ -64,7 +89,7 @@ mod sys {
                     &mut size,
                     0,
                     u32::from(family),
-                    TCP_TABLE_OWNER_PID_CONNECTIONS,
+                    class,
                     0,
                 )
             };
@@ -101,8 +126,17 @@ mod sys {
 
     /// Every TCP connection of the machine, IPv4 and IPv6, with its process.
     pub fn rows() -> std::io::Result<Vec<Row>> {
+        rows_in(TCP_TABLE_OWNER_PID_CONNECTIONS)
+    }
+
+    /// Every TCP listener of the machine, IPv4 and IPv6, with its process.
+    pub fn listeners() -> std::io::Result<Vec<Row>> {
+        rows_in(TCP_TABLE_OWNER_PID_LISTENER)
+    }
+
+    fn rows_in(class: TCP_TABLE_CLASS) -> std::io::Result<Vec<Row>> {
         let mut all = Vec::new();
-        for r in rows_of::<MIB_TCPROW_OWNER_PID>(&table(AF_INET)?) {
+        for r in rows_of::<MIB_TCPROW_OWNER_PID>(&table(AF_INET, class)?) {
             let ip = |a: u32| IpAddr::V4(Ipv4Addr::from(a.to_ne_bytes()));
             all.push(Row {
                 local: SocketAddr::new(ip(r.dwLocalAddr), port(r.dwLocalPort)),
@@ -110,7 +144,7 @@ mod sys {
                 pid: r.dwOwningPid,
             });
         }
-        for r in rows_of::<MIB_TCP6ROW_OWNER_PID>(&table(AF_INET6)?) {
+        for r in rows_of::<MIB_TCP6ROW_OWNER_PID>(&table(AF_INET6, class)?) {
             let ip = |a: [u8; 16]| IpAddr::V6(Ipv6Addr::from(a));
             all.push(Row {
                 local: SocketAddr::new(ip(r.ucLocalAddr), port(r.dwLocalPort)),
@@ -142,6 +176,17 @@ mod sys {
                 let (_s, peer) = l.accept().unwrap();
                 assert_eq!(c.local_addr().unwrap(), peer);
                 assert_eq!(client_pid(peer, local), Some(std::process::id()), "{at}");
+            }
+        }
+
+        /// A listener this test holds is found with this process.
+        #[test]
+        fn a_listener_is_found_with_its_process() {
+            for at in ["127.0.0.1:0", "[::1]:0"] {
+                let l = std::net::TcpListener::bind(at).unwrap();
+                let local = l.local_addr().unwrap();
+                let pids = super::super::listening_at(&listeners().unwrap(), local);
+                assert_eq!(pids, [std::process::id()], "{at}");
             }
         }
     }
@@ -190,5 +235,31 @@ mod tests {
             ),
             Some(2)
         );
+    }
+
+    /// The listeners a connection to an address may reach: on it, and on
+    /// every address of its family (or both, `[::]`), on its port.
+    #[test]
+    fn the_listeners_of_an_address_are_found() {
+        let row = |l: &str, pid| Row {
+            local: at(l),
+            remote: at("0.0.0.0:0"),
+            pid,
+        };
+        let rows = [
+            row("127.0.0.1:7480", 1),
+            row("0.0.0.0:7480", 2),
+            row("[::]:7480", 3),
+            row("[::1]:7480", 4),
+            row("127.0.0.1:7481", 5),
+            row("192.0.2.1:7480", 6),
+        ];
+        assert_eq!(listening_at(&rows, at("127.0.0.1:7480")), [1, 2, 3]);
+        assert_eq!(listening_at(&rows, at("[::1]:7480")), [3, 4]);
+        assert_eq!(
+            listening_at(&rows, at("[::ffff:127.0.0.1]:7480")),
+            [1, 2, 3]
+        );
+        assert!(listening_at(&rows, at("127.0.0.1:7482")).is_empty());
     }
 }

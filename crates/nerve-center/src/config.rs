@@ -225,6 +225,16 @@ pub struct Args {
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+    /// Print JSON for programs instead of text
+    ///
+    /// For the administrator's commands and status: the lines they print as {"messages": [...]} with their data, an error as {"error": ...}.
+    #[arg(long, global = true, hide = true)]
+    pub json: bool,
+    /// Where the running center says where its web UI listens
+    /// ([`crate::ui_file`]): the installed service's file, which
+    /// [`crate::server::run`] names; no flag sets it.
+    #[arg(skip)]
+    pub ui_file: Option<PathBuf>,
 }
 
 /// What the owner runs by hand; a harness never does. Without one,
@@ -455,6 +465,34 @@ where
     })
 }
 
+/// The command of the command line `args` (the program's name first) as
+/// clap reads it; `None` where it does not parse or names none: what the
+/// app's broker checks against its list.
+pub fn command_of<I, S>(args: I) -> Option<Cmd>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    command_given(args).map(|(cmd, _)| cmd)
+}
+
+/// [`command_of`] with the settings the command line itself gives
+/// ([`settings_given`]'s flags, not the variables of this process): the app's
+/// broker refuses the ones a command does not take, since a setting like
+/// `--state-dir` points an owner command at another folder.
+pub fn command_given<I, S>(args: I) -> Option<(Cmd, Vec<String>)>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    use clap::FromArgMatches;
+    let m = command().try_get_matches_from(args).ok()?;
+    let cmd = Args::from_arg_matches(&m).ok()?.cmd?;
+    let mut given = settings_given(&m);
+    given.retain(|g| g.starts_with("--"));
+    Some((cmd, given))
+}
+
 impl Cmd {
     /// install, set, update, uninstall and service start|stop|restart: they
     /// work on the installed service, as root, not on `--state-dir`.
@@ -654,6 +692,10 @@ pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
     let mut given = Vec::new();
     for a in cmd.get_arguments() {
         let id = a.get_id().as_str();
+        // `--json` says how to answer: no setting of the center.
+        if id == "json" {
+            continue;
+        }
         // A global flag may come after the subcommand, where its value is.
         let below = || {
             m.subcommand()
@@ -1195,6 +1237,9 @@ mod tests {
         };
         assert!(given(&["install"]).is_empty());
         assert!(given(&["uninstall", "--purge"]).is_empty());
+        // How a program asks for the answer is no setting.
+        assert!(given(&["--json", "install"]).is_empty());
+        assert!(given(&["set", "ui", "off", "--json"]).is_empty());
         assert_eq!(
             given(&["--public-url", "https://center.example:7443", "install"]),
             ["--public-url"]

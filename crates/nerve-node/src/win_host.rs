@@ -483,6 +483,10 @@ impl WinSystem for WinHost {
         svc::stop(SERVICE_NAME)
     }
 
+    fn program_of(&self, name: &str) -> Option<PathBuf> {
+        nerve_service::role::program_in_command_line(&svc::command_line(name)?)
+    }
+
     fn owner_sid(&self) -> Option<(String, String)> {
         crate::winsvc::app_or_own_owner(
             crate::cli::desktop_user(),

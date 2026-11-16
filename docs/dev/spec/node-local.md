@@ -1070,7 +1070,7 @@ turns it on, and a center reads and changes nothing of it, grant or not.
 
 ### The web UI
 
-The installed node on Linux (`nerve-node` and `nerve-node-desktop` alike)
+The installed node on Linux (`nerve-node` and `nerve` alike)
 can serve the pages of the desktop app over HTTP. It is a task of the node's
 process, off until the owner sets `ui.listen`, and then it is the only
 listener of the node besides the relay's; off, the node listens on nothing for

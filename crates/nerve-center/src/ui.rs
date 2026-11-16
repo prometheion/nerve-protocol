@@ -1468,7 +1468,7 @@ mod tests {
     fn the_web_ui_has_the_desktop_apps_tokens() {
         let theme = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../nerve-node-desktop/ui/theme.slint"
+            "/../nerve/ui/theme.slint"
         ))
         .unwrap();
         let css = without_comments(APP_CSS);
@@ -2410,7 +2410,7 @@ mod tests {
     fn the_off_switch_has_the_contrast_of_a_control() {
         let theme = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../nerve-node-desktop/ui/theme.slint"
+            "/../nerve/ui/theme.slint"
         ))
         .unwrap();
         let colours = slint_global(&theme, "Theme");
@@ -2434,7 +2434,7 @@ mod tests {
         assert!(contrast(&off_light, "#ffffff") >= 3.0);
         let widgets = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../nerve-node-desktop/ui/widgets.slint"
+            "/../nerve/ui/widgets.slint"
         ))
         .unwrap();
         assert!(widgets.contains("root.checked ? Theme.accent : Theme.switch-off;"));

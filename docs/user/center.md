@@ -10,7 +10,9 @@ nerve-center status
 
 `status` says whether it runs, its addresses and its machines, and what to
 do next. `sudo nerve-center service start|stop|restart` starts and stops
-it. On Windows, run these in an administrator's terminal
+it. The app `nerve` installs the center too, as its role
+([the desktop app](install.md#the-desktop-app)); then `nerve-center` is a
+link to it. On Windows the app installs it, and its web UI manages it
 ([Windows](windows.md#the-center-as-a-service)).
 
 ## In the terminal

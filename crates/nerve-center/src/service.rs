@@ -68,6 +68,17 @@ pub struct Layout {
     /// Where `update` finds the programs of the latest release and their
     /// `SHA256SUMS`.
     pub release: String,
+    /// The folder of the web UI's address file, which every account may
+    /// read ([`crate::ui_file`]): the service's runtime folder on Linux,
+    /// which systemd makes and removes with the service.
+    pub run: PathBuf,
+    /// The hidden first word the service's command line starts the program
+    /// with: the app's `__center` ([`crate::edition`]); none for
+    /// `nerve-center`.
+    pub word: Option<&'static str>,
+    /// What the app puts in place with the center besides it
+    /// ([`crate::edition::Parts`]).
+    pub parts: crate::edition::AppParts,
 }
 
 impl Layout {
@@ -82,26 +93,42 @@ impl Layout {
     /// that run there write the center's key into this folder (round 6,
     /// security 1).
     pub fn system() -> Layout {
+        let edition = crate::edition::get();
+        let program = edition.program;
         #[cfg(windows)]
         {
             use nerve_service::win::folders::{program_data, program_files};
             let data = program_data().join("nerve-center");
             Layout {
                 unit: PathBuf::new(),
-                bin: program_files().join("Nerve").join("nerve-center.exe"),
+                bin: program_files().join("Nerve").join(format!("{program}.exe")),
                 state: data.join("state"),
                 settings_dir: data.join("settings"),
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+                run: data.join("run"),
+                word: edition.word,
+                parts: edition.parts,
             }
         }
         #[cfg(not(windows))]
         {
+            // The app from its package is in /usr/bin, as the package put
+            // it; a plain program goes to /usr/local/bin.
+            let packaged = edition.is_app() && Path::new(crate::edition::PACKAGE_MARK).is_file();
+            let dir = if packaged {
+                "/usr/bin"
+            } else {
+                "/usr/local/bin"
+            };
             Layout {
                 unit: PathBuf::from("/etc/systemd/system").join(UNIT_NAME),
-                bin: "/usr/local/bin/nerve-center".into(),
+                bin: PathBuf::from(dir).join(program),
                 state: "/var/lib/nerve-center".into(),
                 settings_dir: "/etc/nerve-center".into(),
                 release: concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download").into(),
+                run: "/run/nerve-center".into(),
+                word: edition.word,
+                parts: edition.parts,
             }
         }
     }
@@ -145,7 +172,9 @@ impl Layout {
     /// after that default, so it may set another mode. Unlike the node it
     /// starts no command and needs no privilege at all: it keeps no
     /// capability, gets no new privileges, and may write its state folder
-    /// only. The rest keeps a center an attacker took over from the kernel
+    /// only, and the runtime folder where it says where its web UI listens
+    /// ([`crate::ui_file`]), which every account may read. The rest keeps a
+    /// center an attacker took over from the kernel
     /// paths it never needs: no namespaces (a user namespace would give it
     /// capabilities of its own there), sockets of the internet and Unix
     /// only, the system calls of an ordinary service, no shared memory.
@@ -165,7 +194,7 @@ Group={USER}
 Environment=HOME={state}
 Environment=NERVE_CENTER_MCP=http
 EnvironmentFile=-{settings}
-ExecStart={bin} --state-dir {state}
+ExecStart={bin}{word} --state-dir {state}
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -174,6 +203,8 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
 ReadWritePaths={state}
+RuntimeDirectory=nerve-center
+RuntimeDirectoryMode=0755
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -204,6 +235,7 @@ WantedBy=multi-user.target
             state = self.state.display(),
             settings = self.settings().display(),
             bin = self.bin.display(),
+            word = self.word.map(|w| format!(" {w}")).unwrap_or_default(),
         )
     }
 
@@ -427,10 +459,29 @@ pub fn status(
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
         .flatten();
-    let page = status_page(layout, state, installed, file.as_deref(), ui, mcp);
+    // A package replaced the program and the restart its script ran failed.
+    let service = installed.then(service_state).map(|mut s| {
+        s.older = s.active && nerve_service::stale::service_runs_older(UNIT_NAME, &layout.bin);
+        s
+    });
+    crate::json::also("installed", serde_json::json!(installed));
+    crate::json::also(
+        "older",
+        serde_json::json!(service.as_ref().is_some_and(|s| s.older)),
+    );
+    crate::json::also(
+        "service",
+        serde_json::json!(service.as_ref().map(|s| s.state.clone())),
+    );
+    crate::json::also("running", serde_json::json!(crate::attach::runs(state)));
+    let page = status_page(layout, state, installed, file.as_deref(), ui, mcp, service);
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
 }
+
+/// What `status` says when the service runs an older program than the
+/// installed one.
+pub const OLDER_PROGRAM: &str = "The service still runs the program it started with, older than the installed one: `sudo nerve-center service restart` starts the new one.";
 
 /// The program's name and version on the head line of its pages.
 pub const PROGRAM: &str = "Nerve center";
@@ -452,6 +503,9 @@ struct ServiceState {
     active: bool,
     state: String,
     boot: Option<bool>,
+    /// It still runs an older program than the installed one
+    /// (nerve_service::stale).
+    older: bool,
 }
 
 /// The installed service's state, from systemd or the service control
@@ -464,16 +518,19 @@ fn service_state() -> ServiceState {
                 active: st.state == "running",
                 state: st.state.to_string(),
                 boot: st.automatic,
+                older: false,
             },
             Ok(None) => ServiceState {
                 active: false,
                 state: "not installed".into(),
                 boot: None,
+                older: false,
             },
             Err(e) => ServiceState {
                 active: false,
                 state: format!("unknown ({e})"),
                 boot: None,
+                older: false,
             },
         }
     }
@@ -493,6 +550,7 @@ fn service_state() -> ServiceState {
             active: state == "active",
             state,
             boot: ask("is-enabled").map(|e| e == "enabled"),
+            older: false,
         }
     }
 }
@@ -506,8 +564,8 @@ fn status_page(
     file: Option<&str>,
     given_ui: &str,
     given_mcp: &crate::config::McpMode,
+    service: Option<ServiceState>,
 ) -> Page {
-    let service = installed.then(service_state);
     status_page_of(
         layout,
         state,
@@ -545,6 +603,9 @@ fn status_page_of(
         _ => ("not running", Tone::Plain),
     };
     let mut p = page().state(head, tone);
+    if service.as_ref().is_some_and(|s| s.older) {
+        p.warn(OLDER_PROGRAM);
+    }
     match &service {
         // A service that runs says so in the head line.
         Some(s) if s.active => {}
@@ -906,6 +967,7 @@ pub(crate) fn service_page(layout: &Layout, file: &str, runs: bool) -> Page {
                 false => "stopped".into(),
             },
             boot: None,
+            older: false,
         }),
     )
 }
@@ -933,6 +995,24 @@ pub fn install_with(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
+    // The app installs one role per machine: not a center where its node is
+    // installed (the terminal's nerve-center may).
+    if layout.word.is_some()
+        && let Some(units) = layout.unit.parent()
+    {
+        let node = nerve_service::role::Roles::in_units(units).node;
+        nerve_service::role::one_role(nerve_service::role::Role::Center, node)?;
+    }
+    // The package manager owns the package's program, which every account
+    // starts from the menu: another one does not take its place, as for
+    // the node.
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    if packaged(layout) && !(real(exe).is_some() && real(exe) == real(&layout.bin)) {
+        return Err(format!(
+            "the app came from its package here, so its program is {}: open that one (Nerve in the application menu)",
+            layout.bin.display()
+        ));
+    }
     for (var, value) in set {
         check_setting(var, value)?;
     }
@@ -970,7 +1050,6 @@ pub fn install_with(
     sys.give(state, account.uid, account.gid)?;
     steps.did(format!("{} belongs to {USER}", state.display()));
     settings(layout, sys, set, steps.out)?;
-    let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
             "the program is at {} already",
@@ -981,6 +1060,10 @@ pub fn install_with(
         write_file(&layout.bin, &program, 0o755)?;
         steps.did(format!("put the program at {}", layout.bin.display()));
     }
+    if layout.word.is_some() {
+        link_terminal_name(layout, &mut steps)?;
+    }
+    put_parts(layout, &mut steps)?;
     nerve_service::start_unit(
         sys,
         &layout.unit,
@@ -1029,6 +1112,7 @@ pub(crate) fn done_page(
                 false => "stopped".into(),
             },
             boot: started.then_some(true),
+            older: false,
         }),
     );
     if let Some(v) = version {
@@ -1434,7 +1518,7 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
             (
                 ui_address(file),
                 "the web UI",
-                "web UI",
+                crate::winsvc::PRINTED_RULES[0],
                 "your browser asks you to trust it",
             )
         }
@@ -1443,7 +1527,7 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
             (
                 mcp_address(file),
                 "the HTTP MCP endpoint",
-                "MCP",
+                crate::winsvc::PRINTED_RULES[1],
                 "let the harness trust it (the Connect a harness card shows its fingerprint)",
             )
         }
@@ -1474,8 +1558,8 @@ pub(crate) fn set_page(var: &str, file: &str, layout: &Layout, running: bool) ->
         p.next(
             format!("Let in port {port}"),
             format!(
-                "New-NetFirewallRule -DisplayName 'Nerve center {rule}' -Direction Inbound -Protocol TCP -LocalPort {port} -Program '{}' -Action Allow",
-                layout.bin.display()
+                "New-NetFirewallRule -DisplayName '{rule}' -Direction Inbound -Protocol TCP -LocalPort {port} -Service {} -Action Allow",
+                crate::winsvc::SERVICE_NAME
             ),
         );
     }
@@ -1546,7 +1630,29 @@ pub fn uninstall(
         }
         None => {}
     }
-    if layout.bin.exists() {
+    // The app's terminal name for the center and its parts go with the
+    // center; so does its program, which serves this role alone (one role
+    // per machine), unless its package manager owns it, or the node's
+    // service runs it (the app's node, a center of the terminal beside it).
+    if layout.word.is_some()
+        && let Some(gone) = unlink_terminal_name(layout)?
+    {
+        step(out, format!("removed the link {}", gone.display()));
+    }
+    if node_runs(layout) {
+        step(
+            out,
+            format!(
+                "left the program {} and the app's menu entry: the node's service runs it",
+                layout.bin.display()
+            ),
+        );
+        return Ok(());
+    }
+    for gone in remove_parts(layout)? {
+        step(out, gone);
+    }
+    if !packaged(layout) && layout.bin.exists() {
         std::fs::remove_file(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
         step(out, format!("removed the program {}", layout.bin.display()));
     }
@@ -1557,6 +1663,156 @@ pub fn uninstall(
         );
     }
     Ok(())
+}
+
+/// Puts the app's parts for its center role in place once its program is
+/// ([`crate::edition::Parts`]): the program opens as the app again from the
+/// menu, and removes the center there.
+pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    if let Some(parts) = layout.parts.0 {
+        for step in parts.install(&layout.bin)? {
+            steps.did(step);
+        }
+    }
+    Ok(())
+}
+
+/// Removes what [`put_parts`] put in place; what it did.
+pub(crate) fn remove_parts(layout: &Layout) -> Result<Vec<String>, String> {
+    match layout.parts.0 {
+        Some(parts) => parts.uninstall(&layout.bin),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Where the terminal name of the app's center goes: `nerve-center` in the
+/// `/usr/local/bin` of the app's program, or beside the package's in
+/// `/usr/bin`, in the `/usr/local/bin` where the plain programs are.
+pub fn terminal_name(layout: &Layout) -> PathBuf {
+    let dir = layout.bin.parent().unwrap_or(Path::new("/"));
+    let local = match dir.file_name().zip(dir.parent()) {
+        Some((bin, usr)) if bin == "bin" && usr.file_name().is_some_and(|u| u == "usr") => {
+            usr.join("local/bin")
+        }
+        _ => dir.to_path_buf(),
+    };
+    local.join(crate::edition::TERMINAL_NAME)
+}
+
+/// Puts the terminal name `nerve-center` on the `PATH` as a link to the
+/// app's program, which runs the center's command line by that name (as the
+/// app's node has `nerve-node`). A file of that name that is no link to the
+/// app is another program's, the terminal center's, and stays as it is.
+fn link_terminal_name(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
+    let link = terminal_name(layout);
+    let at = |e: std::io::Error| format!("{}: {e}", link.display());
+    // A link to the plain program that the app's package replaced is ours
+    // to move: it must not keep the command on the older program.
+    let to_plain = plain_program(layout).is_some_and(|plain| {
+        plain != layout.bin && std::fs::read_link(&link).is_ok_and(|t| t == plain)
+    });
+    match std::fs::symlink_metadata(&link) {
+        Ok(m)
+            if m.file_type().is_symlink()
+                && std::fs::read_link(&link).is_ok_and(|t| t == layout.bin) =>
+        {
+            return Ok(());
+        }
+        Ok(m) if m.file_type().is_symlink() && to_plain => {}
+        // A file, or a link to a program of another's (a terminal center
+        // kept elsewhere).
+        Ok(_) => {
+            steps.did(format!(
+                "left {} as it is: another program of that name",
+                link.display()
+            ));
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(at(e)),
+    }
+    if let Some(dir) = link.parent() {
+        std::fs::create_dir_all(dir).map_err(at)?;
+    }
+    // Made beside it and moved over it, so the command is never missing.
+    let tmp = link.with_file_name(format!(".{}.link", crate::edition::TERMINAL_NAME));
+    let _ = std::fs::remove_file(&tmp);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&layout.bin, &tmp).map_err(at)?;
+    std::fs::rename(&tmp, &link).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        at(e)
+    })?;
+    steps.did(format!(
+        "{} is a link to {}, so the command {} runs the center",
+        link.display(),
+        layout.bin.display(),
+        crate::edition::TERMINAL_NAME
+    ));
+    Ok(())
+}
+
+/// Where the plain program of the app's center is: the `nerve` of the
+/// `/usr/local/bin` where `nerve-center` goes, beside the package's in
+/// `/usr/bin` (the same place as `layout.bin` for a plain install).
+fn plain_program(layout: &Layout) -> Option<PathBuf> {
+    layout
+        .bin
+        .file_name()
+        .map(|name| terminal_name(layout).with_file_name(name))
+}
+
+/// Where the app came from a package, the plain program an earlier install
+/// of the center put in `/usr/local/bin` goes: the package's takes its
+/// place, and neither the command nor the menu may run the older one. Not
+/// where the node's unit starts it.
+fn drop_plain_program(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
+    let Some(plain) = plain_program(layout).filter(|p| *p != layout.bin) else {
+        return Ok(());
+    };
+    if !std::fs::symlink_metadata(&plain).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    let node_runs_it = layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &plain));
+    // A `nerve` of other software is not ours to remove.
+    if node_runs_it || !nerve_service::is_the_app(sys, &plain, USER) {
+        return Ok(());
+    }
+    std::fs::remove_file(&plain).map_err(|e| format!("{}: {e}", plain.display()))?;
+    steps.did(format!(
+        "removed the earlier program {}: the package's takes its place",
+        plain.display()
+    ));
+    Ok(())
+}
+
+/// What an update of the app from its package does besides the service: the
+/// center a plain program installed moves to the package's program in its
+/// menu entry, its command and its file too, as the node's does
+/// (`install_parts`).
+fn take_over_plain(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
+    put_parts(layout, steps)?;
+    drop_plain_program(layout, sys, steps)?;
+    link_terminal_name(layout, steps)
+}
+
+/// Removes the link [`link_terminal_name`] made, and no other; the link it
+/// removed.
+fn unlink_terminal_name(layout: &Layout) -> Result<Option<PathBuf>, String> {
+    let link = terminal_name(layout);
+    let ours = std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink())
+        && std::fs::read_link(&link).is_ok_and(|t| t == layout.bin);
+    if !ours {
+        return Ok(None);
+    }
+    std::fs::remove_file(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+    Ok(Some(link))
 }
 
 /// `update`: the new program (the latest release, checked against its
@@ -1572,6 +1828,18 @@ pub async fn update(
     from: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    update_as(layout, sys, from, out, packaged(layout)).await
+}
+
+/// [`update`] where `packaged` says whether the program is the package's
+/// (its place is `/usr/bin`, which a test cannot use).
+async fn update_as(
+    layout: &Layout,
+    sys: &dyn System,
+    from: Option<&Path>,
+    out: &mut dyn Write,
+    packaged: bool,
+) -> Result<(), String> {
     supported(sys, "update")?;
     if !layout.installed() || !layout.bin.is_file() {
         return Err(NOT_INSTALLED.into());
@@ -1581,8 +1849,19 @@ pub async fn update(
     let file = std::fs::read_to_string(layout.settings()).unwrap_or_default();
     crate::config::refuse_old_names(|k| setting_in(&file, k), &layout.settings())
         .map_err(|e| format!("{e}; update changed nothing"))?;
+    let program = crate::edition::get().program;
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    // The app from a package: its package manager replaces the program, and
+    // the package's script runs this with the program in place.
+    let placed = match (packaged, from) {
+        (false, _) => None,
+        (true, Some(f)) if real(f).is_some() && real(f) == real(&layout.bin) => {
+            Some(nerve_service::Placed::default())
+        }
+        (true, _) => return Err(APP_PACKAGE.into()),
+    };
     let p = nerve_service::Program {
-        name: "nerve-center",
+        name: program,
         bin: &layout.bin,
         release: &layout.release,
         asset: asset_name(),
@@ -1590,6 +1869,7 @@ pub async fn update(
         mark: USER_MARK,
         unit: UNIT_NAME,
         install: "sudo nerve-center install",
+        word: layout.word,
         files_args: Vec::new(),
         places: vec![nerve_service::Place {
             role: "unit",
@@ -1597,11 +1877,14 @@ pub async fn update(
             mode: 0o644,
         }],
         before_restart: &|_| {},
-        placed: None,
+        placed,
     };
     let mut steps = Steps::new(out);
     let started = || sys.wait_running(&layout.state);
-    let r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
+    let mut r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
+    if matches!(r, Ok(true)) && p.placed.is_some() {
+        r = take_over_plain(layout, sys, &mut steps).map(|()| true);
+    }
     log_update(layout, &steps.done, &r, steps.out);
     let started = r?;
     let version = sys
@@ -1609,7 +1892,7 @@ pub async fn update(
         .ok()
         .flatten()
         .and_then(|a| sys.version_of(&layout.bin, &a).ok())
-        .and_then(|said| nerve_service::Version::parse_of("nerve-center", &said))
+        .and_then(|said| nerve_service::Version::parse_of(program, &said))
         .map(|v| v.to_string());
     let page = done_page(layout, &file, None, version.as_deref(), started);
     let _ = write!(out, "\n{}", page.render(Style::stdout()));
@@ -1650,18 +1933,53 @@ pub(crate) fn log_update(
     }
 }
 
-/// The release file of this machine's program.
+/// The release file of this machine's program: `nerve-center`'s for Linux,
+/// the app's for Linux x86_64 and Windows (the release has no other
+/// center for Windows).
 pub(crate) fn asset_name() -> Result<String, String> {
-    match std::env::consts::ARCH {
-        arch @ ("x86_64" | "aarch64") if cfg!(target_os = "linux") => {
-            Ok(format!("nerve-center-{arch}-linux"))
+    asset_of(crate::edition::get(), std::env::consts::ARCH)
+}
+
+/// [`asset_name`] of `edition` on `arch`.
+pub(crate) fn asset_of(edition: &crate::edition::Edition, arch: &str) -> Result<String, String> {
+    let program = edition.program;
+    match arch {
+        "x86_64" if cfg!(windows) && edition.is_app() => {
+            Ok(format!("{program}-x86_64-windows.exe"))
         }
-        "x86_64" if cfg!(windows) => Ok("nerve-center-x86_64-windows.exe".into()),
+        "x86_64" if cfg!(target_os = "linux") && edition.is_app() => {
+            Ok(format!("{program}-x86_64-linux"))
+        }
+        arch @ ("x86_64" | "aarch64") if cfg!(target_os = "linux") && !edition.is_app() => {
+            Ok(format!("{program}-{arch}-linux"))
+        }
         other => Err(format!(
-            "the releases have no program of the center for {other}; build one (docs/dev/building.md) and give it with --from"
+            "the releases have no {program} for {other} on this system; build one (docs/dev/building.md) and give it with --from"
         )),
     }
 }
+
+/// Whether the installed program is the app from its .deb or .rpm, which
+/// only its package manager replaces.
+/// Whether the node's unit beside the center's starts the program at
+/// `layout.bin`: the app's program serves the node then.
+fn node_runs(layout: &Layout) -> bool {
+    layout
+        .unit
+        .parent()
+        .and_then(|units| {
+            nerve_service::role::program_in_units(units, nerve_service::role::Role::Node)
+        })
+        .is_some_and(|program| nerve_service::role::same_program(&program, &layout.bin))
+}
+
+fn packaged(layout: &Layout) -> bool {
+    layout.word.is_some() && layout.bin.starts_with("/usr/bin")
+}
+
+/// What `update` of the app from its package says: the package manager
+/// replaces the program, and the package's script brings the service to it.
+pub const APP_PACKAGE: &str = "the app came from its package here, so its package manager updates it (the newer package, or `sudo apt upgrade` or `sudo dnf upgrade`): the package's script restarts the center with the new program";
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -1723,6 +2041,293 @@ mod tests {
         }
     }
 
+    /// The app runs the center behind its hidden word: the unit starts its
+    /// program so, its install puts the terminal name `nerve-center` on the
+    /// PATH as a link to it, and its uninstall takes the link away, and the
+    /// plain program, which serves the center alone.
+    #[test]
+    fn the_app_s_center_runs_the_app_behind_its_word() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("usr/bin/nerve");
+        l.word = Some(crate::edition::APP_WORD);
+        assert!(
+            l.unit_text().contains(&format!(
+                "\nExecStart={} __center --state-dir {}\n",
+                l.bin.display(),
+                l.state.display()
+            )),
+            "{}",
+            l.unit_text()
+        );
+        // The terminal name goes beside the plain programs.
+        let link = terminal_name(&l);
+        assert_eq!(link, d.path().join("usr/local/bin/nerve-center"));
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        let mut out = Vec::new();
+        install(&l, &sys, &l.bin, &mut out).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), l.bin);
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains("so the command nerve-center runs the center"),
+            "{said}"
+        );
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists(), "the plain program goes with its role");
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        // A program of that name that is no link to the app stays.
+        std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        std::fs::write(&link, "nerve-center 1.0.0\n").unwrap();
+        let mut out = Vec::new();
+        install(&l, &sys, &l.bin, &mut out).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&link).unwrap(),
+            "nerve-center 1.0.0\n"
+        );
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(link.is_file());
+        #[cfg(unix)]
+        {
+            // A link to a center of another's stays too, install and uninstall.
+            std::fs::remove_file(&link).unwrap();
+            let theirs = d.path().join("opt/nerve-center");
+            std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+            std::fs::write(&theirs, "nerve-center 1.0.0\n").unwrap();
+            std::os::unix::fs::symlink(&theirs, &link).unwrap();
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+            install(&l, &sys, &l.bin, &mut Vec::new()).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), theirs);
+            uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), theirs);
+            std::fs::remove_file(&link).unwrap();
+            std::fs::write(&l.bin, "nerve 1.0.0\n").unwrap();
+        }
+        // Where the node's unit starts the app's program (`nerve __center
+        // uninstall` typed on the app's node), the program and the parts
+        // stay: they are the node's.
+        let node_unit = l.unit.with_file_name("nerve-node.service");
+        std::fs::write(
+            &node_unit,
+            format!(
+                "[Service]\nExecStart={} --config-dir x run\n",
+                l.bin.display()
+            ),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(l.bin.exists(), "{said}");
+        assert!(said.contains("the node's service runs it"), "{said}");
+        // One role per machine: not where the node's unit is; the terminal
+        // center (no word) may.
+        std::fs::write(&node_unit, "").unwrap();
+        let e = install(&l, &sys, &l.bin, &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("this machine is a node already"), "{e}");
+        assert!(e.contains("nerve-node and nerve-center"), "{e}");
+        assert!(!l.unit.exists());
+        l.word = None;
+        install(&l, &sys, &l.bin, &mut Vec::new()).unwrap();
+    }
+
+    /// What the parts of the test below were asked to do.
+    static PARTS_DID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct Parts;
+
+    impl crate::edition::Parts for Parts {
+        fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_DID
+                .lock()
+                .unwrap()
+                .push(format!("put {}", bin.display()));
+            Ok(vec!["put Nerve in the menu".into()])
+        }
+        fn uninstall(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_DID
+                .lock()
+                .unwrap()
+                .push(format!("removed {}", bin.display()));
+            Ok(vec!["removed Nerve from the menu".into()])
+        }
+    }
+
+    /// The app's parts come with its center and go with it: the app opens
+    /// again from the menu in the center role, and nothing of it is left.
+    #[test]
+    fn the_app_s_parts_come_and_go_with_its_center() {
+        static PARTS: Parts = Parts;
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("usr/local/bin/nerve");
+        l.word = Some(crate::edition::APP_WORD);
+        l.parts = crate::edition::AppParts(Some(&PARTS));
+        let exe = d.path().join("download/nerve");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("put Nerve in the menu"), "{said}");
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("removed Nerve from the menu"), "{said}");
+        let bin = l.bin.display();
+        assert_eq!(
+            *PARTS_DID.lock().unwrap(),
+            [format!("put {bin}"), format!("removed {bin}")]
+        );
+    }
+
+    /// What the parts of the take-over test were asked to do.
+    static PARTS_TOOK: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct TakeOverParts;
+
+    impl crate::edition::Parts for TakeOverParts {
+        fn install(&self, bin: &Path) -> Result<Vec<String>, String> {
+            PARTS_TOOK
+                .lock()
+                .unwrap()
+                .push(format!("put {}", bin.display()));
+            Ok(vec!["put Nerve in the menu".into()])
+        }
+        fn uninstall(&self, _: &Path) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The app's package over a center the plain program installed: the
+    /// update moves the service to the package's program, and also the
+    /// plain program, its menu entry (the parts) and the `nerve-center`
+    /// link go to it, so the menu and the command never run the older
+    /// program. The node's unit starting the plain program keeps it.
+    #[tokio::test]
+    async fn the_package_takes_over_a_center_the_plain_program_installed() {
+        static PARTS: TakeOverParts = TakeOverParts;
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = d.path().join("usr/bin/nerve");
+        l.word = Some(crate::edition::APP_WORD);
+        l.parts = crate::edition::AppParts(Some(&PARTS));
+        let plain = d.path().join("usr/local/bin/nerve");
+        let link = terminal_name(&l);
+        assert_eq!(plain_program(&l).unwrap(), plain);
+        std::fs::create_dir_all(l.bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        // The plain program installed the center.
+        std::fs::write(&plain, "nerve-center 0.9.0\n").unwrap();
+        let sys = Fake::new();
+        let mut earlier = l.clone();
+        earlier.bin = plain.clone();
+        install(&earlier, &sys, &plain, &mut Vec::new()).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), plain);
+        // The package puts its program in place and runs the update.
+        // A `nerve` of other software in the plain program's place stays.
+        std::fs::write(&plain, "other 1.0\n").unwrap();
+        take_over_plain(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file(), "a program that is not the app was removed");
+        std::fs::write(&plain, "nerve 0.9.0\n").unwrap();
+        std::fs::write(&l.bin, "nerve-center 1.3.0\n").unwrap();
+        let before = PARTS_TOOK.lock().unwrap().len();
+        let mut out = Vec::new();
+        update_as(&l, &sys, Some(&l.bin), &mut out, true)
+            .await
+            .unwrap();
+        let said = String::from_utf8(out).unwrap();
+        // The app's center is asked for by its word, or the node's files
+        // would be written for the center.
+        assert!(
+            sys.runs
+                .borrow()
+                .iter()
+                .any(|r| r == "__center service-files"),
+            "{:?}",
+            sys.runs
+        );
+        assert!(said.contains("removed the earlier program"), "{said}");
+        assert!(std::fs::symlink_metadata(&plain).is_err(), "{said}");
+        assert_eq!(std::fs::read_link(&link).unwrap(), l.bin, "{said}");
+        assert!(l.bin.is_file());
+        assert_eq!(
+            PARTS_TOOK.lock().unwrap()[before..],
+            [format!("put {}", l.bin.display())]
+        );
+        // A node's unit that starts the plain program keeps it.
+        std::fs::write(&plain, "nerve 0.9.0\n").unwrap();
+        std::fs::write(
+            l.unit.with_file_name("nerve-node.service"),
+            format!(
+                "[Service]\nExecStart={} --config-dir x run\n",
+                plain.display()
+            ),
+        )
+        .unwrap();
+        take_over_plain(&l, &sys, &mut Steps::new(&mut Vec::new())).unwrap();
+        assert!(plain.is_file());
+    }
+
+    /// The release files: the terminal center's for Linux on both machines,
+    /// the app's for Linux x86_64; an update of the app from its package is
+    /// its package manager's.
+    #[tokio::test]
+    async fn the_app_s_center_takes_the_app_s_release_file() {
+        use crate::edition::{APP, CENTER};
+        assert_eq!(
+            asset_of(&CENTER, "x86_64").unwrap(),
+            "nerve-center-x86_64-linux"
+        );
+        assert_eq!(
+            asset_of(&CENTER, "aarch64").unwrap(),
+            "nerve-center-aarch64-linux"
+        );
+        assert_eq!(asset_of(&APP, "x86_64").unwrap(), "nerve-x86_64-linux");
+        assert!(asset_of(&APP, "aarch64").is_err());
+        let mut l = layout(Path::new("/"));
+        l.bin = "/usr/bin/nerve".into();
+        l.word = Some(crate::edition::APP_WORD);
+        assert!(packaged(&l));
+        l.word = None;
+        assert!(!packaged(&l));
+    }
+
+    /// The app from its package: the center's install by another copy of
+    /// the program (one from Downloads) is refused before anything
+    /// changes; the package's program is the one to open.
+    #[test]
+    fn the_app_s_center_takes_no_other_program_than_the_package_s() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = layout(d.path());
+        l.bin = "/usr/bin/nerve".into();
+        l.word = Some(crate::edition::APP_WORD);
+        let exe = d.path().join("Downloads/nerve-x86_64-linux");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve 1.0.0\n").unwrap();
+        let sys = Fake::new();
+        let e = install(&l, &sys, &exe, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("came from its package here"), "{e}");
+        assert!(e.contains("/usr/bin/nerve"), "{e}");
+        assert!(!l.unit.exists() && !l.state.exists());
+    }
+
+    /// The run folder of the installed center is the runtime folder its
+    /// unit has systemd make.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_run_folder_is_the_unit_s_runtime_folder() {
+        let l = Layout::system();
+        let unit = l.unit_text();
+        let name = l.run.strip_prefix("/run").unwrap().display().to_string();
+        assert!(
+            unit.contains(&format!("\nRuntimeDirectory={name}\n")),
+            "{unit}"
+        );
+    }
+
     fn layout(root: &Path) -> Layout {
         Layout {
             unit: root.join("etc/systemd/system").join(UNIT_NAME),
@@ -1730,6 +2335,9 @@ mod tests {
             state: root.join("var/lib/nerve-center"),
             settings_dir: root.join("etc/nerve-center"),
             release: "http://127.0.0.1:1/none".into(),
+            run: root.join("run/nerve-center"),
+            word: None,
+            parts: Default::default(),
         }
     }
 
@@ -1910,6 +2518,10 @@ mod tests {
             "LimitNOFILE=65536",
             "SystemCallFilter=@system-service",
             "MemoryDenyWriteExecute=yes",
+            // Where it says where its web UI listens, for every account to
+            // read (crate::ui_file).
+            "RuntimeDirectory=nerve-center",
+            "RuntimeDirectoryMode=0755",
         ] {
             assert!(unit.contains(&format!("\n{line}\n")), "{line}: {unit}");
         }
@@ -2528,6 +3140,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             active: true,
             state: "active".into(),
             boot: Some(true),
+            older: false,
         });
         let runs = crate::attach::runs(state);
         status_page_of(l, state, installed, file, ui, mcp, runs, service).render(Style::PLAIN)
@@ -2804,6 +3417,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
                 active: false,
                 state: "inactive".into(),
                 boot: Some(true),
+                older: false,
             }),
         )
         .render(Style::PLAIN);
@@ -2816,6 +3430,25 @@ Next  Change one:  sudo nerve-center set <name> <value>
             has_next(&stopped, "Start it: sudo nerve-center service start"),
             "{stopped}"
         );
+        assert!(!stopped.contains("older"), "{stopped}");
+        // A service that still runs the program a package replaced says so.
+        let older = status_page_of(
+            &l,
+            &state,
+            true,
+            Some(file),
+            "",
+            &McpMode::Off,
+            Some(true),
+            Some(ServiceState {
+                active: true,
+                state: "active".into(),
+                boot: Some(true),
+                older: true,
+            }),
+        )
+        .render(Style::PLAIN);
+        assert!(older.contains("older than the installed one"), "{older}");
     }
 
     /// A link in place of the state or the settings folder is refused:
