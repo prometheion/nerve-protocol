@@ -971,8 +971,8 @@ fn every_function_of_the_pages_has_its_command() {
     assert!(!skip.contains("Skip the model"), "{skip}");
     assert!(said(&["checker", "on", "model"]).contains(" · blocklist on · model on\n"));
     assert!(said(&["checker", "off", "model"]).contains(" · blocklist on · model off\n"));
-    let tuned = said(&["checker", "model", "set", "threshold", "0.7"]);
-    assert!(tuned.contains("threshold 0.7"), "{tuned}");
+    let tuned = said(&["checker", "model", "set", "threshold", "0.6"]);
+    assert!(tuned.contains("threshold 0.6,"), "{tuned}");
     assert!(refused(&["checker", "model", "set", "gpu", "maybe"]).contains("on or off"));
     assert!(
         refused(&["checker", "machine", "nope", "model", "on"]).contains("no machine named nope")
