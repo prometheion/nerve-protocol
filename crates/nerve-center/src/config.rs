@@ -399,7 +399,7 @@ pub enum Cmd {
     Stats,
     /// Show the latest decisions on calls, or make a rule from one
     ///
-    /// The newest first, numbered. `audit allow 3` lets that call on its machine, `audit deny 3` refuses it there, `audit skip 3` lets such calls skip the decision model, as the web UI's Audit buttons do. It asks the running center.
+    /// The newest first, each with an id. `audit allow <ID>` lets that call on its machine, `audit deny <ID>` refuses it there, `audit skip <ID>` lets such calls skip the decision model, as the web UI's Audit buttons do. It asks the running center.
     #[command(args_conflicts_with_subcommands = true)]
     Audit {
         /// Show only the newest N.
@@ -643,8 +643,12 @@ pub enum ModelCmd {
     },
     /// Remove the local model.
     Remove,
-    /// Set the endpoint's token from stdin; an empty line removes it.
-    Token,
+    /// Set the endpoint's token (asked without echo; from stdin if piped), or remove it.
+    Token {
+        /// Remove the token, instead of asking for one.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 /// The settings `checker model set` takes.
@@ -709,8 +713,8 @@ pub enum AuditCmd {
 /// The decision a rule is made of, and how wide the rule is.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct AuditRule {
-    /// The decision's number, as `audit` shows it.
-    pub n: usize,
+    /// The decision's id, as `audit` shows it.
+    pub id: String,
     /// Any target, not only this one.
     #[arg(long, conflicts_with = "pin")]
     pub wildcard: bool,

@@ -174,7 +174,7 @@ pub(crate) fn command_of(
 
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
-const API_BODY: usize = 1024 * 1024;
+pub(crate) const API_BODY: usize = 1024 * 1024;
 
 /// The requests of the web UI that the local owner channel takes
 /// ([`Ui::owner_call`]): every call of the web UI's pages, so the owner's

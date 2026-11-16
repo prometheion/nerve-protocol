@@ -353,6 +353,7 @@ impl Ctl {
             return;
         }
         let tried = token.clone();
+        let remembered = self.hub.token.borrow().as_deref() == Some(token.as_str());
         self.job(
             move |_| client.login(&tried),
             move |c, r| {
@@ -383,6 +384,17 @@ impl Ctl {
                         if matches!(e, Failed::Refused(401, _)) {
                             if quiet {
                                 let _ = c.hub.keyring.borrow().delete();
+                                // A token from the keyring that the center
+                                // refuses is not one the owner kept (another
+                                // program may have written it): the switch
+                                // goes off with the entry, and the next log-in
+                                // keeps nothing. The one this app logged in
+                                // with, refused after a new owner token, was
+                                // the owner's: the switch stays.
+                                if !remembered {
+                                    c.with_hub(|h| h.set_keep_login(false));
+                                    c.hub_save_keep(false);
+                                }
                             }
                             c.hub.token.borrow_mut().take();
                         }
@@ -1164,7 +1176,7 @@ impl Ctl {
         set("ui", &ui, started["ui"].as_str().unwrap_or_default());
         set("mcp", &mcp, started["mcp"].as_str().unwrap_or_default());
         let body = json!({"name": name, "retention_days": days, "pair_code_minutes": minutes,
-                          "log_level": if debug { "debug" } else { "info" }});
+                          "log_level": view::log_level(&was, debug)});
         self.with_hub(|h| {
             h.set_busy("settings".into());
             h.set_set_error(SharedString::new());

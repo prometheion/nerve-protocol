@@ -51,7 +51,7 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 | `sessions [end <id>]` | Shows the harnesses' sessions, or ends one |
 | `checker [on\|off\|block\|skip\|model\|machine]` | Shows the action checker, or changes its switches, rules and model |
 | `caps <machine> [add\|rm]` | Shows a machine's capabilities, or adds or removes one |
-| `stats`, `audit [allow\|deny\|skip <N>]` | Shows the statistics, or the latest decisions and makes a rule of one |
+| `stats`, `audit [allow\|deny\|skip <ID>]` | Shows the statistics, or the latest decisions and makes a rule of one |
 | `key rotate\|finish`, `config [<setting> <value>]` | A new center key; the center's name, retention, pairing time, log level |
 | `log [--last N] [--problems] [--follow]` | Shows the center's log |
 | `owner-token [--new]` | Shows the token that logs in to the web UI |

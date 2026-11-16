@@ -25,7 +25,7 @@ the service manager on Windows ([install](../../user/install.md#the-center-as-a-
 | `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | where nodes connect |
 | `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links; `{port}` in it is the port the center got, for a `--listen` with port 0 |
 | `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | plain HTTP for nodes, only on a loopback `--listen` |
-| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | web UI address, or `off` |
+| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` (`off` on Windows) | web UI address, or `off` |
 | `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off` (center only), `http` (HTTP MCP at `127.0.0.1:7481`) or an HTTP MCP address |
 | `--harness-token` | `NERVE_CENTER_HARNESS_TOKEN` | none | a harness token: a bearer token for HTTP MCP (more can be made in the UI); it does not log in to the UI |
 | `--call-wait` | `NERVE_CENTER_CALL_WAIT` | `20s` | how long `execute` waits for a result before the call becomes a job (§4.4): `20` or `20s`, or `500ms`; 10 ms to 600 s |

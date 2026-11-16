@@ -234,6 +234,18 @@ pub fn hidden(token: &str) -> String {
     format!("{start}{}", "•".repeat(22))
 }
 
+/// The log level a save of the center's settings posts: the debug switch
+/// chooses between `debug` and the level the center has, which is `info`
+/// where it is `debug` now or names none, so a `warn` or `error` the owner
+/// set in the terminal or the web UI survives a save.
+pub fn log_level(center: &Value, debug: bool) -> String {
+    match (debug, center["log_level"].as_str()) {
+        (true, _) => "debug".to_string(),
+        (false, Some(level)) if level != "debug" && !level.is_empty() => level.to_string(),
+        _ => "info".to_string(),
+    }
+}
+
 /// The Overview's line of the checker: "Blocklist on · model off".
 pub fn checker_line(v: &Value) -> String {
     let c = &v["config"];
@@ -984,6 +996,19 @@ pub fn commands(v: &Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Saving the center's settings keeps a `warn` or `error` log level
+    /// that the app's debug switch cannot show.
+    #[test]
+    fn a_save_keeps_the_log_level_the_switch_does_not_show() {
+        let at = |level: &str| json!({"log_level": level});
+        assert_eq!(log_level(&at("warn"), false), "warn");
+        assert_eq!(log_level(&at("error"), false), "error");
+        assert_eq!(log_level(&at("info"), false), "info");
+        assert_eq!(log_level(&at("debug"), false), "info");
+        assert_eq!(log_level(&at("warn"), true), "debug");
+        assert_eq!(log_level(&json!({}), false), "info");
+    }
     use slint::Model;
 
     const NOW: u64 = 1_700_000_000_000;

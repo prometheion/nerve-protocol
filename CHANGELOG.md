@@ -55,8 +55,11 @@ and every limit is in
   `sessions [end]`, `checker` (its switches, the blocklist and the rules that
   skip the model with add, edit, on, off and rm, the decision model, a
   machine's own switches), `caps <machine> [add|rm]`, `stats`, `audit` (and
-  `allow|deny|skip <N>`), `key rotate|finish`, `config` (name, retention,
-  pairing time, log level) and `nodes rename|settings|sudo`.
+  `allow|deny|skip <id>`), `key rotate|finish`, `config` (name, retention,
+  pairing time, log level) and `nodes rename|settings|sudo`. `audit` gives
+  each decision an id that stays the same while new ones come in, and
+  `nodes settings` prints a file (with the version it was read at) that
+  `--from` takes back, refusing it where the settings changed since.
 - The center's web UI is on by default on Linux and off on Windows, where
   the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow

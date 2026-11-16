@@ -73,6 +73,15 @@ pub struct Caller {
     pub needs_token: bool,
 }
 
+impl Caller {
+    /// It is the account that installed the center, which is served within
+    /// [`OWNER_PLACES`]: root, an administrator and the center's own are not
+    /// counted, so they get in while it is held up.
+    fn limited(self) -> bool {
+        !self.harness && self.needs_token
+    }
+}
+
 /// [`Caller`] by uid (Linux): root, the center's own account `me`, or the
 /// account that installed it (`owner`); `None` for anyone else.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -276,8 +285,30 @@ pub fn owner_account(state: &Path) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
 }
-/// The longest request line of an owner's command.
-const OWNER_REQUEST: u64 = 64 * 1024;
+/// The longest first line (the hello) of a connection.
+const HELLO_MAX: u64 = 64 * 1024;
+/// The longest request line of an owner's command: the web UI's body limit
+/// and room for the rest of the request, so what the web UI saves (a long
+/// rule list, a checker config) saves here too.
+const OWNER_REQUEST: u64 = crate::ui::API_BODY as u64 + 64 * 1024;
+/// How many connections of the account that installed the center it
+/// serves at once, each held for one request of at most a few seconds: the
+/// bound that keeps one account's idle connections from using up the
+/// center's descriptors, where root's and the center's own still get in.
+const OWNER_PLACES: usize = 16;
+/// Windows: how many connections wait for their first line at once; the
+/// account of a pipe's client is known only after it.
+#[cfg(windows)]
+const PENDING_PLACES: usize = 64;
+/// The line a caller of another account gets before its connection closes.
+pub(crate) const NOT_THE_OWNER: &str = match cfg!(windows) {
+    true => {
+        "this account did not install the center and may not ask it: install it again from the account that should, or use an administrator's terminal"
+    }
+    false => {
+        "this account did not install the center and may not ask it: install it again with sudo from the account that should"
+    }
+};
 
 pub fn socket_path(state: &Path) -> PathBuf {
     state.join(RUN_DIR).join(SOCKET)
@@ -361,16 +392,17 @@ async fn attached<S>(
     ui: std::sync::Arc<crate::ui::Ui>,
     stream: S,
     who: impl FnOnce() -> Option<Caller>,
+    place: Option<tokio::sync::OwnedSemaphorePermit>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-    let (r, w) = tokio::io::split(stream);
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let (r, mut w) = tokio::io::split(stream);
     let mut r = tokio::io::BufReader::new(r);
     let mut first = String::new();
     let read = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        (&mut r).take(OWNER_REQUEST).read_line(&mut first),
+        (&mut r).take(HELLO_MAX).read_line(&mut first),
     )
     .await;
     if !matches!(read, Ok(Ok(_))) {
@@ -378,8 +410,12 @@ async fn attached<S>(
     }
     let Some(caller) = who() else {
         tracing::warn!("refused a caller of another account");
+        let _ = w.write_all(refusal().as_bytes()).await;
         return;
     };
+    // Only the installing account's requests keep their place: the others
+    // are served for as long as they stay.
+    let _place = place.filter(|_| caller.limited());
     let hello: serde_json::Value = serde_json::from_str(first.trim()).unwrap_or_default();
     match hello["role"].as_str() {
         Some("harness") if caller.harness => {
@@ -397,6 +433,20 @@ async fn attached<S>(
         }
         _ => {}
     }
+}
+
+/// The line that says a full house.
+#[cfg(unix)]
+fn busy() -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({ "error": "the center has too many requests of yours open: try again" })
+    )
+}
+
+/// The line that says a caller of another account is refused.
+fn refusal() -> String {
+    format!("{}\n", serde_json::json!({ "error": NOT_THE_OWNER }))
 }
 
 /// Answers one owner's request: a line `{"method", "path", "query",
@@ -424,10 +474,17 @@ async fn owner_request<R, W>(
         r.take(OWNER_REQUEST).read_line(&mut line),
     )
     .await;
-    if !matches!(read, Ok(Ok(n)) if n > 0) {
-        return;
-    }
-    let answer = match serde_json::from_str::<serde_json::Value>(&line) {
+    let parsed = match read {
+        // A line cut at the limit is no request, and is said so.
+        Ok(Ok(n)) if n as u64 >= OWNER_REQUEST && !line.ends_with('\n') => {
+            Err("the request is longer than the center takes".to_string())
+        }
+        Ok(Ok(n)) if n > 0 => serde_json::from_str::<serde_json::Value>(&line)
+            .map_err(|e| format!("not a request: {e}")),
+        Ok(Err(e)) => Err(format!("not a request: {e}")),
+        _ => return,
+    };
+    let answer = match parsed {
         Ok(req) => {
             let s = |k: &str| req[k].as_str().unwrap_or_default().to_string();
             let login = s("path") == LOGIN;
@@ -451,7 +508,7 @@ async fn owner_request<R, W>(
                 },
             }
         }
-        Err(e) => serde_json::json!({ "error": format!("not a request: {e}") }),
+        Err(e) => serde_json::json!({ "error": e }),
     };
     let _ = w.write_all(format!("{answer}\n").as_bytes()).await;
     let _ = w.shutdown().await;
@@ -538,7 +595,18 @@ mod unix {
         listener: UnixListener,
         owner: Option<u32>,
     ) {
-        let me = nerve_transport::net::euid();
+        serve_as(nerve_transport::net::euid(), center, ui, listener, owner).await
+    }
+
+    /// [`serve`] for the center's own account `me`.
+    pub(super) async fn serve_as(
+        me: u32,
+        center: Center,
+        ui: std::sync::Arc<crate::ui::Ui>,
+        listener: UnixListener,
+        owner: Option<u32>,
+    ) {
+        let places = std::sync::Arc::new(tokio::sync::Semaphore::new(super::OWNER_PLACES));
         let mut failing = false;
         loop {
             let Some((stream, _)) = accepted(listener.accept().await, &mut failing).await else {
@@ -547,14 +615,40 @@ mod unix {
             let uid = stream.peer_cred().map(|c| c.uid()).ok();
             let Some(caller) = super::caller_of_uid(uid, me, owner) else {
                 tracing::warn!(?uid, "refused a caller from another user");
+                tell(stream, &super::refusal());
                 continue;
+            };
+            // The installing account's connections are counted; a full
+            // house is told to try again, and root still gets in.
+            let place = match caller.limited() {
+                true => match places.clone().try_acquire_owned() {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        tracing::warn!(
+                            "too many connections of the account that installed the center"
+                        );
+                        tell(stream, &super::busy());
+                        continue;
+                    }
+                },
+                false => None,
             };
             tokio::spawn(super::attached(
                 center.clone(),
                 ui.clone(),
                 stream,
                 move || Some(caller),
+                place,
             ));
+        }
+    }
+
+    /// Says `line` to a connection that is refused: written at once, as
+    /// the socket is new and takes it, and never waited for.
+    fn tell(stream: UnixStream, line: &str) {
+        use std::io::Write;
+        if let Ok(stream) = stream.into_std() {
+            let _ = (&stream).write(line.as_bytes());
         }
     }
 
@@ -639,6 +733,22 @@ mod windows {
         make(name, owner)
     }
 
+    /// [`bind_owner`], tried again every `every` until it works: the pipe's
+    /// name is open to every account while the service is stopped, and a
+    /// program that made it first keeps it only as long as it runs.
+    pub async fn bind_owner_when_free(
+        name: &str,
+        owner: Option<&str>,
+        every: Duration,
+    ) -> Listener {
+        loop {
+            tokio::time::sleep(every).await;
+            if let Ok(l) = make(name, owner) {
+                return l;
+            }
+        }
+    }
+
     fn make(name: &str, owner: Option<&str>) -> Result<Listener, String> {
         let own = user_of(None)
             .map_err(|e| format!("the pipe {name}: {e}"))
@@ -684,6 +794,7 @@ mod windows {
         } = l;
         let mut next = first;
         let mut failing = false;
+        let pending = std::sync::Arc::new(tokio::sync::Semaphore::new(super::PENDING_PLACES));
         loop {
             let connected = next.connect().await;
             let made = loop {
@@ -705,13 +816,26 @@ mod windows {
             // The handle lives while the task holds the connection, which
             // is past the first line, when the caller is named.
             let raw = conn.as_raw_handle() as usize;
+            // A place for the connection until its account is known (past
+            // its first line); a full house closes it, and the client's
+            // next try finds the pipe again.
+            let Ok(place) = pending.clone().try_acquire_owned() else {
+                tracing::warn!("too many connections wait at the pipe {name}");
+                continue;
+            };
             let (own, owner) = (own.clone(), owner.clone());
             let who = move || {
                 let (sid, admin) = client_identity(raw as _)?;
                 let sid = sid_text(&sid).ok();
                 super::caller_of_sid(sid.as_deref(), admin, &own, owner.as_deref())
             };
-            tokio::spawn(super::attached(center.clone(), ui.clone(), conn, who));
+            tokio::spawn(super::attached(
+                center.clone(),
+                ui.clone(),
+                conn,
+                who,
+                Some(place),
+            ));
         }
     }
 
@@ -751,11 +875,33 @@ mod windows {
 }
 
 #[cfg(windows)]
-pub use windows::{Listener, bind, bind_owner, relay, serve};
+pub use windows::{Listener, bind, bind_owner, bind_owner_when_free, relay, serve};
 
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+
+    /// A program that made the owner pipe first holds it only while it
+    /// runs: the center makes the pipe as soon as it lets go (round 1 of
+    /// #232's second pass, correctness 6 and security 4).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_owner_pipe_is_made_once_the_program_that_took_it_lets_go() {
+        let name = format!(
+            r"\\.\pipe\nerve-center-owner-test-{}",
+            nerve_transport::keys::random_token(12)
+        );
+        let squatter = bind_owner(&name, None).unwrap();
+        assert!(bind_owner(&name, None).is_err(), "a second first instance");
+        let every = std::time::Duration::from_millis(20);
+        let n = name.clone();
+        let waiting = tokio::spawn(async move { bind_owner_when_free(&n, None, every).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished(), "made while another program held it");
+        drop(squatter);
+        let made = tokio::time::timeout(std::time::Duration::from_secs(10), waiting).await;
+        assert!(made.is_ok(), "not made after the other program let go");
+    }
 
     /// One center per state folder on every system: while one holds the
     /// lock a second finds it held, and `runs` says a center runs (#64:
@@ -1061,9 +1207,17 @@ mod role_tests {
         lines: &str,
     ) -> String {
         let (mine, theirs) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(attached(center.clone(), ui.clone(), theirs, move || caller));
+        tokio::spawn(attached(
+            center.clone(),
+            ui.clone(),
+            theirs,
+            move || caller,
+            None,
+        ));
         let (r, mut w) = tokio::io::split(mine);
-        w.write_all(lines.as_bytes()).await.unwrap();
+        // The center may end the connection before it read a request that
+        // is too long: the answer is there all the same.
+        let _ = w.write_all(lines.as_bytes()).await;
         let mut answer = String::new();
         let mut r = tokio::io::BufReader::new(r);
         let read =
@@ -1155,7 +1309,113 @@ mod role_tests {
         let d = tempfile::tempdir().unwrap();
         let center = center_in(d.path());
         let ui = crate::ui::Ui::new(&center, None, true);
-        assert_eq!(answer_of(&center, &ui, None, &request).await, "");
+        let refused = answer_of(&center, &ui, None, &request).await;
+        let v: serde_json::Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(v["error"], NOT_THE_OWNER, "{v}");
+        assert!(v.get("ok").is_none(), "{v}");
+    }
+
+    /// The owner's request may be as long as the web UI's body (1 MiB):
+    /// what the web UI saves, a long rule list among it, saves here too
+    /// (round 1 of #232's second pass, correctness 4). A line beyond that
+    /// is refused in words, not cut into a request that fails oddly.
+    #[tokio::test]
+    async fn an_owner_s_request_may_be_as_long_as_the_web_ui_s_body() {
+        let d = tempfile::tempdir().unwrap();
+        let center = center_in(d.path());
+        let ui = crate::ui::Ui::new(&center, None, true);
+        let admin = Some(Caller {
+            harness: false,
+            needs_token: false,
+        });
+        let line = |size: usize| {
+            format!(
+                "{OWNER_HELLO}\n{}\n",
+                serde_json::json!({"method": "POST", "path": "/api/pair/status",
+                    "body": {"code": "x".repeat(size)}})
+            )
+        };
+        // 200 KiB, well over the old 64 KiB.
+        let answer = answer_of(&center, &ui, admin, &line(200 * 1024)).await;
+        let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert!(v.get("ok").is_some(), "{v}");
+        let answer = answer_of(&center, &ui, admin, &line(2 * 1024 * 1024)).await;
+        let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(
+            v["error"], "the request is longer than the center takes",
+            "{v}"
+        );
+    }
+
+    /// The account that installed the center is served in a bounded number
+    /// of places, so its idle connections cannot use up the center's
+    /// descriptors; a full house is told so at once, and a place that is
+    /// let go is taken by the next one. A caller of another account is told
+    /// why it is not served (round 1 of #232's second pass, security 3 and
+    /// correctness 5).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_owner_endpoint_holds_a_bounded_number_of_the_owner_s_connections() {
+        use tokio::net::{UnixListener, UnixStream};
+        let d = tempfile::tempdir().unwrap();
+        let center = center_in(d.path());
+        let ui = crate::ui::Ui::new(&center, None, true);
+        let (token, _) = crate::owner::ensure(d.path()).unwrap();
+        let mine = nerve_transport::net::euid();
+        let at = d.path().join("owner.sock");
+        // The center's own account is another one, and this one installed it.
+        tokio::spawn(unix::serve_as(
+            mine + 1,
+            center.clone(),
+            ui.clone(),
+            UnixListener::bind(&at).unwrap(),
+            Some(mine),
+        ));
+        let mut held = Vec::new();
+        for _ in 0..OWNER_PLACES {
+            held.push(UnixStream::connect(&at).await.unwrap());
+        }
+        let first_line = |mut s: UnixStream| async move {
+            let mut line = String::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::io::BufReader::new(&mut s).read_line(&mut line),
+            )
+            .await;
+            assert!(read.is_ok(), "no answer within 10 s");
+            line
+        };
+        let full = first_line(UnixStream::connect(&at).await.unwrap()).await;
+        assert!(full.contains("too many requests"), "{full}");
+        // One lets go; its place serves the next, with its request.
+        drop(held.pop());
+        let request = format!(
+            "{}\n{}\n",
+            owner_hello(Some(&token)),
+            serde_json::json!({"method": "GET", "path": "/api/overview", "body": {}})
+        );
+        let served = loop {
+            let mut s = UnixStream::connect(&at).await.unwrap();
+            s.write_all(request.as_bytes()).await.unwrap();
+            let line = first_line(s).await;
+            if !line.contains("too many requests") {
+                break line;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(served.contains("\"ok\""), "{served}");
+        // Another account than the center's and the installer's.
+        let other = d.path().join("other.sock");
+        tokio::spawn(unix::serve_as(
+            mine + 1,
+            center.clone(),
+            ui.clone(),
+            UnixListener::bind(&other).unwrap(),
+            None,
+        ));
+        let told = first_line(UnixStream::connect(&other).await.unwrap()).await;
+        let v: serde_json::Value = serde_json::from_str(&told).unwrap();
+        assert_eq!(v["error"], NOT_THE_OWNER, "{v}");
     }
 
     /// The owner's requests of a caller that is not root or an

@@ -27,6 +27,14 @@ pub async fn run(
     let command = commands(state, installed);
     let ask = crate::pages::Ask { state, installed };
     let page = match cmd {
+        Cmd::Nodes {
+            cmd: Some(NodesCmd::Settings { name, from: None }),
+        } => {
+            // The file alone, not a page around it: it is what `--from` takes.
+            let file = crate::pages::settings_file(&ask, name).await?;
+            let _ = out.write_all(file.as_bytes());
+            return Ok(());
+        }
         Cmd::Pair => pair_page(&call(state, installed, "POST", "/api/pair", json!({})).await?),
         Cmd::Nodes { cmd: Some(c) } if crate::pages::touches_one(c) => {
             crate::pages::nodes(&ask, c).await?.ok_or("nothing to do")?

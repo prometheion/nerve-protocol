@@ -974,6 +974,31 @@ fn every_function_of_the_pages_has_its_command() {
     let tuned = said(&["checker", "model", "set", "threshold", "0.6"]);
     assert!(tuned.contains("threshold 0.6,"), "{tuned}");
     assert!(refused(&["checker", "model", "set", "gpu", "maybe"]).contains("on or off"));
+    // The endpoint's token: given on a line of stdin, kept when nothing is
+    // given, and removed only on request.
+    let token_file = state.join("checker-model.token");
+    let mut give = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    let mut give = bare(&mut give)
+        .args(["checker", "model", "token", "--state-dir"])
+        .arg(&state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    give.stdin
+        .take()
+        .unwrap()
+        .write_all(b"endpoint-secret\n")
+        .unwrap();
+    assert!(give.wait_with_output().unwrap().status.success());
+    assert_eq!(
+        std::fs::read_to_string(&token_file).unwrap().trim(),
+        "endpoint-secret"
+    );
+    assert!(refused(&["checker", "model", "token"]).contains("nothing was given"));
+    assert!(token_file.exists(), "an empty input removed the token");
+    assert!(said(&["checker", "model", "token", "--remove"]).contains("token is removed"));
+    assert!(!token_file.exists());
     assert!(
         refused(&["checker", "machine", "nope", "model", "on"]).contains("no machine named nope")
     );
@@ -984,7 +1009,7 @@ fn every_function_of_the_pages_has_its_command() {
     assert!(refused(&["sessions", "end", "nope"]).contains("no such session"));
     assert!(said(&["stats"]).contains("All machines"));
     assert!(said(&["audit"]).contains(" · no decision yet\n"));
-    assert!(refused(&["audit", "allow", "1"]).contains("no decision numbered 1"));
+    assert!(refused(&["audit", "allow", "0badc0de"]).contains("no decision 0badc0de"));
     // The center's own settings.
     let config = said(&["config", "retention-days", "12"]);
     assert!(

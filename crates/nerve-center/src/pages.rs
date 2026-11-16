@@ -94,6 +94,48 @@ fn from_stdin(whole: bool) -> Result<String, String> {
 
 // ---- nodes rename | settings | sudo ----
 
+fn settings_target(id: &str) -> String {
+    format!("/api/nodes/settings?id={}", query(id))
+}
+
+/// `nodes settings <name>`: the machine's settings as the file `--from`
+/// takes back, with the version they were read at, so a save refuses a
+/// machine whose settings changed while the file was edited.
+pub(crate) async fn settings_file(ask: &Ask<'_>, name: &str) -> Result<String, String> {
+    let id = ask.node(name).await?;
+    let now = ask.get(&settings_target(&id)).await?;
+    Ok(settings_text(&now))
+}
+
+/// The file for the settings `now` (the page's answer): JSON alone, so a
+/// redirect to a file is the file.
+fn settings_text(now: &Value) -> String {
+    let file = json!({"version": now["version"], "document": now["document"]});
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&file).unwrap_or_default()
+    )
+}
+
+/// The document a `--from` file holds and the version to save it over. A
+/// file from `nodes settings` names the version it was read at; a bare
+/// document (written by hand) is saved over the version now (`current`).
+fn settings_to_save(text: &str, current: &Value) -> Result<(Value, Value), String> {
+    let file: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    let Some(object) = file.as_object() else {
+        return Err("the settings are a JSON object".to_string());
+    };
+    match (object.get("version"), object.get("document")) {
+        (Some(version), Some(document)) if object.len() == 2 => {
+            match version.is_u64() && document.is_object() {
+                true => Ok((document.clone(), version.clone())),
+                false => Err("the file's version is a number and its document an object".into()),
+            }
+        }
+        _ => Ok((file, current.clone())),
+    }
+}
+
 /// Whether `cmd` is one of the `nodes` commands here, which change or show
 /// one machine.
 pub(crate) fn touches_one(cmd: &NodesCmd) -> bool {
@@ -115,37 +157,31 @@ pub(crate) async fn nodes(ask: &Ask<'_>, cmd: &NodesCmd) -> Result<Option<Page>,
             p.row("Machine", format!("{name} is now {new_name}"));
             Ok(Some(p))
         }
-        NodesCmd::Settings { name, from } => {
+        NodesCmd::Settings {
+            name,
+            from: Some(from),
+        } => {
             let id = ask.node(name).await?;
-            let target = format!("/api/nodes/settings?id={}", query(&id));
-            let now = ask.get(&target).await?;
-            let Some(from) = from else {
-                // The JSON alone, for a file to edit and give back.
-                let mut p = crate::service::page().state(
-                    format!("settings of {name}, version {}", now["version"]),
-                    Tone::Plain,
-                );
-                p.note(serde_json::to_string_pretty(&now["document"]).unwrap_or_default());
-                p.next(
-                    "Change them",
-                    format!("nerve-center nodes settings {name} --from <file>"),
-                );
-                return Ok(Some(p));
-            };
+            let now = ask.get(&settings_target(&id)).await?;
             let text = match from.as_os_str() == "-" {
                 true => from_stdin(true)?,
                 false => {
                     std::fs::read_to_string(from).map_err(|e| format!("{}: {e}", from.display()))?
                 }
             };
-            let document: Value =
-                serde_json::from_str(&text).map_err(|e| format!("not valid JSON: {e}"))?;
+            let (document, version) = settings_to_save(&text, &now["version"])?;
             let saved = ask
                 .post(
                     "/api/nodes/settings",
-                    json!({"id": id, "document": document, "if_version": now["version"]}),
+                    json!({"id": id, "document": document, "if_version": version}),
                 )
-                .await?;
+                .await
+                .map_err(|e| match e.contains("the settings changed") {
+                    true => "the settings changed since the file was written: \
+                             show them again, make the change in the new file and save it"
+                        .to_string(),
+                    false => e,
+                })?;
             let mut p = crate::service::page().state("saved", Tone::Good);
             p.row("Machine", name.as_str());
             p.row("Version", saved["version"].to_string());
@@ -290,6 +326,19 @@ fn refused(e: &Value) -> bool {
     s(&e["decision"]) == "forbidden"
 }
 
+/// The short name `audit` gives a decision and its rule commands take: eight
+/// hex digits of what the decision holds (FNV-1a), so it is the same
+/// whenever it is listed.
+fn decision_id(e: &Value) -> String {
+    let hash = e
+        .to_string()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{:08x}", (hash >> 32) ^ (hash & 0xffff_ffff))
+}
+
 /// `audit`, and a rule made of one of its decisions.
 pub(crate) async fn audit(
     ask: &Ask<'_>,
@@ -298,22 +347,26 @@ pub(crate) async fn audit(
 ) -> Result<Page, String> {
     let v = ask.get("/api/audit").await?;
     let all = list(&v["decisions"]);
-    // Numbered from the newest, as `audit` shows them.
-    let newest = |n: usize| -> Result<&Value, String> {
-        n.checked_sub(1)
-            .and_then(|i| all.len().checked_sub(i + 1))
-            .and_then(|i| all.get(i))
-            .ok_or_else(|| format!("no decision numbered {n}: `audit` shows them"))
+    // The decision `audit` showed under `id`: the list moves with every call
+    // the agents make, so a place in it would name another one by then.
+    let decision = |id: &str| -> Result<&Value, String> {
+        let mut found = all.iter().filter(|e| decision_id(e) == id.to_lowercase());
+        let first = found.next().ok_or_else(|| {
+            format!("no decision {id}: `audit` shows them, and the oldest drop off")
+        })?;
+        match found.any(|e| e != first) {
+            true => Err(format!("{id} names two decisions: say the call as a rule")),
+            false => Ok(first),
+        }
     };
     let Some(cmd) = cmd else {
         let rows: Vec<Vec<String>> = all
             .iter()
             .rev()
             .take(last)
-            .enumerate()
-            .map(|(i, e)| {
+            .map(|e| {
                 vec![
-                    format!("{}", i + 1),
+                    decision_id(e),
                     nerve_service::out::time(e["ts"].as_u64().unwrap_or(0)),
                     s(&e["node"]).to_string(),
                     format!("{}.{}", s(&e["cap"]), s(&e["action"])),
@@ -339,7 +392,7 @@ pub(crate) async fn audit(
         if !all.is_empty() {
             p.next(
                 "Make a rule of one",
-                "nerve-center audit allow|deny|skip <N>",
+                "nerve-center audit allow|deny|skip <ID>",
             );
         }
         return Ok(p);
@@ -359,7 +412,7 @@ pub(crate) async fn audit(
     };
     let (said, rule) = match cmd {
         AuditCmd::Allow(r) | AuditCmd::Deny(r) => {
-            let e = newest(r.n)?;
+            let e = decision(&r.id)?;
             let mut b = body(e, r)?;
             let word = match cmd {
                 AuditCmd::Allow(_) => "allow",
@@ -376,7 +429,7 @@ pub(crate) async fn audit(
             rule: r,
             this_machine,
         } => {
-            let e = newest(r.n)?;
+            let e = decision(&r.id)?;
             let mut b = body(e, r)?;
             if !this_machine {
                 b["node_id"] = Value::Null;
@@ -623,18 +676,22 @@ pub(crate) async fn checker(ask: &Ask<'_>, cmd: Option<&CheckerCmd>) -> Result<P
             ask.post("/api/checker/remove", json!({})).await?;
             said = Some("the local model is removed".to_string());
         }
-        Some(CheckerCmd::Model(ModelCmd::Token)) => {
-            let token = from_stdin(false)?;
-            let token = token.trim();
+        Some(CheckerCmd::Model(ModelCmd::Token { remove })) => {
+            // A token is given on purpose: empty input is no token, and
+            // only `--remove` takes it away.
+            let token = match remove {
+                true => None,
+                false => Some(nerve_service::prompt::secret("The endpoint's token: ")?),
+            };
             ask.post(
                 "/api/checker/token",
-                json!({"token": (!token.is_empty()).then_some(token)}),
+                json!({"token": token.as_deref().map(str::trim).filter(|t| !t.is_empty())}),
             )
             .await?;
             said = Some(
-                match token.is_empty() {
-                    true => "the endpoint's token is removed",
-                    false => "the endpoint's token is kept",
+                match token {
+                    None => "the endpoint's token is removed",
+                    Some(_) => "the endpoint's token is kept",
                 }
                 .to_string(),
             );
@@ -880,4 +937,43 @@ fn checker_page(v: &Value, overview: &Value, said: Option<String>) -> Page {
     }
     p.next("Add a rule", "nerve-center checker block add '<rule>'");
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `nodes settings <name>` prints a file that `--from` takes back as it
+    /// is, with the version it was read at; a save is over that version, not
+    /// the one read when the command runs (round 1 of #232's second pass,
+    /// correctness 1 and 2).
+    #[test]
+    fn the_settings_file_goes_back_with_the_version_it_was_read_at() {
+        let now = json!({"version": 7, "document": {"paused": true, "policy": {"deny": ["a"]}}});
+        let file = settings_text(&now);
+        // JSON alone, nothing around it.
+        assert!(file.starts_with("{\n"), "{file}");
+        let (document, version) = settings_to_save(&file, &json!(9)).unwrap();
+        assert_eq!(document, now["document"]);
+        assert_eq!(version, json!(7), "the version of the file, not of now");
+        // A document written by hand is saved over the version now.
+        let (document, version) = settings_to_save(r#"{"paused": false}"#, &json!(9)).unwrap();
+        assert_eq!(document, json!({"paused": false}));
+        assert_eq!(version, json!(9));
+        for bad in ["nope", "[]", r#"{"version": "7", "document": {}}"#] {
+            assert!(settings_to_save(bad, &json!(9)).is_err(), "{bad}");
+        }
+    }
+
+    /// A decision keeps its id while the list moves under it, and another
+    /// decision has another one (round 1, correctness 3).
+    #[test]
+    fn a_decision_is_named_by_what_it_holds_not_by_its_place() {
+        let a = json!({"ts": 1, "cap": "exec", "action": "run", "target": "ls"});
+        let b = json!({"ts": 2, "cap": "exec", "action": "run", "target": "ls"});
+        assert_eq!(decision_id(&a), decision_id(&a.clone()));
+        assert_ne!(decision_id(&a), decision_id(&b));
+        assert_eq!(decision_id(&a).len(), 8);
+        assert!(decision_id(&a).bytes().all(|c| c.is_ascii_hexdigit()));
+    }
 }

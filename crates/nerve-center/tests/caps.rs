@@ -532,3 +532,64 @@ async fn a_node_that_takes_none_says_why_on_the_tab() {
     daemon.stop().await;
     r.stop().await;
 }
+
+/// `nodes settings <name>` prints a file that `--from` takes back as it is,
+/// with the version it was read at, and a save over settings that changed
+/// since then is refused in words (round 1 of #232's second pass,
+/// correctness 1 and 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_s_settings_go_through_a_file_that_remembers_its_version() {
+    use nerve_center::config::{Cmd, NodesCmd};
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(&dir.path().join("center")).await;
+    let (daemon, _) = node(&r, dir.path(), true).await;
+    let ui = Ui::open(&r).await;
+    let name = online(&ui).await["name"].as_str().unwrap().to_string();
+    let state = r.center.dir().to_path_buf();
+    let run = |cmd: NodesCmd| {
+        let state = state.clone();
+        async move {
+            let mut out = Vec::new();
+            nerve_center::owner_calls::run(&state, &Cmd::Nodes { cmd: Some(cmd) }, false, &mut out)
+                .await
+                .map(|()| String::from_utf8(out).unwrap())
+        }
+    };
+    let show = || {
+        run(NodesCmd::Settings {
+            name: name.clone(),
+            from: None,
+        })
+    };
+    let shown = show().await.unwrap();
+    let mut file: Value = serde_json::from_str(&shown).expect("the file alone is JSON");
+    assert!(file["version"].is_u64(), "{shown}");
+    assert!(file["document"].is_object(), "{shown}");
+    // Saved as printed, with a deny rule added.
+    file["document"]["policy"]["deny"] = json!(["exec.run:shutdown *"]);
+    let path = dir.path().join("lab.json");
+    std::fs::write(&path, file.to_string()).unwrap();
+    let save = || {
+        run(NodesCmd::Settings {
+            name: name.clone(),
+            from: Some(path.clone()),
+        })
+    };
+    let saved = save().await.unwrap();
+    assert!(saved.contains("saved"), "{saved}");
+    let now: Value = serde_json::from_str(&show().await.unwrap()).unwrap();
+    assert_eq!(
+        now["document"]["policy"]["deny"],
+        json!(["exec.run:shutdown *"]),
+        "{now}"
+    );
+    assert!(now["version"].as_u64() > file["version"].as_u64(), "{now}");
+    // The same file again: the settings changed since it was written.
+    let stale = save().await.unwrap_err();
+    assert!(
+        stale.contains("changed since the file was written"),
+        "{stale}"
+    );
+    daemon.stop().await;
+    r.stop().await;
+}

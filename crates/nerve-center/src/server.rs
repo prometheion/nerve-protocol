@@ -209,18 +209,39 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
             ),
         }
         if let Some(at) = &args.owner_endpoint {
-            match crate::attach::bind_owner(&at.to_string_lossy(), installer.as_deref()) {
+            let name = at.to_string_lossy().into_owned();
+            match crate::attach::bind_owner(&name, installer.as_deref()) {
                 Ok(l) => tasks.push(tokio::spawn(crate::attach::serve(
                     center.clone(),
                     owner_ui.clone(),
                     l,
                     None,
                 ))),
-                Err(e) => center.log().record(
-                    Level::Warn,
-                    None,
-                    &format!("{e}; the app cannot reach the center"),
-                ),
+                // A program of the owner may hold the name while the service
+                // restarts: the pipe is made as soon as that program lets go.
+                Err(e) => {
+                    center.log().record(
+                        Level::Warn,
+                        None,
+                        &format!("{e}; the app cannot reach the center until it is free"),
+                    );
+                    let (center, ui) = (center.clone(), owner_ui.clone());
+                    let installer = installer.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let l = crate::attach::bind_owner_when_free(
+                            &name,
+                            installer.as_deref(),
+                            Duration::from_secs(5),
+                        )
+                        .await;
+                        center.log().record(
+                            Level::Info,
+                            None,
+                            &format!("the pipe {name} is free now and serves the app"),
+                        );
+                        crate::attach::serve(center, ui, l, None).await
+                    }));
+                }
             }
         }
     }

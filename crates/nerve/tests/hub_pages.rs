@@ -479,7 +479,7 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
     let token = nerve_center::owner::read(&state).unwrap().unwrap();
     let window2 = AppWindow::new().unwrap();
     let ctl2 = Ctl::attach(&window2, runner, Exec::Inline);
-    ctl2.set_hub_judge(judge);
+    ctl2.set_hub_judge(judge.clone());
     let kept = Arc::new(keep::Memory::default());
     kept.set(&token).unwrap();
     ctl2.set_hub_keyring(kept.clone());
@@ -493,6 +493,36 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
     up.store(true, Ordering::SeqCst);
     hub2.invoke_reload();
     assert!(hub2.get_logged_in(), "{}", hub2.get_login_check());
+
+    // A token that another program planted in the keyring, with the switch
+    // written on beside it, is refused at the start: the switch goes off
+    // with the entry, and the owner's own log-in keeps nothing.
+    let window3 = AppWindow::new().unwrap();
+    let ctl3 = Ctl::attach(
+        &window3,
+        Runner::new(env!("CARGO_BIN_EXE_nerve").into(), None, None),
+        Exec::Inline,
+    );
+    ctl3.set_hub_judge(judge.clone());
+    let planted = Arc::new(keep::Memory::default());
+    planted.set("nrv_planted_by_a_program").unwrap();
+    ctl3.set_hub_keyring(planted.clone());
+    let settings3 = dir.path().join("nerve-app3/settings.json");
+    nerve::settings::save_keep_login(&settings3, true).unwrap();
+    ctl3.keep_settings(settings3.clone());
+    ctl3.center_role(at.clone());
+    let hub3 = window3.global::<Hub>();
+    assert!(!hub3.get_logged_in());
+    assert!(
+        !hub3.get_keep_login(),
+        "the switch stays on for a refused token"
+    );
+    assert!(!nerve::settings::keep_login(&settings3));
+    assert_eq!(planted.get().unwrap(), None);
+    hub3.set_login_token(token.as_str().into());
+    hub3.invoke_login();
+    assert!(hub3.get_logged_in(), "{}", hub3.get_login_error());
+    assert_eq!(planted.get().unwrap(), None, "the log-in kept a token");
 
     // An administrator's command through a real broker: it ends with the
     // command, the center role keeps none (design of #232, 3).

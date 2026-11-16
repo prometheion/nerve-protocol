@@ -378,6 +378,10 @@ pub fn no_pipe(node_service_runs: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::{ffi::c_void, io, os::windows::io::AsRawHandle};
+    #[cfg(windows)]
+    use windows_sys::Win32::{Foundation::HANDLE, Storage::FileSystem::SECURITY_IDENTIFICATION};
 
     /// SYSTEM, the administrators and the node's account, nobody else; no
     /// entry twice where the node runs as one of the first two.
@@ -464,5 +468,134 @@ mod tests {
         // Without the node's account, only the first two.
         assert!(!trusted_owner(&nerve, &system, &admins, None));
         assert!(trusted_owner(&system, &system, &admins, None));
+    }
+
+    /// Impersonates a copy of this process's token with the administrators
+    /// as deny-only, as the filtered token of an unelevated administrator
+    /// holds them, until dropped.
+    #[cfg(windows)]
+    struct Filtered;
+
+    #[cfg(windows)]
+    impl Filtered {
+        fn new() -> Filtered {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::Security::{
+                CreateRestrictedToken, ImpersonateLoggedOnUser, SID_AND_ATTRIBUTES,
+                TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, WinBuiltinAdministratorsSid,
+            };
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+            let admins = crate::win::sid::well_known_sid(WinBuiltinAdministratorsSid).unwrap();
+            // SAFETY: a token of this process, a SID that lives through the
+            // call and a handle that is closed after use.
+            unsafe {
+                let mut process: HANDLE = std::ptr::null_mut();
+                let access = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY;
+                assert_ne!(
+                    OpenProcessToken(GetCurrentProcess(), access, &mut process),
+                    0
+                );
+                let disable = SID_AND_ATTRIBUTES {
+                    Sid: admins.as_ptr() as *mut c_void,
+                    Attributes: 0,
+                };
+                let mut filtered: HANDLE = std::ptr::null_mut();
+                let made = CreateRestrictedToken(
+                    process,
+                    0,
+                    1,
+                    &disable,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    &mut filtered,
+                );
+                CloseHandle(process);
+                assert_ne!(made, 0, "no filtered token");
+                let on = ImpersonateLoggedOnUser(filtered);
+                CloseHandle(filtered);
+                assert_ne!(on, 0, "cannot impersonate the filtered token");
+            }
+            Filtered
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for Filtered {
+        fn drop(&mut self) {
+            // SAFETY: ends the impersonation of this thread.
+            unsafe { windows_sys::Win32::Security::RevertToSelf() };
+        }
+    }
+
+    /// What `client_identity` reads for a client that connects as this
+    /// process does, or (`filtered`) with the administrators held as
+    /// deny-only, as the token of an unelevated administrator holds them.
+    #[cfg(windows)]
+    fn identity_of_client(filtered: bool) -> Option<(Vec<u8>, bool)> {
+        use std::io::{Read, Write};
+        use std::os::windows::fs::OpenOptionsExt;
+        let own = crate::win::process::user_of(None).unwrap();
+        let sd =
+            Descriptor::from_sddl(&dacl_text(&crate::win::sid::sid_text(&own).unwrap())).unwrap();
+        let name = format!(
+            r"\\.\pipe\nerve-service-identity-{}-{filtered}",
+            std::process::id()
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _in = rt.enter();
+        let server = instance(&name, &sd, true).unwrap();
+        let client = {
+            let name = name.clone();
+            std::thread::spawn(move || {
+                let _filtered = filtered.then(Filtered::new);
+                let mut f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .security_qos_flags(SECURITY_IDENTIFICATION)
+                    .open(&name)
+                    .unwrap();
+                f.write_all(b"hello\n").unwrap();
+                // Until the server has read who it is.
+                let _ = f.read(&mut [0u8; 1]);
+            })
+        };
+        let got = rt.block_on(async {
+            server.connect().await.unwrap();
+            let mut buf = [0u8; 16];
+            loop {
+                server.readable().await.unwrap();
+                match server.try_read(&mut buf) {
+                    Ok(n) if n > 0 => break,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    other => panic!("{other:?}"),
+                }
+            }
+            client_identity(server.as_raw_handle() as HANDLE)
+        });
+        let _ = server.try_write(b"x");
+        client.join().unwrap();
+        got
+    }
+
+    /// A pipe's client is told its account, and an administrator only where
+    /// the administrators' group is in effect in its token: a filtered token
+    /// of the same account (an unelevated administrator, or a program of one)
+    /// is none, which is what makes it give the owner token (round 1 of
+    /// #232's second pass, security 1).
+    #[cfg(windows)]
+    #[test]
+    fn a_client_is_an_administrator_only_where_the_group_is_in_effect() {
+        let own = crate::win::process::user_of(None).unwrap();
+        let (sid, admin) = identity_of_client(false).expect("the identity of this process");
+        assert_eq!(sid, own);
+        assert_eq!(admin, crate::win::sid::is_admin());
+        let (sid, admin) = identity_of_client(true).expect("the identity of a filtered token");
+        assert_eq!(sid, own);
+        assert!(!admin, "a filtered token counted as an administrator's");
     }
 }

@@ -60,7 +60,7 @@ sudo nerve-center token list
 sudo nerve-center token rm laptop
 sudo nerve-center checker               # its switches and rules, numbered
 sudo nerve-center checker block add 'exec.run:shutdown *'
-sudo nerve-center audit skip 3          # such calls skip the model
+sudo nerve-center audit skip 3a9f01c2   # such calls skip the model
 sudo nerve-center log --problems
 ```
 
@@ -123,7 +123,7 @@ the 20 seconds; keep it below your harness's own timeout for a tool call
 | Port | For | Setting |
 |---|---|---|
 | 7443 | nodes, over TLS | `--listen`, `NERVE_CENTER_LISTEN` |
-| 7480 | the web UI, this machine only | `--ui`, `NERVE_CENTER_UI` |
+| 7480 | the web UI, this machine only (off on Windows until you turn it on) | `--ui`, `NERVE_CENTER_UI` |
 | 7481 | harnesses over HTTP, this machine only | `--mcp`, `NERVE_CENTER_MCP` |
 
 Set `--public-url` when nodes reach the center under another name than its
