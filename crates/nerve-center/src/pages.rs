@@ -339,6 +339,19 @@ fn decision_id(e: &Value) -> String {
     format!("{:08x}", (hash >> 32) ^ (hash & 0xffff_ffff))
 }
 
+/// The decision `audit` showed under `id`: the list moves with every call
+/// the agents make, so a place in it would name another one by then.
+fn find_decision<'a>(all: &'a [Value], id: &str) -> Result<&'a Value, String> {
+    let mut found = all.iter().filter(|e| decision_id(e) == id.to_lowercase());
+    let first = found
+        .next()
+        .ok_or_else(|| format!("no decision {id}: `audit` shows them, and the oldest drop off"))?;
+    match found.any(|e| e != first) {
+        true => Err(format!("{id} names two decisions: say the call as a rule")),
+        false => Ok(first),
+    }
+}
+
 /// `audit`, and a rule made of one of its decisions.
 pub(crate) async fn audit(
     ask: &Ask<'_>,
@@ -347,18 +360,7 @@ pub(crate) async fn audit(
 ) -> Result<Page, String> {
     let v = ask.get("/api/audit").await?;
     let all = list(&v["decisions"]);
-    // The decision `audit` showed under `id`: the list moves with every call
-    // the agents make, so a place in it would name another one by then.
-    let decision = |id: &str| -> Result<&Value, String> {
-        let mut found = all.iter().filter(|e| decision_id(e) == id.to_lowercase());
-        let first = found.next().ok_or_else(|| {
-            format!("no decision {id}: `audit` shows them, and the oldest drop off")
-        })?;
-        match found.any(|e| e != first) {
-            true => Err(format!("{id} names two decisions: say the call as a rule")),
-            false => Ok(first),
-        }
-    };
+    let decision = |id: &str| find_decision(all, id);
     let Some(cmd) = cmd else {
         let rows: Vec<Vec<String>> = all
             .iter()
@@ -975,5 +977,19 @@ mod tests {
         assert_ne!(decision_id(&a), decision_id(&b));
         assert_eq!(decision_id(&a).len(), 8);
         assert!(decision_id(&a).bytes().all(|c| c.is_ascii_hexdigit()));
+        // The rule command finds the decision it was shown, whatever came in
+        // since; one that dropped off is said.
+        let c = json!({"ts": 3, "cap": "fs", "action": "read", "target": "/etc"});
+        let shown = decision_id(&b);
+        let mut all = vec![a.clone(), b.clone()];
+        assert_eq!(find_decision(&all, &shown).unwrap(), &b);
+        all.extend([c.clone(), c.clone()]);
+        assert_eq!(find_decision(&all, &shown).unwrap(), &b);
+        assert_eq!(
+            find_decision(&all, &decision_id(&c).to_uppercase()).unwrap(),
+            &c
+        );
+        let gone = find_decision(&all[1..], &decision_id(&a)).unwrap_err();
+        assert!(gone.contains("no decision"), "{gone}");
     }
 }

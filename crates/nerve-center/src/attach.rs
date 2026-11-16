@@ -295,6 +295,7 @@ const OWNER_REQUEST: u64 = crate::ui::API_BODY as u64 + 64 * 1024;
 /// serves at once, each held for one request of at most a few seconds: the
 /// bound that keeps one account's idle connections from using up the
 /// center's descriptors, where root's and the center's own still get in.
+#[cfg(unix)]
 const OWNER_PLACES: usize = 16;
 /// Windows: how many connections wait for their first line at once; the
 /// account of a pipe's client is known only after it.
