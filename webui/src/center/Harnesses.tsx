@@ -273,7 +273,7 @@ export function HarnessesPage() {
       />
     );
   } else if (tok) {
-    detail = <TokenDetail t={tok} reload={tokens.reload} />;
+    detail = <TokenDetail key={tok.id || "settings"} t={tok} reload={tokens.reload} />;
   } else if (ses) {
     detail = <SessionDetail s={ses} />;
   } else {

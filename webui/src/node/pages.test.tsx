@@ -38,6 +38,15 @@ describe("Overview, locked", () => {
 });
 
 describe("Relay", () => {
+  it("does not carry an open Remove question to the next node picked", async () => {
+    const { el } = await node("relay");
+    await click(allByText(el, /^laptop-2/, ".lrow")[0]);
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(el.querySelector(".ask")).not.toBeNull();
+    await click(allByText(el, /^lab-pc/, ".lrow")[0]);
+    expect(el.querySelector(".ask")).toBeNull();
+  });
+
   it("adds a node with a link shown once, makes it a new link, and removes it after asking in place", async () => {
     const { el, f } = await node("relay", {
       "POST /api/relay/add": () => ({ token: { node: "lab-pc-2", link: "https://lab-pc-2:secret@relay.example:7490" } }),
@@ -224,6 +233,23 @@ describe("Permissions", () => {
 });
 
 describe("Capabilities", () => {
+  it("does not carry an open Remove question to the next own capability or program picked", async () => {
+    const d = nodeData();
+    d.caps.config.push({ ...d.caps.config[0], name: "backup.sync" });
+    d.caps.programs.push({ name: "desk2", exe: "/usr/lib/nerve-desk/nerve-desk2" });
+    const { el } = await node("capabilities", { "GET /api/caps": () => d.caps });
+    await click(allByText(el, /^backup\.run/, ".lrow")[0]);
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(el.querySelector(".ask")).not.toBeNull();
+    await click(allByText(el, /^backup\.sync/, ".lrow")[0]);
+    expect(el.querySelector(".ask")).toBeNull();
+    await click(allByText(el, /^desk\b/, ".lrow")[0]);
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(el.querySelector(".ask")).not.toBeNull();
+    await click(allByText(el, /^desk2/, ".lrow")[0]);
+    expect(el.querySelector(".ask")).toBeNull();
+  });
+
   it("switches an action for the chosen center in its row", async () => {
     const { el, f } = await node("capabilities", { "POST /api/caps/set": () => ({}) });
     const row = allByText(el, /^fs\.read/, ".lrow")[0];

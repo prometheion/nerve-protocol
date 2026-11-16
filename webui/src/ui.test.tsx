@@ -18,6 +18,21 @@ it("asks before a removal, in place, and removes only on yes", async () => {
   expect(gone).toHaveBeenCalledTimes(1);
 });
 
+it("ignores the second click of a double-click on the confirm", async () => {
+  const gone = vi.fn(async () => {});
+  const el = await render(<RemoveAsk question="Remove dev?" onConfirm={gone} bare label="Remove" />);
+  await click(el.querySelector("button"));
+  const yes = el.querySelector(".ask .btn.danger-solid")!;
+  await act(async () => {
+    yes.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+  });
+  expect(gone).not.toHaveBeenCalled();
+  await act(async () => {
+    yes.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  });
+  expect(gone).toHaveBeenCalledTimes(1);
+});
+
 function Picked() {
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState("a");

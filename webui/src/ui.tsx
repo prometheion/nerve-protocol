@@ -103,6 +103,9 @@ type BtnProps = {
   disabled?: boolean;
   type?: "button" | "submit";
   className?: string;
+  /** Ignore the second click of a double-click (the confirm of a question
+   * opens where the first click landed). */
+  single?: boolean;
 };
 
 /** Runs an action the way a button does: busy, errors as a toast. */
@@ -128,7 +131,7 @@ export function useAction(): [boolean, (fn: () => Promise<unknown> | unknown) =>
   return [busy, run];
 }
 
-export function Btn({ children, kind = "", size = "sm", icon, onClick, act, title, label, disabled, type = "button", className }: BtnProps) {
+export function Btn({ children, kind = "", size = "sm", icon, onClick, act, title, label, disabled, type = "button", className, single }: BtnProps) {
   const [busy, run] = useAction();
   const cls = ["btn", kind, size, !children && icon ? "icon" : "", className || ""].filter(Boolean).join(" ");
   return (
@@ -139,7 +142,11 @@ export function Btn({ children, kind = "", size = "sm", icon, onClick, act, titl
       aria-label={label}
       aria-busy={busy || undefined}
       disabled={disabled || busy}
-      onClick={act ? () => run(act) : onClick}
+      onClick={(e) => {
+        if (single && e.detail > 1) return;
+        if (act) run(act);
+        else onClick?.();
+      }}
     >
       {busy ? <span className="spinner" aria-hidden="true" /> : icon ? <Icon name={icon} /> : null}
       {children}
@@ -622,7 +629,7 @@ export function RemoveAsk({
       <Btn kind="ghost" size={size} onClick={() => setAsking(false)}>
         Cancel
       </Btn>
-      <Btn kind="danger-solid" size={size} icon={icon} act={async () => {
+      <Btn kind="danger-solid" size={size} icon={icon} single act={async () => {
         await onConfirm();
         setAsking(false);
       }}>

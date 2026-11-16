@@ -73,6 +73,34 @@ describe("Nodes", () => {
   });
 });
 
+describe("Overview", () => {
+  it("shows Get started to a new center, with the folder step as a command, and Pair a machine opens the overlay", async () => {
+    const d = centerData();
+    d.overview.nodes = [];
+    d.overview.sessions = [];
+    const { el } = await center("overview", { "GET /api/overview": () => d.overview, "POST /api/pair": () => pairing, "POST /api/pair/status": () => ({ open: true }) });
+    const card = el.querySelector("[aria-label='Get started']")!;
+    expect(text(card)).toContain("1. Pair a machine");
+    expect(text(card)).toContain("2. Give it a folder: nerve-node folder add");
+    expect(text(card)).toContain("3. Connect a harness");
+    await click(button(card, "Pair a machine"));
+    expect(document.querySelector("[role=dialog]")).not.toBeNull();
+  });
+
+  it("drops Get started once a machine is paired with a folder and a harness is connected", async () => {
+    const { el } = await center("overview");
+    expect(el.querySelector("[aria-label='Get started']")).toBeNull();
+    expect(text(el)).toContain("Running");
+  });
+
+  it("keeps Get started while the folder step is open", async () => {
+    const d = centerData();
+    d.overview.nodes = d.overview.nodes.map((n) => ({ ...n, folders: 0 }));
+    const { el } = await center("overview", { "GET /api/overview": () => d.overview });
+    expect(text(el.querySelector("[aria-label='Get started']")!)).toContain("2. Give it a folder");
+  });
+});
+
 describe("Statistics", () => {
   it("lists all machines and each one, and shows the picked one's numbers", async () => {
     const { el } = await center("stats");
@@ -94,6 +122,15 @@ describe("Harnesses", () => {
     expect(text(el)).toContain("Shown only now.");
     await click(button(el, "Hide the token"));
     expect(text(el)).not.toContain("nrv_secret");
+  });
+
+  it("does not carry an open Remove question to the next token picked", async () => {
+    const { el } = await center("harnesses");
+    await click(allByText(el, /^claude-code/, ".lrow")[0]);
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(el.querySelector(".ask")).not.toBeNull();
+    await click(allByText(el, /^ci-runner/, ".lrow")[0]);
+    expect(el.querySelector(".ask")).toBeNull();
   });
 
   it("switches between the tokens and the sessions, removes a token after asking in place, and ends a session", async () => {
@@ -283,6 +320,19 @@ describe("Action checker", () => {
 });
 
 describe("Capabilities", () => {
+  it("does not carry an open Remove question to the next added capability picked", async () => {
+    const d = centerData();
+    const caps = d.caps("n-dev") as { added: { entries: { name: string }[] } };
+    caps.added.entries.push({ ...caps.added.entries[0], name: "backup.files" });
+    const { el } = await center("capabilities", { "GET /api/caps": () => caps });
+    // The entries a center added are listed after the units it offers.
+    await click(allByText(el, /^backup\.db/, ".lrow").at(-1));
+    await click(button(el.querySelector(".dcol")!, "Remove"));
+    expect(text(el)).toContain("Remove backup.db?");
+    await click(allByText(el, /^backup\.files/, ".lrow").at(-1));
+    expect(el.querySelector(".ask")).toBeNull();
+  });
+
   it("checks the form of a new capability and shows what the machine refused", async () => {
     const { el, f } = await center("capabilities", {
       "POST /api/caps/check": (c) => ({ ok: false, errors: { name: (c.body.form as { name: string }).name.includes(".") ? "" : "a name is cap.action" } }),

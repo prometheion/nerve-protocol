@@ -152,6 +152,7 @@ function CapsOf({ node }: { node: Node }) {
   } else if (added) {
     detail = (
       <Detail
+        key={added.name}
         compact
         title={added.name}
         mono

@@ -172,6 +172,7 @@ export function RelayPage() {
   } else if (n) {
     detail = (
       <Detail
+        key={n.name}
         icon="server"
         mono
         title={n.name}

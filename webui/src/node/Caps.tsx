@@ -150,6 +150,7 @@ function CapsOf({ center }: { center: string | null }) {
     const d = own.find((x) => `o:${x.name}` === current);
     detail = d ? (
       <Detail
+        key={current}
         compact
         mono
         title={d.name}
@@ -180,6 +181,7 @@ function CapsOf({ center }: { center: string | null }) {
     const p = programs.find((x) => `p:${x.name}` === current);
     detail = p ? (
       <Detail
+        key={current}
         compact
         mono
         title={p.name}
