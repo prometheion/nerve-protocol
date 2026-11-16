@@ -314,7 +314,7 @@ export function Seg<T extends string | number | null>({
           type="button"
           role="radio"
           aria-checked={o.value === value}
-          tabIndex={o.value === value ? 0 : -1}
+          tabIndex={o.value === value || (!options.some((x) => x.value === value) && o === options[0]) ? 0 : -1}
           disabled={disabled || busy || o.disabled}
           onClick={(ev) => {
             ev.stopPropagation();
@@ -637,19 +637,21 @@ export function RemoveAsk({
 export function Overlay({ title, sub, onClose, children, foot }: { title: string; sub?: ReactNode; onClose: () => void; children?: ReactNode; foot?: ReactNode }) {
   const box = useRef<HTMLDivElement>(null);
   const id = useId();
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null;
     const first = box.current?.querySelector("input, textarea, button.primary, button") as HTMLElement | null;
     first?.focus();
     const esc = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") close.current();
     };
     document.addEventListener("keydown", esc);
     return () => {
       document.removeEventListener("keydown", esc);
       before?.focus?.();
     };
-  }, [onClose]);
+  }, []);
   return (
     <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={id} ref={box}>

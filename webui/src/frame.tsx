@@ -39,8 +39,10 @@ export type Poll<T> = {
 
 /** What `load` answers, asked when the page opens and again every `every`
  * ms while the tab is in view (0: only when asked). An answer that comes
- * after a newer question is dropped. */
-export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000): Poll<T> {
+ * after a newer question is dropped. When `deps` change, what was shown is
+ * dropped too, unless `keep` (a filter changed: the old list stays until
+ * the new one comes). */
+export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000, keep = false): Poll<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const run = useRef(0);
@@ -60,7 +62,7 @@ export function usePoll<T>(load: () => Promise<T>, deps: unknown[], every = 2000
     }
   }, []);
   useEffect(() => {
-    setData(null);
+    if (!keep) setData(null);
     setError(null);
     reload();
     if (!every) return;

@@ -119,6 +119,13 @@ h1, h2, h3, h4, p { margin: 0; }
 .wrap { overflow-wrap: anywhere; }
 .cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .mb { margin-bottom: var(--space-lg); }
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
+.tone-ok, .tone-danger, .tone-warn, .tone-accent, .tone-neutral, .tone- { display: inline-flex; flex: none; }
+.tone-ok { color: var(--ok); }
+.tone-danger { color: var(--danger); }
+.tone-warn { color: var(--warn); }
+.tone-accent { color: var(--accent-text); }
+.tone-neutral, .tone- { color: var(--text-muted); }
 
 .pill { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--radius-pill); font-size: var(--type-caption); font-weight: var(--weight-semibold); background: var(--surface-alt); color: var(--text-muted); white-space: nowrap; flex: none; }
 .pill.accent { background: var(--accent-soft); color: var(--accent-text); }
@@ -175,7 +182,7 @@ h1, h2, h3, h4, p { margin: 0; }
 /* A row of choices of which one is on: the app's Segmented. */
 .seg { display: inline-flex; flex-wrap: wrap; background: var(--inset); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 2px; flex: none; max-width: 100%; }
 .seg button { height: 26px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: none; border-radius: var(--radius-sm); font-size: var(--type-small); color: var(--text-muted); cursor: pointer; white-space: nowrap; }
-.seg button[aria-checked="true"] { background: var(--surface); color: var(--accent-text); font-weight: var(--weight-semibold); box-shadow: 0 0 0 1px var(--border); }
+.seg button[aria-checked="true"], .seg button[aria-pressed="true"] { background: var(--surface); color: var(--accent-text); font-weight: var(--weight-semibold); box-shadow: 0 0 0 1px var(--border); }
 .seg button:disabled { cursor: default; opacity: 0.55; }
 .seg .n { color: var(--text-faint); font-weight: var(--weight-medium); }
 .seg.sm button { height: 22px; padding: 0 8px; font-size: var(--type-caption); }
@@ -285,7 +292,9 @@ pre.code { white-space: pre-wrap; margin: 0; max-height: 320px; overflow: auto; 
 .strip .fact b { color: var(--text); font-weight: var(--weight-semibold); }
 .strip .note { flex: 1 1 200px; min-width: 0; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: var(--space-lg); }
-.filters .input { flex: 1 1 220px; width: auto; }
+.filters > .input { flex: 1 1 220px; width: auto; }
+.dsec > .seg, .field > .seg, .stack > .seg { align-self: flex-start; }
+.detail > p.meta, .detail > .banner { margin-top: 10px; }
 .ctabs { display: flex; align-items: center; gap: 10px; margin: -6px 0 var(--space-lg); flex-wrap: wrap; }
 
 /* The overview's head: the state and the service side by side. */
@@ -369,6 +378,7 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); p
 .verb { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-top: 1px dashed var(--border); }
 .args { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 4px 16px; align-items: baseline; }
 .args > code { font-weight: var(--weight-semibold); }
+.contents { display: contents; }
 .refbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .refbar .input { flex: 1 1 200px; width: auto; }
 
