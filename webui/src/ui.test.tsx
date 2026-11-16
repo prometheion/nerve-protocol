@@ -1,8 +1,8 @@
 // The shared building blocks of layout B.
-import { useState } from "react";
+import { act, useState } from "react";
 import { expect, it, vi } from "vitest";
 import { button, click, key, render, text, type } from "./test/dom";
-import { Btn, LRow, ListCard, Overlay, Picker, RemoveAsk, Seg, Split } from "./ui";
+import { Asks, Btn, LRow, ListCard, Overlay, Picker, RemoveAsk, Seg, Split, ask } from "./ui";
 
 it("asks before a removal, in place, and removes only on yes", async () => {
   const gone = vi.fn(async () => {});
@@ -84,6 +84,17 @@ it("puts the focus in an overlay's field, not on its Close", async () => {
     </Overlay>,
   );
   expect(document.activeElement?.textContent).toBe("Yes");
+});
+
+it("puts the focus of a question without a field on Cancel, so Enter does not say yes", async () => {
+  await render(<Asks />);
+  let answer: unknown = "open";
+  await act(async () => {
+    void ask({ title: "Add to the sudo allow list?", message: "sudo apt *", confirm: "Add" }).then((v) => (answer = v));
+  });
+  expect(document.activeElement?.textContent).toBe("Cancel");
+  await click(document.activeElement);
+  expect(answer).toBeNull();
 });
 
 it("picks an entry of a long list by its search", async () => {

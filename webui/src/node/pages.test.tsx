@@ -89,6 +89,25 @@ describe("Centers", () => {
     expect(f.to("POST", "/api/centers/remove")[0].body).toEqual({ center: "lab" });
   });
 
+  it("opens the pages of the center picked, not of the first", async () => {
+    const { el, f } = await node("centers", { "POST /api/mode": () => ({}) });
+    await click(allByText(el, /^lab/, ".lrow")[0]);
+    await click(el.querySelector(".dcol a.btn.sm"));
+    await settle(4);
+    await click(button(el, "Folder"));
+    await click(button(el, "Set the mode"));
+    expect(f.to("POST", "/api/mode")[0].body).toMatchObject({ center: "lab", mode: "folder" });
+  });
+
+  it("does not carry an open Unpair question to the next center picked", async () => {
+    const { el } = await node("centers", { "POST /api/centers/remove": () => ({}) });
+    await click(button(el, "Unpair"));
+    expect(text(el)).toContain("Unpair home?");
+    await click(allByText(el, /^lab/, ".lrow")[0]);
+    expect(text(el)).not.toContain("Unpair lab?");
+    expect(el.querySelector(".ask")).toBeNull();
+  });
+
   it("pairs from a link pasted in the overlay", async () => {
     const { el, f } = await node("centers", { "POST /api/centers/pair": () => ({ url: "https://center.example.net", name: "work" }) });
     await click(button(el, "Pair a center"));

@@ -634,7 +634,7 @@ export function RemoveAsk({
 
 /** A small window over the page: Esc, the cross, Cancel or a click on the
  * scrim closes it. */
-export function Overlay({ title, sub, onClose, children, foot }: { title: string; sub?: ReactNode; onClose: () => void; children?: ReactNode; foot?: ReactNode }) {
+export function Overlay({ title, sub, onClose, children, foot, first }: { title: string; sub?: ReactNode; onClose: () => void; children?: ReactNode; foot?: ReactNode; first?: string }) {
   const box = useRef<HTMLDivElement>(null);
   const id = useId();
   const close = useRef(onClose);
@@ -643,8 +643,10 @@ export function Overlay({ title, sub, onClose, children, foot }: { title: string
     const before = document.activeElement as HTMLElement | null;
     // The first field, else the main button, else any: each looked for in
     // turn, or the header's Close, which comes first, would always win.
-    const first = ["input, textarea", "button.primary", "button"].map((s) => box.current?.querySelector<HTMLElement>(s)).find(Boolean);
-    first?.focus();
+    // A window that names its control (a question without a field names
+    // Cancel) puts the focus there, so a stray Enter does not say yes.
+    const start = (first ? [first] : ["input, textarea", "button.primary", "button"]).map((s) => box.current?.querySelector<HTMLElement>(s)).find(Boolean);
+    start?.focus();
     const esc = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") close.current();
     };
@@ -714,6 +716,7 @@ export function Asks() {
       title={a.title}
       sub={a.message}
       onClose={close}
+      first={a.field ? undefined : ".df button"}
       foot={
         <>
           <Btn kind="ghost" size="" onClick={close}>

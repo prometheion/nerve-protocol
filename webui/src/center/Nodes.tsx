@@ -307,7 +307,7 @@ export function NodesPage() {
               />
             </ListCard>
           }
-          detail={n ? <NodeDetail n={n} reload={overview.reload} /> : null}
+          detail={n ? <NodeDetail key={n.id} n={n} reload={overview.reload} /> : null}
         />
       ) : (
         <div className="card">

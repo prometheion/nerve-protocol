@@ -54,6 +54,15 @@ describe("Nodes", () => {
     expect(f.to("POST", "/api/nodes/remove")[0].body).toEqual({ id: "n-dev" });
   });
 
+  it("does not carry an open Remove question to the next machine picked", async () => {
+    const { el } = await center("nodes", { "POST /api/nodes/remove": () => ({}) });
+    await click(button(el, "Remove"));
+    expect(text(el)).toContain("Remove dev?");
+    await click(allByText(el, /^office-pc/, ".lrow")[0]);
+    expect(text(el)).not.toContain("Remove office-pc?");
+    expect(el.querySelector(".ask")).toBeNull();
+  });
+
   it("sends a Windows machine's owner to the Nerve app for its folder", async () => {
     const d = centerData();
     d.overview.nodes = d.overview.nodes.filter((n) => n.platform === "windows").map((n) => ({ ...n, folders: 0 }));

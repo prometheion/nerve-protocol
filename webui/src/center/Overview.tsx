@@ -141,7 +141,7 @@ export function OverviewPage() {
               />
             </ListCard>
           }
-          detail={n ? <NodeDetail n={n} reload={overview.reload} /> : null}
+          detail={n ? <NodeDetail key={n.id} n={n} reload={overview.reload} /> : null}
           third={
             <section className="card clip">
               <div className="sechead">

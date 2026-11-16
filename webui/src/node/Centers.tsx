@@ -46,7 +46,7 @@ export function CenterRows({ centers, sel, pick }: { centers: CenterEntry[]; sel
 /** A center's details: its state and address, its mode, its settings grant,
  * and Pause or Resume, New key, Unpair. */
 export function CenterDetail({ c }: { c: CenterEntry }) {
-  const { status } = useNode();
+  const { status, setCenter } = useNode();
   const grant = c.settings === "write";
   const run = (path: string) => async () => {
     await api("POST", path, { center: c.name });
@@ -97,7 +97,7 @@ export function CenterDetail({ c }: { c: CenterEntry }) {
             <b>{MODES[c.mode] || c.mode}</b>
             {c.until ? <div className="faint">Until {when(c.until)}{c.then ? `, then ${c.then}` : ""}.</div> : null}
           </div>
-          <a className="btn sm" href="#permissions">
+          <a className="btn sm" href="#permissions" onClick={() => setCenter(c.name)}>
             Change
           </a>
           <span className="k">Settings grant</span>
@@ -121,10 +121,10 @@ export function CenterDetail({ c }: { c: CenterEntry }) {
       </DSec>
       <DSec title="What it may do here">
         <div className="acts-row">
-          <a className="btn ghost sm" href="#permissions">
+          <a className="btn ghost sm" href="#permissions" onClick={() => setCenter(c.name)}>
             Permissions
           </a>
-          <a className="btn ghost sm" href="#capabilities">
+          <a className="btn ghost sm" href="#capabilities" onClick={() => setCenter(c.name)}>
             Capabilities
           </a>
         </div>
@@ -225,7 +225,7 @@ export function CentersPage() {
               />
             </ListCard>
           }
-          detail={<CenterDetail c={c} />}
+          detail={<CenterDetail key={c.name} c={c} />}
         />
       ) : (
         <div className="card">

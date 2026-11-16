@@ -131,7 +131,7 @@ export function OverviewPage() {
               />
             </ListCard>
           }
-          detail={<CenterDetail c={c} />}
+          detail={<CenterDetail key={c.name} c={c} />}
           third={<PairHint pair={pair} />}
         />
       ) : (
