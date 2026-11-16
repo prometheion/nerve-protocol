@@ -434,9 +434,14 @@ mod tests {
     /// The program gets its output handle and no other (round 1, security
     /// 6): an inheritable handle of this process, as one from the terminal
     /// that started an elevated `update` would be, does not reach it.
+    ///
+    /// The program writes a mark through the handle's number, and the mark
+    /// must not come out of this pipe. Opening the number alone would prove
+    /// nothing: the program's own handles may have that number too.
     #[test]
     fn only_the_output_handle_is_inherited() {
-        let (_reader, writer) = std::io::pipe().unwrap();
+        use std::io::Read;
+        let (mut reader, writer) = std::io::pipe().unwrap();
         let h = writer.as_raw_handle();
         // SAFETY: an open handle of this process.
         assert_ne!(
@@ -447,7 +452,7 @@ mod tests {
         let ps = std::path::PathBuf::from(root)
             .join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
         let script = format!(
-            "try {{ $h = New-Object Microsoft.Win32.SafeHandles.SafeFileHandle([IntPtr]{}, $false); $s = New-Object System.IO.FileStream($h, [System.IO.FileAccess]::Write); 'inherited' }} catch {{ 'not inherited' }}",
+            "try {{ $h = New-Object Microsoft.Win32.SafeHandles.SafeFileHandle([IntPtr]{}, $false); $s = New-Object System.IO.FileStream($h, [System.IO.FileAccess]::Write); $s.Write([byte[]](77,65,82,75), 0, 4); $s.Flush(); 'wrote' }} catch {{ 'could not write' }}",
             h as usize
         );
         let (code, out) = output_of(
@@ -458,6 +463,21 @@ mod tests {
         .unwrap();
         let out = String::from_utf8_lossy(&out);
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("not inherited"), "{out}");
+        // The program has ended: what it wrote into this pipe is there now.
+        // Only this end is closed here; a program another test started may
+        // still hold the inheritable handle, so the read waits a while only.
+        drop(writer);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 16];
+            let n = reader.read(&mut b).unwrap_or(0);
+            let _ = tx.send(b[..n].to_vec());
+        });
+        let got = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
+        assert!(
+            got.is_empty(),
+            "the program wrote into this pipe: {:?} ({out})",
+            String::from_utf8_lossy(&got)
+        );
     }
 }

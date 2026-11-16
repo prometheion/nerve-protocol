@@ -1,14 +1,11 @@
-//! A long list scrolls in a box of its own: past some eight rows more rules
-//! or folders leave the page as long as it was, and the list scrolls inside
-//! it. One test: Slint takes one platform per process.
+//! A long list grows with its rows (#231): one scroll per page, no list in
+//! a box of its own, so more rules or folders make the page longer, each
+//! row as tall as the others. One test: Slint takes one platform per
+//! process.
 
 use nerve::headless::Screen;
 use nerve::{AppWindow, FolderRow, Load, Page, Perm, Store};
-use slint::platform::WindowEvent;
-use slint::{
-    ComponentHandle, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString,
-    VecModel,
-};
+use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 /// A window as tall as no page here gets, so the page itself never scrolls.
 const SIZE: (u32, u32) = (1180, 4000);
@@ -44,7 +41,7 @@ fn content_end(shot: &SharedPixelBuffer<Rgba8Pixel>) -> usize {
 }
 
 #[test]
-fn long_lists_scroll_in_their_own_box() {
+fn long_lists_grow_the_page() {
     let screen = Screen::install(SIZE.0, SIZE.1, 1.0).unwrap();
     let window = AppWindow::new().unwrap();
     window.show().unwrap();
@@ -76,39 +73,31 @@ fn long_lists_scroll_in_their_own_box() {
             .collect();
         ModelRc::new(VecModel::from(all))
     };
-    let end = |r: usize, f: usize| {
+    perm.set_allow_unfit(ModelRc::new(VecModel::from(vec![SharedString::new(); 60])));
+    let end = |section: i32, r: usize, f: usize| {
+        perm.set_section(section);
         perm.set_allow(rules(r));
         perm.set_folders(folders(f));
         content_end(&settled(&screen))
     };
-    // Short lists grow the page, row by row.
-    let short = end(2, 2);
-    assert!(end(5, 2) > short, "three more rules took no room");
-    assert!(end(2, 5) > short, "three more folders took no room");
-    // Past their box, they do not.
-    let long = end(12, 12);
-    assert_eq!(end(60, 12), long, "more rules made the page longer");
-    assert_eq!(end(12, 60), long, "more folders made the page longer");
-    assert!(long < 2600, "the page is {long} pixels long");
-
-    // A turn of the wheel over a long list scrolls it, and the page stays.
-    perm.set_allow(rules(60));
-    let before = settled(&screen);
-    let mut moved = false;
-    for y in (120..long as i32).step_by(40) {
-        window
-            .window()
-            .dispatch_event(WindowEvent::PointerScrolled {
-                position: LogicalPosition::new(700.0, y as f32),
-                delta_x: 0.0,
-                delta_y: -120.0,
-            });
-        let now = settled(&screen);
-        if now.as_slice() != before.as_slice() {
-            moved = true;
-            assert_eq!(content_end(&now), long, "the page moved");
-            break;
-        }
+    // Each list grows the page row by row, past any eight rows too.
+    for (section, what) in [(0, "folders"), (2, "rules")] {
+        let at = |n: usize| {
+            if section == 0 {
+                end(section, 2, n)
+            } else {
+                end(section, n, 2)
+            }
+        };
+        let (two, twelve, sixty) = (at(2), at(12), at(60));
+        assert!(twelve > two, "ten more {what} took no room");
+        let row = at(13) - twelve;
+        assert!(row > 30, "a row of {what} is {row} pixels");
+        assert_eq!(
+            sixty,
+            twelve + 48 * row,
+            "{what} past twelve grow the page by another {} pixels",
+            sixty - twelve
+        );
     }
-    assert!(moved, "no list scrolled");
 }

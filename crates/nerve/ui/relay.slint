@@ -2,18 +2,145 @@
 // centers through another node's relay: one link from that relay, pasted
 // here. And this node can be a relay for nodes that reach no center
 // themselves: its switch and address, the nodes it carries, each with its
-// link, centers, limits and tunnels now.
+// link, centers, limits and tunnels now. A list of these, and the picked
+// one's details.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Store, Prefs } from "store.slint";
 import {
-    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, IconTile, InfoRow, ListRow,
-    TextField, Field, Reveal, SectionTitle, Icon, Fit, ScrollBox,
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, IconTile, InfoRow, TextField,
+    Field, Reveal, Icon, CopyText, Split, ListPane, DetailsPane, ListCard, ListGroup, ListItem,
+    AddItem, RemoveAsk, PaneForm, DetailCard, Fact,
 } from "widgets.slint";
 import { LimitRows, SaveRow } from "settings.slint";
 
+// A row of the list: its icon, its name, a word on the right.
+component RelayItem inherits ListItem {
+    in property <image> icon;
+    in property <color> icon-color: Theme.text-muted;
+    in property <string> text;
+    in property <bool> mono;
+    in property <string> note;
+    label: root.text + " " + root.note;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: root.icon;
+            colorize: root.icon-color;
+        }
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.text;
+        color: Theme.text;
+        font-size: root.mono ? Type.small : Type.body;
+        font-family: root.mono ? Type.mono : "";
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    @children
+    Text {
+        text: root.note;
+        color: Theme.text-faint;
+        font-size: Type.small;
+        vertical-alignment: center;
+    }
+}
+
+// The head of a details card: its icon, its title and what follows it.
+component Head inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <bool> mono;
+    spacing: Space.sm;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: root.icon;
+            colorize: Theme.text;
+            size: 20px;
+        }
+    }
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Type.title;
+        font-weight: Type.semibold;
+        font-family: root.mono ? Type.mono : "";
+        vertical-alignment: center;
+        overflow: elide;
+        min-width: min(80px, self.preferred-width);
+    }
+    @children
+}
+
+// A relayed node's link: a new node (`relay add`), or a new link for one
+// (its old link stops working). The link names where the other node
+// reaches this machine. In the details pane.
+component RelayAddForm inherits PaneForm {
+    icon: @image-url("icons/server.svg");
+    title: Prefs.relay-add-for != "" ? "New link for " + Prefs.relay-add-for : "Add a node";
+    subtitle: Prefs.relay-add-for != "" ? "Its old link stops working; its centers and limits stay."
+        : "It gets a link to paste, which lets it reach this node's centers.";
+    error: Prefs.relay-add-error;
+    save-text: Prefs.relay-add-for != "" ? "Make a new link" : "Add";
+    busy: Prefs.relay-add-busy;
+    can-save: Prefs.relay-add-for != "" || Prefs.relay-add-name != "";
+    save => {
+        Prefs.relay-add-confirm();
+    }
+    cancel => {
+        Prefs.relay-add-open = false;
+    }
+    Reveal {
+        shown: Prefs.relay-add-for == "";
+        Field {
+            label: "Its name here";
+            hint: "1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, like laptop-2.";
+            TextField {
+                text <=> Prefs.relay-add-name;
+                mono: true;
+                placeholder: "laptop-2";
+                label: "Its name here";
+                accepted => {
+                    Prefs.relay-add-confirm();
+                }
+            }
+        }
+    }
+    Field {
+        label: "This machine, as the other node reaches it";
+        hint: "A host name or address, with :port when it is not the relay's.";
+        TextField {
+            text <=> Prefs.relay-add-address;
+            mono: true;
+            label: "This machine, as the other node reaches it";
+            accepted => {
+                Prefs.relay-add-confirm();
+            }
+        }
+    }
+}
+
 export component RelayPage inherits PageFrame {
+    property <bool> on: Prefs.relay-listen != "";
+    // What is picked, where it still is: a node or a link that went shows
+    // the relay instead.
+    property <int> kind: (Prefs.relay-pick == 3 && Prefs.relay-pick-at >= Prefs.relay-nodes.length)
+        || (Prefs.relay-pick == 4 && Prefs.relay-pick-at >= Prefs.tunnels.length)
+        || (Prefs.relay-pick == 2 && !root.on) ? 1 : Prefs.relay-pick;
+    property <int> at: Prefs.relay-pick-at;
     gap: 0;
+    init => {
+        Store.details-open = false;
+        Store.asking = "";
+    }
+    function pick(kind: int, at: int) {
+        Prefs.relay-pick = kind;
+        Prefs.relay-pick-at = at;
+        Prefs.relay-add-open = false;
+        Store.details-open = true;
+    }
     PageHeader {
         icon: @image-url("icons/route.svg");
         title: "Relay";
@@ -29,384 +156,372 @@ export component RelayPage inherits PageFrame {
         }
     }
 
-    // This node through a relay.
     Rectangle {
-        height: Space.xxl;
+        height: Space.xl;
     }
-    SectionTitle {
-        text: "This node through a relay";
-        icon: @image-url("icons/link.svg");
-    }
-    Card {
-        pad: Space.xl;
-        gap: 0;
-        HorizontalLayout {
-            spacing: Space.lg;
-            VerticalLayout {
-                alignment: start;
-                IconTile {
-                    icon: @image-url("icons/route.svg");
-                    tone: Prefs.via-relay ? Prefs.via-tone : Tone.accent;
-                    solid: Prefs.via-relay;
+    Split {
+        ListPane {
+            open: Store.details-open;
+            ListCard {
+                label: "Relay";
+                ListGroup {
+                    text: "This node";
                 }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 2px;
-                Text {
+                RelayItem {
+                    first: true;
+                    selected: root.kind == 0 && !Prefs.relay-add-open;
+                    icon: @image-url("icons/link.svg");
                     text: Prefs.via-relay ? "Through " + Prefs.via-address
-                        : Prefs.proxy != "" ? "Through a proxy"
-                        : "Direct";
-                    color: Theme.text;
-                    font-size: Type.body;
-                    font-weight: Type.semibold;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: Prefs.via-relay ? "As " + Prefs.via-node + ". " + Prefs.via-state
-                        : Prefs.proxy != "" ? Prefs.proxy + ". A relay's link takes its place."
-                        : "For a machine that reaches no center itself: paste the link a relay shows.";
-                    color: Prefs.via-relay ? Theme.tone(Prefs.via-tone) : Theme.text-muted;
-                    font-size: Type.small;
-                    wrap: word-wrap;
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                HorizontalLayout {
-                    spacing: Space.sm;
-                    if Prefs.via-relay: Button {
-                        text: "Disconnect";
-                        kind: ButtonKind.danger-soft;
-                        small: true;
-                        clicked => {
-                            Prefs.disconnect();
-                        }
-                    }
-                    Button {
-                        text: Prefs.via-relay ? "New link…" : "Connect…";
-                        icon: @image-url("icons/link.svg");
-                        kind: Prefs.via-relay ? ButtonKind.secondary : ButtonKind.primary;
-                        small: true;
-                        clicked => {
-                            Prefs.connect-start();
-                        }
+                        : Prefs.proxy != "" ? "Through a proxy" : "Direct";
+                    note: Prefs.via-relay ? Prefs.via-state : "no relay";
+                    clicked => {
+                        root.pick(0, 0);
                     }
                 }
-            }
-        }
-        Reveal {
-            shown: Prefs.via-relay && Prefs.proxy-problem != "";
-            gap: Space.lg;
-            Banner {
-                tone: Tone.warn;
-                text: Prefs.proxy-problem;
-            }
-        }
-    }
-
-    // This machine as a relay.
-    Rectangle {
-        height: Space.section;
-    }
-    SectionTitle {
-        text: "This machine as a relay";
-        icon: @image-url("icons/server.svg");
-    }
-    Card {
-        pad: Space.xl;
-        gap: 0;
-        HorizontalLayout {
-            spacing: Space.lg;
-            VerticalLayout {
-                alignment: start;
-                IconTile {
+                ListGroup {
+                    text: "This machine as a relay";
+                }
+                RelayItem {
+                    first: true;
+                    selected: root.kind == 1 && !Prefs.relay-add-open;
                     icon: @image-url("icons/server.svg");
-                    tone: Prefs.relay-listen != "" ? Tone.ok : Tone.neutral;
-                    solid: Prefs.relay-listen != "";
-                }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 2px;
-                HorizontalLayout {
-                    spacing: Space.sm;
-                    alignment: start;
-                    Text {
-                        text: Prefs.relay-listen != "" ? "On" : "Off";
-                        color: Theme.text;
-                        font-size: Type.body;
-                        font-weight: Type.semibold;
-                        vertical-alignment: center;
+                    text: "Relay";
+                    clicked => {
+                        root.pick(1, 0);
                     }
-                    if Prefs.relay-listen != "": VerticalLayout {
+                    VerticalLayout {
                         alignment: center;
                         Pill {
-                            text: Prefs.relay-listen;
-                            tone: Tone.ok;
+                            text: root.on ? "On" : "Off";
+                            tone: root.on ? Tone.ok : Tone.neutral;
                             dot: true;
                         }
                     }
                 }
-                Text {
-                    text: Prefs.relay-listen == "" ? "Nodes that reach no center themselves can reach this node's centers through it."
-                        : Prefs.relay-status != "" ? Prefs.relay-status
-                        : "The node takes it when it runs.";
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    wrap: word-wrap;
-                }
-            }
-            if Prefs.relay-listen != "": VerticalLayout {
-                alignment: center;
-                Button {
-                    text: "Turn off";
-                    small: true;
+                if root.on: RelayItem {
+                    selected: root.kind == 2 && !Prefs.relay-add-open;
+                    icon: @image-url("icons/route.svg");
+                    text: "Tunnels";
                     clicked => {
-                        Prefs.relay-off();
+                        root.pick(2, 0);
                     }
                 }
-            }
-        }
-        Reveal {
-            shown: Prefs.relay-listen == "";
-            gap: Space.lg;
-            Field {
-                label: "Listen on";
-                hint: "An address and port of this machine; 0.0.0.0 is every address.";
-                HorizontalLayout {
-                    spacing: Space.md;
-                    TextField {
-                        horizontal-stretch: 1;
-                        text <=> Prefs.relay-address;
-                        mono: true;
-                        label: "Listen on";
-                        accepted => {
-                            Prefs.relay-on();
-                        }
-                    }
-                    Button {
-                        text: "Turn on";
-                        kind: ButtonKind.primary;
-                        clicked => {
-                            Prefs.relay-on();
-                        }
+                ListGroup {
+                    text: "Nodes that use it";
+                    count: Prefs.relay-nodes.length;
+                }
+                for n[i] in Prefs.relay-nodes: RelayItem {
+                    first: i == 0;
+                    selected: root.kind == 3 && root.at == i && !Prefs.relay-add-open;
+                    icon: @image-url("icons/server.svg");
+                    icon-color: n.live != "" ? Theme.ok : Theme.text-muted;
+                    text: n.name;
+                    mono: true;
+                    note: n.live != "" ? n.live : "not linked";
+                    clicked => {
+                        root.pick(3, i);
                     }
                 }
-            }
-        }
-        Reveal {
-            shown: Prefs.relay-pin != "" && Prefs.relay-listen != "";
-            gap: Space.lg;
-            InfoRow {
-                label: "Its pin";
-                value: Prefs.relay-pin;
-                mono: true;
-            }
-        }
-    }
-
-    // The nodes it carries.
-    Rectangle {
-        height: Space.lg;
-    }
-    Card {
-        pad: 0;
-        gap: 0;
-        HorizontalLayout {
-            padding-left: Space.xl;
-            padding-right: Space.lg;
-            padding-top: Space.lg;
-            padding-bottom: Space.md;
-            spacing: Space.md;
-            Text {
-                horizontal-stretch: 1;
-                text: Prefs.relay-nodes.length == 0 ? "No node uses this relay yet." : "Nodes that use it";
-                color: Prefs.relay-nodes.length == 0 ? Theme.text-muted : Theme.text;
-                font-size: Prefs.relay-nodes.length == 0 ? Type.small : Type.body;
-                font-weight: Prefs.relay-nodes.length == 0 ? Type.regular : Type.semibold;
-                vertical-alignment: center;
-            }
-            Button {
-                text: "Add a node…";
-                icon: @image-url("icons/plus.svg");
-                kind: ButtonKind.primary;
-                small: true;
-                clicked => {
-                    Prefs.relay-add();
-                }
-            }
-        }
-        ScrollBox {
-            rows: Prefs.relay-nodes.length;
-            // Taller rows: half of one more shows below the cut.
-            long-height: 460px;
-            for n[i] in Prefs.relay-nodes: ListRow {
-                first: false;
-                VerticalLayout {
-                    alignment: center;
-                    Icon {
-                        source: @image-url("icons/server.svg");
-                        colorize: n.live != "" ? Theme.ok : Theme.text-muted;
+                AddItem {
+                    first: Prefs.relay-nodes.length == 0;
+                    text: "Add a node…";
+                    active: Prefs.relay-add-open && Prefs.relay-add-for == "";
+                    clicked => {
+                        Prefs.relay-add();
+                        Store.details-open = true;
                     }
                 }
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    alignment: center;
-                    spacing: 2px;
-                    HorizontalLayout {
-                        spacing: Space.sm;
-                        alignment: start;
-                        Text {
-                            text: n.name;
-                            color: Theme.text;
-                            font-size: Type.small;
-                            font-weight: Type.semibold;
-                            font-family: Type.mono;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        if n.live != "": VerticalLayout {
-                            alignment: center;
-                            Pill {
-                                text: n.live;
-                                tone: Tone.ok;
-                                dot: true;
-                            }
-                        }
-                    }
-                    Text {
-                        text: n.reach + (n.limits != "" ? "; " + n.limits : "");
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        wrap: word-wrap;
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    HorizontalLayout {
-                        spacing: Space.xs;
-                        Button {
-                            text: "Centers and limits…";
-                            small: true;
-                            kind: ButtonKind.ghost;
-                            clicked => {
-                                Prefs.relay-edit(i);
-                            }
-                        }
-                        Button {
-                            text: "New link…";
-                            small: true;
-                            kind: ButtonKind.ghost;
-                            clicked => {
-                                Prefs.relay-token(n.name);
-                            }
-                        }
-                        Button {
-                            icon: @image-url("icons/trash.svg");
-                            small: true;
-                            kind: ButtonKind.ghost;
-                            accessible-label: "Remove " + n.name;
-                            clicked => {
-                                Prefs.relay-remove(n.name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // What it carries now.
-    Reveal {
-        shown: Prefs.tunnels.length > 0;
-        gap: Space.lg;
-        Card {
-            pad: 0;
-            gap: 0;
-            HorizontalLayout {
-                padding-left: Space.xl;
-                padding-top: Space.lg;
-                padding-bottom: Space.md;
-                Text {
+                if Prefs.tunnels.length > 0: ListGroup {
                     text: "Linked now";
-                    color: Theme.text;
-                    font-size: Type.body;
-                    font-weight: Type.semibold;
+                    count: Prefs.tunnels.length;
                 }
-            }
-            ScrollBox {
-                rows: Prefs.tunnels.length;
-                for t in Prefs.tunnels: ListRow {
-                    first: false;
-                    VerticalLayout {
-                        alignment: center;
-                        Icon {
-                            source: @image-url("icons/activity.svg");
-                            colorize: Theme.ok;
-                        }
-                    }
-                    Text {
-                        horizontal-stretch: 1;
-                        text: t.node + " → " + t.center;
-                        color: Theme.text;
-                        font-size: Type.small;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: t.from;
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        font-family: Type.mono;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        min-width: 90px;
-                        text: t.since;
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                for t[i] in Prefs.tunnels: RelayItem {
+                    first: i == 0;
+                    selected: root.kind == 4 && root.at == i && !Prefs.relay-add-open;
+                    icon: @image-url("icons/activity.svg");
+                    icon-color: Theme.ok;
+                    text: t.node + " → " + t.center;
+                    note: t.since;
+                    clicked => {
+                        root.pick(4, i);
                     }
                 }
             }
         }
-    }
-
-    // Its limits, while it is on.
-    Reveal {
-        shown: Prefs.relay-listen != "";
-        gap: Space.lg;
-        Card {
-            pad: Space.xl;
-            gap: 0;
-            Text {
-                text: "Tunnels";
-                color: Theme.text;
-                font-size: Type.body;
-                font-weight: Type.semibold;
-            }
-            Reveal {
-                shown: Prefs.limits-error != "";
-                gap: Space.md;
-                Banner {
-                    tone: Tone.danger;
-                    title: "Not saved";
-                    text: Prefs.limits-error;
-                }
+        DetailsPane {
+            open: Store.details-open || Prefs.relay-add-open;
+            view-top: root.view-top;
+            view-height: root.view-height;
+            back => {
+                Store.details-open = false;
+                Prefs.relay-add-open = false;
             }
             VerticalLayout {
-                padding-top: Space.lg;
-                spacing: Space.lg;
-                LimitRows {
-                    group: "relay";
-                    rows: Prefs.limits-relay;
+                // A node's new link, or one more node.
+                Reveal {
+                    shown: Prefs.relay-add-open;
+                    RelayAddForm { }
                 }
-                SaveRow {
-                    group: "relay";
+                // This node through a relay.
+                Reveal {
+                    shown: !Prefs.relay-add-open && root.kind == 0;
+                    DetailCard {
+                        Head {
+                            icon: @image-url("icons/link.svg");
+                            title: Prefs.via-relay ? "Through a relay" : Prefs.proxy != "" ? "Through a proxy" : "Direct";
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                            if Prefs.via-relay: Button {
+                                text: "Disconnect";
+                                kind: ButtonKind.danger-soft;
+                                clicked => {
+                                    Prefs.disconnect();
+                                }
+                            }
+                            Button {
+                                text: Prefs.via-relay ? "New link…" : "Connect…";
+                                icon: @image-url("icons/link.svg");
+                                kind: Prefs.via-relay ? ButtonKind.secondary : ButtonKind.primary;
+                                clicked => {
+                                    Prefs.connect-start();
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            Text {
+                                text: Prefs.via-relay ? "As " + Prefs.via-node + " through " + Prefs.via-address + ". " + Prefs.via-state
+                                    : Prefs.proxy != "" ? Prefs.proxy + ". A relay's link takes its place."
+                                    : "For a machine that reaches no center itself: paste the link a relay shows.";
+                                color: Prefs.via-relay ? Theme.tone(Prefs.via-tone) : Theme.text;
+                                font-size: Type.lead;
+                                wrap: word-wrap;
+                            }
+                            Reveal {
+                                shown: Prefs.via-relay && Prefs.proxy-problem != "";
+                                gap: Space.lg;
+                                Banner {
+                                    tone: Tone.warn;
+                                    text: Prefs.proxy-problem;
+                                }
+                            }
+                        }
+                    }
+                }
+                // This machine as a relay.
+                Reveal {
+                    shown: !Prefs.relay-add-open && root.kind == 1;
+                    DetailCard {
+                        Head {
+                            icon: @image-url("icons/server.svg");
+                            title: "Relay";
+                            VerticalLayout {
+                                alignment: center;
+                                Pill {
+                                    text: root.on ? "On" : "Off";
+                                    tone: root.on ? Tone.ok : Tone.neutral;
+                                    dot: true;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                            if root.on: Button {
+                                text: "Turn off";
+                                clicked => {
+                                    Prefs.relay-off();
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            Text {
+                                text: !root.on ? "Nodes that reach no center themselves can reach this node's centers through it."
+                                    : Prefs.relay-status != "" ? Prefs.relay-status
+                                    : "The node takes it when it runs.";
+                                color: Theme.text;
+                                font-size: Type.lead;
+                                wrap: word-wrap;
+                            }
+                            Reveal {
+                                shown: !root.on;
+                                gap: Space.lg;
+                                Field {
+                                    label: "Listen on";
+                                    hint: "An address and port of this machine; 0.0.0.0 is every address.";
+                                    HorizontalLayout {
+                                        spacing: Space.md;
+                                        TextField {
+                                            horizontal-stretch: 1;
+                                            text <=> Prefs.relay-address;
+                                            mono: true;
+                                            label: "Listen on";
+                                            accepted => {
+                                                Prefs.relay-on();
+                                            }
+                                        }
+                                        Button {
+                                            text: "Turn on";
+                                            kind: ButtonKind.primary;
+                                            clicked => {
+                                                Prefs.relay-on();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Reveal {
+                                shown: root.on;
+                                gap: Space.lg;
+                                Fact {
+                                    label: "Listens on";
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: Prefs.relay-listen;
+                                        color: Theme.text;
+                                        font-size: Type.small;
+                                        font-family: Type.mono;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Reveal {
+                                shown: root.on && Prefs.relay-pin != "";
+                                gap: Space.md;
+                                Fact {
+                                    label: "Its pin";
+                                    CopyText {
+                                        horizontal-stretch: 1;
+                                        text: Prefs.relay-pin;
+                                        copy-button: true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Its limits, while it is on.
+                Reveal {
+                    shown: !Prefs.relay-add-open && root.kind == 2;
+                    DetailCard {
+                        Head {
+                            icon: @image-url("icons/route.svg");
+                            title: "Tunnels";
+                        }
+                        VerticalLayout {
+                            Text {
+                                text: "How many tunnels this relay holds.";
+                                color: Theme.text;
+                                font-size: Type.lead;
+                                wrap: word-wrap;
+                            }
+                            Reveal {
+                                shown: Prefs.limits-error != "";
+                                gap: Space.lg;
+                                Banner {
+                                    tone: Tone.danger;
+                                    title: "Not saved";
+                                    text: Prefs.limits-error;
+                                }
+                            }
+                        }
+                        LimitRows {
+                            group: "relay";
+                            rows: Prefs.limits-relay;
+                        }
+                        SaveRow {
+                            group: "relay";
+                        }
+                    }
+                }
+                // A node that uses it.
+                Reveal {
+                    property <bool> asking: Store.asking == "relay-node:" + Prefs.relay-nodes[root.at].name;
+                    shown: !Prefs.relay-add-open && root.kind == 3;
+                    DetailCard {
+                        Head {
+                            icon: @image-url("icons/server.svg");
+                            title: Prefs.relay-nodes[root.at].name;
+                            mono: true;
+                            if Prefs.relay-nodes[root.at].live != "": VerticalLayout {
+                                alignment: center;
+                                Pill {
+                                    text: Prefs.relay-nodes[root.at].live;
+                                    tone: Tone.ok;
+                                    dot: true;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        Text {
+                            text: Prefs.relay-nodes[root.at].reach + (Prefs.relay-nodes[root.at].limits != "" ? "; " + Prefs.relay-nodes[root.at].limits : "");
+                            color: Theme.text;
+                            font-size: Type.lead;
+                            wrap: word-wrap;
+                        }
+                        FlexboxLayout {
+                            spacing: Space.sm;
+                            Button {
+                                text: "Centers and limits…";
+                                clicked => {
+                                    Prefs.relay-edit(root.at);
+                                }
+                            }
+                            Button {
+                                text: "New link…";
+                                kind: ButtonKind.ghost;
+                                clicked => {
+                                    Prefs.relay-token(Prefs.relay-nodes[root.at].name);
+                                    Store.details-open = true;
+                                }
+                            }
+                            RemoveAsk {
+                                label: "Remove " + Prefs.relay-nodes[root.at].name;
+                                asking: Store.asking == "relay-node:" + Prefs.relay-nodes[root.at].name;
+                                ask => {
+                                    Store.asking = "relay-node:" + Prefs.relay-nodes[root.at].name;
+                                }
+                                cancel => {
+                                    Store.asking = "";
+                                }
+                                confirmed => {
+                                    Store.asking = "";
+                                    Prefs.relay-remove(Prefs.relay-nodes[root.at].name);
+                                }
+                            }
+                        }
+                    }
+                }
+                // A link it carries now.
+                Reveal {
+                    shown: !Prefs.relay-add-open && root.kind == 4;
+                    DetailCard {
+                        Head {
+                            icon: @image-url("icons/activity.svg");
+                            title: Prefs.tunnels[root.at].node + " → " + Prefs.tunnels[root.at].center;
+                            VerticalLayout {
+                                alignment: center;
+                                Pill {
+                                    text: "Linked";
+                                    tone: Tone.ok;
+                                    dot: true;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        InfoRow {
+                            label: "From";
+                            value: Prefs.tunnels[root.at].from;
+                            mono: true;
+                        }
+                        InfoRow {
+                            label: "Linked";
+                            value: Prefs.tunnels[root.at].since;
+                        }
+                    }
                 }
             }
         }

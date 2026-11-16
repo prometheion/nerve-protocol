@@ -1,58 +1,81 @@
-// Settings in tabs: this machine and its commands, the keys, the network,
-// the limits, backups, the app, and any setting by its name.
+// Settings in sections: this machine and its commands, the keys, the
+// network, the limits, backups, the app, and any setting by its name. The
+// sections in a list, the picked one beside it (on a small window: the
+// list, then the section with Back to the list).
 
-import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Shape } from "theme.slint";
 import { Load, RelayNodeRow, Limit } from "data.slint";
 import { Store, Prefs, Install, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Segmented, Divider,
-    TextField, Field, InfoRow, ListRow, Icon, IconTile, Reveal, TabBar, Fold, Switch,
+    TextField, Field, InfoRow, Icon, IconTile, Reveal, Fold, Switch, Split, ListPane, DetailsPane,
+    ListCard, ListItem,
 } from "widgets.slint";
 
-// A setting card: its icon, title and sentence on top, its controls below.
-export component Group inherits Card {
+// A setting of a section: its icon, title and sentence on top, its
+// controls below, and a line above all but the section's first.
+export component Group inherits Rectangle {
     in property <image> icon;
     in property <Tone> tone: Tone.accent;
     in property <string> title;
     in property <string> text;
     // The rest of the line on it, folded under it.
     in property <string> more;
-    pad: Space.xl;
-    gap: Space.lg;
-    HorizontalLayout {
-        spacing: Space.lg;
-        VerticalLayout {
-            alignment: start;
-            IconTile {
-                icon: root.icon;
-                tone: root.tone;
-            }
+    in property <bool> first;
+    // Whether its controls show: a setting with none here takes no room
+    // for them.
+    in property <bool> body: true;
+    VerticalLayout {
+        Rectangle {
+            height: root.first ? 0px : 1px;
+            background: Theme.border;
         }
         VerticalLayout {
-            spacing: 2px;
-            horizontal-stretch: 1;
-            alignment: center;
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: Type.heading;
-                font-weight: Type.semibold;
-            }
-            Reveal {
-                shown: root.text != "";
-                Text {
-                    text: root.text;
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    wrap: word-wrap;
+            padding: Space.xl;
+            HorizontalLayout {
+                spacing: Space.md;
+                VerticalLayout {
+                    alignment: start;
+                    IconTile {
+                        icon: root.icon;
+                        tone: root.tone;
+                        size: 32px;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: root.title;
+                        color: Theme.text;
+                        font-size: Type.body;
+                        font-weight: Type.semibold;
+                    }
+                    Reveal {
+                        shown: root.text != "";
+                        Text {
+                            text: root.text;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if root.more != "": Fold {
+                        more: root.more;
+                    }
                 }
             }
-            if root.more != "": Fold {
-                more: root.more;
+            Reveal {
+                shown: root.body;
+                gap: Space.lg;
+                VerticalLayout {
+                    spacing: Space.lg;
+                    @children
+                }
             }
         }
     }
-    @children
 }
 
 // The limits of a group, one a line: what, its field, its unit. An empty
@@ -119,7 +142,19 @@ export component SaveRow {
 }
 
 export component SettingsPage inherits PageFrame {
+    property <[{name: string, icon: image}]> sections: [
+        { name: "General", icon: @image-url("icons/settings.svg") },
+        { name: "Keys", icon: @image-url("icons/key.svg") },
+        { name: "Network", icon: @image-url("icons/globe.svg") },
+        { name: "Limits", icon: @image-url("icons/gauge.svg") },
+        { name: "Backup", icon: @image-url("icons/archive.svg") },
+        { name: "App", icon: @image-url("icons/window.svg") },
+        { name: "Advanced", icon: @image-url("icons/sliders.svg") },
+    ];
     gap: 0;
+    init => {
+        Store.details-open = false;
+    }
     PageHeader {
         icon: @image-url("icons/settings.svg");
         title: "Settings";
@@ -128,262 +163,383 @@ export component SettingsPage inherits PageFrame {
     }
 
     Rectangle {
-        height: Space.lg;
+        height: Space.xl;
     }
-    TabBar {
-        tabs: ["General", "Keys", "Network", "Limits", "Backup", "App", "Advanced"];
-        current: Prefs.tab;
-        chosen(i) => {
-            Prefs.tab = i;
-        }
-    }
-
-    // General: the machine's name, the account and shell of the commands,
-    // and how much the node logs.
-    Reveal {
-        shown: Prefs.tab == 0;
-        fade: true;
-        gap: Space.xl;
-        VerticalLayout {
-            spacing: Space.xl;
-            Group {
-                icon: @image-url("icons/edit.svg");
-                title: "Name";
-                text: "How centers show this machine.";
-                HorizontalLayout {
-                    spacing: Space.md;
-                    TextField {
+    Split {
+        ListPane {
+            open: Store.details-open;
+            ListCard {
+                label: "Settings";
+                step(d) => {
+                    Prefs.tab = Math.max(0, Math.min(root.sections.length - 1, Prefs.tab + d));
+                }
+                Rectangle {
+                    height: 6px;
+                }
+                for section[i] in root.sections: ListItem {
+                    first: i == 0;
+                    selected: i == Prefs.tab;
+                    label: section.name;
+                    clicked => {
+                        Prefs.tab = i;
+                        Store.details-open = true;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: section.icon;
+                            colorize: i == Prefs.tab ? Theme.accent-text : Theme.text-muted;
+                        }
+                    }
+                    Text {
                         horizontal-stretch: 1;
-                        text <=> Prefs.name;
-                        placeholder: Prefs.name-shown;
-                        label: "Name";
-                        accepted => {
-                            Prefs.name-save(Prefs.name);
-                        }
+                        text: section.name;
+                        color: i == Prefs.tab ? Theme.accent-text : Theme.text;
+                        font-size: Type.body;
+                        font-weight: i == Prefs.tab ? Type.semibold : Type.regular;
+                        vertical-alignment: center;
                     }
-                    Button {
-                        text: "Save";
-                        clicked => {
-                            Prefs.name-save(Prefs.name);
-                        }
-                    }
-                }
-            }
-            Group {
-                icon: @image-url("icons/shield.svg");
-                title: "Account for commands";
-                text: Perm.owner-is-root ? "Commands run as nerve-run, which reaches only your folders (user mode: as root)."
-                    : "Commands run as nerve-run, which reaches only your folders (user mode: as you).";
-                more: "Folder and allowlist mode run commands as nerve-run, an account of their own"
-                    + (Install.windows ? ", each pairing's in an AppContainer of its own. " : ". ")
-                    + "User mode runs them as " + (Perm.owner-is-root ? "root, the owner of this node, with every right on this machine." : "you.");
-                // One block: a hidden part takes no room, nor the space around it.
-                VerticalLayout {
-                    Reveal {
-                        shown: Install.windows;
-                        gap: Space.sm;
-                        Text {
-                            text: "User mode, allowlist mode as you and sudo run commands as "
-                                + (Prefs.account != "" ? Prefs.account : Install.account)
-                                + ", with your Windows password, which the install stored. Folder mode needs it too: the node changes your folders' permissions as you.";
-                            color: Theme.text;
-                            font-size: Type.small;
-                            wrap: word-wrap;
-                        }
-                    }
-                    // Also without a stored one, as after a mistyped password
-                    // at install: the password of the app's user.
-                    Reveal {
-                        shown: Install.windows;
-                        gap: Space.lg;
-                        Field {
-                            label: "Your Windows password";
-                            hint: "Enter it again when it changes: the password, not a PIN.";
-                            HorizontalLayout {
-                                spacing: Space.md;
-                                TextField {
-                                    horizontal-stretch: 1;
-                                    text <=> Prefs.account-password;
-                                    password: true;
-                                    label: "Your Windows password";
-                                    accepted => {
-                                        Prefs.account-password-save();
-                                    }
-                                }
-                                Button {
-                                    text: "Save";
-                                    enabled: Prefs.account-password != "";
-                                    busy: Prefs.account-busy;
-                                    clicked => {
-                                        Prefs.account-password-save();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Reveal {
-                        shown: Prefs.account-error != "";
-                        gap: Space.lg;
-                        Banner {
-                            tone: Tone.danger;
-                            text: Prefs.account-error;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/chev-right.svg");
+                            colorize: Theme.text-faint;
                         }
                     }
                 }
             }
-
-
-            Group {
-                icon: @image-url("icons/terminal.svg");
-                title: "Shell";
-                text: "The program that runs each command. Empty: " + Prefs.shell-default + ".";
+        }
+        DetailsPane {
+            open: Store.details-open;
+            view-top: root.view-top;
+            view-height: root.view-height;
+            back => {
+                Store.details-open = false;
+            }
+            Card {
+                pad: 0;
+                gap: 0;
                 HorizontalLayout {
+                    padding-left: Space.xl;
+                    padding-right: Space.xl;
+                    padding-top: Space.lg;
+                    padding-bottom: Space.lg;
                     spacing: Space.md;
-                    TextField {
+                    IconTile {
+                        icon: root.sections[Prefs.tab].icon;
+                        size: 28px;
+                    }
+                    Text {
                         horizontal-stretch: 1;
-                        text <=> Prefs.shell;
-                        placeholder: Prefs.shell-default;
-                        mono: true;
-                        label: "Shell";
-                        accepted => {
-                            Prefs.shell-save();
-                        }
-                    }
-                    Button {
-                        text: "Save";
-                        clicked => {
-                            Prefs.shell-save();
-                        }
+                        text: root.sections[Prefs.tab].name;
+                        color: Theme.text;
+                        font-size: Type.heading;
+                        font-weight: Type.semibold;
+                        vertical-alignment: center;
                     }
                 }
-            }
-            Group {
-                icon: @image-url("icons/log.svg");
-                title: "Log";
-                text: "How much the node writes to its log.";
-                HorizontalLayout {
-                    alignment: start;
-                    Segmented {
-                        options: ["Errors", "Warnings", "Info", "Debug"];
-                        current: Prefs.log-level;
-                        chosen(i) => {
-                            Prefs.log-level-set(i);
-                        }
-                    }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
                 }
-            }
-        }
-    }
-
-    // Keys: where the node keeps them.
-    Reveal {
-        shown: Prefs.tab == 1;
-        fade: true;
-        gap: Space.xl;
-        Group {
-            icon: @image-url("icons/key.svg");
-            title: "Where the keys live";
-            text: "The node's key for each center and the key of its settings.";
-            HorizontalLayout {
-                spacing: Space.lg;
-                Text {
-                    horizontal-stretch: 1;
-                    text: Prefs.storage == 1 ? (Install.windows ? "In the Credential Manager of the node's account, nerve." : "In the system keyring of the node's account.")
-                        : Store.keyring-usable ? "In files only the node's account can read."
-                        : "In files only the node's account can read. " + Store.keyring-why;
-                    color: Theme.text-muted;
-                    font-size: Type.small;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                }
-                // Only a choice where the keyring can be one; keys there can
-                // always go back into files.
-                if Store.keyring-usable || Prefs.storage == 1: VerticalLayout {
-                    alignment: center;
-                    Segmented {
-                        options: ["Files", "System keyring"];
-                        current: Prefs.storage;
-                        chosen(i) => {
-                            Prefs.storage-set(i);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Network: the proxy. (The relay has a page of its own.)
-    Reveal {
-        shown: Prefs.tab == 2;
-        fade: true;
-        gap: Space.xl;
-        VerticalLayout {
-            spacing: Space.xl;
-            Group {
-                icon: @image-url("icons/globe.svg");
-                title: "Proxy";
-                text: "How the node reaches its centers: directly, or through a proxy. A relay is set on the Relay page.";
+            // General: the machine's name, the account and shell of the commands,
+            // and how much the node logs.
+            Reveal {
+                shown: Prefs.tab == 0;
+                fade: true;
                 VerticalLayout {
-                    Reveal {
-                        shown: Prefs.proxy == "";
+                    Group {
+                        first: true;
+                        icon: @image-url("icons/edit.svg");
+                        title: "Name";
+                        text: "How centers show this machine.";
                         HorizontalLayout {
                             spacing: Space.md;
-                            Text {
+                            TextField {
                                 horizontal-stretch: 1;
-                                text: "Direct, no proxy.";
-                                color: Theme.text-muted;
-                                font-size: Type.small;
-                                vertical-alignment: center;
+                                text <=> Prefs.name;
+                                placeholder: Prefs.name-shown;
+                                label: "Name";
+                                accepted => {
+                                    Prefs.name-save(Prefs.name);
+                                }
                             }
                             Button {
-                                text: "Set a proxy…";
-                                small: true;
+                                text: "Save";
                                 clicked => {
-                                    Prefs.proxy-edit();
+                                    Prefs.name-save(Prefs.name);
                                 }
                             }
                         }
                     }
-                    Reveal {
-                        shown: Prefs.proxy != "";
+                    Group {
+                        icon: @image-url("icons/shield.svg");
+                        title: "Account for commands";
+                        body: Install.windows || Prefs.account-error != "";
+                        text: Perm.owner-is-root ? "Commands run as nerve-run, which reaches only your folders (user mode: as root)."
+                            : "Commands run as nerve-run, which reaches only your folders (user mode: as you).";
+                        more: "Folder and allowlist mode run commands as nerve-run, an account of their own"
+                            + (Install.windows ? ", each pairing's in an AppContainer of its own. " : ". ")
+                            + "User mode runs them as " + (Perm.owner-is-root ? "root, the owner of this node, with every right on this machine." : "you.");
+                        // One block: a hidden part takes no room, nor the space around it.
                         VerticalLayout {
-                            InfoRow {
-                                label: "Proxy";
-                                value: Prefs.proxy;
-                                mono: true;
-                            }
                             Reveal {
-                                shown: Prefs.proxy-pin != "";
+                                shown: Install.windows;
                                 gap: Space.sm;
-                                InfoRow {
-                                    label: "Pin";
-                                    value: Prefs.proxy-pin;
-                                    mono: true;
+                                Text {
+                                    text: "User mode, allowlist mode as you and sudo run commands as "
+                                        + (Prefs.account != "" ? Prefs.account : Install.account)
+                                        + ", with your Windows password, which the install stored. Folder mode needs it too: the node changes your folders' permissions as you.";
+                                    color: Theme.text;
+                                    font-size: Type.small;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            // Also without a stored one, as after a mistyped password
+                            // at install: the password of the app's user.
+                            Reveal {
+                                shown: Install.windows;
+                                gap: Space.lg;
+                                Field {
+                                    label: "Your Windows password";
+                                    hint: "Enter it again when it changes: the password, not a PIN.";
+                                    HorizontalLayout {
+                                        spacing: Space.md;
+                                        TextField {
+                                            horizontal-stretch: 1;
+                                            text <=> Prefs.account-password;
+                                            password: true;
+                                            label: "Your Windows password";
+                                            accepted => {
+                                                Prefs.account-password-save();
+                                            }
+                                        }
+                                        Button {
+                                            text: "Save";
+                                            enabled: Prefs.account-password != "";
+                                            busy: Prefs.account-busy;
+                                            clicked => {
+                                                Prefs.account-password-save();
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Reveal {
-                                shown: Prefs.proxy-login != "";
-                                gap: Space.sm;
-                                InfoRow {
-                                    label: "Login";
-                                    value: Prefs.proxy-login;
-                                }
-                            }
-                            Reveal {
-                                shown: Prefs.proxy-headers != "";
-                                gap: Space.sm;
-                                InfoRow {
-                                    label: "Headers";
-                                    value: Prefs.proxy-headers;
-                                    mono: true;
-                                }
-                            }
-                            Reveal {
-                                shown: Prefs.proxy-problem != "";
-                                gap: Space.sm;
+                                shown: Prefs.account-error != "";
+                                gap: Space.lg;
                                 Banner {
-                                    tone: Tone.warn;
-                                    text: Prefs.proxy-problem;
+                                    tone: Tone.danger;
+                                    text: Prefs.account-error;
+                                }
+                            }
+                        }
+                    }
+
+
+                    Group {
+                        icon: @image-url("icons/terminal.svg");
+                        title: "Shell";
+                        text: "The program that runs each command. Empty: " + Prefs.shell-default + ".";
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            TextField {
+                                horizontal-stretch: 1;
+                                text <=> Prefs.shell;
+                                placeholder: Prefs.shell-default;
+                                mono: true;
+                                label: "Shell";
+                                accepted => {
+                                    Prefs.shell-save();
+                                }
+                            }
+                            Button {
+                                text: "Save";
+                                clicked => {
+                                    Prefs.shell-save();
+                                }
+                            }
+                        }
+                    }
+                    Group {
+                        icon: @image-url("icons/log.svg");
+                        title: "Log";
+                        text: "How much the node writes to its log.";
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                options: ["Errors", "Warnings", "Info", "Debug"];
+                                current: Prefs.log-level;
+                                chosen(i) => {
+                                    Prefs.log-level-set(i);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Keys: where the node keeps them.
+            Reveal {
+                shown: Prefs.tab == 1;
+                fade: true;
+                Group {
+                    first: true;
+                    icon: @image-url("icons/key.svg");
+                    title: "Where the keys live";
+                    text: "The node's key for each center and the key of its settings.";
+                    HorizontalLayout {
+                        spacing: Space.lg;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: Prefs.storage == 1 ? (Install.windows ? "In the Credential Manager of the node's account, nerve." : "In the system keyring of the node's account.")
+                                : Store.keyring-usable ? "In files only the node's account can read."
+                                : "In files only the node's account can read. " + Store.keyring-why;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        // Only a choice where the keyring can be one; keys there can
+                        // always go back into files.
+                        if Store.keyring-usable || Prefs.storage == 1: VerticalLayout {
+                            alignment: center;
+                            Segmented {
+                                options: ["Files", "System keyring"];
+                                current: Prefs.storage;
+                                chosen(i) => {
+                                    Prefs.storage-set(i);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Network: the proxy. (The relay has a page of its own.)
+            Reveal {
+                shown: Prefs.tab == 2;
+                fade: true;
+                VerticalLayout {
+                    Group {
+                        first: true;
+                        icon: @image-url("icons/globe.svg");
+                        title: "Proxy";
+                        text: "How the node reaches its centers: directly, or through a proxy. A relay is set on the Relay page.";
+                        VerticalLayout {
+                            Reveal {
+                                shown: Prefs.proxy == "";
+                                HorizontalLayout {
+                                    spacing: Space.md;
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: "Direct, no proxy.";
+                                        color: Theme.text-muted;
+                                        font-size: Type.small;
+                                        vertical-alignment: center;
+                                    }
+                                    Button {
+                                        text: "Set a proxy…";
+                                        small: true;
+                                        clicked => {
+                                            Prefs.proxy-edit();
+                                        }
+                                    }
+                                }
+                            }
+                            Reveal {
+                                shown: Prefs.proxy != "";
+                                VerticalLayout {
+                                    InfoRow {
+                                        label: "Proxy";
+                                        value: Prefs.proxy;
+                                        mono: true;
+                                    }
+                                    Reveal {
+                                        shown: Prefs.proxy-pin != "";
+                                        gap: Space.sm;
+                                        InfoRow {
+                                            label: "Pin";
+                                            value: Prefs.proxy-pin;
+                                            mono: true;
+                                        }
+                                    }
+                                    Reveal {
+                                        shown: Prefs.proxy-login != "";
+                                        gap: Space.sm;
+                                        InfoRow {
+                                            label: "Login";
+                                            value: Prefs.proxy-login;
+                                        }
+                                    }
+                                    Reveal {
+                                        shown: Prefs.proxy-headers != "";
+                                        gap: Space.sm;
+                                        InfoRow {
+                                            label: "Headers";
+                                            value: Prefs.proxy-headers;
+                                            mono: true;
+                                        }
+                                    }
+                                    Reveal {
+                                        shown: Prefs.proxy-problem != "";
+                                        gap: Space.sm;
+                                        Banner {
+                                            tone: Tone.warn;
+                                            text: Prefs.proxy-problem;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: end;
+                                        spacing: Space.sm;
+                                        padding-top: Space.sm;
+                                        Button {
+                                            text: "Change…";
+                                            small: true;
+                                            clicked => {
+                                                Prefs.proxy-edit();
+                                            }
+                                        }
+                                        Button {
+                                            text: "Remove";
+                                            kind: ButtonKind.danger-soft;
+                                            small: true;
+                                            clicked => {
+                                                Prefs.proxy-remove();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // The node's own web UI, on this machine: off until it is
+                    // turned on here, and every browser logs in with a token.
+                    Group {
+                        icon: @image-url("icons/globe.svg");
+                        title: "Web UI";
+                        text: Prefs.ui-listen == "" ? "Off. On, a browser on this machine opens the node's pages and logs in with a token."
+                            : "On at " + Prefs.ui-listen + (Prefs.ui-status != "" && Prefs.ui-status != "listening" ? ": " + Prefs.ui-status : "") + ". A browser logs in with a token.";
+                        more: "Only you reach it from this machine; other accounts and the commands of the centers do not. Open it from here: the app checks first that the node holds its port.";
+                        VerticalLayout {
+                            spacing: Space.sm;
+                            for label in Prefs.ui-tokens: HorizontalLayout {
+                                spacing: Space.md;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Token " + label;
+                                    color: Theme.text;
+                                    font-size: Type.small;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Revoke";
+                                    kind: ButtonKind.danger-soft;
+                                    small: true;
+                                    clicked => {
+                                        Prefs.ui-token-rm(label);
+                                    }
                                 }
                             }
                             HorizontalLayout {
@@ -391,386 +547,338 @@ export component SettingsPage inherits PageFrame {
                                 spacing: Space.sm;
                                 padding-top: Space.sm;
                                 Button {
-                                    text: "Change…";
+                                    text: "Open";
+                                    small: true;
+                                    visible: Prefs.ui-listen != "";
+                                    clicked => {
+                                        Prefs.ui-open();
+                                    }
+                                }
+                                Button {
+                                    text: "New token";
+                                    small: true;
+                                    visible: Prefs.ui-listen != "";
+                                    clicked => {
+                                        Prefs.ui-token-add();
+                                    }
+                                }
+                                Button {
+                                    text: Prefs.ui-listen == "" ? "Turn on" : "Turn off";
                                     small: true;
                                     clicked => {
-                                        Prefs.proxy-edit();
+                                        if Prefs.ui-listen == "" {
+                                            Prefs.ui-on();
+                                        } else {
+                                            Prefs.ui-off();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Limits: what a command may use and how long it runs, and the node's
+            // own.
+            Reveal {
+                shown: Prefs.tab == 3;
+                fade: true;
+                VerticalLayout {
+                    Reveal {
+                        shown: Prefs.limits-error != "";
+                        HorizontalLayout {
+                            padding: Space.xl;
+                            padding-bottom: 0px;
+                            Banner {
+                                tone: Tone.danger;
+                                title: "Not saved";
+                                text: Prefs.limits-error;
+                            }
+                        }
+                    }
+                    Group {
+                        first: true;
+                        icon: @image-url("icons/cpu.svg");
+                        title: "Each command";
+                        text: Install.windows ? "What one command gets, and the most a call may ask for. Windows counts processes, not their threads." : "What one command gets, and the most a call may ask for.";
+                        LimitRows {
+                            group: "command";
+                            rows: Prefs.limits-command;
+                        }
+                        SaveRow {
+                            group: "command";
+                        }
+                    }
+                    Group {
+                        icon: @image-url("icons/wait.svg");
+                        title: "Run time";
+                        text: "A command past it is stopped.";
+                        LimitRows {
+                            group: "time";
+                            rows: Prefs.limits-time;
+                        }
+                        SaveRow {
+                            group: "time";
+                        }
+                    }
+                    Group {
+                        icon: @image-url("icons/gauge.svg");
+                        title: "The node";
+                        text: "Over all centers.";
+                        LimitRows {
+                            group: "node";
+                            rows: Prefs.limits-node;
+                        }
+                        SaveRow {
+                            group: "node";
+                        }
+                    }
+                }
+            }
+
+            // Backup: the config and the keys in a file, and back.
+            Reveal {
+                shown: Prefs.tab == 4;
+                fade: true;
+                Group {
+                    first: true;
+                    icon: @image-url("icons/archive.svg");
+                    title: "Backup";
+                    text: "The settings and keys in one file, sealed with a passphrase: to keep, or to move the node to another machine.";
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Space.sm;
+                        Button {
+                            text: "Restore…";
+                            clicked => {
+                                Prefs.restore-choose();
+                            }
+                        }
+                        Button {
+                            text: "Back up…";
+                            icon: @image-url("icons/archive.svg");
+                            kind: ButtonKind.primary;
+                            clicked => {
+                                Prefs.backup-choose();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // App: its version and update, and removing Nerve. (Light and dark are
+            // at the foot of the sidebar.)
+            Reveal {
+                shown: Prefs.tab == 5;
+                fade: true;
+                VerticalLayout {
+                    Group {
+                        first: true;
+                        icon: @image-url("icons/window.svg");
+                        title: "Nerve " + Install.version;
+                        text: "The app and the node's service are one program" + (Install.program != "" ? ", " + Install.program : "") + ".";
+                        HorizontalLayout {
+                            spacing: Space.lg;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "From the latest release or a file. The service restarts with it.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            Button {
+                                text: "Update…";
+                                icon: @image-url("icons/download.svg");
+                                clicked => {
+                                    Install.ask-update();
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Space.lg;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: Space.xs;
+                                Text {
+                                    text: "Pre-releases";
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    font-weight: Type.medium;
+                                }
+                                Text {
+                                    text: "Update takes test builds too, before their release.";
+                                    color: Theme.text-muted;
+                                    font-size: Type.small;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Switch {
+                                    checked: Install.pre-releases;
+                                    label: "Pre-releases";
+                                    toggled(on) => {
+                                        Install.set-pre-releases(on);
+                                    }
+                                }
+                            }
+                        }
+                        Divider { }
+                        HorizontalLayout {
+                            spacing: Space.lg;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Removes the service, its user and the app. You choose whether the node's data stays.";
+                                color: Theme.text-muted;
+                                font-size: Type.small;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            Button {
+                                text: "Uninstall…";
+                                icon: @image-url("icons/trash.svg");
+                                kind: ButtonKind.danger-soft;
+                                clicked => {
+                                    Install.ask-uninstall();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Advanced: any setting by its name.
+            Reveal {
+                shown: Prefs.tab == 6;
+                fade: true;
+                VerticalLayout {
+                    Group {
+                        first: true;
+                        icon: @image-url("icons/sliders.svg");
+                        title: "Any setting";
+                        text: "Any setting of node.toml by its dotted name, like center.<name>.policy.protected.extra. Add and Remove change a list.";
+                        VerticalLayout {
+                            HorizontalLayout {
+                                spacing: Space.md;
+                                TextField {
+                                    horizontal-stretch: 1;
+                                    text <=> Prefs.raw-key;
+                                    mono: true;
+                                    placeholder: "node.name";
+                                    label: "Setting";
+                                    accepted => {
+                                        Prefs.raw-get();
+                                    }
+                                }
+                                Button {
+                                    text: "Show";
+                                    enabled: Prefs.raw-key != "";
+                                    clicked => {
+                                        Prefs.raw-get();
+                                    }
+                                }
+                            }
+                            Reveal {
+                                shown: Prefs.raw-shown != "";
+                                gap: Space.lg;
+                                VerticalLayout {
+                                    spacing: Space.sm;
+                                    Text {
+                                        text: "Now";
+                                        color: Theme.text-faint;
+                                        font-size: Type.caption;
+                                        font-weight: Type.semibold;
+                                    }
+                                    Text {
+                                        text: Prefs.raw-shown;
+                                        color: Theme.text;
+                                        font-size: Type.small;
+                                        font-family: Type.mono;
+                                        wrap: char-wrap;
+                                    }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            HorizontalLayout {
+                                spacing: Space.md;
+                                TextField {
+                                    horizontal-stretch: 1;
+                                    text <=> Prefs.raw-value;
+                                    mono: true;
+                                    placeholder: "new value";
+                                    label: "New value";
+                                    accepted => {
+                                        Prefs.raw-set();
+                                    }
+                                }
+                                Button {
+                                    text: "Set";
+                                    enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
+                                    clicked => {
+                                        Prefs.raw-set();
+                                    }
+                                }
+                                Button {
+                                    text: "Add";
+                                    icon: @image-url("icons/plus.svg");
+                                    enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
+                                    clicked => {
+                                        Prefs.raw-add();
                                     }
                                 }
                                 Button {
                                     text: "Remove";
-                                    kind: ButtonKind.danger-soft;
-                                    small: true;
+                                    kind: ButtonKind.ghost;
+                                    enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
                                     clicked => {
-                                        Prefs.proxy-remove();
+                                        Prefs.raw-remove();
+                                    }
+                                }
+                                Button {
+                                    text: "Unset";
+                                    kind: ButtonKind.ghost;
+                                    enabled: Prefs.raw-key != "";
+                                    clicked => {
+                                        Prefs.raw-unset();
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-            }
-            // The node's own web UI, on this machine: off until it is
-            // turned on here, and every browser logs in with a token.
-            Group {
-                icon: @image-url("icons/globe.svg");
-                title: "Web UI";
-                text: Prefs.ui-listen == "" ? "Off. On, a browser on this machine opens the node's pages and logs in with a token."
-                    : "On at " + Prefs.ui-listen + (Prefs.ui-status != "" && Prefs.ui-status != "listening" ? ": " + Prefs.ui-status : "") + ". A browser logs in with a token.";
-                more: "Only you reach it from this machine; other accounts and the commands of the centers do not. Open it from here: the app checks first that the node holds its port.";
-                VerticalLayout {
-                    spacing: Space.sm;
-                    for label in Prefs.ui-tokens: HorizontalLayout {
-                        spacing: Space.md;
-                        Text {
-                            horizontal-stretch: 1;
-                            text: "Token " + label;
-                            color: Theme.text;
-                            font-size: Type.small;
-                            vertical-alignment: center;
-                        }
-                        Button {
-                            text: "Revoke";
-                            kind: ButtonKind.danger-soft;
-                            small: true;
-                            clicked => {
-                                Prefs.ui-token-rm(label);
+                            Reveal {
+                                shown: Prefs.raw-error != "";
+                                gap: Space.lg;
+                                Banner {
+                                    tone: Tone.danger;
+                                    text: Prefs.raw-error;
+                                }
                             }
                         }
-                    }
-                    HorizontalLayout {
-                        alignment: end;
-                        spacing: Space.sm;
-                        padding-top: Space.sm;
-                        Button {
-                            text: "Open";
-                            small: true;
-                            visible: Prefs.ui-listen != "";
-                            clicked => {
-                                Prefs.ui-open();
+                        Divider { }
+                        HorizontalLayout {
+                            spacing: Space.md;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "A node.toml changed by hand is refused until you take it. Read it first.";
+                                color: Theme.text-muted;
+                                font-size: Type.caption;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
                             }
-                        }
-                        Button {
-                            text: "New token";
-                            small: true;
-                            visible: Prefs.ui-listen != "";
-                            clicked => {
-                                Prefs.ui-token-add();
-                            }
-                        }
-                        Button {
-                            text: Prefs.ui-listen == "" ? "Turn on" : "Turn off";
-                            small: true;
-                            clicked => {
-                                if Prefs.ui-listen == "" {
-                                    Prefs.ui-on();
-                                } else {
-                                    Prefs.ui-off();
+                            Button {
+                                text: "Take node.toml as it is…";
+                                small: true;
+                                clicked => {
+                                    Prefs.accept-file();
                                 }
                             }
                         }
                     }
-                }
-            }
 
-        }
-    }
-
-    // Limits: what a command may use and how long it runs, and the node's
-    // own.
-    Reveal {
-        shown: Prefs.tab == 3;
-        fade: true;
-        gap: Space.xl;
-        VerticalLayout {
-            spacing: Space.xl;
-            Reveal {
-                shown: Prefs.limits-error != "";
-                Banner {
-                    tone: Tone.danger;
-                    title: "Not saved";
-                    text: Prefs.limits-error;
                 }
             }
-            Group {
-                icon: @image-url("icons/cpu.svg");
-                title: "Each command";
-                text: Install.windows ? "What one command gets, and the most a call may ask for. Windows counts processes, not their threads." : "What one command gets, and the most a call may ask for.";
-                LimitRows {
-                    group: "command";
-                    rows: Prefs.limits-command;
-                }
-                SaveRow {
-                    group: "command";
-                }
             }
-            Group {
-                icon: @image-url("icons/wait.svg");
-                title: "Run time";
-                text: "A command past it is stopped.";
-                LimitRows {
-                    group: "time";
-                    rows: Prefs.limits-time;
-                }
-                SaveRow {
-                    group: "time";
-                }
-            }
-            Group {
-                icon: @image-url("icons/gauge.svg");
-                title: "The node";
-                text: "Over all centers.";
-                LimitRows {
-                    group: "node";
-                    rows: Prefs.limits-node;
-                }
-                SaveRow {
-                    group: "node";
-                }
-            }
-        }
-    }
-
-    // Backup: the config and the keys in a file, and back.
-    Reveal {
-        shown: Prefs.tab == 4;
-        fade: true;
-        gap: Space.xl;
-        Group {
-            icon: @image-url("icons/archive.svg");
-            title: "Backup";
-            text: "The settings and keys in one file, sealed with a passphrase: to keep, or to move the node to another machine.";
-            HorizontalLayout {
-                alignment: end;
-                spacing: Space.sm;
-                Button {
-                    text: "Restore…";
-                    clicked => {
-                        Prefs.restore-choose();
-                    }
-                }
-                Button {
-                    text: "Back up…";
-                    icon: @image-url("icons/archive.svg");
-                    kind: ButtonKind.primary;
-                    clicked => {
-                        Prefs.backup-choose();
-                    }
-                }
-            }
-        }
-    }
-
-    // App: its version and update, and removing Nerve. (Light and dark are
-    // at the foot of the sidebar.)
-    Reveal {
-        shown: Prefs.tab == 5;
-        fade: true;
-        gap: Space.xl;
-        VerticalLayout {
-            spacing: Space.xl;
-            Group {
-                icon: @image-url("icons/window.svg");
-                title: "Nerve " + Install.version;
-                text: "The app and the node's service are one program" + (Install.program != "" ? ", " + Install.program : "") + ".";
-                HorizontalLayout {
-                    spacing: Space.lg;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: "From the latest release or a file. The service restarts with it.";
-                        color: Theme.text-muted;
-                        font-size: Type.small;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
-                    Button {
-                        text: "Update…";
-                        icon: @image-url("icons/download.svg");
-                        clicked => {
-                            Install.ask-update();
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: Space.lg;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: Space.xs;
-                        Text {
-                            text: "Pre-releases";
-                            color: Theme.text;
-                            font-size: Type.body;
-                            font-weight: Type.medium;
-                        }
-                        Text {
-                            text: "Update takes test builds too, before their release.";
-                            color: Theme.text-muted;
-                            font-size: Type.small;
-                            wrap: word-wrap;
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Switch {
-                            checked: Install.pre-releases;
-                            label: "Pre-releases";
-                            toggled(on) => {
-                                Install.set-pre-releases(on);
-                            }
-                        }
-                    }
-                }
-                Divider { }
-                HorizontalLayout {
-                    spacing: Space.lg;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: "Removes the service, its user and the app. You choose whether the node's data stays.";
-                        color: Theme.text-muted;
-                        font-size: Type.small;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
-                    Button {
-                        text: "Uninstall…";
-                        icon: @image-url("icons/trash.svg");
-                        kind: ButtonKind.danger-soft;
-                        clicked => {
-                            Install.ask-uninstall();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Advanced: any setting by its name.
-    Reveal {
-        shown: Prefs.tab == 6;
-        fade: true;
-        gap: Space.xl;
-        VerticalLayout {
-            Group {
-                icon: @image-url("icons/sliders.svg");
-                title: "Any setting";
-                text: "Any setting of node.toml by its dotted name, like center.<name>.policy.protected.extra. Add and Remove change a list.";
-                VerticalLayout {
-                    HorizontalLayout {
-                        spacing: Space.md;
-                        TextField {
-                            horizontal-stretch: 1;
-                            text <=> Prefs.raw-key;
-                            mono: true;
-                            placeholder: "node.name";
-                            label: "Setting";
-                            accepted => {
-                                Prefs.raw-get();
-                            }
-                        }
-                        Button {
-                            text: "Show";
-                            enabled: Prefs.raw-key != "";
-                            clicked => {
-                                Prefs.raw-get();
-                            }
-                        }
-                    }
-                    Reveal {
-                        shown: Prefs.raw-shown != "";
-                        gap: Space.lg;
-                        VerticalLayout {
-                            spacing: Space.sm;
-                            Text {
-                                text: "Now";
-                                color: Theme.text-faint;
-                                font-size: Type.caption;
-                                font-weight: Type.semibold;
-                            }
-                            Text {
-                                text: Prefs.raw-shown;
-                                color: Theme.text;
-                                font-size: Type.small;
-                                font-family: Type.mono;
-                                wrap: char-wrap;
-                            }
-                        }
-                    }
-                }
-                VerticalLayout {
-                    HorizontalLayout {
-                        spacing: Space.md;
-                        TextField {
-                            horizontal-stretch: 1;
-                            text <=> Prefs.raw-value;
-                            mono: true;
-                            placeholder: "new value";
-                            label: "New value";
-                            accepted => {
-                                Prefs.raw-set();
-                            }
-                        }
-                        Button {
-                            text: "Set";
-                            enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
-                            clicked => {
-                                Prefs.raw-set();
-                            }
-                        }
-                        Button {
-                            text: "Add";
-                            icon: @image-url("icons/plus.svg");
-                            enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
-                            clicked => {
-                                Prefs.raw-add();
-                            }
-                        }
-                        Button {
-                            text: "Remove";
-                            kind: ButtonKind.ghost;
-                            enabled: Prefs.raw-key != "" && Prefs.raw-value != "";
-                            clicked => {
-                                Prefs.raw-remove();
-                            }
-                        }
-                        Button {
-                            text: "Unset";
-                            kind: ButtonKind.ghost;
-                            enabled: Prefs.raw-key != "";
-                            clicked => {
-                                Prefs.raw-unset();
-                            }
-                        }
-                    }
-                    Reveal {
-                        shown: Prefs.raw-error != "";
-                        gap: Space.lg;
-                        Banner {
-                            tone: Tone.danger;
-                            text: Prefs.raw-error;
-                        }
-                    }
-                }
-                Divider { }
-                HorizontalLayout {
-                    spacing: Space.md;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: "A node.toml changed by hand is refused until you take it. Read it first.";
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        wrap: word-wrap;
-                        vertical-alignment: center;
-                    }
-                    Button {
-                        text: "Take node.toml as it is…";
-                        small: true;
-                        clicked => {
-                            Prefs.accept-file();
-                        }
-                    }
-                }
-            }
-
         }
     }
 }

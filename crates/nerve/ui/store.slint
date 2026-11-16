@@ -10,6 +10,15 @@ import {
 
 export global Store {
     in-out property <Page> page: Page.overview;
+    // Below 1100 px a page shows its list or a row's details (the list and
+    // details layout, Split in widgets.slint): whether the details are
+    // open. A page that opens starts with its list.
+    in-out property <bool> details-open;
+    // The row whose remove button asks before it removes ("" none), as
+    // "<what>:<which>", so one row asks at a time.
+    in-out property <string> asking;
+    // The center picked on Centers and the Overview, by its place.
+    in-out property <int> center-pick;
     in-out property <string> version;
     // The git ref of the user guide the Help links open: the release's tag
     // in a release build, `main` in any other.
@@ -46,6 +55,9 @@ export global Store {
     in-out property <string> audit-summary;
     in-out property <string> audit-foot;
     in-out property <bool> audit-more-left;
+    // The entry picked, by its place in the shown list; -1 until one is
+    // clicked, so that the details follow the first one.
+    in-out property <int> audit-pick: -1;
 
     // Pairing: the link, then what the owner confirms.
     in-out property <bool> pair-open;
@@ -223,8 +235,6 @@ export global Perm {
     in-out property <bool> deny-hint-error;
     in-out property <string> edit-hint;
     in-out property <bool> edit-hint-error;
-    // Allowlist mode: whether its exceptions (the deny rules) are open.
-    in-out property <bool> except-open;
     // The rule being edited in place: its list (-1: none), its row, and
     // what it becomes.
     in-out property <int> edit-list: -1;
@@ -244,7 +254,15 @@ export global Perm {
     in-out property <string> user-then: "allowlist";
     in-out property <string> mode-error;
 
+    // The section shown: 0 the folders, 1 the forbidden commands, 2 the
+    // allowed ones, 3 sudo.
+    in-out property <int> section;
+    // A form row in the list: a folder's (folder-open), new or the one
+    // `folder-edit` names, which a save moves to the path typed; a new
+    // rule's, for the list `add-list` (-1: none).
     in-out property <bool> folder-open;
+    in-out property <string> folder-edit;
+    in-out property <int> add-list: -1;
     in-out property <string> folder-path;
     in-out property <bool> folder-read: true;
     in-out property <bool> folder-write;
@@ -307,6 +325,13 @@ export global Caps {
     in-out property <[CapRow]> rows;
     in-out property <[DeclaredRow]> declared;
     in-out property <[ProgramRow]> programs;
+    // The row picked: 0 a unit of what the node offers, by its place in
+    // `rows`; 1 one of your capabilities and 2 a program, by their place;
+    // 3 allowing a program. And on a large window the group the list shows:
+    // a capability's (CapRow.group), -1 your capabilities, -2 the programs.
+    in-out property <int> pick-kind;
+    in-out property <int> pick-at: 1;
+    in-out property <int> group;
     // Whether the node runs: only then does it know the programs'
     // capabilities and whether a center may use each one now.
     in-out property <bool> running;
@@ -370,21 +395,30 @@ export global Logs {
     in-out property <string> error;
     in-out property <[LogRow]> rows;
     in-out property <bool> problems-only;
+    // Words the shown lines hold (the search bar), and the line picked (-1
+    // until one is clicked: the details follow the newest line). The search
+    // goes over the lines the page read (`read`), not the whole log.
+    in-out property <string> search;
+    in-out property <int> pick: -1;
+    in-out property <int> read;
     // How many of the newest lines the page asks for (src/app/live.rs).
     in-out property <int> limit: 300;
     callback filter(bool);
+    // The search bar changed.
+    callback searched();
     callback more();
     // Asks before `log clear`.
     callback clear();
 }
 
-// The Help page: whether its keys and its command reference are open, and
+// The Help page: its section and the task map's open groups, and
 // the reference (src/reference.rs): what it shows for the filter and the
 // order. Each part, topic and command opens and closes on its own.
 export global Manual {
-    in-out property <bool> tasks-open;
-    in-out property <bool> keys-open;
-    in-out property <bool> commands-open;
+    // The section shown: 0 the tasks, 1 the keys, 2 the commands; and
+    // which groups of the task map are open.
+    in-out property <int> section;
+    in-out property <[bool]> tasks-open: [false, false, false, false];
     in-out property <[RefGroup]> ref-groups;
     in-out property <string> ref-filter;
     in-out property <bool> ref-by-name;
@@ -468,6 +502,11 @@ export global Prefs {
     in-out property <[RelayNodeRow]> relay-nodes;
     in-out property <[TunnelRow]> tunnels;
     in-out property <string> relay-address: "0.0.0.0:7490";
+    // The row picked on the page: 0 this node's way to its centers, 1 the
+    // relay, 2 its tunnels, 3 a node that uses it and 4 a link now, each by
+    // its place (relay-pick-at).
+    in-out property <int> relay-pick;
+    in-out property <int> relay-pick-at;
     callback relay-on();
     callback relay-off();
     callback relay-remove(string);

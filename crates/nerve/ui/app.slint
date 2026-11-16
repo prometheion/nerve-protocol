@@ -1,7 +1,7 @@
 // The window: the sidebar of pages, the page, and the dialogs over it.
 
 import { Palette } from "std-widgets.slint";
-import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape } from "theme.slint";
 import {
     Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow,
     ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
@@ -19,14 +19,14 @@ import { SettingsPage } from "settings.slint";
 import { HelpPage } from "help.slint";
 import { SetupDialog } from "setup.slint";
 import {
-    PairDialog, ConfirmDialog, AboutDialog, ModeDialog, FolderDialog, SudoDialog, OwnerPasswordDialog, ProxyDialog,
+    PairDialog, ConfirmDialog, AboutDialog, ModeDialog, SudoDialog, OwnerPasswordDialog, ProxyDialog,
     OnceDialog, BackupDialog, RestoreDialog, ElevateDialog, UpdateDialog, UninstallDialog,
-    MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog, CapDialog,
+    MissingDialog, RelayNodeDialog, OtherCopyDialog, ConnectDialog,
 } from "dialogs.slint";
 import { InstallerView } from "installer.slint";
 
 export {
-    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Tone, Page, Load, NodeStatus, CenterRow,
+    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Shape, Tone, Page, Load, NodeStatus, CenterRow,
     AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow, ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup,
     RelayNodeRow, TunnelRow, Pick, Limit,
 }
@@ -237,12 +237,11 @@ export component AppWindow inherits Window {
     // A dialog is open: the window's own shortcuts wait, and the focus comes
     // back to the window when it closes.
     property <bool> dialog-open: Store.pair-open || Store.confirm-open || Store.about-open
-        || Perm.mode-open || Perm.folder-open || Perm.sudo-open || Perm.owner-password-open
+        || Perm.mode-open || Perm.sudo-open || Perm.owner-password-open
         || Prefs.proxy-open
         || Prefs.once-open || Prefs.relay-edit-open || Prefs.backup-open || Prefs.restore-open
         || Store.setup-open || Store.elevate-open || Install.update-open || Install.uninstall-open
-        || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open
-        || Caps.edit-open;
+        || Store.missing-open || Prefs.connect-open || Install.other-open;
     changed dialog-open => {
         if (!self.dialog-open) {
             keys.focus();
@@ -250,6 +249,11 @@ export component AppWindow inherits Window {
     }
     init => {
         keys.focus();
+        Shape.window-width = self.width;
+    }
+    // The pages follow the window's width (Shape).
+    changed width => {
+        Shape.window-width = self.width;
     }
 
     // The window's shortcuts: Ctrl+1 to Ctrl+8 open the pages in the
@@ -397,13 +401,10 @@ export component AppWindow inherits Window {
         if Store.confirm-open: ConfirmDialog { }
         if Store.about-open: AboutDialog { }
         if Perm.mode-open: ModeDialog { }
-        if Perm.folder-open: FolderDialog { }
         if Perm.sudo-open: SudoDialog { }
-        if Caps.edit-open: CapDialog { }
         if Prefs.proxy-open: ProxyDialog { }
         if Prefs.once-open: OnceDialog { }
         if Prefs.relay-edit-open: RelayNodeDialog { }
-        if Prefs.relay-add-open: RelayAddDialog { }
         if Prefs.connect-open: ConnectDialog { }
         if Prefs.backup-open: BackupDialog { }
         if Prefs.restore-open: RestoreDialog { }

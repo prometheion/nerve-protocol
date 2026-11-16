@@ -101,9 +101,16 @@ until **Settings › Network › Web UI** turns it on.
 | **Permissions** | Mode, the network, folders, allow, deny and sudo rules, sudo off |
 | **Capabilities** | Switches, your own capabilities, the programs that may add some |
 | **Audit** | What the node allowed and refused, with **Allow** and **Deny** buttons |
-| **Log** | The node's log, problems only |
+| **Log** | The node's log, with a search and problems only |
 | **Settings** | Name, keys, log level, backup, update and uninstall |
 | **Help** | The keys, and the command reference |
+
+A page is a list and the details of the row you pick: side by side in a wide
+window, and in a narrow one the list first, then the details with **Back to
+the list**. The up and down keys move through a list. Adding something opens
+a form where it belongs, and removing asks in the row (**Remove?**, then
+**Cancel** or **Remove**). The Log's search reads the newest lines on the
+page; **Show more** reads further back.
 
 Ctrl+1 to Ctrl+9 open the pages. The app asks for an administrator's
 password only for what changes the system: update, uninstall, turning sudo

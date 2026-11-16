@@ -897,7 +897,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             .unwrap_or_default()
     };
     let mut rows = Vec::new();
-    for (cap, source, units) in groups {
+    for (group, (cap, source, units)) in groups.into_iter().enumerate() {
+        let group = group as i32;
         let switches = !center.is_empty() && cap != "settings";
         rows.push(CapRow {
             name: cap.into(),
@@ -912,6 +913,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             inherited: false,
             now: SharedString::new(),
             command: SharedString::new(),
+            group,
+            units: units.len() as i32,
         });
         for r in units {
             let name = s(&r["name"]);
@@ -953,6 +956,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
                 inherited: own < 0 && shown >= 0,
                 now: now.into(),
                 command: command(source, name).into(),
+                group,
+                units: 0,
             });
         }
     }
@@ -1062,12 +1067,97 @@ pub fn declared(v: &Value) -> Vec<DeclaredRow> {
         .collect()
 }
 
+/// The folder a typed or chosen path means, as `folder add` gets it: `~` is
+/// the owner's home, and a relative path is refused, since the node would
+/// join it to the folder the app happens to run in. A network folder or
+/// drive is said at once, as the node refuses it.
+pub fn typed_folder(text: &str, home: &Path) -> Result<String, String> {
+    let text = text.trim();
+    let rest = text
+        .strip_prefix('~')
+        .filter(|r| r.is_empty() || r.starts_with('/') || (cfg!(windows) && r.starts_with('\\')));
+    let path = match rest {
+        Some(rest) => format!("{}{rest}", home.display()),
+        None => text.to_string(),
+    };
+    if !Path::new(&path).is_absolute() {
+        return Err("Type the whole path, from the top of the drive, or choose the folder.".into());
+    }
+    match nerve_node::drives::refusal(&path) {
+        Some(why) => Err(why),
+        None => Ok(path),
+    }
+}
+
+/// The place `folder add` stored a folder at, from what it said
+/// (`<center>: folder <path> <rights>`): the node tidies the path and
+/// follows its links, so it may differ from what was asked.
+pub fn stored_folder<'a>(said: impl Iterator<Item = &'a str>) -> Option<String> {
+    said.filter_map(|l| l.split_once(": folder ")?.1.rsplit_once(' '))
+        .map(|(path, _)| path.to_string())
+        .next()
+}
+
+/// Whether two folder paths name one place, as the node compares them.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    use nerve_policy::paths::within;
+    // A `.` part names no other place. Windows' comparison keeps it as a
+    // part of its own; Path's components leave it out on every platform.
+    let tidy = |p: &str| Path::new(p).components().collect::<std::path::PathBuf>();
+    let (a, b) = (tidy(a), tidy(b));
+    within(&a, &b) && within(&b, &a)
+}
+
+/// Where the picked row of `old` stands in `new`, once the page's rows were
+/// made again (a line came in): the pick follows the row, not its place.
+/// `same` says whether two rows are one entry; of several equal ones the pick
+/// keeps its rank from the end that does not move (`newest_first`: the oldest
+/// end), so a repeated line is not mistaken for its twin. -1 when nothing was
+/// picked (the page follows the first row) or the row is gone.
+pub fn follow_pick<T>(
+    old: &[T],
+    pick: i32,
+    new: &[T],
+    newest_first: bool,
+    same: impl Fn(&T, &T) -> bool,
+) -> i32 {
+    let Some(at) = usize::try_from(pick)
+        .ok()
+        .map(|p| p.min(old.len().saturating_sub(1)))
+        .filter(|_| !old.is_empty())
+    else {
+        return -1;
+    };
+    let rank = |rows: &[T], at: usize| {
+        let twins = rows.iter().enumerate().filter(|(_, r)| same(r, &rows[at]));
+        if newest_first {
+            twins.filter(|(i, _)| *i > at).count()
+        } else {
+            twins.filter(|(i, _)| *i < at).count()
+        }
+    };
+    let want = rank(old, at);
+    let mut twins: Vec<usize> = new
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| same(r, &old[at]))
+        .map(|(i, _)| i)
+        .collect();
+    if newest_first {
+        twins.reverse();
+    }
+    twins.get(want).map_or(-1, |i| *i as i32)
+}
+
 /// The lines of the log to show, from `newest` first: all of them, or the
-/// errors and warnings only.
-pub fn log_rows(newest: &[Value], problems_only: bool, now_ms: u64) -> Vec<LogRow> {
+/// errors and warnings only, and of those the ones whose message holds
+/// `search` (any case; empty: every one).
+pub fn log_rows(newest: &[Value], problems_only: bool, search: &str, now_ms: u64) -> Vec<LogRow> {
+    let search = search.trim().to_lowercase();
     newest
         .iter()
         .filter(|e| !problems_only || matches!(s(&e["level"]), "error" | "warn"))
+        .filter(|e| search.is_empty() || s(&e["msg"]).to_lowercase().contains(&search))
         .map(|e| {
             let ts = e["ts"].as_u64().unwrap_or_default();
             let level = s(&e["level"]);
@@ -2576,12 +2666,13 @@ mod tests {
         // The page shows it whole, wrapped, not cut at its start as a path.
         let page = include_str!("../ui/capabilities.slint");
         let shown = page
-            .split("shown: c.command != \"\";")
+            .split("shown: root.unit.command != \"\";")
             .nth(1)
             .and_then(|s| s.split('}').next())
             .unwrap();
-        assert!(shown.trim_start().starts_with("Text {"), "{shown}");
-        assert!(shown.contains("text: c.command;"), "{shown}");
+        let body = shown.trim_start().trim_start_matches("gap: Space.md;");
+        assert!(body.trim_start().starts_with("Text {"), "{shown}");
+        assert!(shown.contains("text: root.unit.command;"), "{shown}");
         assert!(shown.contains("wrap: char-wrap;"), "{shown}");
     }
 
@@ -2667,6 +2758,27 @@ mod tests {
         assert_eq!(row("lamp.on").left_out, "for windows only");
         assert!(!row("lamp").switchable && !row("lamp.on").switchable);
         assert_eq!(row("lamp.on").summary, "");
+        // The groups of the page: each row knows its capability's place,
+        // and each capability counts its units.
+        let groups: Vec<(i32, i32)> = rows.iter().map(|r| (r.group, r.units)).collect();
+        assert_eq!(
+            groups,
+            [
+                (0, 1),
+                (0, 0),
+                (1, 1),
+                (1, 0),
+                (2, 1),
+                (2, 0),
+                (3, 1),
+                (3, 0),
+                (4, 2),
+                (4, 0),
+                (4, 0),
+                (5, 1),
+                (5, 0)
+            ]
+        );
         // No center paired: no switch, nothing now.
         assert!(
             cap_rows(&v, "")
@@ -2947,15 +3059,91 @@ mod tests {
             json!({"ts": NOW, "level": "info", "msg": "node started"}),
             json!({"ts": NOW, "level": "warn", "msg": "link dropped", "node": "web-1"}),
         ];
-        let rows = log_rows(&lines, false, NOW);
+        let rows = log_rows(&lines, false, "", NOW);
         assert_eq!(rows.len(), 3);
         assert_eq!(
             (rows[0].level.as_str(), rows[0].tone),
             ("Error", Tone::Danger)
         );
-        let rows = log_rows(&lines, true, NOW);
+        let rows = log_rows(&lines, true, "", NOW);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].msg, "link dropped (web-1)");
+        // The search bar: words of the message, in any case.
+        let rows = log_rows(&lines, false, " Link ", NOW);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg, "link dropped (web-1)");
+        assert!(log_rows(&lines, true, "started", NOW).is_empty());
+    }
+
+    #[test]
+    fn a_typed_folder_is_a_whole_path() {
+        let home = Path::new(if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            "/home/me"
+        });
+        let whole = if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        };
+        assert_eq!(typed_folder(&format!(" {whole} "), home).unwrap(), whole);
+        // `~` is the owner's home, as in the CLI's own examples.
+        assert_eq!(
+            typed_folder("~/code", home).unwrap(),
+            format!("{}/code", home.display())
+        );
+        assert_eq!(typed_folder("~", home).unwrap(), home.display().to_string());
+        // The node would join these to the folder the app runs in.
+        for relative in ["code", "./code", "~me/code", "-rf"] {
+            let e = typed_folder(relative, home).unwrap_err();
+            assert!(e.contains("whole path"), "{relative}: {e}");
+        }
+    }
+
+    #[test]
+    fn what_folder_add_stored_is_read_from_its_answer() {
+        let said = [
+            "note: nothing",
+            "home: folder /var/home/me/my proj rw-",
+            "home: folder ignored r--",
+        ];
+        assert_eq!(
+            stored_folder(said.into_iter()).as_deref(),
+            Some("/var/home/me/my proj")
+        );
+        assert_eq!(stored_folder(["note: nothing"].into_iter()), None);
+        // Another spelling of one place is that place.
+        assert!(same_folder("/home/me/proj/", "/home/me/proj"));
+        assert!(same_folder("/home/me/./proj", "/home/me/proj"));
+        assert!(!same_folder("/home/me/proj2", "/home/me/proj"));
+        assert!(!same_folder("/home/me/proj/sub", "/home/me/proj"));
+    }
+
+    #[test]
+    fn a_pick_follows_its_row_as_rows_come() {
+        let same = |a: &&str, b: &&str| a == b;
+        // Newest first: two lines come in front, the pick moves down two.
+        let old = ["c", "b", "a"];
+        let new = ["e", "d", "c", "b", "a"];
+        assert_eq!(follow_pick(&old, 1, &new, true, same), 3);
+        // Nothing picked yet (-1): the page follows the first row.
+        assert_eq!(follow_pick(&old, -1, &new, true, same), -1);
+        // A row that fell off the end is gone.
+        assert_eq!(follow_pick(&old, 2, &["e", "d", "c", "b"], true, same), -1);
+        // Equal lines keep their rank from the old end: the second "x" from
+        // the end stays that one when another "x" comes in front.
+        let old = ["x", "x", "y"];
+        let new = ["x", "x", "x", "y"];
+        assert_eq!(follow_pick(&old, 0, &new, true, same), 1);
+        assert_eq!(follow_pick(&old, 1, &new, true, same), 2);
+        // Oldest first: rows come at the end, a pick keeps its place.
+        assert_eq!(
+            follow_pick(&["a", "b"], 1, &["a", "b", "c"], false, same),
+            1
+        );
+        // A pick past the end means the last row, as the page shows it.
+        assert_eq!(follow_pick(&old, 9, &new, true, same), 3);
     }
 
     #[test]

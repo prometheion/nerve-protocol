@@ -116,6 +116,10 @@ export struct CapRow {
     // Whether the center may use it now, as the running node said: on,
     // off, or "" while the node does not run.
     now: string,
+    // The capability it belongs to, by its place among the capabilities
+    // (the page's groups), and on a capability the count of its units.
+    group: int,
+    units: int,
 }
 
 // A capability of node.toml the owner declared (`cap add`), to edit or

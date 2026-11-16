@@ -2,7 +2,7 @@
 // from these only, so a button or a card looks the same everywhere.
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape } from "theme.slint";
 
 export component Icon inherits Image {
     in property <length> size: Size.icon;
@@ -601,42 +601,6 @@ export component PageHeader {
     }
 }
 
-// The head of a group on a page, with its icon in the group's colour.
-export component SectionTitle {
-    in property <string> text;
-    in property <string> detail;
-    in property <image> icon;
-    in property <Tone> tone: Tone.accent;
-    HorizontalLayout {
-        spacing: Space.sm;
-        if root.icon.width > 0: VerticalLayout {
-            alignment: center;
-            Icon {
-                source: root.icon;
-                colorize: Theme.tone(root.tone);
-                size: Size.icon-lg;
-            }
-        }
-        Text {
-            text: root.text;
-            color: Theme.text;
-            font-size: Type.heading;
-            font-weight: Type.semibold;
-            vertical-alignment: center;
-        }
-        if root.detail != "": Text {
-            text: root.detail;
-            color: Theme.text-faint;
-            font-size: Type.small;
-            vertical-alignment: center;
-        }
-        Rectangle {
-            horizontal-stretch: 1;
-        }
-        @children
-    }
-}
-
 export component NavItem {
     in property <image> icon;
     in property <string> text;
@@ -877,9 +841,14 @@ export component Picker {
 export component Segmented {
     in property <[string]> options;
     in property <int> current;
+    // In a list's row: lower, with smaller text.
+    in property <bool> small;
+    in property <string> label;
     callback chosen(int);
     horizontal-stretch: 0;
-    height: Size.control;
+    height: root.small ? 26px : Size.control;
+    accessible-role: tab-list;
+    accessible-label: root.label;
     forward-focus: focus;
     Rectangle {
         background: Theme.inset;
@@ -895,7 +864,7 @@ export component Segmented {
         shown: focus.has-focus;
     }
     HorizontalLayout {
-        padding: 3px;
+        padding: root.small ? 2px : 3px;
         spacing: 2px;
         for option[i] in root.options: Rectangle {
             border-radius: Radius.sm;
@@ -906,12 +875,12 @@ export component Segmented {
             accessible-label: option;
             accessible-item-selected: i == root.current;
             HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
+                padding-left: root.small ? 9px : 12px;
+                padding-right: root.small ? 9px : 12px;
                 Text {
                     text: option;
                     color: i == root.current ? Theme.accent-text : Theme.text-muted;
-                    font-size: Type.small;
+                    font-size: root.small ? Type.caption : Type.small;
                     font-weight: i == root.current ? Type.semibold : Type.medium;
                     vertical-alignment: center;
                     horizontal-alignment: center;
@@ -1020,170 +989,6 @@ export component SchemeSwitch {
                 return accept;
             }
             reject
-        }
-    }
-}
-
-// The tabs of a page: their names in a row on a line, the open one marked
-// in the accent. One stop of the Tab key; the arrow keys go to the next.
-export component TabBar {
-    in property <[string]> tabs;
-    in property <int> current;
-    callback chosen(int);
-    forward-focus: focus;
-    accessible-role: tab-list;
-    VerticalLayout {
-        HorizontalLayout {
-            spacing: 2px;
-            alignment: start;
-            for name[i] in root.tabs: Rectangle {
-                height: 38px;
-                accessible-role: tab;
-                accessible-label: name;
-                accessible-item-selected: i == root.current;
-                FocusRing {
-                    x: -3px;
-                    y: -3px;
-                    width: parent.width + 6px;
-                    height: parent.height + 6px;
-                    shown: focus.has-focus && i == root.current;
-                    radius: Radius.sm;
-                }
-                Rectangle {
-                    border-radius: Radius.sm;
-                    background: t.has-hover && i != root.current ? Theme.hover : transparent;
-                }
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    Text {
-                        text: name;
-                        color: i == root.current ? Theme.accent-text : Theme.text-muted;
-                        font-size: Type.body;
-                        font-weight: i == root.current ? Type.semibold : Type.medium;
-                        vertical-alignment: center;
-                    }
-                }
-                Rectangle {
-                    y: parent.height - self.height;
-                    height: 3px;
-                    border-radius: 1.5px;
-                    background: Theme.accent;
-                    visible: i == root.current;
-                }
-                t := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => {
-                        root.chosen(i);
-                    }
-                }
-            }
-        }
-        Divider { }
-    }
-    focus := FocusScope {
-        focus-on-click: false;
-        key-pressed(event) => {
-            if (event.text == Key.LeftArrow && root.current > 0) {
-                root.chosen(root.current - 1);
-                return accept;
-            }
-            if (event.text == Key.RightArrow && root.current < root.tabs.length - 1) {
-                root.chosen(root.current + 1);
-                return accept;
-            }
-            reject
-        }
-    }
-}
-
-// A part that opens on a click, such as a question and its answer: its head
-// stays, its body shows while it is open. The page keeps which is open.
-export component Expander inherits Rectangle {
-    in property <string> title;
-    in property <image> icon;
-    in property <bool> open;
-    callback toggled();
-    background: Theme.surface;
-    border-radius: Radius.lg;
-    border-width: 1px;
-    border-color: root.open ? Theme.accent.transparentize(0.55) : Theme.border;
-    animate border-color { duration: Motion.base; }
-    height: self.preferred-height;
-    VerticalLayout {
-        Rectangle {
-            accessible-role: button;
-            accessible-label: root.title;
-            accessible-expandable: true;
-            accessible-expanded: root.open;
-            accessible-action-default => {
-                root.toggled();
-            }
-            FocusRing {
-                x: -3px;
-                y: -3px;
-                width: parent.width + 6px;
-                height: parent.height + 6px;
-                shown: focus.has-focus;
-                radius: Radius.lg;
-            }
-            HorizontalLayout {
-                padding-left: Space.xl;
-                padding-right: Space.lg;
-                padding-top: 13px;
-                padding-bottom: 13px;
-                spacing: Space.md;
-                if root.icon.width > 0: VerticalLayout {
-                    alignment: center;
-                    Icon {
-                        source: root.icon;
-                        colorize: Theme.accent-text;
-                    }
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.title;
-                    color: Theme.text;
-                    font-size: Type.body;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                }
-                VerticalLayout {
-                    alignment: center;
-                    Icon {
-                        source: root.open ? @image-url("icons/chev.svg") : @image-url("icons/chev-right.svg");
-                        colorize: root.open ? Theme.accent-text : Theme.text-muted;
-                    }
-                }
-            }
-            TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                clicked => {
-                    root.toggled();
-                }
-            }
-            focus := FocusScope {
-                focus-on-click: false;
-                key-pressed(event) => {
-                    if (event.text == " " || event.text == Key.Return) {
-                        root.toggled();
-                        return accept;
-                    }
-                    reject
-                }
-            }
-        }
-        Reveal {
-            shown: root.open;
-            smooth: true;
-            VerticalLayout {
-                padding-left: Space.xl;
-                padding-right: Space.xl;
-                padding-bottom: Space.lg;
-                spacing: Space.sm;
-                @children
-            }
         }
     }
 }
@@ -1701,14 +1506,22 @@ export component Toast inherits Rectangle {
     }
 }
 
-// A page: its content scrolls, at most Size.content-max wide, in the middle.
-// A page that opens rises a little and fades in.
+// A page: its content scrolls, one scroll for the whole page, at most
+// Size.page-max wide, in the middle. A page that opens rises a little and
+// fades in. Its lists grow with their rows; only a details pane taller than
+// the window scrolls on its own (DetailsPane).
 export component PageFrame {
     // The space between the page's parts; a page whose parts are Reveals
     // sets 0 and gives each its gap.
     in property <length> gap: Space.xxl;
-    // The side margins grow on a wide window, so the content keeps its width.
-    property <length> side: max(Space.page, (scroll.visible-width - Size.content-max) / 2);
+    // Where the page's visible part starts in the window, and its height:
+    // a details pane keeps itself in it while the list scrolls.
+    out property <length> view-top: self.absolute-position.y;
+    out property <length> view-height: scroll.visible-height;
+    // The side margins grow on a very wide window, so the content keeps its
+    // width; a small window keeps less of them.
+    property <length> pad: Shape.wide ? Space.page : Space.xxl;
+    property <length> side: max(root.pad, (scroll.visible-width - Size.page-max) / 2);
     // How far it came in, 0 to 1.
     property <float> came: 0;
     animate came {
@@ -1729,68 +1542,11 @@ export component PageFrame {
             width: scroll.visible-width;
             padding-left: root.side;
             padding-right: root.side;
-            padding-top: 28px;
+            padding-top: Shape.wide ? 28px : Space.xxl;
             padding-bottom: Space.page;
             spacing: root.gap;
             alignment: start;
             @children
-        }
-    }
-}
-
-// A number or state at a glance, on the overview.
-export component StatTile inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
-    in property <string> value;
-    in property <string> detail;
-    in property <Tone> tone: Tone.accent;
-    background: Theme.surface;
-    border-radius: Radius.lg;
-    border-width: 1px;
-    border-color: Theme.border;
-    // The same start for every tile, so a row of them shares the width.
-    horizontal-stretch: 1;
-    preferred-width: 160px;
-    // A row of tiles is as high as its tallest; the others keep their lines
-    // at the top, so the labels and values line up across the row.
-    VerticalLayout {
-        padding: Space.lg + 2px;
-        spacing: Space.sm;
-        alignment: start;
-        HorizontalLayout {
-            spacing: Space.sm;
-            VerticalLayout {
-                alignment: center;
-                Icon {
-                    source: root.icon;
-                    colorize: Theme.tone(root.tone);
-                }
-            }
-            Text {
-                text: root.label;
-                color: Theme.text-muted;
-                font-size: Type.small;
-                font-weight: Type.medium;
-                vertical-alignment: center;
-                overflow: elide;
-                min-width: 0;
-            }
-        }
-        // Long words elide, so a row of tiles keeps one width.
-        Text {
-            text: root.value;
-            color: Theme.text;
-            font-size: 20px;
-            font-weight: Type.semibold;
-            overflow: elide;
-            min-width: 0;
-        }
-        Text {
-            text: root.detail;
-            color: Theme.text-faint;
-            font-size: Type.caption;
-            wrap: word-wrap;
         }
     }
 }
@@ -2182,27 +1938,6 @@ export component Steps {
     }
 }
 
-// A row of a list inside a card: its content, and a line above all but the
-// first. A row of a `for`, so it takes its height as Fit does.
-export component ListRow inherits Rectangle {
-    in property <bool> first;
-    height: self.preferred-height;
-    VerticalLayout {
-        Divider {
-            visible: !root.first;
-            height: root.first ? 0 : 1px;
-        }
-        HorizontalLayout {
-            padding-left: Space.xl;
-            padding-right: Space.lg;
-            padding-top: 10px;
-            padding-bottom: 10px;
-            spacing: Space.md;
-            @children
-        }
-    }
-}
-
 // A list that can grow long, in a box of its own: up to `max-rows` rows it
 // is as tall as they are; past them it is `long-height` tall (eight rows and
 // a half, so a cut row says there is more) and scrolls inside, with a scroll
@@ -2266,5 +2001,667 @@ export component ScrollBox {
                 }
             }
         }
+    }
+}
+
+// The list and its details (#231): a list of one-line rows on the left, the
+// picked row's text and settings on the right. From 1100 px (Shape.wide) the
+// two stand side by side; below it they take turns: the list fills the page,
+// and a picked row shows its details there, with Back to the list. One tree
+// for both, so a resize keeps what was typed, the focus and the pick.
+// Its children are a ListPane, a DetailsPane and, where a page has one, a
+// SidePane.
+// The gap between the panes is the panes' own (the details' and a third
+// pane's), so a pane that is not shown leaves none.
+export component Split inherits HorizontalLayout {
+    spacing: 0px;
+}
+
+// The list's side of a Split. Side by side it is `least` to `most` wide, or
+// takes the room with `stretch`; below 1100 px it fills the page until the
+// details open (`open`) and take its place.
+export component ListPane {
+    in property <bool> open;
+    in property <length> least: 260px;
+    in property <length> most: 320px;
+    in property <float> stretch: 0;
+    property <bool> shown: Shape.wide || !root.open;
+    visible: root.shown;
+    horizontal-stretch: Shape.wide ? root.stretch : 1;
+    // A list of its own width takes its most; one that stretches shares
+    // the room with the details by their stretch alone.
+    preferred-width: root.stretch > 0 ? 1px : root.most;
+    min-width: !root.shown ? 0px : Shape.wide ? root.least : 0px;
+    max-width: !root.shown ? 0px : Shape.wide ? root.most : 100000px;
+    // Hidden, it adds nothing to the height of the Split.
+    min-height: 0px;
+    preferred-height: root.shown ? column.preferred-height : 0px;
+    column := VerticalLayout {
+        alignment: start;
+        spacing: Space.md;
+        @children
+    }
+}
+
+// The details' side of a Split. Side by side it stays in view while the page
+// scrolls the list beside it, and scrolls on its own only when it is taller
+// than the window. Below 1100 px it shows only while `open`, in the list's
+// place, with Back to the list above it (`back`).
+export component DetailsPane {
+    in property <bool> open;
+    in property <length> least: 300px;
+    in property <length> most: 100000px;
+    in property <float> stretch: 1;
+    // The page's visible part (PageFrame's view-top and view-height).
+    in property <length> view-top;
+    in property <length> view-height: 100000px;
+    callback back();
+    property <bool> shown: Shape.wide || root.open;
+    // Its gap to the list beside it.
+    property <length> gap: Shape.wide ? Space.lg : 0px;
+    // As tall as its content, side by side up to the window's height less
+    // a margin above and below.
+    property <length> natural: body.preferred-height;
+    out property <length> tall: Shape.wide ? min(root.natural, max(160px, root.view-height - 2 * Space.lg)) : root.natural;
+    visible: root.shown;
+    horizontal-stretch: root.stretch;
+    preferred-width: 1px;
+    min-width: !root.shown ? 0px : Shape.wide ? root.least + root.gap : 0px;
+    max-width: !root.shown ? 0px : Shape.wide ? root.most + root.gap : 100000px;
+    min-height: 0px;
+    preferred-height: root.shown ? root.tall : 0px;
+    // How far it moved down to stay in view: from where the page's visible
+    // part starts, never above its own place nor below the list's end.
+    property <length> follow: Shape.wide ? clamp(root.view-top + Space.lg - root.absolute-position.y, 0px, max(0px, root.height - root.tall)) : 0px;
+    // Only details taller than their room scroll, with a thin bar of their
+    // own over the card's padding; the others take no wheel, so it scrolls
+    // the page.
+    property <bool> long: root.natural > root.tall + 1px;
+    flick := Flickable {
+        x: root.gap;
+        y: root.follow;
+        width: root.width - root.gap;
+        height: root.tall;
+        interactive: root.long;
+        content-width: self.width;
+        content-height: root.natural;
+        // One card, or a VerticalLayout of a few: a hidden part would
+        // still take the spacing of a layout.
+        body := VerticalLayout {
+            width: flick.width;
+            alignment: start;
+            Reveal {
+                shown: !Shape.wide;
+                HorizontalLayout {
+                    alignment: start;
+                    padding-bottom: Space.md;
+                    Button {
+                        text: "Back to the list";
+                        icon: @image-url("icons/arrow-left.svg");
+                        kind: ButtonKind.ghost;
+                        small: true;
+                        clicked => {
+                            root.back();
+                        }
+                    }
+                }
+            }
+            @children
+        }
+    }
+    if root.long: Rectangle {
+        x: root.width - 10px;
+        y: root.follow + Space.sm;
+        width: 6px;
+        height: root.tall - 2 * Space.sm;
+        border-radius: self.width / 2;
+        background: Theme.border;
+        Rectangle {
+            width: parent.width;
+            height: max(28px, parent.height * root.tall / max(1px, root.natural));
+            y: (parent.height - self.height) * (-flick.content-y / max(1px, root.natural - root.tall));
+            border-radius: self.width / 2;
+            background: Theme.text-faint.transparentize(0.3);
+        }
+    }
+}
+
+// A third pane of a Split, from 1800 px only (Shape.large), `pane-width`
+// wide, with its gap on the side of the list: before it (`leading`) or
+// after the details.
+export component SidePane {
+    in property <length> pane-width: 380px;
+    in property <bool> leading;
+    visible: Shape.large;
+    min-width: Shape.large ? root.pane-width + Space.lg : 0px;
+    max-width: Shape.large ? root.pane-width + Space.lg : 0px;
+    min-height: 0px;
+    preferred-height: Shape.large ? column.preferred-height : 0px;
+    column := VerticalLayout {
+        x: root.leading ? 0px : Space.lg;
+        width: root.pane-width;
+        alignment: start;
+        spacing: Space.md;
+        @children
+    }
+}
+
+// The card a list's rows sit in. It is one stop of the Tab key: the arrow
+// keys move the pick up and down (`step`), as the page decides.
+export component ListCard inherits Rectangle {
+    in property <string> label;
+    callback step(int);
+    background: Theme.surface;
+    border-radius: Radius.lg;
+    border-width: 1px;
+    border-color: Theme.border;
+    clip: true;
+    accessible-role: list;
+    accessible-label: root.label;
+    forward-focus: keys;
+    FocusRing {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        shown: keys.has-focus;
+        radius: Radius.lg;
+    }
+    VerticalLayout {
+        padding-bottom: 6px;
+        @children
+    }
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) {
+                root.step(-1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.step(1);
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// The head of a group of rows in a ListCard: its name in small capitals,
+// its count on the right, and what the page puts after them (a switch).
+export component ListGroup {
+    in property <string> text;
+    in property <string> count;
+    in property <bool> mono;
+    in property <bool> collapsed;
+    height: root.collapsed ? 0px : self.preferred-height;
+    visible: !root.collapsed;
+    HorizontalLayout {
+        padding-left: Space.lg;
+        padding-right: Space.lg;
+        padding-top: 14px;
+        padding-bottom: 6px;
+        spacing: Space.sm;
+        Text {
+            text: root.mono ? root.text : root.text.to-uppercase();
+            color: Theme.text-faint;
+            font-size: Type.caption;
+            font-weight: Type.semibold;
+            font-family: root.mono ? Type.mono : "";
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        @children
+        Text {
+            text: root.count;
+            color: Theme.text-faint;
+            font-size: Type.caption;
+            font-weight: Type.medium;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A dense row of a ListCard, one line (or two with `tall`): a click picks
+// it, and the picked one is marked with the accent. A row of a `for`, so it
+// takes its height as Fit does. What sits in it (a switch, a button) takes
+// its own clicks.
+export component ListItem inherits Rectangle {
+    in property <bool> selected;
+    in property <bool> first;
+    in property <bool> tall;
+    in property <string> label;
+    in property <bool> pickable: true;
+    // Its least height: a row of one line, or of two.
+    in property <length> least: root.tall ? 52px : 40px;
+    // Not shown, and no room taken (a group of the list that is not the
+    // one picked).
+    in property <bool> collapsed;
+    callback clicked();
+    height: root.collapsed ? 0px : max(root.least, self.preferred-height);
+    visible: !root.collapsed;
+    background: root.selected ? Theme.accent-soft : touch.has-hover && root.pickable ? Theme.hover : transparent;
+    animate background { duration: Motion.quick; }
+    accessible-role: list-item;
+    accessible-label: root.label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.clicked();
+    }
+    touch := TouchArea {
+        enabled: root.pickable;
+        mouse-cursor: root.pickable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.clicked();
+        }
+    }
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.border;
+        visible: !root.first;
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        background: Theme.accent;
+        visible: root.selected;
+    }
+    HorizontalLayout {
+        padding-left: Space.lg;
+        padding-right: Space.lg;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 10px;
+        @children
+    }
+}
+
+// The row at the end of a group that adds one more: "Add a folder…". It is
+// marked while its form is open.
+export component AddItem inherits ListItem {
+    in property <string> text;
+    in property <bool> active;
+    least: 38px;
+    selected: root.active;
+    label: root.text;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: @image-url("icons/plus.svg");
+            colorize: Theme.accent-text;
+        }
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.text;
+        color: Theme.accent-text;
+        font-size: Type.body;
+        font-weight: Type.medium;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// A switch above a list: one group of the list at a time, each with its
+// count. One stop of the Tab key; the arrow keys choose. Its choices wrap to
+// a second line where the list is too narrow for one.
+export component ListSwitch {
+    in property <[string]> options;
+    in property <[string]> counts;
+    in property <int> current;
+    in property <string> label;
+    callback chosen(int);
+    forward-focus: focus;
+    accessible-role: tab-list;
+    accessible-label: root.label;
+    Rectangle {
+        background: Theme.inset;
+        border-radius: Radius.md;
+        border-width: 1px;
+        border-color: Theme.border;
+    }
+    FocusRing {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        shown: focus.has-focus;
+    }
+    FlexboxLayout {
+        padding: 3px;
+        spacing: 2px;
+        alignment: stretch;
+        for option[i] in root.options: Rectangle {
+            height: Size.control - 6px;
+            horizontal-stretch: 1;
+            preferred-width: line.preferred-width;
+            border-radius: Radius.sm;
+            background: i == root.current ? Theme.surface : t.has-hover ? Theme.hover : transparent;
+            border-width: i == root.current ? 1px : 0;
+            border-color: Theme.dark ? Theme.border-strong : Theme.border;
+            accessible-role: tab;
+            accessible-label: option;
+            accessible-item-selected: i == root.current;
+            line := HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: option;
+                    color: i == root.current ? Theme.accent-text : Theme.text-muted;
+                    font-size: Type.small;
+                    font-weight: i == root.current ? Type.semibold : Type.medium;
+                    vertical-alignment: center;
+                }
+                if i < root.counts.length && root.counts[i] != "": Text {
+                    text: root.counts[i];
+                    color: Theme.text-faint;
+                    font-size: Type.small;
+                    vertical-alignment: center;
+                }
+            }
+            t := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.chosen(i);
+                }
+            }
+        }
+    }
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow && root.current > 0) {
+                root.chosen(root.current - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.current < root.options.length - 1) {
+                root.chosen(root.current + 1);
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// A remove button in a row that asks in its place before it removes:
+// "Remove? Cancel Remove". The page keeps which row asks (`asking`), so one
+// asks at a time.
+export component RemoveAsk {
+    in property <bool> asking;
+    in property <string> label;
+    in property <string> question: "Remove?";
+    in property <string> confirm: "Remove";
+    in property <bool> busy;
+    callback ask();
+    callback cancel();
+    callback confirmed();
+    HorizontalLayout {
+        spacing: Space.xs;
+        alignment: end;
+        if !root.asking: Button {
+            icon: @image-url("icons/trash.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            accessible-label: root.label;
+            clicked => {
+                root.ask();
+            }
+        }
+        if root.asking: Text {
+            text: root.question;
+            color: Theme.danger;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+        }
+        if root.asking: Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                root.cancel();
+            }
+        }
+        if root.asking: Button {
+            text: root.confirm;
+            kind: ButtonKind.danger;
+            small: true;
+            busy: root.busy;
+            accessible-label: root.label;
+            clicked => {
+                root.confirmed();
+            }
+        }
+    }
+}
+
+// Cancel and the main button of a form: at the right of a form row's last
+// line, or at the foot of a form in the details pane.
+export component FormButtons inherits HorizontalLayout {
+    in property <string> save-text: "Save";
+    in property <bool> busy;
+    in property <bool> can-save: true;
+    callback save();
+    callback cancel();
+    alignment: end;
+    spacing: Space.sm;
+    Button {
+        text: "Cancel";
+        kind: ButtonKind.ghost;
+        small: true;
+        clicked => {
+            root.cancel();
+        }
+    }
+    Button {
+        text: root.save-text;
+        icon: @image-url("icons/check.svg");
+        kind: ButtonKind.primary;
+        small: true;
+        busy: root.busy;
+        enabled: root.can-save;
+        clicked => {
+            root.save();
+        }
+    }
+}
+
+// The foot of a form in the details pane: what went wrong when the last
+// try failed, then its buttons.
+component FormFoot inherits VerticalLayout {
+    in property <string> error;
+    in property <string> error-title;
+    in property <string> save-text;
+    in property <bool> busy;
+    in property <bool> can-save;
+    callback save();
+    callback cancel();
+    spacing: Space.md;
+    Reveal {
+        shown: root.error != "";
+        smooth: true;
+        Banner {
+            tone: Tone.danger;
+            title: root.error-title;
+            text: root.error;
+        }
+    }
+    FormButtons {
+        save-text: root.save-text;
+        busy: root.busy;
+        can-save: root.can-save;
+        save => {
+            root.save();
+        }
+        cancel => {
+            root.cancel();
+        }
+    }
+}
+
+// A form in the details pane, for adding a thing or changing one: its head,
+// its fields, and Cancel and Save at its foot. Escape cancels; Enter saves
+// unless a field takes the key itself.
+export component PaneForm {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> subtitle;
+    // The rest of the subtitle, folded under it.
+    in property <string> subtitle-more;
+    in property <string> error;
+    in property <string> error-title;
+    in property <string> save-text: "Save";
+    in property <bool> busy;
+    in property <bool> can-save: true;
+    callback save();
+    callback cancel();
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && root.can-save && !root.busy) {
+                root.save();
+                return accept;
+            }
+            reject
+        }
+        Rectangle {
+            background: Theme.surface;
+            border-radius: Radius.lg;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: Space.xl;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    if root.icon.width > 0: VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            source: root.icon;
+                            colorize: Theme.text;
+                            size: Size.icon-lg;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.title;
+                        color: Theme.text;
+                        font-size: Type.heading;
+                        font-weight: Type.semibold;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+                Reveal {
+                    shown: root.subtitle != "";
+                    Text {
+                        text: root.subtitle;
+                        color: Theme.text-muted;
+                        font-size: Type.body;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.subtitle-more != "": Fold {
+                    more: root.subtitle-more;
+                }
+                @children
+                FormFoot {
+                    error: root.error;
+                    error-title: root.error-title;
+                    save-text: root.save-text;
+                    busy: root.busy;
+                    can-save: root.can-save;
+                    save => {
+                        root.save();
+                    }
+                    cancel => {
+                        root.cancel();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A row of a list that became a form: a new one at the list's end, or a row
+// changed in place. Its lines are the page's, the last one ending in
+// FormButtons; what went wrong shows below them. Escape cancels; Enter
+// saves unless a field takes it.
+export component FormRow inherits Rectangle {
+    in property <string> error;
+    in property <bool> can-save: true;
+    in property <bool> busy;
+    in property <bool> first;
+    callback save();
+    callback cancel();
+    height: self.preferred-height;
+    background: Theme.surface-alt;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && root.can-save && !root.busy) {
+                root.save();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            Rectangle {
+                height: root.first ? 0px : 1px;
+                background: Theme.border;
+            }
+            VerticalLayout {
+                padding-left: Space.lg;
+                padding-right: Space.lg;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: Space.sm;
+                @children
+                Reveal {
+                    shown: root.error != "";
+                    Text {
+                        text: root.error;
+                        color: Theme.danger;
+                        font-size: Type.caption;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The card of a details pane: one thing's head, text and settings.
+export component DetailCard inherits Card {
+    pad: Space.xl;
+    gap: Space.lg;
+}
+
+// One fact of a details pane: its name on the left, the value (the
+// children) on the right.
+export component Fact {
+    in property <string> label;
+    HorizontalLayout {
+        spacing: Space.lg;
+        Text {
+            width: 132px;
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        @children
     }
 }

@@ -38,6 +38,8 @@ impl Ctl {
                 None => {
                     p.set_current(0);
                     p.set_center(names.first().map(String::as_str).unwrap_or("").into());
+                    // The center the forms were opened for is gone.
+                    close_forms(p);
                 }
             }
         });
@@ -281,13 +283,28 @@ impl Ctl {
     /// again. `close` runs on success (a dialog that closes).
     fn perm_change(
         self: &Rc<Self>,
+        args: Vec<String>,
+        input: Option<String>,
+        said: String,
+        close: fn(&Ctl),
+        failed: fn(&Ctl, String),
+    ) {
+        let center = self.perm_center();
+        self.perm_change_on(&center, args, input, said, close, failed);
+    }
+
+    /// [`Ctl::perm_change`] for the center named, not the one picked now:
+    /// the second command of a move must reach the center of the first.
+    fn perm_change_on(
+        self: &Rc<Self>,
+        center: &str,
         mut args: Vec<String>,
         input: Option<String>,
         said: String,
         close: fn(&Ctl),
         failed: fn(&Ctl, String),
     ) {
-        args.push(format!("--center={}", self.perm_center()));
+        args.push(format!("--center={center}"));
         self.command(args, input, move |c, answer| {
             match answer {
                 Ok(v) => {
@@ -377,10 +394,15 @@ impl Ctl {
                         return;
                     }
                     c.with_perm(|p| {
+                        // Into the open form row, as it is; a new one starts
+                        // with reading only.
+                        if !p.get_folder_open() {
+                            p.set_folder_edit(SharedString::new());
+                            p.set_folder_read(true);
+                            p.set_folder_write(false);
+                            p.set_folder_execute(false);
+                        }
                         p.set_folder_path(path.display().to_string().into());
-                        p.set_folder_read(true);
-                        p.set_folder_write(false);
-                        p.set_folder_execute(false);
                         p.set_folder_error(SharedString::new());
                         p.set_folder_open(true);
                     });
@@ -389,16 +411,30 @@ impl Ctl {
         );
     }
 
+    /// Saves the folder form row: a new folder, or the folder it changes,
+    /// which a new path moves (the new one is added, then the old one goes).
     fn folder_add(self: &Rc<Self>) {
-        let Some((path, r, w, x)) = self.with_perm(|p| {
+        let Some((path, r, w, x, was)) = self.with_perm(|p| {
             (
-                p.get_folder_path().to_string(),
+                p.get_folder_path().trim().to_string(),
                 p.get_folder_read(),
                 p.get_folder_write(),
                 p.get_folder_execute(),
+                p.get_folder_edit().to_string(),
             )
         }) else {
             return;
+        };
+        if path.is_empty() {
+            self.with_perm(|p| p.set_folder_error("Choose a folder.".into()));
+            return;
+        }
+        let path = match view::typed_folder(&path, &nerve_node::paths::home_dir()) {
+            Ok(path) => path,
+            Err(e) => {
+                self.with_perm(|p| p.set_folder_error(e.into()));
+                return;
+            }
         };
         // A new folder gets some right; `none` is for closing one inside
         // another, which a folder's row does.
@@ -406,23 +442,51 @@ impl Ctl {
             self.with_perm(|p| p.set_folder_error("Choose at least one right.".into()));
             return;
         }
+        // The center the form was opened for: the owner may pick another
+        // while the node walks the new folder, and the old grant goes from
+        // this one.
+        let center = self.perm_center();
+        // Behind `--`, so that a path is never read as a flag.
         let args = vec![
             "folder".into(),
             "add".into(),
+            format!("--center={center}"),
+            "--".into(),
             path.clone(),
             view::rights(r, w, x),
         ];
-        self.perm_change(
-            args,
-            None,
-            format!("{path} is added."),
-            |c| {
-                c.with_perm(|p| p.set_folder_open(false));
-            },
-            |c, e| {
-                c.with_perm(|p| p.set_folder_error(e.into()));
-            },
-        );
+        self.command(args, None, move |c, answer| {
+            match answer {
+                Ok(v) => {
+                    c.with_perm(|p| {
+                        p.set_folder_open(false);
+                        p.set_folder_edit(SharedString::new());
+                    });
+                    // Another spelling of the folder it changes (a closing
+                    // `/`, a link on the way) is that folder: the node
+                    // stored it at the same place, and removing the old
+                    // path would take the grant away again.
+                    let stored = view::stored_folder(super::lines(&v)).unwrap_or(path.clone());
+                    let moved = !was.is_empty() && !view::same_folder(&was, &stored);
+                    c.done(
+                        &v,
+                        if !was.is_empty() && !moved {
+                            format!("The rights of {path} changed.")
+                        } else {
+                            format!("{path} is added.")
+                        },
+                    );
+                    if moved {
+                        c.folder_remove_on(&center, &was);
+                    }
+                }
+                Err(e) => {
+                    c.with_perm(|p| p.set_folder_error(e.into()));
+                }
+            }
+            c.refresh_status();
+            c.perm_load();
+        });
     }
 
     /// Walks every folder grant again (`folder sync`), so what was moved
@@ -456,8 +520,14 @@ impl Ctl {
     }
 
     fn folder_remove(self: &Rc<Self>, path: &str) {
+        let center = self.perm_center();
+        self.folder_remove_on(&center, path);
+    }
+
+    fn folder_remove_on(self: &Rc<Self>, center: &str, path: &str) {
         let args = vec!["folder".into(), "rm".into(), path.into()];
-        self.perm_change(
+        self.perm_change_on(
+            center,
             args,
             None,
             format!("{path} is removed."),
@@ -487,6 +557,7 @@ impl Ctl {
         let cleared: fn(&Ctl) = match list {
             0 => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_allow_text(SharedString::new());
                     p.set_allow_wild(false);
                     p.set_allow_hint(SharedString::new());
@@ -495,6 +566,7 @@ impl Ctl {
             },
             1 => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_deny_text(SharedString::new());
                     p.set_deny_wild(false);
                     p.set_deny_hint(SharedString::new());
@@ -503,6 +575,7 @@ impl Ctl {
             },
             _ => |c| {
                 c.with_perm(|p| {
+                    p.set_add_list(-1);
                     p.set_sudo_text(SharedString::new());
                     p.set_sudo_wild(false);
                 });
@@ -764,6 +837,15 @@ impl Ctl {
     }
 }
 
+/// Closes the folder and rule form rows. They show one center's rights, so
+/// every change of the page's center closes them.
+fn close_forms(p: &Perm<'_>) {
+    p.set_folder_open(false);
+    p.set_folder_edit(SharedString::new());
+    p.set_add_list(-1);
+    p.set_edit_list(-1);
+}
+
 pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let p = window.global::<Perm>();
     let c = ctl.clone();
@@ -775,6 +857,9 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
             c.with_perm(|p| {
                 p.set_current(i);
                 p.set_center(name);
+                // A form row was opened for the center before, and shows
+                // that center's rights: it would save them to this one.
+                close_forms(p);
             });
             c.perm_load();
         }

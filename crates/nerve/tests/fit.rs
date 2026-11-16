@@ -199,15 +199,6 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         "the relay link's dialog does not fit the window"
     );
     prefs.set_connect_open(false);
-    prefs.set_relay_add_error(
-        "the relay knows a node laptop-2 already; take its link away first".into(),
-    );
-    prefs.set_relay_add_open(true);
-    assert!(
-        bottom(&screen.draw(), 26) == foot,
-        "the dialog of a node's link does not fit the window"
-    );
-    prefs.set_relay_add_open(false);
     store.set_pair_preview(PairPreview {
         center: "http://127.0.0.1:7480".into(),
         tls: false,
@@ -282,15 +273,14 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         "no password field for the account on Windows"
     );
 
-    // The dialog of a capability on a screen of 1280x800, with what is
-    // wrong shown at every field: its card stays in the window, and
-    // scrolls to its buttons, whose main one saves.
+    // The form of a capability in the details pane, on a screen of
+    // 1280x800, with what is wrong shown at every field: taller than the
+    // window, it scrolls on its own to its buttons, whose main one saves.
     screen.resize(ROOM.0 as u32, ROOM.1 as u32);
     store.set_page(Page::Capabilities);
-    store.set_elevate_open(true);
-    let foot = bottom(&screen.draw(), 20);
-    store.set_elevate_open(false);
     let caps = window.global::<Caps>();
+    caps.set_read(true);
+    caps.set_load(Load::Ready);
     let saved = std::rc::Rc::new(std::cell::Cell::new(false));
     let s = saved.clone();
     caps.on_edit_save(move || s.set(true));
@@ -313,46 +303,61 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     }
     // Add is there with the fields not ready: a click shows what is missing.
     caps.set_edit_ready(false);
-    caps.set_edit_open(true);
-    assert!(
-        bottom(&screen.draw(), 20) == foot,
-        "the capability's dialog runs out of the window"
-    );
-    window
-        .window()
-        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
-            position: slint::LogicalPosition::new(640.0, 360.0),
-            delta_x: 0.0,
-            delta_y: -5000.0,
-        });
-    screen.draw();
-    // Add, the last button: right in the card of 640, above its padding.
-    let at = slint::LogicalPosition::new(
-        (ROOM.0 + 640.0) / 2.0 - 24.0 - 24.0,
-        ROOM.1 - 24.0 - 24.0 - 17.0,
-    );
-    for event in [
-        slint::platform::WindowEvent::PointerMoved { position: at },
-        slint::platform::WindowEvent::PointerPressed {
-            position: at,
-            button: slint::platform::PointerEventButton::Left,
-        },
-        slint::platform::WindowEvent::PointerReleased {
-            position: at,
-            button: slint::platform::PointerEventButton::Left,
-        },
-    ] {
-        window.window().dispatch_event(event);
+    // The details pane: right of the list, its 400 px before the margin.
+    let pane = (ROOM.0 - 32.0 - 400.0, ROOM.0 - 32.0);
+    // The page to its end, with the pane in view at its top, then the
+    // form to its end.
+    let to_the_end = || {
+        caps.set_edit_open(true);
+        screen.draw();
+        for x in [400.0, (pane.0 + pane.1) / 2.0] {
+            window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition::new(x, 360.0),
+                    delta_x: 0.0,
+                    delta_y: -5000.0,
+                });
+            screen.draw();
+        }
+    };
+    to_the_end();
+    // Add, the last button: the right-most one low in the pane; a click
+    // that closed the form (Cancel) opens it again.
+    'add: for y in (ROOM.1 as i32 - 120..ROOM.1 as i32).rev().step_by(4) {
+        for x in (pane.0 as i32..pane.1 as i32).rev().step_by(8) {
+            if !caps.get_edit_open() {
+                to_the_end();
+            }
+            let at = slint::LogicalPosition::new(x as f32, y as f32);
+            for event in [
+                slint::platform::WindowEvent::PointerMoved { position: at },
+                slint::platform::WindowEvent::PointerPressed {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+                slint::platform::WindowEvent::PointerReleased {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+            ] {
+                window.window().dispatch_event(event);
+            }
+            if saved.get() {
+                break 'add;
+            }
+        }
     }
     assert!(
         saved.get(),
-        "the dialog's Add is not at the end of its scroll"
+        "the form's Add is not at the end of its scroll"
     );
+    caps.set_edit_open(true);
 
     // The Arguments box holds more lines than it shows, and a TextInput
     // does not scroll itself: the wheel over the box moves its text, and
     // the cursor sent to the end brings the last line into view. The window
-    // is tall for this, so the dialog's own body has nothing to scroll and
+    // is tall for this, so the form's pane has nothing to scroll and
     // only the box takes the wheel; the box is found by where it does.
     screen.resize(ROOM.0 as u32, 1600);
     caps.set_params_scrolled(0.0);
@@ -376,7 +381,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     };
     let mut over = None;
     'find: for y in (0..1600).step_by(8) {
-        for x in [380.0, 450.0, 520.0, 600.0, 680.0, 760.0, 840.0, 900.0] {
+        for x in [870.0, 930.0, 990.0, 1050.0, 1110.0, 1170.0, 1230.0] {
             probe(x, y as f32, -20.0);
             if caps.get_params_scrolled() < 0.0 {
                 over = Some((x, y as f32));
@@ -470,7 +475,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         "the box did not follow the cursor back to the first line"
     );
     // Enter in a one-line field saves, as it does with no field focused:
-    // the TextField takes the key for its own `accepted`, so the dialog's
+    // the TextField takes the key for its own `accepted`, so the form's
     // `enter` never sees it. Each field is found by a click that a typed
     // letter then lands in.
     let tap = |x: f32, y: f32| {
@@ -500,7 +505,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     };
     let mut entered = [false; 4];
     for y in (0..1600).step_by(6) {
-        for x in [400.0, 640.0, 900.0] {
+        for x in [880.0, 1000.0, 1120.0, 1230.0] {
             if !caps.get_edit_open() {
                 caps.set_edit_open(true);
                 screen.draw();
@@ -519,7 +524,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
             key(slint::platform::Key::Return.into());
             assert!(
                 saved.get(),
-                "Enter in the dialog's field {i} (name, time limit, summary, command) does not save"
+                "Enter in the form's field {i} (name, time limit, summary, command) does not save"
             );
             entered[i] = true;
         }
@@ -527,7 +532,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
             break;
         }
     }
-    assert_eq!(entered, [true; 4], "a field of the dialog was not found");
+    assert_eq!(entered, [true; 4], "a field of the form was not found");
     caps.set_edit_open(false);
     screen.resize(ROOM.0 as u32, ROOM.1 as u32);
     screen.draw();
@@ -599,4 +604,194 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         2,
         "the look's switch is not at the foot"
     );
+
+    // Every page at the window's four sizes, the least, a small one, a
+    // middle and a large one, its list and its details: nothing runs into
+    // the page's right margin, however long a name, a path or a rule is.
+    // Light only: the layout is the same in dark.
+    store.on_show(|_| {});
+    made_up(&window);
+    for (width, height) in SIZES {
+        screen.resize(width, height);
+        // The margin right of the page, left of its scroll bar.
+        let margin = if width >= 1100 { 32 } else { 24 };
+        let (from, to) = (width as usize - margin + 2, width as usize - 18);
+        for page in [
+            Page::Overview,
+            Page::Centers,
+            Page::Relay,
+            Page::Policy,
+            Page::Capabilities,
+            Page::Audit,
+            Page::Log,
+            Page::Settings,
+            Page::Help,
+        ] {
+            store.set_page(page);
+            for open in [false, true] {
+                store.set_details_open(open);
+                let shot = settled(&screen);
+                let w = shot.width() as usize;
+                let px = shot.as_slice();
+                let background = px[(shot.height() as usize - 1) * w + from];
+                let overrun = (0..shot.height() as usize).find(|y| {
+                    px[y * w + from..y * w + to]
+                        .iter()
+                        .any(|p| *p != background)
+                });
+                assert_eq!(
+                    overrun, None,
+                    "{page:?} at {width}x{height} (details open: {open}) runs into the margin"
+                );
+            }
+        }
+    }
+}
+
+/// The window's sizes the pages fit: the least, a small window, a middle
+/// one and a large one (the breakpoints are 1100 and 1800 px).
+const SIZES: [(u32, u32); 4] = [(900, 580), (1024, 700), (1440, 900), (2200, 1200)];
+
+/// Made-up rows for every page, with long names, paths and rules.
+fn made_up(window: &AppWindow) {
+    use nerve::{
+        AuditRow, CapRow, CenterRow, DeclaredRow, FolderRow, LogRow, NodeStatus, ProgramRow,
+        RelayNodeRow, Tone, TunnelRow,
+    };
+    let long_path = "/home/alex/projects/clients/northwind/infrastructure/terraform/modules/networking/vpc-peering";
+    let long_rule = "exec.run:docker compose -f deploy/docker-compose.production.yml --project-name northwind-platform up -d --remove-orphans";
+    let store = window.global::<Store>();
+    store.set_status_load(Load::Ready);
+    store.set_status(NodeStatus {
+        state: "running".into(),
+        title: "Running".into(),
+        detail: "Each call of a center is checked against your rules.".into(),
+        tone: Tone::Ok,
+        confinement: "landlock v10".into(),
+        centers: 2,
+        connected: 1,
+        limits: "4096 MiB · 200 % · 1024".into(),
+        limits_off: "The service has no cgroup of its own for them.".into(),
+        ..Default::default()
+    });
+    store.set_service_state("running".into());
+    let center = |name: &str| CenterRow {
+        name: name.into(),
+        url: "https://nerve-center.platform-engineering.internal.example.com:8443/teams/nerve"
+            .into(),
+        link: "Connected".into(),
+        link_tone: Tone::Ok,
+        mode: "Folder mode".into(),
+        mode_detail: "What each of its folders allows.".into(),
+        note: "The center no longer takes this machine: pair it again.".into(),
+        note_tone: Tone::Warn,
+        ..Default::default()
+    };
+    store.set_centers(ModelRc::new(VecModel::from(vec![
+        center("home"),
+        center("office-workstation-second-floor"),
+    ])));
+    store.set_audit_read(1);
+    store.set_audit_load(Load::Ready);
+    store.set_audit(ModelRc::new(VecModel::from(vec![AuditRow {
+        kind: "call".into(),
+        tone: Tone::Danger,
+        title: "exec.run".into(),
+        badge: "Refused".into(),
+        center: "office-workstation-second-floor".into(),
+        target: long_rule.into(),
+        detail: "No allow rule matches the command.".into(),
+        when: "2 min ago".into(),
+        rules: true,
+        ..Default::default()
+    }])));
+    let logs = window.global::<nerve::Logs>();
+    logs.set_load(Load::Ready);
+    logs.set_rows(ModelRc::new(VecModel::from(vec![LogRow {
+        tone: Tone::Danger,
+        level: "Error".into(),
+        msg: format!(
+            "center lab: cannot resolve {long_path}, and the link waits for the next try in 30 s"
+        )
+        .into(),
+        when: "2 min ago".into(),
+        when_exact: "2026-11-14 18:02:05 UTC".into(),
+    }])));
+    let perm = window.global::<Perm>();
+    perm.set_centers(ModelRc::new(VecModel::from(vec![
+        SharedString::from("home"),
+        SharedString::from("office-workstation-second-floor"),
+    ])));
+    perm.set_center("home".into());
+    perm.set_read(true);
+    perm.set_load(Load::Ready);
+    perm.set_mode("folder".into());
+    perm.set_folders(ModelRc::new(VecModel::from(vec![FolderRow {
+        path: long_path.into(),
+        read: true,
+        write: true,
+        execute: true,
+    }])));
+    perm.set_deny(ModelRc::new(VecModel::from(vec![SharedString::from(
+        long_rule,
+    )])));
+    perm.set_deny_unfit(ModelRc::new(VecModel::from(vec![SharedString::new()])));
+    let caps = window.global::<Caps>();
+    caps.set_centers(perm.get_centers());
+    caps.set_center("home".into());
+    caps.set_read(true);
+    caps.set_running(true);
+    caps.set_edit_open(false);
+    let unit = |name: &str, action: bool| {
+        CapRow {
+        name: name.into(),
+        action,
+        effect: if action { "execute".into() } else { "".into() },
+        tone: Tone::Accent,
+        source: "built-in".into(),
+        summary: "Runs a command with /bin/sh -c. A command is killed after timeout_ms, after 10 min when you give none, and never runs longer than 1 h.".into(),
+        switchable: true,
+        setting: 1,
+        now: "on".into(),
+        command: long_rule.into(),
+        units: if action { 0 } else { 1 },
+        ..Default::default()
+    }
+    };
+    caps.set_rows(ModelRc::new(VecModel::from(vec![
+        unit("exec", false),
+        unit("exec.run-a-long-name-of-a-unit", true),
+    ])));
+    caps.set_pick_kind(0);
+    caps.set_pick_at(1);
+    caps.set_declared(ModelRc::new(VecModel::from(vec![DeclaredRow {
+        name: "sensors.read".into(),
+        effect: "sense".into(),
+        command: long_rule.into(),
+        detail: "takes arguments, returns JSON".into(),
+        ..Default::default()
+    }])));
+    caps.set_programs(ModelRc::new(VecModel::from(vec![ProgramRow {
+        name: "desk".into(),
+        exe: long_path.into(),
+        attached: "attached".into(),
+    }])));
+    let prefs = window.global::<Prefs>();
+    prefs.set_load(Load::Ready);
+    prefs.set_relay_listen("0.0.0.0:7490".into());
+    prefs.set_relay_pin("Q3hT7c1Lm9VwX2bN8kPz4RsYd6FgJ0uA5eHiKoWq1ZcQ3hT7c1Lm9VwX2bN8kPz4R".into());
+    prefs.set_relay_nodes(ModelRc::new(VecModel::from(vec![RelayNodeRow {
+        name: "build-agent-with-a-long-name-7".into(),
+        reach: "May reach every https center of this node.".into(),
+        live: "2 links".into(),
+        ..Default::default()
+    }])));
+    prefs.set_tunnels(ModelRc::new(VecModel::from(vec![TunnelRow {
+        node: "build-agent-with-a-long-name-7".into(),
+        center: "office-workstation-second-floor".into(),
+        from: "192.0.2.14:51234".into(),
+        since: "2 h 5 min".into(),
+    }])));
+    prefs.set_relay_pick(3);
+    prefs.set_relay_pick_at(0);
 }

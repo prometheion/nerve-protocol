@@ -105,6 +105,9 @@ pub struct Ctl {
     /// pickers offer (after "every").
     audit_filter: RefCell<view::AuditFilter>,
     audit_options: RefCell<(Vec<String>, Vec<String>)>,
+    /// The picked log line or audit entry of a feed that restarts (Refresh,
+    /// Show more): the new feed's rows look for it, until the page is ready.
+    kept: RefCell<Option<live::Kept>>,
     /// The log lines shown, newest first.
     log: RefCell<Vec<Value>>,
     /// The names of the paired centers, and the status, as the node said
@@ -286,6 +289,7 @@ impl Ctl {
             audit: RefCell::new(Vec::new()),
             audit_filter: RefCell::default(),
             audit_options: RefCell::default(),
+            kept: RefCell::new(None),
             log: RefCell::new(Vec::new()),
             centers: RefCell::new(Vec::new()),
             status: RefCell::new(Value::Null),

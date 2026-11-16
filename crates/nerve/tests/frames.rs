@@ -32,6 +32,11 @@ fn save(pixels: &SharedPixelBuffer<Rgba8Pixel>, path: &Path) {
     w.write_image_data(pixels.as_bytes()).unwrap();
 }
 
+/// The task map's groups of Help, the first open or none.
+fn first_group(open: bool) -> slint::ModelRc<bool> {
+    slint::ModelRc::new(slint::VecModel::from(vec![open, false, false, false]))
+}
+
 #[test]
 #[ignore = "writes frames for a person to look at; NERVE_DESKTOP_FRAMES=<folder>"]
 fn every_animation_frame_by_frame() {
@@ -98,8 +103,12 @@ fn every_animation_frame_by_frame() {
         scene("toast-in", scheme, &|| store.set_toast_shown(true));
         scene("toast-out", scheme, &|| store.set_toast_shown(false));
         store.set_page(Page::Help);
-        scene("section-open", scheme, &|| manual.set_keys_open(true));
-        scene("section-close", scheme, &|| manual.set_keys_open(false));
+        scene("section-open", scheme, &|| {
+            manual.set_tasks_open(first_group(true))
+        });
+        scene("section-close", scheme, &|| {
+            manual.set_tasks_open(first_group(false))
+        });
         install.set_shown(true);
         install.set_step("welcome".into());
         scene("installer-step", scheme, &|| {

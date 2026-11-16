@@ -354,11 +354,37 @@ fn the_app_drives_the_cli_end_to_end() {
             .count()
     };
     let before = settings_shown();
+    // Until an entry is picked, the page follows the first; the one picked
+    // stays the picked one while new entries come in front of it.
+    assert_eq!(store.get_audit_pick(), -1);
+    store.set_audit_pick(index_of("git push origin main"));
     store.invoke_audit_rule(index_of("git push origin main"), "allow".into(), true);
     // The change comes in as an entry of its own, live.
     until(&ctl, "the rule's settings entry", || {
         settings_shown() == before + 1
     });
+    let at = store.get_audit_pick() as usize;
+    assert_eq!(
+        store.get_audit().row_data(at).unwrap().target,
+        "git push origin main",
+        "the pick stayed at its place while an entry came"
+    );
+    // Refresh reads the entries again: the pick stays on its entry.
+    let all = store.get_audit().row_count();
+    store.invoke_reload();
+    until(&ctl, "the entries again", || {
+        store.get_audit().row_count() == all && store.get_audit_pick() >= 0
+    });
+    assert_eq!(
+        store
+            .get_audit()
+            .row_data(store.get_audit_pick() as usize)
+            .unwrap()
+            .target,
+        "git push origin main",
+        "Refresh dropped the pick"
+    );
+    store.set_audit_pick(-1);
     store.invoke_audit_rule(index_of("/srv/data/report.txt"), "deny".into(), true);
     until(&ctl, "the second rule", || settings_shown() == before + 2);
     store.invoke_audit_rule(index_of("sudo apt update"), "allow".into(), false);
@@ -535,7 +561,7 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
-    // Nor does the Add dialog make a folder that is written and not read.
+    // Nor does the folder form make a folder that is written and not read.
     perm.invoke_folder_choose();
     perm.set_folder_read(false);
     perm.set_folder_write(true);
@@ -547,6 +573,87 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // The form row of a folder changes it in place: its rights, and a new
+    // path moves the grant there (the old one goes).
+    let moved = root.join("work-moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    perm.set_folder_edit(path.clone());
+    perm.set_folder_path(moved.display().to_string().into());
+    perm.set_folder_read(true);
+    perm.set_folder_write(false);
+    perm.set_folder_execute(true);
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
+    assert_eq!(perm.get_folder_edit(), "");
+    let folders = &config(&paths).centers[0].policy.folders;
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    assert!(
+        folders[0].path.ends_with("work-moved")
+            && folders[0].access.read
+            && !folders[0].access.write
+            && folders[0].access.execute,
+        "{folders:?}"
+    );
+    // Back where it was, for what follows.
+    let moved = perm.get_folders().row_data(0).unwrap().path;
+    perm.set_folder_edit(moved);
+    perm.set_folder_path(path.clone());
+    perm.set_folder_write(true);
+    perm.set_folder_execute(false);
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
+    // Another spelling of the same folder is that folder, not a move: the
+    // node stores it where it was, and the old path must not be removed
+    // behind it.
+    let stored = perm.get_folders().row_data(0).unwrap().path;
+    perm.set_folder_edit(stored.clone());
+    perm.set_folder_path(format!("{stored}{}", std::path::MAIN_SEPARATOR).into());
+    perm.set_folder_read(true);
+    perm.set_folder_write(true);
+    perm.set_folder_execute(true);
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(!perm.get_folder_open(), "{}", perm.get_folder_error());
+    let folders = &config(&paths).centers[0].policy.folders;
+    assert_eq!(
+        folders.len(),
+        1,
+        "the grant went with its move: {folders:?}"
+    );
+    assert!(folders[0].access.execute, "{folders:?}");
+    assert!(
+        store.get_toast().contains("rights"),
+        "said as a move: {}",
+        store.get_toast()
+    );
+    // A typed path is a whole one: the node would join "proj" to the folder
+    // the app runs in.
+    perm.set_folder_edit(slint::SharedString::new());
+    perm.set_folder_path("proj".into());
+    perm.set_folder_open(true);
+    perm.invoke_folder_add();
+    assert!(perm.get_folder_open());
+    assert!(
+        perm.get_folder_error().contains("whole path"),
+        "{}",
+        perm.get_folder_error()
+    );
+    assert_eq!(config(&paths).centers[0].policy.folders.len(), 1);
+    perm.set_folder_open(false);
+    perm.set_folder_error(slint::SharedString::new());
+    // A form row belongs to the center it was opened for: picking a center
+    // closes it, so that it does not save one center's rights to another.
+    perm.set_folder_edit("/somewhere".into());
+    perm.set_folder_open(true);
+    perm.set_add_list(1);
+    perm.set_edit_list(0);
+    perm.invoke_pick(0);
+    assert!(!perm.get_folder_open());
+    assert_eq!(perm.get_folder_edit(), "");
+    assert_eq!(perm.get_add_list(), -1);
+    assert_eq!(perm.get_edit_list(), -1);
     // Sync folders walks the grants again. No node runs here: on Linux the
     // node walks them when it starts, on Windows this command does.
     perm.invoke_folder_sync();
@@ -673,6 +780,21 @@ fn the_app_drives_the_cli_end_to_end() {
     st["owner_full_rights"] = serde_json::json!(false);
     ctl.show_status(Ok(st));
     assert!(!perm.get_owner_is_root() && !perm.get_owner_is_admin());
+    // A center that is unpaired while a form row is open for it: the center
+    // that takes its place must not get the form's rights.
+    perm.set_folder_edit("/somewhere".into());
+    perm.set_folder_open(true);
+    perm.set_add_list(1);
+    perm.set_edit_list(0);
+    ctl.show_status(Ok(
+        serde_json::json!({"daemon": "running", "owner": "alice",
+        "centers": [{"name": "other", "mode": "user", "account": "alice"}]}),
+    ));
+    assert_eq!(perm.get_center(), "other");
+    assert!(!perm.get_folder_open());
+    assert_eq!(perm.get_folder_edit(), "");
+    assert_eq!(perm.get_add_list(), -1);
+    assert_eq!(perm.get_edit_list(), -1);
     ctl.refresh_status();
     until(&ctl, "the node's own status", || {
         perm.get_landlock() && perm.get_home_warning() == "" && perm.get_stale() == ""
@@ -849,6 +971,21 @@ fn the_app_drives_the_cli_end_to_end() {
         (listed.name.as_str(), listed.attached.as_str()),
         ("desk", "")
     );
+    // A second program, then the first allowed again: the form gives way to
+    // the first one's details, in its own place and not after the others.
+    caps.set_program_name("other".into());
+    caps.set_program_exe(program.as_str().into());
+    caps.invoke_program_allow();
+    assert_eq!(caps.get_program_error(), "");
+    assert_eq!((caps.get_pick_kind(), caps.get_pick_at()), (2, 1));
+    caps.set_program_name("desk".into());
+    caps.set_program_exe(program.as_str().into());
+    caps.invoke_program_allow();
+    assert_eq!(caps.get_program_error(), "");
+    assert_eq!(caps.get_programs().row_count(), 2);
+    let at = caps.get_pick_at() as usize;
+    assert_eq!(caps.get_programs().row_data(at).unwrap().name, "desk");
+    caps.invoke_program_remove("other".into());
     caps.invoke_program_remove("desk".into());
     assert!(config(&paths).providers.allowed.is_empty());
     assert_eq!(caps.get_programs().row_count(), 0);
@@ -894,6 +1031,11 @@ fn the_app_drives_the_cli_end_to_end() {
         logs.get_rows().row_count() == 2
     });
     assert_eq!(logs.get_rows().row_data(0).unwrap().msg, "cannot connect");
+    // The line picked stays the picked one while newer ones come; until a
+    // line is picked, the page follows the newest.
+    assert_eq!(logs.get_pick(), -1);
+    logs.set_pick(1);
+    assert_eq!(logs.get_rows().row_data(1).unwrap().msg, "link dropped");
     // How long ago moves on while the node writes nothing new.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -904,6 +1046,10 @@ fn the_app_drives_the_cli_end_to_end() {
         logs.get_rows().row_count() == 3
     });
     assert_eq!(logs.get_rows().row_data(0).unwrap().when, "just now");
+    let at = logs.get_pick() as usize;
+    assert_eq!(at, 2, "the pick stayed at its place while a line came");
+    assert_eq!(logs.get_rows().row_data(at).unwrap().msg, "link dropped");
+    logs.set_pick(-1);
     ctl.refresh_times(now + 2 * 3600 * 1000);
     assert_eq!(logs.get_rows().row_data(0).unwrap().when, "2 h ago");
     // The page shows the newest lines, and more when asked.
@@ -912,9 +1058,44 @@ fn the_app_drives_the_cli_end_to_end() {
     until(&ctl, "the two newest lines", || {
         logs.get_rows().row_count() == 2
     });
+    // The search goes over the lines the page read, and the page says how
+    // many that are: the footer that reads further back stays while the
+    // search narrows the list.
+    assert_eq!(logs.get_read(), 2);
+    logs.set_search("link dropped".into());
+    logs.invoke_searched();
+    assert_eq!(logs.get_rows().row_count(), 0, "an older line than read");
+    assert!(logs.get_read() >= logs.get_limit());
+    logs.set_search("LINK UP".into());
+    logs.invoke_searched();
+    assert_eq!(logs.get_rows().row_count(), 1);
+    assert_eq!(logs.get_rows().row_data(0).unwrap().msg, "link up");
     logs.invoke_more();
     assert_eq!(logs.get_limit(), 1000);
+    until(&ctl, "the older line", || logs.get_read() == 3);
+    logs.set_search("link dropped".into());
+    logs.invoke_searched();
+    assert_eq!(logs.get_rows().row_count(), 1);
+    logs.set_search("".into());
+    logs.invoke_searched();
     until(&ctl, "every line", || logs.get_rows().row_count() == 3);
+    // Refresh and Show more read the lines again: the pick stays on its
+    // line.
+    logs.set_pick(2);
+    assert_eq!(logs.get_rows().row_data(2).unwrap().msg, "link dropped");
+    logs.set_read(99);
+    store.invoke_reload();
+    assert_eq!(logs.get_read(), 0, "a search would name lines never read");
+    until(&ctl, "the line again", || {
+        logs.get_rows().row_count() == 3 && logs.get_pick() >= 0
+    });
+    let at = logs.get_pick() as usize;
+    assert_eq!(
+        logs.get_rows().row_data(at).unwrap().msg,
+        "link dropped",
+        "Refresh dropped the pick"
+    );
+    logs.set_pick(-1);
     // The problems come from the whole log: a warning shows behind newer
     // lines that are none, more than the page shows.
     logged_level(&paths, now, "info", "linked");

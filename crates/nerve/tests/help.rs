@@ -1,21 +1,19 @@
-//! Help's parts open each on their own: the task map first, then opening
-//! the command reference leaves the keyboard's shortcuts open; on Windows
-//! the reference is there too. One test: Slint takes one platform per
-//! process.
+//! Help's sections come from a list beside them, and the task map's
+//! groups open each on their own; on Windows the reference is there too.
+//! One test: Slint takes one platform per process.
 
 use nerve::app::{Ctl, Exec};
 use nerve::headless::Screen;
 use nerve::runner::Runner;
 use nerve::{AppWindow, Install, Manual, Page, Store};
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition};
+use slint::{ComponentHandle, LogicalPosition, Model};
 
-// Tall enough for the task map, which a closed Expander still takes room for
-// until its animation ran, the keys and the reference's head.
-const SIZE: (u32, u32) = (1180, 1600);
+// Tall enough for the task map with two groups open.
+const SIZE: (u32, u32) = (1180, 1200);
 
 #[test]
-fn opening_one_part_leaves_the_other_open() {
+fn the_sections_come_from_the_list_and_the_groups_open_on_their_own() {
     let screen = Screen::install(SIZE.0, SIZE.1, 1.0).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let runner = Runner::new(
@@ -45,62 +43,52 @@ fn opening_one_part_leaves_the_other_open() {
         });
         screen.draw();
     };
-    // Down the page, below its header, a click every few pixels in the
-    // middle of the content until a part opens: first the task map, which
-    // the same click closes again, then the keys, then, further down, the
-    // commands.
-    let x = 700.0;
+    let open = |i: usize| manual.get_tasks_open().row_data(i).unwrap_or(false);
+
+    // Down the list of sections, a click every few pixels picks the keys,
+    // then the commands, in the list's order.
+    let mut picked = vec![manual.get_section()];
     let mut y = 90.0;
-    while !manual.get_tasks_open() {
-        assert!(y < SIZE.1 as f32, "the task map did not open on a click");
-        assert!(!manual.get_keys_open(), "the keys come before the task map");
+    while y < 400.0 {
+        click(400.0, y);
+        if picked.last() != Some(&manual.get_section()) {
+            picked.push(manual.get_section());
+        }
+        y += 6.0;
+    }
+    assert_eq!(picked, [0, 1, 2], "the sections in the list");
+
+    // The task map's groups, beside the list: a click opens the first, the
+    // same click closes it again; further down the next one opens, and the
+    // first stays as it is.
+    manual.set_section(0);
+    screen.draw();
+    let x = 800.0;
+    let mut y = 90.0;
+    while !open(0) {
+        assert!(y < SIZE.1 as f32, "the task map's first group did not open");
         click(x, y);
         y += 6.0;
     }
     click(x, y - 6.0);
-    assert!(!manual.get_tasks_open());
-    while !manual.get_keys_open() {
-        assert!(y < SIZE.1 as f32, "no part of Help opened on a click");
+    assert!(!open(0), "the same click does not close the group");
+    click(x, y - 6.0);
+    // Past the first group's head, into its tasks.
+    y += 48.0;
+    while !open(1) {
+        assert!(y < SIZE.1 as f32, "no second group opened");
         click(x, y);
+        assert!(open(0), "a click below the first group's head closed it");
         y += 6.0;
     }
-    assert!(!manual.get_commands_open());
-    // Past the keys' head: a click there closes them, and the next one
-    // opens them again.
-    while !manual.get_commands_open() {
-        assert!(y < SIZE.1 as f32, "the commands did not open on a click");
-        click(x, y);
-        if !manual.get_keys_open() {
-            click(x, y);
-            assert!(manual.get_keys_open());
-        }
-        y += 6.0;
-    }
-    assert!(
-        manual.get_keys_open(),
-        "opening the commands closed the keys"
-    );
+    assert!(open(0), "opening a group closed the other");
 
-    // Windows' page: the task map, the keys and the reference.
-    manual.set_commands_open(false);
-    manual.set_keys_open(false);
+    // Windows' page: the reference is there too.
     window.global::<Install>().set_windows(true);
+    manual.set_section(2);
     screen.draw();
-    let mut y = 90.0;
-    let (mut tasks, mut keys, mut commands) = (false, false, false);
-    while y < SIZE.1 as f32 {
-        click(x, y);
-        if manual.get_tasks_open() {
-            tasks = true;
-            click(x, y);
-        }
-        keys |= manual.get_keys_open();
-        commands |= manual.get_commands_open();
-        y += 6.0;
-    }
     assert!(
-        tasks && keys,
-        "the task map or the keys did not open on Windows' page"
+        manual.get_ref_groups().row_count() > 0,
+        "no reference on Windows' page"
     );
-    assert!(commands, "the reference did not open on Windows' page");
 }
