@@ -280,7 +280,7 @@ NERVE_CENTER_HARNESS_TOKEN={token}
             line("NERVE_CENTER_NAME", "nerve-center"),
             line("NERVE_CENTER_LISTEN", "0.0.0.0:7443"),
             line("NERVE_CENTER_PUBLIC_URL", "https://<host name>:7443"),
-            line("NERVE_CENTER_UI", "127.0.0.1:7480"),
+            line("NERVE_CENTER_UI", crate::config::DEFAULT_UI),
             line("NERVE_CENTER_MCP", "127.0.0.1:7481"),
             owner = crate::owner::path(&self.state).display(),
         )
@@ -626,7 +626,7 @@ fn status_page_of(
     let at = |var: &str| file.and_then(|f| setting_in(f, var));
     let web = crate::config::address_url;
     let ui = match installed {
-        true => at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into()),
+        true => at("NERVE_CENTER_UI").unwrap_or_else(|| crate::config::DEFAULT_UI.into()),
         false => given_ui.to_string(),
     };
     p.row(
@@ -1146,7 +1146,13 @@ pub(crate) fn done_page(
 
 /// The web UI's address the settings `file` give the service.
 fn ui_address(file: &str) -> String {
-    setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into())
+    ui_address_on(file, cfg!(windows))
+}
+
+/// [`ui_address`] as it is on Windows (`windows`) or elsewhere: the web UI
+/// is off by default on Windows.
+fn ui_address_on(file: &str, windows: bool) -> String {
+    setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| crate::config::default_ui(windows).into())
 }
 
 /// The HTTP MCP address the settings `file` give the service, which runs
@@ -1159,7 +1165,7 @@ fn mcp_address(file: &str) -> String {
 }
 
 /// The web UI's value on a page, with the same `off` as `status` shows.
-fn ui_value(file: &str) -> String {
+pub(crate) fn ui_value(file: &str) -> String {
     match ui_address(file) {
         a if a.eq_ignore_ascii_case("off") => "off".into(),
         a => crate::config::address_url(&a),
@@ -1459,7 +1465,7 @@ fn default_of(var: &str, file: &str) -> Option<String> {
             crate::winsvc::node_port(file)
         )),
         "NERVE_CENTER_LISTEN" => Some("0.0.0.0:7443".into()),
-        "NERVE_CENTER_UI" => Some("127.0.0.1:7480".into()),
+        "NERVE_CENTER_UI" => Some(crate::config::DEFAULT_UI.into()),
         "NERVE_CENTER_MCP" => Some("http".into()),
         _ => None,
     }
@@ -2854,8 +2860,9 @@ mod tests {
         );
         let out = String::from_utf8(out).unwrap();
         let token = crate::owner::read(&l.state).unwrap().unwrap();
+        let web_ui = ui_value("");
         assert!(
-            out.contains("  Web UI        http://127.0.0.1:7480\n"),
+            out.contains(&format!("  Web UI        {web_ui}\n")),
             "{out}"
         );
         assert!(out.contains(&format!("  Owner token   {token}\n")), "{out}");
@@ -2987,7 +2994,7 @@ mod tests {
         assert_eq!(
             changed,
             [(
-                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                &format!("#NERVE_CENTER_UI={}", crate::config::DEFAULT_UI)[..],
                 "NERVE_CENTER_UI=0.0.0.0:7480"
             )]
         );
@@ -3317,6 +3324,17 @@ Next  Change one:  sudo nerve-center set <name> <value>
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("status waited on a FIFO");
         assert!(text.contains("  Machines    "), "{text}");
+    }
+
+    /// The pages that tell where the web UI is read the platform's default.
+    #[test]
+    fn the_status_pages_take_the_web_ui_default_of_the_platform() {
+        assert_eq!(ui_address_on("", true), "off");
+        assert_eq!(ui_address_on("", false), "127.0.0.1:7480");
+        assert_eq!(
+            ui_address_on("NERVE_CENTER_UI=0.0.0.0:7480\n", true),
+            "0.0.0.0:7480"
+        );
     }
 
     /// `install` ends with the page `status` shows, the owner token on it

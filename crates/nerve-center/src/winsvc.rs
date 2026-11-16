@@ -1169,8 +1169,9 @@ mod tests {
         );
         assert!(out.contains("runs as NT SERVICE\\nerve-center"), "{out}");
         assert!(out.contains("the node port 7443"), "{out}");
+        let web_ui = crate::service::ui_value("");
         assert!(
-            out.contains("  Web UI        http://127.0.0.1:7480\n"),
+            out.contains(&format!("  Web UI        {web_ui}\n")),
             "{out}"
         );
         assert_eq!(sys.service.get(), Some(true));
@@ -1238,7 +1239,7 @@ mod tests {
         assert_eq!(
             changed,
             [(
-                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                &format!("#NERVE_CENTER_UI={}", crate::config::DEFAULT_UI)[..],
                 "NERVE_CENTER_UI=0.0.0.0:7480"
             )]
         );
