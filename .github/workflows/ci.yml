@@ -64,6 +64,43 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # The web UIs (webui/): React and TypeScript, built with Vite into
+  # webui/dist, which is committed and embedded by the Rust programs, so a
+  # `cargo build` needs no Node (docs/dev/web-uis.md). This job checks the
+  # types, runs the page tests and builds them, and fails when the committed
+  # build is not what the sources build; npm audit fails on a high or
+  # critical advisory of a dependency.
+  webui:
+    name: Web UIs (types, tests, build, audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: The committed build is what the sources build
+        run: |
+          git diff --exit-code -- dist
+          untracked=$(git status --porcelain -- dist)
+          if [ -n "$untracked" ]; then
+            echo "::error::webui/dist is not what the sources build; run npm run build in webui/ and commit it"
+            echo "$untracked"
+            exit 1
+          fi
+      - run: npm audit --audit-level=high
+
   linux:
     name: Linux (fmt, clippy, tests)
     runs-on: ubuntu-24.04
@@ -78,10 +115,9 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
       # Before the cache, so a badly formatted pull request fails in seconds.
       - run: cargo fmt --check
-      # The web UIs' JavaScript is served as it is, with no build step, and the
-      # Rust tests only look for words in it: a syntax error would keep a
-      # whole UI from starting. node checks every script parses.
-      - name: The web UIs' JavaScript parses
+      # The scripts of the workflows and the web UIs' build (webui/dist, whose
+      # sources the `webui` job checks): node checks every one parses.
+      - name: The JavaScript parses
         run: |
           node --version
           git ls-files -z '*.js' '*.mjs' | xargs -0 -n 1 node --check

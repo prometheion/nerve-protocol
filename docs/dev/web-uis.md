@@ -4,6 +4,68 @@ The center's web UI and the node's web UI: the login model, the throttle,
 the `Host` rule, sessions, TLS beyond loopback, and a tour of each page. The
 user guide's [web UIs page](../user/web-uis.md) is the short version.
 
+## How the pages are built
+
+Both web UIs are one frontend project, [`webui/`](../../webui) at the
+repository's root: TypeScript, React and Vite, with no UI library. It has
+three pages: `center.html` (the center's web UI), `node.html` (the node's)
+and `login.html` (the login of both).
+
+- **Layout.** The pages follow the desktop app's layout B (#231, #232): a
+  list on the left and the picked row's details on the right, side by side
+  from a 1100 px window, in turns with **Back to the list** on a smaller one,
+  and a third pane from 1800 px where a page has one. Adding is a form in the
+  details pane, pairing an overlay, and a removal asks in its row. The shared
+  pieces are in `webui/src/ui.tsx` (buttons, switches, the rows of choices,
+  fields, the list and its details, the inline question, overlays, the
+  searchable picker) and `webui/src/frame.tsx` (the sidebar, the page the
+  address names, the polls); each UI's pages are in `webui/src/center/` and
+  `webui/src/node/`.
+- **Look.** `webui/src/styles/tokens.css` holds the app's design tokens, the
+  values of `crates/nerve/ui/theme.slint`, and a test checks each one
+  against the app's (`webui/src/tokens.test.ts`). The icons are the app's own
+  (`crates/nerve/ui/icons`), written into `webui/src/icons.ts` as data by
+  `node scripts/icons.mjs`.
+- **The build is committed.** `npm run build` writes `webui/dist`, which is in
+  the repository. `nerve-transport`'s `build.rs` lists every file there for
+  `include_bytes!`, so `cargo build` needs no Node, and both servers serve the
+  same files (`nerve_transport::webui`): their page at `/`, the login at
+  `/login`, the scripts and the stylesheet at `/assets/…` with a hash of
+  their content in the name, and the icon.
+- **The CSP stays strict.** Every script and style is a file of the build;
+  the pages hold no inline script, style or handler, and no source writes
+  markup from text (`webui/src/sources.test.ts`;
+  `nerve_transport::webui::tests::the_pages_load_only_files_of_the_build`).
+  What a server says to a page goes in as data: the login's words and the
+  user guide's ref are `<meta>` tags the page reads.
+- **CI.** The `webui` job of `ci.yml` runs `npm ci`, the type check, the
+  tests and the build, fails when `webui/dist` is not what the sources build,
+  and runs `npm audit --audit-level=high`.
+
+### Changing the pages
+
+```sh
+cd webui
+npm ci                 # once
+npm run check          # the type check
+npm test               # the page tests, against a fake API
+npm run build          # writes dist/: commit it with the change
+```
+
+A page test renders a page with a fake server (`webui/src/test/fake.ts`) and
+acts on it as a person does (`webui/src/test/dom.tsx`); every change of a page
+gets one. To try a page against a real center or node, run it and point the
+dev server at it, then open `http://localhost:5173/center.html` (or
+`node.html`) and log in at `/login`:
+
+```sh
+NERVE_DEV_UI=http://127.0.0.1:7480 npm run dev
+```
+
+A new npm dependency needs a reason: the project has React and React DOM,
+and for the build and the tests Vite, its React plugin, TypeScript, Vitest,
+happy-dom (the DOM of the page tests) and React's type definitions.
+
 ## The center's web UI
 
 `nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`). Its pages,
@@ -86,14 +148,20 @@ not running.
 
 ### Look
 
-The web UI has the desktop app's design: the same colours, type, controls and
-motion. The switch at the foot of the menu picks **System**, **Light** or
+The web UI has the desktop app's design and layout: the same colours, type,
+controls and motion, a list and its details on every page. The switch at the foot of the menu picks **System**, **Light** or
 **Dark**; the choice stays in this browser. When the system asks for less
 motion, nothing moves. On a phone the menu opens from the button at the top.
 
 ### Pages
 
-#### Overview
+#### Overview and Nodes
+
+The Overview shows the center's state, Get started while a new center has
+steps left, alerts, and the machines as a list; from 1800 px the sessions
+stand beside them. **Nodes** lists the machines too, with **Pair a machine**.
+A picked machine's details:
+
 
 - **Machines.** Each paired machine with its state (online, offline,
   disabled), platform, a short summary and what it offers. Buttons: Rename,
@@ -108,13 +176,31 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
   `event <name>:`; a capability without actions is then listed by its own
   name. A reason is one line, cut after 300 characters. The agent never sees
   them; the rest of the machine's actions stay.
-- **Pair a machine.** Makes a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command,
+- **Pair a machine.** An overlay with a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command,
   `nerve-node center add -`, and the bare link it reads from stdin (also for the desktop
   app), each with Copy; for a Windows machine it says to open the link there.
+  It closes once a machine used the code, and the page names the machine and
+  its next step.
+- Alerts, for example a machine whose key is in use twice.
+
+#### Harnesses
+
+- **Connect a harness.** How an AI app reaches this center: for HTTP, **Make
+  a token** shows a new token once with the JSON, the URL, the header and the
+  Claude Code line to paste.
+- **Tokens.** Make a token with a label. It is shown once. Remove one
+  to stop it: the harness sessions it opened over HTTP end at once, with
+  their jobs. A token is only shown once the center has written it to its
+  state file; when it cannot, the page says so and no token is made. A
+  token removed while the state file cannot be written stops at once, but
+  the page says the removal is not kept yet: unless the file can be written
+  before the center stops, the token works again at the next start. The
+  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
+  `--harness-token`) is listed too, without **Remove**: remove it from the
+  settings. A harness token does not log in to this UI.
 - **Sessions.** The harnesses connected now, each marked `tainted` once the
   [action checker](action-checker.md#taint-1) marked it. **End** stops one
   session.
-- Alerts, for example a machine whose key is in use twice.
 
 A disabled machine stays paired and connected. The agent's `list` shows it as
 disabled with no capabilities, and calls to it are refused. The agent's calls
@@ -292,9 +378,9 @@ the marked entry and **Escape** closes it.
 
 #### Help
 
-Parts that open and close on their own:
+Its sections as a list:
 
-- **Connect a harness.** How an AI app reaches this center, as on the Overview.
+- **Tasks.** What you may want to do, and the page where it is done.
 - **nerve-center commands.** The center's own commands, one line each; its
   options and the advanced ones fold.
 - **nerve-node commands.** The commands of `nerve-node`, the program on each
@@ -317,16 +403,6 @@ Parts that open and close on their own:
 - **Center key.** The pin of the key the center serves. **Rotate key** makes
   a new key and shows its pin once; **Serve the new key now** ends the 7 days
   in which the old key is still served ([center](identity-and-pairing.md#rotate-the-centers-key)).
-- **Harness tokens.** Make a token with a label. It is shown once. Delete one
-  to stop it: the harness sessions it opened over HTTP end at once, with
-  their jobs. A token is only shown once the center has written it to its
-  state file; when it cannot, the page says so and no token is made. A
-  token deleted while the state file cannot be written stops at once, but
-  the page says the delete is not kept yet: unless the file can be written
-  before the center stops, the token works again at the next start. The
-  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
-  `--harness-token`) is listed too, without **Delete**: remove it from the
-  settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings
   grant: its settings as JSON, with **Reload** and **Save**, and the sudo
   switch. The capabilities the center adds are on the Capabilities page, not
@@ -491,7 +567,7 @@ and nothing more.
 |---|---|
 | **Overview** | Status, the centers and their links, the root-as-owner warning, the warning that nothing keeps the pairings apart (the installed node without Landlock, with two or more pairings as `nerve-run`; on **Centers** too), **Panic** and **Unlock** |
 | **Centers** | Pair from a pasted link (it goes to the node as the command's input, never in a command line), pause and resume, the settings grant, a new key, remove |
-| **Permissions** | Mode (also for some hours, and as the owner), **No network for its commands** (`network off`, in every mode), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
+| **Permissions** | Mode (also for some hours, and as the owner), **No network for its commands** (`network off`, in every mode), folders (a whole path), allow, deny and sudo rules (an edit is one `rule edit` of the entry as listed), the guard, sudo off |
 | **Audit** | What the node allowed and refused, refused only, Live; **Allow**, **Allow as wildcard** and **Deny** show the rule each one stores, made by the same code as `rule add`, and the list it goes to (the sudo list for a sudo command), with hidden characters written out; a wildcard is wider than the entry (`python3 *` for a `python3` call, the whole folder for a file), and the preview says so |
 | **Log** | Problems only, Live, clear |
 | **Capabilities** | A center's switches (on, off, hidden), your own capabilities (add, edit and remove, with the same checks as the desktop app's form), the programs that may add capabilities |

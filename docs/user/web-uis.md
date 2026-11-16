@@ -33,16 +33,23 @@ nerve-center owner-token               # a center your harness starts
 From another machine, use an SSH tunnel:
 `ssh -L 7480:127.0.0.1:7480 you@center-host`.
 
+Each page has the app's layout: a list on the left and the picked row's
+details on the right (on a small window the details open with **Back to the
+list**). Adding is a form in the details, pairing a small window over the
+page, and **Remove** asks in its row.
+
 | Page | Does |
 |---|---|
-| **Overview** | Get started, the machines, **Pair a machine**, **Connect a harness**, the sessions |
-| **Statistics** | Calls per day, per machine and per action |
-| **Audit** | Each call the center sent, with **Trust this** buttons that add a rule |
-| **Action checker** | Blocklist, decision model, Skip the model ([action checker](action-checker.md)) |
+| **Overview** | The center's state, Get started, the machines and, on a wide window, the sessions |
+| **Nodes** | Each machine: rename, disable, remove; **Pair a machine** |
+| **Harnesses** | **Connect a harness**, the harness tokens, the sessions |
+| **Action checker** | Blocklist, Skip the model, the decision model, each machine's own settings ([action checker](action-checker.md)) |
 | **Capabilities** | What each machine offers, and capabilities this center adds |
-| **Log** | The center's log, problems only, Live |
-| **Help** | Connect a harness, the `nerve-center` and `nerve-node` commands |
-| **Settings** | Name, log level, center key, harness tokens, machines with the settings grant |
+| **Statistics** | Calls per day, per machine and per action |
+| **Audit** | Each call the center sent, with buttons that add a rule |
+| **Log** | The center's log, by level, machine and text, Live |
+| **Settings** | Name, log level, center key, the machines' own settings |
+| **Help** | Tasks and where they are done, the `nerve-center` and `nerve-node` commands |
 
 The Audit buttons and a machine's settings need that machine's
 [settings grant](rules.md#the-settings-grant)
@@ -50,9 +57,9 @@ The Audit buttons and a machine's settings need that machine's
 
 ## The node's web UI
 
-The installed node can serve a web UI with the app's pages, on Linux and
-Windows. `nerve-node install` turns it on at loopback and shows its first
-token once. In the app it is off until you turn it on, in **Settings ›
+The installed node can serve a web UI with the app's pages and layout, on
+Linux and Windows. `nerve-node install` turns it on at loopback and shows its
+first token once. In the app it is off until you turn it on, in **Settings ›
 Network › Web UI**, or in the terminal:
 
 ```sh

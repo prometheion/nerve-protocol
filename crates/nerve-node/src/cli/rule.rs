@@ -132,6 +132,25 @@ impl List {
                 } else {
                     format!("sudo {new}")
                 };
+                // The entry as the list shows it: a literal character is
+                // written `[*]`, and only a trailing ` *` after a named
+                // command is a wildcard. Anything wider than `rule add`
+                // would have stored for that text is refused, so an edit
+                // cannot make a root rule broader by accident.
+                let (body, wildcard) = match wildcard_start(&glob) {
+                    Some(start) => (start, true),
+                    None => (glob.as_str(), false),
+                };
+                if wildcard && !names_a_command(body) {
+                    return Err(format!(
+                        "{glob:?}: name the command after sudo before the *"
+                    ));
+                }
+                if has_glob_chars(body) {
+                    return Err(format!(
+                        "{glob:?}: a `*`, `?`, `[`, `]`, `{{`, `}}` or `\\` in a sudo command is written in brackets, as in `[*]`; only a ` *` at the end is a wildcard"
+                    ));
+                }
                 rules::validate_command_glob(&glob)?;
                 Ok(glob)
             }
@@ -238,9 +257,7 @@ impl List {
         let glob = format!("{} *", rules::escape(start));
         if sudo {
             // `sudo *` would be every command as root.
-            let named = sudo_command(start)
-                .is_some_and(|rest| rest.split_whitespace().any(|w| !w.starts_with('-')));
-            if !named {
+            if !names_a_command(start) {
                 return Err(format!(
                     "{line:?}: name the command after sudo before the *"
                 ));
@@ -264,6 +281,32 @@ fn allow_rules_note(name: &str, mode: Mode) -> Option<String> {
             mode.as_str()
         )
     })
+}
+
+/// Whether the sudo command line `start` names a command after `sudo` and
+/// its flags: `sudo apt`, not `sudo` or `sudo -i`.
+fn names_a_command(start: &str) -> bool {
+    sudo_command(start).is_some_and(|rest| rest.split_whitespace().any(|w| !w.starts_with('-')))
+}
+
+/// Whether `glob` holds a character a glob reads outside a bracket class,
+/// the way [`rules::escape`] writes a literal one (`[*]`).
+fn has_glob_chars(glob: &str) -> bool {
+    const GLOB: [char; 7] = ['*', '?', '[', ']', '{', '}', '\\'];
+    let mut rest = glob;
+    while let Some(i) = rest.find(GLOB) {
+        let tail = &rest[i..];
+        let mut chars = tail.chars();
+        // `[x]` for one of these characters is a literal one.
+        let literal = chars.next() == Some('[')
+            && chars.next().is_some_and(|c| GLOB.contains(&c))
+            && chars.next() == Some(']');
+        if !literal {
+            return true;
+        }
+        rest = &tail[3..];
+    }
+    false
 }
 
 /// The words before a command line's trailing ` *`, its wildcard; `None`
@@ -1033,6 +1076,59 @@ mod tests {
         }
         assert_eq!(policy(), now);
         assert_eq!(changes(), n);
+    }
+
+    /// `rule edit` on the sudo list checks what `rule add` checks: no `sudo *`
+    /// (every command as root), and a `*` inside a command is written `[*]`
+    /// as the list shows it, so an edit never stores a wider rule than the
+    /// same text added.
+    #[test]
+    fn rule_edit_on_the_sudo_list_refuses_a_rule_wider_than_add_makes() {
+        let (_d, paths) = setup(&["home"]);
+        let sudo = || load(&paths).centers[0].policy.sudo_allow.clone();
+        run(&paths, &["rule", "add", "allow", "sudo apt update"]).unwrap();
+        run(
+            &paths,
+            &["rule", "add", "allow", "sudo chmod 644 /srv/*.conf"],
+        )
+        .unwrap();
+        let now = sudo();
+        assert_eq!(now, ["sudo apt update", "sudo chmod 644 /srv/[*].conf"]);
+        for new in [
+            "*",
+            "sudo *",
+            "sudo -i *",
+            "chmod 644 /srv/*.conf",
+            "apt*",
+            "apt ?",
+            "echo {a,b}",
+        ] {
+            let e = run(&paths, &["rule", "edit", "sudo", "sudo apt update", new]).unwrap_err();
+            assert!(
+                e.contains("name the command") || e.contains("in brackets"),
+                "{new}: {e}"
+            );
+            assert_eq!(sudo(), now, "{new}");
+        }
+        // What the list shows (a literal star in brackets) and a wildcard
+        // after a named command are taken.
+        run(
+            &paths,
+            &[
+                "rule",
+                "edit",
+                "sudo",
+                "sudo chmod 644 /srv/[*].conf",
+                "sudo chmod 600 /srv/[*].conf",
+            ],
+        )
+        .unwrap();
+        run(
+            &paths,
+            &["rule", "edit", "sudo", "sudo apt update", "apt *"],
+        )
+        .unwrap();
+        assert_eq!(sudo(), ["sudo apt *", "sudo chmod 600 /srv/[*].conf"]);
     }
 
     /// An older text of the guard holds a line break; `rule` writes it

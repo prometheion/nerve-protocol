@@ -280,6 +280,33 @@ async fn off_listens_on_nothing() {
     daemon.stop().await;
 }
 
+/// What a browser loads for the node's page: the page itself and the files
+/// the built page names (its scripts, its stylesheet, its icon).
+fn node_page_paths() -> Vec<String> {
+    let html = String::from_utf8_lossy(nerve_transport::webui::dist_file("node.html").unwrap());
+    let mut paths = vec!["/".to_string()];
+    for attr in [" src=\"/", " href=\"/"] {
+        for (i, _) in html.match_indices(attr) {
+            let from = i + attr.len() - 1;
+            paths.push(html[from..from + html[from..].find('"').unwrap()].to_string());
+        }
+    }
+    paths
+}
+
+/// What the web UI serves without a session: the page, the login and every
+/// file of the built web UIs (nerve_transport::webui::DIST).
+fn page_paths() -> Vec<String> {
+    let mut paths = vec!["/".to_string(), "/login".to_string()];
+    paths.extend(
+        nerve_transport::webui::DIST
+            .iter()
+            .filter(|(p, _)| !p.ends_with(".html"))
+            .map(|(p, _)| format!("/{p}")),
+    );
+    paths
+}
+
 /// The login and the session: a token made at the CLI logs in, a session
 /// goes as a header and never as a cookie, a wrong token costs time and
 /// never locks the login, and the page's rules hold.
@@ -293,8 +320,8 @@ async fn a_token_logs_in_and_the_session_is_the_header() {
     let addr = ui_address(&daemon).unwrap();
 
     // The page is public, and holds nothing secret; the API is not.
-    for path in ["/", "/app.js", "/kit.js", "/app.css", "/login", "/login.js"] {
-        assert_eq!(get(addr, path, "").await.status, 200, "{path}");
+    for path in page_paths() {
+        assert_eq!(get(addr, &path, "").await.status, 200, "{path}");
     }
     for (method, path) in [
         ("GET", "/api/overview"),
@@ -385,7 +412,8 @@ async fn a_page_loads_on_many_connections_at_once() {
     let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
     let addr = ui_address(&daemon).unwrap();
     assert!(out.contains("token "), "{out}");
-    let paths = ["/", "/app.js", "/kit.js", "/app.css", "/login", "/login.js"];
+    let paths = node_page_paths();
+    assert!(paths.len() >= 4 && paths.len() <= 8, "{paths:?}");
     let loads = paths.iter().chain(paths.iter()).map(|path| async move {
         let mut io = TcpStream::connect(addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -440,7 +468,7 @@ async fn wrong_tokens_on_many_connections_do_not_keep_the_owner_out() {
             .await
             .unwrap_or_else(|a| panic!("login {i} during the flood: {a:?}"));
         assert_eq!(get(addr, "/api/overview", &session).await.status, 200);
-        assert_eq!(get(addr, "/app.css", "").await.status, 200);
+        assert_eq!(get(addr, &page_paths()[2], "").await.status, 200);
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut tries = 0;
@@ -1266,6 +1294,165 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
         assert!(matches!(e["level"].as_str(), Some("error" | "warn")), "{e}");
     }
     change(addr, &s, "/api/log/clear", json!({})).await;
+    daemon.stop().await;
+}
+
+/// A rule is edited in its place, from the entry as listed: one saved
+/// unchanged is refused and stays, and a stored rule with a glob character
+/// keeps matching what it was made for (it is not typed through `rule add`
+/// a second time).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_is_edited_in_its_place_and_an_unchanged_one_stays() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+    for rule in ["git push --force", "rm -rf /tmp/*"] {
+        change(
+            addr,
+            &s,
+            "/api/rules/add",
+            json!({"center": "lab", "list": "deny", "rule": rule}),
+        )
+        .await;
+    }
+    let listed = |v: Value| -> Vec<String> {
+        v["rules"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    let before = listed(get(addr, "/api/perm?center=lab", &s).await.json());
+    let stored = before
+        .iter()
+        .find(|r| r.contains("rm -rf"))
+        .unwrap()
+        .clone();
+    // The `*` is stored as a literal character: typed again, it would be
+    // escaped a second time and name another command.
+    assert_eq!(stored, "exec.run:rm -rf /tmp/[*]");
+
+    let a = post(
+        addr,
+        "/api/rules/edit",
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": stored, "new": stored}),
+    )
+    .await;
+    assert_ne!(a.status, 200, "an unchanged rule is refused: {}", a.body);
+    assert_eq!(
+        listed(get(addr, "/api/perm?center=lab", &s).await.json()),
+        before
+    );
+
+    change(
+        addr,
+        &s,
+        "/api/rules/edit",
+        json!({"center": "lab", "list": "deny", "rule": "exec.run:git push --force", "new": "git push --force origin"}),
+    )
+    .await;
+    let after = listed(get(addr, "/api/perm?center=lab", &s).await.json());
+    let at = before
+        .iter()
+        .position(|r| r == "exec.run:git push --force")
+        .unwrap();
+    assert_eq!(after[at], "exec.run:git push --force origin", "{after:?}");
+    assert_eq!(after.len(), before.len(), "{after:?}");
+    assert!(after.contains(&stored), "{after:?}");
+    let a = post(
+        addr,
+        "/api/rules/edit",
+        &s,
+        json!({"center": "lab", "list": "deny", "rule": stored}),
+    )
+    .await;
+    assert_eq!(a.status, 400, "{}", a.body);
+    daemon.stop().await;
+}
+
+/// The Sudo list's edit makes the checks an add makes: `*` and a `*` inside a
+/// command are refused and the list stays; a rule with a line break is listed
+/// with the break written out, and edited from that form it keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_the_sudo_list_is_checked_and_a_line_break_survives() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "sudo", "rule": "sudo apt update"}),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "deny", "rule": "cat a\nb *"}),
+    )
+    .await;
+    let listed = |v: Value, list: &str| -> Vec<String> {
+        v["rules"][list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    let perm = || async { get(addr, "/api/perm?center=lab", &s).await.json() };
+    let sudo = listed(perm().await, "sudo");
+    assert_eq!(sudo, ["sudo apt update"]);
+    for new in ["*", "sudo *", "chmod 644 /srv/*.conf"] {
+        let a = post(
+            addr,
+            "/api/rules/edit",
+            &s,
+            json!({"center": "lab", "list": "sudo", "rule": "sudo apt update", "new": new}),
+        )
+        .await;
+        assert_ne!(a.status, 200, "{new}: {}", a.body);
+        assert_eq!(listed(perm().await, "sudo"), sudo, "{new}");
+    }
+
+    // The page lists the rule with its line break in it. It edits and sends
+    // the entry as `rule` prints it, the break written `\n`, and the rule
+    // stays one rule with the break in it.
+    let deny = listed(perm().await, "deny");
+    let raw = deny.iter().find(|r| r.contains("cat a")).unwrap().clone();
+    assert!(raw.contains('\n'), "{raw:?}");
+    let shown = raw.replace('\n', "\\n");
+    change(
+        addr,
+        &s,
+        "/api/rules/edit",
+        json!({"center": "lab", "list": "deny", "rule": shown, "new": shown.replace("cat a", "cat c")}),
+    )
+    .await;
+    let after = listed(perm().await, "deny");
+    assert!(after.contains(&raw.replace("cat a", "cat c")), "{after:?}");
     daemon.stop().await;
 }
 
