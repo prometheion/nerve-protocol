@@ -1016,8 +1016,9 @@ pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
     let mut given = Vec::new();
     for a in cmd.get_arguments() {
         let id = a.get_id().as_str();
-        // `--json` says how to answer: no setting of the center.
-        if id == "json" {
+        // `--json` says how to answer, and `--desktop-user-sid` whose app asks
+        // (the app's broker adds it): no settings of the center.
+        if id == "json" || id == "desktop_user_sid" {
             continue;
         }
         // A global flag may come after the subcommand, where its value is.
@@ -1600,6 +1601,7 @@ mod tests {
         assert!(given(&["uninstall", "--purge"]).is_empty());
         // How a program asks for the answer is no setting.
         assert!(given(&["--json", "install"]).is_empty());
+        assert!(given(&["--desktop-user-sid", "S-1-5-21-1-2-3-1001", "install"]).is_empty());
         assert!(given(&["set", "ui", "off", "--json"]).is_empty());
         assert_eq!(
             given(&["--public-url", "https://center.example:7443", "install"]),

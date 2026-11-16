@@ -689,6 +689,21 @@ mod tests {
         assert_eq!(*opened.borrow(), ["http://127.0.0.1:7480"]);
     }
 
+    /// The center's step does not promise a web UI on Windows, where it is
+    /// off until Settings turn it on (owner, 2026-11-16).
+    #[test]
+    fn the_center_step_names_the_web_ui_default_of_the_platform() {
+        let slint = include_str!("../../ui/installer.slint");
+        let row = slint
+            .split("title: \"Its web UI\";")
+            .nth(1)
+            .and_then(|r| r.lines().find(|l| l.contains("text:")))
+            .unwrap();
+        assert!(row.contains("Install.windows ?"), "{row}");
+        assert!(row.contains("Off until you turn it on"), "{row}");
+        assert!(row.contains("127.0.0.1:7480"), "{row}");
+    }
+
     /// The installer starts with what this machine becomes where no role is
     /// installed; a center installed here is said, not offered a node.
     #[test]
