@@ -139,6 +139,10 @@ pub const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Error when a call got no answer in time.
 pub const NO_ANSWER: &str = "the node did not answer in time; try again";
 
+/// Error when the connection ended before an answer: a node that is
+/// stopping as it was reached, or something else in the node's place.
+pub const CLOSED: &str = "the node closed without answering";
+
 /// Why a provider socket ([`serve_providers`]), or its handler, refuses a
 /// caller whose process ended before the node could hold on to it: its pid
 /// may be another process's by then.
@@ -315,8 +319,7 @@ async fn call_stream<S: AsyncRead + AsyncWrite>(
 }
 
 fn answer(line: &str) -> Result<Value, String> {
-    let v: Value =
-        serde_json::from_str(line).map_err(|_| "the node closed without answering".to_string())?;
+    let v: Value = serde_json::from_str(line).map_err(|_| CLOSED.to_string())?;
     if let Some(e) = v.get("error").and_then(Value::as_str) {
         return Err(e.to_string());
     }

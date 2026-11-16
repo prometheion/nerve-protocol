@@ -1131,9 +1131,8 @@ where
         .next_line()
         .await
         .map_err(|e| format!("cannot reach the node: {e}"))?
-        .ok_or("the node closed without answering")?;
-    let first: Value =
-        serde_json::from_str(&first).map_err(|_| "the node closed without answering")?;
+        .ok_or(nerve_transport::ctl::CLOSED)?;
+    let first: Value = serde_json::from_str(&first).map_err(|_| nerve_transport::ctl::CLOSED)?;
     if let Some(e) = first["error"].as_str() {
         return Err(e.to_string());
     }
