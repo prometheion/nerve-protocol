@@ -116,6 +116,13 @@ a harness's agent, a program of the same user, does not have (design of
   after a minute the clipboard is emptied if its sequence number is still
   the copy's. On Linux the copy goes through Slint's platform clipboard and
   is cleared after a minute while the clipboard still holds it.
+- **The role change** (`HubRoleDialog`, `app/hub.rs` `role_*`): a backup
+  (the role's own dialog), the machines that still trust this one, then the
+  old role's `uninstall --purge --keep-program` through the broker (hidden
+  flag, `nerve_service::keeps_program`: the service, accounts, data and parts
+  go, the app's program stays), and only after it worked the installer at the
+  role step with the other role picked. The node's Settings › App has the
+  same row.
 - **Tests:** `tests/hub.rs` and `tests/hub_pages.rs` against a center started
   in the test (the peer check answered by the test), `tests/hub_fit.rs` at the
   four sizes, `tests/hub_shots.rs` for the screenshots (made-up data,

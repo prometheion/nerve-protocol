@@ -1648,6 +1648,7 @@ impl Ctl {
                 Ok(()) => {
                     c.with_hub(|h| h.set_backup_open(false));
                     c.toast(format!("Backed up to {}.", file.display()), Tone::Ok);
+                    c.role_backed_up();
                 }
                 Err(e) => c
                     .with_hub(|h| h.set_backup_error(e.into()))
@@ -1704,6 +1705,115 @@ impl Ctl {
         {
             self.toast(e, Tone::Danger);
         }
+    }
+}
+
+/// The arguments of the old role's uninstall in a role change: whole, its
+/// data too, the app's program kept for the other role's install.
+pub fn role_change_args(node: bool) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if !node {
+        args.push(nerve_center::edition::APP_WORD.into());
+    }
+    args.extend(["uninstall", "--purge", "--keep-program"].map(String::from));
+    args
+}
+
+impl Ctl {
+    /// Opens the role change: a backup first, then the machines that still
+    /// trust this one.
+    fn role_ask(&self) {
+        let node = self.with_hub(|h| h.get_role_node()).unwrap_or(false);
+        let trusted: Vec<SharedString> = if node {
+            self.centers
+                .borrow()
+                .iter()
+                .map(|c| SharedString::from(c.as_str()))
+                .collect()
+        } else {
+            self.hub_names()
+                .into_iter()
+                .map(|(_, n)| SharedString::from(n))
+                .collect()
+        };
+        self.with_hub(|h| {
+            h.set_role_trusted(model(trusted));
+            h.set_role_step(0);
+            h.set_role_error(SharedString::new());
+            h.set_role_busy(false);
+            h.set_role_open(true);
+        });
+    }
+
+    /// The backup of the role change, with the role's own backup dialog.
+    fn role_backup(self: &Rc<Self>) {
+        match self.with_hub(|h| h.get_role_node()) {
+            Some(true) => self.node_backup_choose(),
+            Some(false) => self.hub_backup_choose(false),
+            None => {}
+        }
+    }
+
+    /// A backup was written: a role change that waited for it goes on to
+    /// its next step. Whether one did.
+    pub(super) fn role_backed_up(&self) -> bool {
+        let waiting = self
+            .with_hub(|h| h.get_role_open() && h.get_role_step() == 0)
+            .unwrap_or(false);
+        if waiting {
+            self.with_hub(|h| h.set_role_step(1));
+        }
+        waiting
+    }
+
+    /// The old role goes, whole and with its data (design of #232, 4); only
+    /// once that worked, the installer installs the other one.
+    fn role_change(self: &Rc<Self>) {
+        let Some(node) = self.with_hub(|h| h.get_role_node()) else {
+            return;
+        };
+        self.with_hub(|h| {
+            h.set_role_busy(true);
+            h.set_role_step(2);
+            h.set_role_error(SharedString::new());
+        });
+        let done = move |c: &Rc<Ctl>, answer: Result<Value, String>| {
+            c.with_hub(|h| h.set_role_busy(false));
+            match answer {
+                Ok(_) => c.role_changed(node),
+                Err(e) => c
+                    .with_hub(|h| {
+                        h.set_role_step(1);
+                        h.set_role_error(e.into());
+                    })
+                    .unwrap_or_default(),
+            }
+        };
+        let args = role_change_args(node);
+        if node {
+            self.command_with_rights(args, None, done);
+        } else {
+            // `hub_admin` puts the hidden word first itself.
+            self.hub_admin(args[1..].to_vec(), None, done);
+        }
+    }
+
+    /// The old role is gone: the window is the installer, at the role's
+    /// choice with the other role picked.
+    fn role_changed(self: &Rc<Self>, node: bool) {
+        self.hub.poll.stop();
+        self.hub.token.borrow_mut().take();
+        if !node {
+            let _ = self.hub.keyring.borrow().delete();
+        }
+        self.with_hub(|h| {
+            h.set_role_open(false);
+            h.set_shown(false);
+            h.set_logged_in(false);
+        });
+        let bin = nerve_node::service::Layout::system().bin;
+        self.installer(Launch::Elevated, &bin);
+        self.with_install(|i| i.set_role(if node { 1 } else { 0 }));
     }
 }
 
@@ -2029,5 +2139,30 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     h.on_backup(move || c.hub_backup());
     let c = ctl.clone();
+    h.on_role_ask(move || c.role_ask());
+    let c = ctl.clone();
+    h.on_role_backup(move || c.role_backup());
+    let c = ctl.clone();
+    h.on_role_change(move || c.role_change());
+    let c = ctl.clone();
     h.on_restore(move || c.hub_restore());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A role change takes the old role whole, its data too, and keeps the
+    /// program for the new role's install; the center's behind its word.
+    #[test]
+    fn a_role_change_uninstalls_the_old_role_whole_and_keeps_the_program() {
+        assert_eq!(
+            role_change_args(true),
+            ["uninstall", "--purge", "--keep-program"]
+        );
+        assert_eq!(
+            role_change_args(false),
+            ["__center", "uninstall", "--purge", "--keep-program"]
+        );
+    }
 }

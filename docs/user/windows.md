@@ -113,6 +113,11 @@ minute and stays out of the clipboard history. The center's settings are in
 `settings\center.env` there; its web UI and MCP stay on this machine, and
 the app installs no second role beside it.
 
+To make the machine a node instead, use **Settings › This machine › Change
+the role…** (on a node: **Settings › App › Change the role…**): a backup
+first, then the old role goes with its data and the installer installs the
+other.
+
 A relay on Windows needs a firewall rule for its port, which you add yourself.
 
 ## Update and uninstall

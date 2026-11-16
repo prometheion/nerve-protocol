@@ -176,6 +176,10 @@ and every limit is in
 - Each administrator's step of the center (start and stop, update,
   uninstall, an address, the owner token, backup and restore) asks once and
   ends with it.
+- **Change the role…** (the center's Settings › This machine, the node's
+  Settings › App) offers a backup first, names the machines that still trust
+  this one, removes the old role whole with its data, then opens the
+  installer for the other role.
 - `nerve-center --json backup -` and `restore -` hand the sealed backup over
   the answer and the input, with `--passphrase-file -`.
 - Each page is a list and the picked row's details: side by side from a

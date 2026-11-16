@@ -64,10 +64,16 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     let asked: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
     let said = asked.clone();
     let owner = token.clone();
+    // The uninstall of a role change fails while this is set.
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let refusing = refuse.clone();
     ctl.set_hub_admin(Arc::new(move |args, _input| {
         said.lock().unwrap().push(args.to_vec());
         match args.get(1).map(String::as_str) {
             Some("owner-token") => Ok(json!({"messages": [], "token": owner})),
+            Some("uninstall") if refusing.load(std::sync::atomic::Ordering::SeqCst) => {
+                Err("the service did not stop".into())
+            }
             _ => Ok(json!({"messages": []})),
         }
     }));
@@ -247,5 +253,33 @@ fn the_center_s_pages_drive_its_web_ui_api() {
     assert!(!hub.get_logged_in());
     assert_eq!(keyring.get().unwrap(), None);
     assert!(!nerve::settings::keep_login(&settings));
+
+    // The role change: the backup's step first, then the center goes whole
+    // with its data, the program kept; a failed uninstall stays a center.
+    hub.set_login_token(nerve_center::owner::read(&state).unwrap().unwrap().into());
+    hub.invoke_login();
+    hub.set_role_node(false);
+    hub.invoke_role_ask();
+    assert!(hub.get_role_open());
+    assert_eq!(hub.get_role_step(), 0);
+    hub.set_role_step(1);
+    hub.invoke_role_change();
+    let uninstall = vec![
+        "__center".to_string(),
+        "uninstall".into(),
+        "--purge".into(),
+        "--keep-program".into(),
+    ];
+    assert_eq!(asked.lock().unwrap().last(), Some(&uninstall));
+    assert_eq!(hub.get_role_error(), "the service did not stop");
+    assert_eq!(hub.get_role_step(), 1);
+    assert!(hub.get_shown());
+    refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    hub.invoke_role_change();
+    assert_eq!(asked.lock().unwrap().last(), Some(&uninstall));
+    let install = window.global::<nerve::Install>();
+    assert!(!hub.get_shown() && !hub.get_role_open());
+    assert!(install.get_shown());
+    assert_eq!(install.get_role(), 0, "the node is picked");
     rt.block_on(center.stop());
 }

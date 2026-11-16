@@ -36,6 +36,11 @@ restore) asks for the password each time.
 A copied harness token, harness line or pairing link leaves the clipboard
 after a minute.
 
+**Settings › This machine › Change the role…** makes the machine a node:
+it offers a backup first, names the machines paired with this center (they
+keep it until it is removed there), removes the center with its data, and
+opens the installer for the node.
+
 ## In the terminal
 
 What the web UI does for machines and harnesses, the terminal does too,

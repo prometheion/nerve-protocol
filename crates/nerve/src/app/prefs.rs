@@ -981,6 +981,11 @@ impl Ctl {
         });
     }
 
+    /// The node's backup, as Settings › Backup starts it.
+    pub(super) fn node_backup_choose(self: &Rc<Self>) {
+        self.backup_choose(false);
+    }
+
     fn backup_choose(self: &Rc<Self>, restore: bool) {
         let chooser = self.chooser.borrow().clone();
         let what = if restore {
@@ -1050,7 +1055,10 @@ impl Ctl {
             match answer {
                 Ok(v) => {
                     c.with_prefs(|p| p.set_backup_open(false));
-                    c.show_once("The backup is written", "", &view::backup_written(&v), "");
+                    // A role change goes on once its backup is written.
+                    if !c.role_backed_up() {
+                        c.show_once("The backup is written", "", &view::backup_written(&v), "");
+                    }
                 }
                 Err(e) => {
                     c.with_prefs(|p| p.set_backup_error(e.into()));
