@@ -191,6 +191,15 @@ fn the_release_lists_the_linux_app_as_an_arch_package() {
     ] {
         assert!(test.contains(line), "{line}: {test}");
     }
+    // Released and in SHA256SUMS.
+    let publish = job("publish");
+    assert!(
+        publish.contains(" nerve-[0-9]*-1-x86_64.pkg.tar.zst)"),
+        "{publish}"
+    );
+    for need in ["desktop-arch-package", "desktop-arch-package-test"] {
+        assert!(publish.contains(&format!(" {need},")), "{need}: {publish}");
+    }
     let pkgbuild = include_str!("../../../packaging/arch/PKGBUILD");
     for line in [
         "pkgname=nerve\n",
