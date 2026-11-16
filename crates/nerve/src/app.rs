@@ -1210,6 +1210,18 @@ impl Ctl {
         if installer {
             return;
         }
+        // On a center the node's pairing and update from a file are none of
+        // the window's (design of #232, 4): only the center's own uninstall
+        // opens, as from Apps & features.
+        if self.with_hub(|h| h.get_shown()).unwrap_or(false) {
+            if asked.uninstall {
+                self.with_hub(|h| {
+                    h.set_uninstall_purge(false);
+                    h.set_uninstall_open(true);
+                });
+            }
+            return;
+        }
         if let Some(link) = asked.link {
             self.open_link(link);
         } else if asked.uninstall {

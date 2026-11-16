@@ -34,7 +34,12 @@ it on). What only an administrator may do (start and stop, an address in
 restore) asks for the password each time.
 
 A copied harness token, harness line or pairing link leaves the clipboard
-after a minute.
+after a minute, or when the app closes.
+
+**Settings › Backup › Restore…** takes a backup of this center. To move a
+center to a new machine, install the center there, then restore its backup
+with **It is another center's backup** ticked: the new center takes the old
+one's key, pairings and settings.
 
 **Settings › This machine › Change the role…** makes the machine a node:
 it offers a backup first, names the machines paired with this center (they

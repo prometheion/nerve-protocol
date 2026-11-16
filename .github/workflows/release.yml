@@ -447,6 +447,17 @@ jobs:
           grep -qx 'Exec=/usr/bin/nerve %u' "$entry"
           test -f /usr/share/icons/hicolor/scalable/apps/nerve.svg
           test "$(cat /usr/share/nerve/package)" = pacman
+      - name: An upgrade runs the package's script for the app's service
+        run: |
+          # A node's unit that runs the app's program: the script asks the
+          # node to take the new program. No systemd runs here, so that fails,
+          # and the script says the service still runs the earlier one.
+          mkdir -p /etc/systemd/system
+          printf '[Service]\nExecStart=/usr/bin/nerve run\n' > /etc/systemd/system/nerve-node.service
+          said=$(pacman -U --noconfirm "./dist/nerve-${VERSION}-1-x86_64.pkg.tar.zst" 2>&1)
+          echo "$said"
+          grep -q "the node still runs the earlier program" <<<"$said"
+          rm /etc/systemd/system/nerve-node.service
       - name: Removing the package removes the app
         run: |
           pacman -R --noconfirm nerve

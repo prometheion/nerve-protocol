@@ -1866,7 +1866,10 @@ async fn update_as(
         (true, Some(f)) if real(f).is_some() && real(f) == real(&layout.bin) => {
             Some(nerve_service::Placed::default())
         }
-        (true, _) => return Err(APP_PACKAGE.into()),
+        (true, _) => {
+            let mark = std::fs::read_to_string(crate::edition::PACKAGE_MARK).unwrap_or_default();
+            return Err(app_package(&mark));
+        }
     };
     let p = nerve_service::Program {
         name: program,
@@ -1985,9 +1988,22 @@ fn packaged(layout: &Layout) -> bool {
     layout.word.is_some() && layout.bin.starts_with("/usr/bin")
 }
 
-/// What `update` of the app from its package says: the package manager
-/// replaces the program, and the package's script brings the service to it.
-pub const APP_PACKAGE: &str = "the app came from its package here, so its package manager updates it (the newer package, or `sudo apt upgrade` or `sudo dnf upgrade`): the package's script restarts the center with the new program";
+/// What `update` of the app from its package says, with the package
+/// manager its mark names (crate::edition::PACKAGE_MARK: `deb`, `rpm` or
+/// `pacman`): the package manager replaces the program, and the package's
+/// script brings the service to it.
+pub fn app_package(mark: &str) -> String {
+    let how = match mark.trim() {
+        "deb" => "the newer .deb, or `sudo apt upgrade`",
+        "rpm" => "the newer .rpm, or `sudo dnf upgrade`",
+        // No repository: the release's package, installed as a file.
+        "pacman" => "the newer package of the release, with `sudo pacman -U` and its file",
+        _ => "the newer package, or `sudo apt upgrade` or `sudo dnf upgrade`",
+    };
+    format!(
+        "the app came from its package here, so its package manager updates it ({how}): the package's script restarts the center with the new program"
+    )
+}
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -3949,5 +3965,18 @@ Next  Change one:  sudo nerve-center set <name> <value>
         drop(listener);
         assert!(socket.exists());
         assert!(!answers(&socket));
+    }
+
+    /// The app's update from its package names the package manager of its
+    /// kind: pacman on Arch, never apt or dnf there.
+    #[test]
+    fn the_update_of_a_packaged_center_names_its_package_manager() {
+        let arch = app_package("pacman\n");
+        assert!(arch.contains("sudo pacman -U"), "{arch}");
+        assert!(!arch.contains("apt") && !arch.contains("dnf"), "{arch}");
+        assert!(app_package("deb").contains("sudo apt upgrade"));
+        assert!(!app_package("deb").contains("dnf"));
+        assert!(app_package("rpm").contains("sudo dnf upgrade"));
+        assert!(app_package("").contains("apt upgrade` or `sudo dnf"));
     }
 }

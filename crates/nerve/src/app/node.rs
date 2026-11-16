@@ -10,9 +10,12 @@ use crate::broker;
 use crate::{Store, Tone};
 
 impl Ctl {
-    /// The app ends: so does what follows the audit or the log.
+    /// The app ends: so does what follows the audit or the log, and a
+    /// copied secret leaves the clipboard now, not a minute later (on
+    /// Windows the clipboard keeps it after the app is gone).
     pub fn end(&self) {
         self.stop_follow();
+        self.hub_clip_expired();
     }
 
     /// The installed service's state, from `status`, which needs no rights;

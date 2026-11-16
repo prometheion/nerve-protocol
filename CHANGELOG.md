@@ -150,7 +150,11 @@ and every limit is in
   On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
   link to it (a link to another program stays as it is). The `.deb` and `.rpm` are named `nerve` and replace
   `nerve-node-desktop`: a pre-release tester removes that first. The
-  package's app asks the role at its first start. In the center role
+  package's app asks the role at its first start.
+- Arch Linux: the release has the app as a package too,
+  `nerve-<version>-1-x86_64.pkg.tar.zst` (`sudo pacman -U` with the file; no
+  AUR package). The app's **Update** installs the next one with pacman, and
+  `sudo pacman -R nerve` removes it. In the center role
   **Nerve** in the menu opens the center's pages (Apps & features on Windows
   opens its uninstall). A role a terminal program installed
   beside it is said, as "Also a center, installed in the terminal", and left
@@ -181,7 +185,9 @@ and every limit is in
   this one, removes the old role whole with its data, then opens the
   installer for the other role.
 - `nerve-center --json backup -` and `restore -` hand the sealed backup over
-  the answer and the input, with `--passphrase-file -`.
+  the answer and the input, with `--passphrase-file -`. The app's restore
+  takes another center's backup where **It is another center's backup** is
+  ticked (`--replace`), so a center moves to a new machine, Windows too.
 - Each page is a list and the picked row's details: side by side from a
   window of 1100 px, in turns with Back to the list on a smaller one, and the
   page scrolls as a whole. Switches sit in the rows, adding is a form where it

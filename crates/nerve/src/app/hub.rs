@@ -198,7 +198,7 @@ fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
 }
 
 impl Ctl {
-    fn with_hub<R>(&self, f: impl FnOnce(&Hub<'_>) -> R) -> Option<R> {
+    pub(super) fn with_hub<R>(&self, f: impl FnOnce(&Hub<'_>) -> R) -> Option<R> {
         let w = self.window.upgrade()?;
         let h = w.global::<Hub>();
         Some(f(&h))
@@ -215,9 +215,15 @@ impl Ctl {
         *self.hub.keyring.borrow_mut() = keyring;
     }
 
-    /// How the administrator's commands run, for tests.
-    pub fn set_hub_admin(&self, admin: Admin) {
-        *self.hub.admin.borrow_mut() = Some(admin);
+    /// How the administrator's commands run, for tests: `None` through a
+    /// broker of their own again.
+    pub fn set_hub_admin(&self, admin: Option<Admin>) {
+        *self.hub.admin.borrow_mut() = admin;
+    }
+
+    /// How that broker starts, for tests: as the test's user.
+    pub fn set_hub_launch(&self, how: Launch) {
+        self.hub.launch.set(how);
     }
 
     /// The window shows the center's pages: this machine is a center the
@@ -229,11 +235,22 @@ impl Ctl {
         let counts: Vec<i32> = (0..groups.len() as i32)
             .map(|g| tasks.iter().filter(|t| t.group == g).count() as i32)
             .collect();
-        let keep_login = self
+        // The switch is on where the owner turned it on: the settings file
+        // says so and the keyring holds the token it kept then. The file
+        // alone is not enough, since every program of the user may write it,
+        // and the token would go into the keyring at the next log-in.
+        let kept = if self
             .settings
             .borrow()
             .as_deref()
-            .is_some_and(crate::settings::keep_login);
+            .is_some_and(crate::settings::keep_login)
+        {
+            let keyring = self.hub.keyring.borrow().clone();
+            keyring.get().ok().flatten()
+        } else {
+            None
+        };
+        let keep_login = kept.is_some();
         self.with_hub(|h| {
             h.set_shown(true);
             h.set_page(HubPage::Overview);
@@ -244,11 +261,8 @@ impl Ctl {
             h.set_keep_login(keep_login);
         });
         self.hub_connect();
-        if keep_login {
-            let keyring = self.hub.keyring.borrow().clone();
-            if let Ok(Some(token)) = keyring.get() {
-                self.hub_login_with(token, true);
-            }
+        if let Some(token) = kept {
+            self.hub_login_with(token, true);
         }
         if self.exec == Exec::Threads {
             let c = Rc::downgrade(self);
@@ -299,6 +313,12 @@ impl Ctl {
         };
         *self.hub.client.borrow_mut() = client.clone();
         self.with_hub(|h| {
+            // No center to talk to: the pages show the log-in, which says
+            // why, and the app logs in again once the center is back
+            // (Ctl::hub_again).
+            if client.is_none() {
+                h.set_logged_in(false);
+            }
             h.set_login_checked(checked);
             h.set_login_check(line.into());
             h.set_ui_off(off);
@@ -335,11 +355,9 @@ impl Ctl {
         });
         // On Linux the app closes itself to the user's other programs before
         // it holds the token (crate::broker::shut_out_the_user), as it does
-        // before it holds the broker's pipe.
+        // before it holds the broker's pipe. In tests too, which check it.
         #[cfg(target_os = "linux")]
-        if self.exec == Exec::Threads
-            && let Err(e) = crate::broker::shut_out_the_user()
-        {
+        if let Err(e) = crate::broker::shut_out_the_user() {
             self.with_hub(|h| {
                 h.set_login_busy(false);
                 h.set_login_error(e.into());
@@ -370,11 +388,16 @@ impl Ctl {
                         c.hub_load(page);
                     }
                     Err(e) => {
-                        // A kept token that no longer works is forgotten.
-                        if quiet && matches!(e, Failed::Refused(401, _)) {
-                            let _ = c.hub.keyring.borrow().delete();
+                        // A token that no longer works is forgotten, a kept
+                        // one too. One the center could not be asked about
+                        // (it was down, or restarting) is kept for the next
+                        // try.
+                        if matches!(e, Failed::Refused(401, _)) {
+                            if quiet {
+                                let _ = c.hub.keyring.borrow().delete();
+                            }
+                            c.hub.token.borrow_mut().take();
                         }
-                        c.hub.token.borrow_mut().take();
                         c.with_hub(|h| {
                             h.set_logged_in(false);
                             if !quiet {
@@ -427,7 +450,28 @@ impl Ctl {
     /// shows the log-in.
     fn hub_logged_out(self: &Rc<Self>) {
         self.with_hub(|h| h.set_logged_in(false));
-        let token = self.hub.token.borrow_mut().take();
+        let token = self.hub.token.borrow().clone();
+        if let Some(token) = token {
+            self.hub_login_with(token, true);
+        }
+    }
+
+    /// Logged out while the center was away (stopped, restarting, or not yet
+    /// started with the app): once it answers again, the app logs in with
+    /// the token it holds, in memory or kept in the keyring.
+    fn hub_again(self: &Rc<Self>) {
+        if self.with_hub(|h| h.get_login_busy()).unwrap_or(true) {
+            return;
+        }
+        if self.hub_connect().is_none() {
+            return;
+        }
+        let held = self.hub.token.borrow().clone();
+        let token = held.or_else(|| {
+            let kept = self.with_hub(|h| h.get_keep_login()).unwrap_or(false);
+            let keyring = self.hub.keyring.borrow().clone();
+            kept.then(|| keyring.get().ok().flatten()).flatten()
+        });
         if let Some(token) = token {
             self.hub_login_with(token, true);
         }
@@ -515,7 +559,7 @@ impl Ctl {
 
     fn hub_reload(self: &Rc<Self>) {
         if self.with_hub(|h| h.get_logged_in()) != Some(true) {
-            self.hub_connect();
+            self.hub_again();
             return;
         }
         if let Some(page) = self.with_hub(|h| h.get_page()) {
@@ -526,7 +570,7 @@ impl Ctl {
     /// The state of the sidebar and the Overview, every few seconds.
     fn hub_poll(self: &Rc<Self>) {
         if self.with_hub(|h| h.get_logged_in()) != Some(true) {
-            self.hub_connect();
+            self.hub_again();
             return;
         }
         let page = self.with_hub(|h| h.get_page());
@@ -1611,6 +1655,7 @@ impl Ctl {
                     h.set_backup_file(path.display().to_string().into());
                     h.set_backup_pass(SharedString::new());
                     h.set_backup_pass2(SharedString::new());
+                    h.set_restore_replace(false);
                     h.set_backup_error(SharedString::new());
                     h.set_backup_open(!restore);
                     h.set_restore_open(restore);
@@ -1658,41 +1703,53 @@ impl Ctl {
     }
 
     /// Restores a backup: the app reads the file the owner chose and hands
-    /// its bytes to the administrator's command on its input.
+    /// its bytes to the administrator's command on its input. Another
+    /// center's backup replaces this one only where the owner said so.
     fn hub_restore(self: &Rc<Self>) {
-        let Some((file, pass)) = self.with_hub(|h| {
+        let Some((file, pass, replace)) = self.with_hub(|h| {
             (
                 PathBuf::from(h.get_backup_file().as_str()),
                 h.get_backup_pass().to_string(),
+                h.get_restore_replace(),
             )
         }) else {
             return;
         };
-        let bytes = match std::fs::read(&file) {
-            Ok(b) => b,
-            Err(e) => {
-                self.with_hub(|h| h.set_backup_error(format!("{}: {e}", file.display()).into()));
-                return;
-            }
-        };
-        let input = format!("{}\n{pass}", nerve_transport::tls::b64url(&bytes));
         self.with_hub(|h| {
             h.set_backup_busy(true);
             h.set_backup_error(SharedString::new());
         });
-        self.hub_admin(restore_args(), Some(input), |c, answer| {
-            c.with_hub(|h| h.set_backup_busy(false));
-            match answer {
-                Ok(_) => {
-                    c.with_hub(|h| h.set_restore_open(false));
-                    c.toast("Restored: the center restarted with the backup.", Tone::Ok);
-                    c.hub_logged_out();
-                }
-                Err(e) => c
-                    .with_hub(|h| h.set_backup_error(e.into()))
-                    .unwrap_or_default(),
-            }
-        });
+        // Read in the job, and no more than a backup can be: a wrong pick (a
+        // disk image) neither stops the window nor fills the memory.
+        self.job(
+            move |_| nerve_transport::backup::read_file(&file),
+            move |c, bytes| {
+                let bytes = match bytes {
+                    Ok(b) => b,
+                    Err(e) => {
+                        c.with_hub(|h| {
+                            h.set_backup_busy(false);
+                            h.set_backup_error(e.into());
+                        });
+                        return;
+                    }
+                };
+                let input = format!("{}\n{pass}", nerve_transport::tls::b64url(&bytes));
+                c.hub_admin(restore_args(replace), Some(input), |c, answer| {
+                    c.with_hub(|h| h.set_backup_busy(false));
+                    match answer {
+                        Ok(_) => {
+                            c.with_hub(|h| h.set_restore_open(false));
+                            c.toast("Restored: the center restarted with the backup.", Tone::Ok);
+                            c.hub_logged_out();
+                        }
+                        Err(e) => c
+                            .with_hub(|h| h.set_backup_error(restore_words(&e).into()))
+                            .unwrap_or_default(),
+                    }
+                });
+            },
+        );
     }
 
     /// Opens the center's web UI in the browser, once its service holds the
@@ -1790,7 +1847,11 @@ impl Ctl {
             }
         };
         let args = role_change_args(node);
-        if node {
+        let fake = self.hub.admin.borrow().clone();
+        if let (true, Some(admin)) = (node, fake) {
+            // A test answers for the node's uninstall too.
+            self.job(move |_| admin(&args, None), done);
+        } else if node {
             self.command_with_rights(args, None, done);
         } else {
             // `hub_admin` puts the hidden word first itself.
@@ -1826,11 +1887,25 @@ pub fn backup_args() -> Vec<String> {
 }
 
 /// The center's restore through the broker: the backup and the passphrase
-/// on its input.
-pub fn restore_args() -> Vec<String> {
-    ["restore", "-", "--passphrase-file", "-"]
+/// on its input; `replace` where it is another center's backup.
+pub fn restore_args(replace: bool) -> Vec<String> {
+    let mut args: Vec<String> = ["restore", "-", "--passphrase-file", "-"]
         .map(String::from)
-        .to_vec()
+        .to_vec();
+    if replace {
+        args.push("--replace".into());
+    }
+    args
+}
+
+/// The box of the restore dialog that says another center's backup may
+/// replace this one.
+const REPLACE_BOX: &str = "\"It is another center's backup\"";
+
+/// A restore's refusal in the app's words: the option it names is the
+/// dialog's box.
+fn restore_words(said: &str) -> String {
+    said.replace("add --replace", &format!("tick {REPLACE_BOX}"))
 }
 
 /// What `__center status --json` says, run as the app's user: the
@@ -2099,7 +2174,9 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
                 let Some(path) = chooser(Choose::SaveLog)? else {
                     return Ok(None);
                 };
-                std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+                // The center keeps its log to itself: so does the copy.
+                nerve_transport::files::write_private(&path, &bytes)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
                 Ok(Some(path))
             },
             |c, r| {

@@ -264,6 +264,14 @@ export component HubRestoreDialog inherits Dialog {
             }
         }
     }
+    CheckBox {
+        text: "It is another center's backup";
+        detail: "Replace this center with it: the machines paired with this one pair again.";
+        checked: Hub.restore-replace;
+        toggled(on) => {
+            Hub.restore-replace = on;
+        }
+    }
     DialogButtons {
         error: Hub.backup-error;
         Button {

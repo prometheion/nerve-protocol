@@ -120,9 +120,13 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
                 overwrite: false,
                 passphrase_file: Some(pass),
             }
+            // A restore may replace this center with another one's backup:
+            // the owner ticks that in the restore dialog, as with
+            // `--replace` in a terminal; a freshly installed center is
+            // always another one than the backup's.
             | Cmd::Restore {
                 file,
-                replace: false,
+                replace: _,
                 passphrase_file: Some(pass),
             } if handed(&file) && handed(&pass) => Ok(()),
             Cmd::Backup { .. } | Cmd::Restore { .. } => Err(
@@ -1010,6 +1014,16 @@ mod tests {
                 "--passphrase-file",
                 "-",
             ],
+            // Another center's backup, where the owner said so.
+            &[
+                "__center",
+                "--json",
+                "restore",
+                "-",
+                "--passphrase-file",
+                "-",
+                "--replace",
+            ],
         ] {
             assert!(allowed(&args(ok), center).is_ok(), "{ok:?}");
         }
@@ -1041,15 +1055,7 @@ mod tests {
                 "--passphrase-file",
                 "-",
             ],
-            &[
-                "__center",
-                "--json",
-                "restore",
-                "-",
-                "--passphrase-file",
-                "-",
-                "--replace",
-            ],
+            &["__center", "--json", "restore", "/tmp/b", "--replace"],
             // A setting of the center's points an owner command at another
             // folder than the installed center's, before the command or after.
             &["__center", "--state-dir", "/tmp/s", "--json", "status"],

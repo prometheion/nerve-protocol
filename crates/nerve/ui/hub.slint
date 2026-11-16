@@ -407,6 +407,8 @@ export global Hub {
     // Backup and restore with a passphrase.
     in-out property <bool> backup-open;
     in-out property <bool> restore-open;
+    // The backup is another center's: it replaces this one.
+    in-out property <bool> restore-replace;
     in-out property <string> backup-pass;
     in-out property <string> backup-pass2;
     in-out property <string> backup-file;

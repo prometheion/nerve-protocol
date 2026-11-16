@@ -187,6 +187,9 @@ fn the_release_lists_the_linux_app_as_an_arch_package() {
         "desktop-file-validate \"$entry\"",
         "grep -qx 'Exec=/usr/bin/nerve %u' \"$entry\"",
         "test \"$(cat /usr/share/nerve/package)\" = pacman",
+        // An upgrade runs the install script, which finds the node's unit.
+        "ExecStart=/usr/bin/nerve run",
+        "grep -q \"the node still runs the earlier program\" <<<\"$said\"",
         "pacman -R --noconfirm nerve",
     ] {
         assert!(test.contains(line), "{line}: {test}");

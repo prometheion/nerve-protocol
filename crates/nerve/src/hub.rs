@@ -275,6 +275,10 @@ impl Hub {
         rt.block_on(async move {
             use tokio::io::AsyncWriteExt;
             let mut io = open(&address).await.map_err(Failed::Unreachable)?;
+            // Asked again once connected, before a byte goes out: the center
+            // may have let go of the port since the first check (a restart),
+            // and another program taken it.
+            self.check()?;
             io.write_all(head.as_bytes())
                 .await
                 .map_err(|e| Failed::Unreachable(e.to_string()))?;
@@ -370,5 +374,41 @@ mod tests {
         }
         // Nobody connected.
         assert!(listener.accept().is_err());
+    }
+
+    /// The port is asked about again once connected: a program that took it
+    /// between the first check and the connection gets nothing.
+    #[test]
+    fn nothing_goes_out_when_the_port_changed_hands_before_the_connection() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = listener.local_addr().unwrap();
+        let asked = Arc::new(AtomicU32::new(0));
+        let n = asked.clone();
+        // The center's service at the first check, another program after.
+        let hub = Hub::new(
+            Address {
+                url: format!("http://{at}"),
+                at,
+                pin: None,
+            },
+            Arc::new(move |_| match n.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(Holder::Service),
+                _ => Ok(Holder::Other),
+            }),
+        );
+        let got = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let _ = c.read_to_end(&mut bytes);
+            bytes
+        });
+        match hub.login("nrv_owner_secret") {
+            Err(Failed::NotTheCenter(e)) => assert!(e.contains("Another program"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        assert!(got.join().unwrap().is_empty(), "the token went out");
     }
 }
