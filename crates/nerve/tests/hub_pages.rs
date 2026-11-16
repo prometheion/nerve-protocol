@@ -210,7 +210,12 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
     let checker: Value = client.get("/api/checker").unwrap();
     assert_eq!(checker["config"]["model_on"], true);
 
-    // Settings: a setting the API changes, without an administrator.
+    // Settings: a setting the API changes, without an administrator. A log
+    // level the debug switch cannot show (set in the terminal or the web UI)
+    // survives the save.
+    client
+        .post("/api/center", &json!({"log_level": "warn"}))
+        .unwrap();
     hub.invoke_show(HubPage::Settings);
     assert_eq!(hub.get_set_days(), "30");
     // The addresses the center was started with: its settings file is
@@ -232,6 +237,7 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
         ),
         (json!("lab"), json!(12))
     );
+    assert_eq!(center_now["log_level"], "warn", "{center_now}");
     // An address: one administrator's command for it.
     hub.set_set_listen("127.0.0.1:7999".into());
     hub.invoke_settings_save();
