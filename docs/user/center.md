@@ -49,8 +49,7 @@ in there ([web UIs](web-uis.md#the-centers-web-ui)).
 
 ## Connect a harness
 
-The web UI's **Connect a harness** card (on the Overview, and under
-**Settings › Harness tokens**) does it:
+The web UI's **Harnesses** page does it, under **Connect a harness**:
 
 1. Press **Make a token**. The token is shown only now.
 2. Copy the JSON into your harness's MCP settings. Or copy the URL and the
@@ -65,7 +64,7 @@ The `claude mcp add` line puts the token in your shell's history; the JSON
 does not. An agent can read its harness token. That token opens `/mcp`
 only ([tokens](../dev/mcp-surface.md#tokens)).
 
-Delete a token under **Settings › Harness tokens** to stop it: its sessions
+Remove a token on the **Harnesses** page to stop it: its sessions
 end at once, with their jobs. A session also ends after 30 minutes without
 a request; the harness then opens a new one
 ([sessions](../dev/mcp-surface.md#sessions)).

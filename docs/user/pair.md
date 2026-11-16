@@ -2,7 +2,7 @@
 
 Pairing links a machine to a center. Do it once per machine and center.
 
-1. In the center's web UI, on the Overview, press **Pair a machine**. It
+1. In the center's web UI, on **Nodes** (or the Overview), press **Pair a machine**. It
    shows a command and the pairing link, each with a Copy button.
 2. On the machine, run the command, then paste the link on the next line:
 
@@ -60,7 +60,7 @@ nerve-node mode folder --center lab
 | From | How | Effect |
 |---|---|---|
 | The machine | `nerve-node center rm lab` | Tells the center, forgets it and deletes its key |
-| The center | **Remove** at the machine on the Overview | Ends the link; the node shows `revoked` until `center rm` |
+| The center | **Remove** at the machine on **Nodes** | Ends the link; the node shows `revoked` until `center rm` |
 
 To pair again, remove the old pairing on both sides, then make a new link.
 

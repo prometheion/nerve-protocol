@@ -2,8 +2,11 @@
 // browser: headless Chrome, driven over the DevTools protocol with what
 // Node.js has built in (fetch, WebSocket), so it needs no package. It signs
 // in with the token on the login page, as a person does, then opens every
-// page of the sidebar and fails on a script error, an error in the console,
-// an answer of 500 or more, or a page that shows nothing.
+// page of the sidebar and fails on a script error, an error in the console
+// (a refusal of the CSP among them), an answer of 500 or more, a file of the
+// page that is not found, or a page that shows nothing or not its title.
+// The pages are the React app of webui/ (docs/dev/web-uis.md): each a list
+// and the picked row's details, the page itself in #page.
 //
 //   node web-ui-smoke.mjs <chrome> <url> <token>
 //
@@ -85,6 +88,8 @@ ws.onmessage = (ev) => {
     problems.push(`console error: ${(p.args || []).map((a) => a.value ?? a.description).join(" ")}`);
   } else if (m.method === "Network.responseReceived" && p.response.status >= 500) {
     problems.push(`answer ${p.response.status} for ${p.response.url}`);
+  } else if (m.method === "Network.responseReceived" && p.response.status === 404 && /\/assets\/|\/icon\.svg$/.test(p.response.url)) {
+    problems.push(`no ${p.response.url}`);
   }
 };
 function send(method, params = {}) {
@@ -127,9 +132,11 @@ try {
     // What the page asks for when it opens comes in meanwhile.
     await sleep(1500);
     const shown = await evaluate("document.getElementById('page').innerText.trim().length");
-    const title = await evaluate("document.getElementById('top-title').textContent");
+    const title = await evaluate("(document.getElementById('top-title') || {}).textContent || ''");
+    const label = await evaluate(`document.querySelector('[data-page="${name}"]').textContent.trim()`);
     console.log(`page ${name}: "${title}", ${shown} characters`);
     if (!shown) problems.push(`the page ${name} shows nothing`);
+    if (title !== label) problems.push(`the page ${name} is titled "${title}", not "${label}"`);
   }
 } catch (e) {
   problems.push(e.message);

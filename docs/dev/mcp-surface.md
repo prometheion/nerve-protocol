@@ -339,8 +339,8 @@ What `list` shows follows what the machines allow:
   when it was last seen. A call to it fails with `unavailable`.
 - An action whose name or schemas (arguments or result) the center cannot
   handle is not offered, even with an allow rule. The center's web UI lists
-  it with the reason on the Overview, under **Not offered to the agent**
-  ([web UI](web-uis.md#overview)).
+  it with the reason on Nodes, under **Not offered to the agent**
+  ([web UI](web-uis.md#overview-and-nodes)).
 - Beside a machine's own capabilities `list` names `job.status`,
   `job.cancel`, `stream.read` and `stream.close`: the center answers them
   itself (below). `exec.signal` is offered where you allowed it, and takes a

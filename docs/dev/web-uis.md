@@ -155,7 +155,13 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
 
 ### Pages
 
-#### Overview
+#### Overview and Nodes
+
+The Overview shows the center's state, Get started while a new center has
+steps left, alerts, and the machines as a list; from 1800 px the sessions
+stand beside them. **Nodes** lists the machines too, with **Pair a machine**.
+A picked machine's details:
+
 
 - **Machines.** Each paired machine with its state (online, offline,
   disabled), platform, a short summary and what it offers. Buttons: Rename,
@@ -170,13 +176,31 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
   `event <name>:`; a capability without actions is then listed by its own
   name. A reason is one line, cut after 300 characters. The agent never sees
   them; the rest of the machine's actions stay.
-- **Pair a machine.** Makes a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command,
+- **Pair a machine.** An overlay with a [pairing](identity-and-pairing.md#pairing-as-the-owner-does-it) command,
   `nerve-node center add -`, and the bare link it reads from stdin (also for the desktop
   app), each with Copy; for a Windows machine it says to open the link there.
+  It closes once a machine used the code, and the page names the machine and
+  its next step.
+- Alerts, for example a machine whose key is in use twice.
+
+#### Harnesses
+
+- **Connect a harness.** How an AI app reaches this center: for HTTP, **Make
+  a token** shows a new token once with the JSON, the URL, the header and the
+  Claude Code line to paste.
+- **Tokens.** Make a token with a label. It is shown once. Remove one
+  to stop it: the harness sessions it opened over HTTP end at once, with
+  their jobs. A token is only shown once the center has written it to its
+  state file; when it cannot, the page says so and no token is made. A
+  token removed while the state file cannot be written stops at once, but
+  the page says the removal is not kept yet: unless the file can be written
+  before the center stops, the token works again at the next start. The
+  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
+  `--harness-token`) is listed too, without **Remove**: remove it from the
+  settings. A harness token does not log in to this UI.
 - **Sessions.** The harnesses connected now, each marked `tainted` once the
   [action checker](action-checker.md#taint-1) marked it. **End** stops one
   session.
-- Alerts, for example a machine whose key is in use twice.
 
 A disabled machine stays paired and connected. The agent's `list` shows it as
 disabled with no capabilities, and calls to it are refused. The agent's calls
@@ -354,9 +378,9 @@ the marked entry and **Escape** closes it.
 
 #### Help
 
-Parts that open and close on their own:
+Its sections as a list:
 
-- **Connect a harness.** How an AI app reaches this center, as on the Overview.
+- **Tasks.** What you may want to do, and the page where it is done.
 - **nerve-center commands.** The center's own commands, one line each; its
   options and the advanced ones fold.
 - **nerve-node commands.** The commands of `nerve-node`, the program on each
@@ -379,16 +403,6 @@ Parts that open and close on their own:
 - **Center key.** The pin of the key the center serves. **Rotate key** makes
   a new key and shows its pin once; **Serve the new key now** ends the 7 days
   in which the old key is still served ([center](identity-and-pairing.md#rotate-the-centers-key)).
-- **Harness tokens.** Make a token with a label. It is shown once. Delete one
-  to stop it: the harness sessions it opened over HTTP end at once, with
-  their jobs. A token is only shown once the center has written it to its
-  state file; when it cannot, the page says so and no token is made. A
-  token deleted while the state file cannot be written stops at once, but
-  the page says the delete is not kept yet: unless the file can be written
-  before the center stops, the token works again at the next start. The
-  same holds for a removed machine. The token of the center's settings (`NERVE_CENTER_HARNESS_TOKEN` or
-  `--harness-token`) is listed too, without **Delete**: remove it from the
-  settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings
   grant: its settings as JSON, with **Reload** and **Save**, and the sudo
   switch. The capabilities the center adds are on the Capabilities page, not
