@@ -1,6 +1,7 @@
 //! The owner's commands in the terminal that the web UI has too: `pair`,
-//! `nodes` and `token` ask the running center over its attach socket or
-//! pipe (crate::attach), whose handlers are the web UI's; `log` reads the
+//! `nodes` and `token` (and the rest of the pages' commands, crate::pages)
+//! ask the running center over its attach socket or pipe (crate::attach),
+//! whose handlers are the web UI's; `log` reads the
 //! center's log file, so it works with the center stopped too. The output
 //! is in the style of both programs (nerve_service::out).
 
@@ -24,11 +25,24 @@ pub async fn run(
 ) -> Result<(), String> {
     use crate::config::Cmd;
     let command = commands(state, installed);
+    let ask = crate::pages::Ask { state, installed };
     let page = match cmd {
         Cmd::Pair => pair_page(&call(state, installed, "POST", "/api/pair", json!({})).await?),
+        Cmd::Nodes { cmd: Some(c) } if crate::pages::touches_one(c) => {
+            crate::pages::nodes(&ask, c).await?.ok_or("nothing to do")?
+        }
         Cmd::Nodes { cmd } => nodes(state, installed, cmd.as_ref(), &command, out).await?,
         Cmd::Token(t) => token(state, installed, t, &command, out).await?,
-        _ => return Err("only pair, nodes and token ask the running center".into()),
+        Cmd::Sessions { cmd } => crate::pages::sessions(&ask, cmd.as_ref()).await?,
+        Cmd::Checker { cmd } => crate::pages::checker(&ask, cmd.as_ref()).await?,
+        Cmd::Caps { name, cmd } => crate::pages::caps(&ask, name, cmd.as_ref()).await?,
+        Cmd::Stats => crate::pages::stats(&ask).await?,
+        Cmd::Audit { last, cmd } => crate::pages::audit(&ask, *last, cmd.as_ref()).await?,
+        Cmd::Key(k) => crate::pages::key(&ask, *k).await?,
+        Cmd::Config { setting, value } => {
+            crate::pages::config(&ask, setting.as_deref(), value.as_deref()).await?
+        }
+        _ => return Err("this command does not ask the running center".into()),
     };
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
@@ -278,7 +292,7 @@ fn nodes_page(overview: &Value, command: &dyn Fn(&str) -> String) -> Page {
 
 /// The id of the paired machine `name` in `overview`. A name two machines
 /// share is refused: the web UI tells them apart.
-fn node_id(overview: &Value, name: &str) -> Result<String, String> {
+pub(crate) fn node_id(overview: &Value, name: &str) -> Result<String, String> {
     let found: Vec<&Value> = overview["nodes"]
         .as_array()
         .into_iter()
@@ -289,7 +303,7 @@ fn node_id(overview: &Value, name: &str) -> Result<String, String> {
         [n] => Ok(n["id"].as_str().unwrap_or_default().to_string()),
         [] => Err(format!("no machine named {name} is paired")),
         _ => Err(format!(
-            "{} machines are named {name}: rename one in the web UI first",
+            "{} machines are named {name}: rename one in the app or the web UI first",
             found.len()
         )),
     }
@@ -334,6 +348,9 @@ fn node_change(cmd: &NodesCmd) -> Option<(&str, &'static str, Value, &'static st
             "turned on",
         ),
         NodesCmd::Rm { name } => (name, "/api/nodes/remove", json!({}), "removed"),
+        NodesCmd::Rename { .. } | NodesCmd::Settings { .. } | NodesCmd::Sudo { .. } => {
+            return None;
+        }
     })
 }
 

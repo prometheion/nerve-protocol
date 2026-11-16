@@ -31,6 +31,7 @@ pub mod listing;
 pub mod mcp;
 pub mod owner;
 pub mod owner_calls;
+pub mod pages;
 pub mod pairing;
 pub mod server;
 pub mod service;

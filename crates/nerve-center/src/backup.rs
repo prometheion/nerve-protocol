@@ -659,6 +659,13 @@ pub fn run(
         | Cmd::Pair
         | Cmd::Nodes { .. }
         | Cmd::Token(_)
+        | Cmd::Sessions { .. }
+        | Cmd::Checker { .. }
+        | Cmd::Caps { .. }
+        | Cmd::Stats
+        | Cmd::Audit { .. }
+        | Cmd::Key(_)
+        | Cmd::Config { .. }
         | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             return Err("only backup and restore are backup commands".into());

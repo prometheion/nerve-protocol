@@ -1,7 +1,14 @@
 # The web UIs and the app
 
 Three windows on Nerve: the center's web UI, the node's web UI and the
-desktop app. Each change you make there runs the same check as the CLI.
+desktop app. Each change you make there runs the same check as the CLI, and
+everything they do the CLI does too (on Windows, which has no terminal, the
+app and the web UIs).
+
+| Web UI | Linux | Windows |
+|---|---|---|
+| The center's | on | off; the app's **Settings › This machine** turns it on |
+| The node's | on after `nerve-node install`, off in the app | off; the app's **Settings › Network** turns it on |
 
 ## The center's web UI
 
@@ -44,8 +51,9 @@ The Audit buttons and a machine's settings need that machine's
 ## The node's web UI
 
 The installed node can serve a web UI with the app's pages, on Linux and
-Windows. It is off until you turn it on, in the app's **Settings › Network ›
-Web UI** or in the terminal:
+Windows. `nerve-node install` turns it on at loopback and shows its first
+token once. In the app it is off until you turn it on, in **Settings ›
+Network › Web UI**, or in the terminal:
 
 ```sh
 nerve-node ui on                       # shows a first token once
@@ -82,16 +90,17 @@ certificate of its own. `ui on` prints its fingerprint.
   Compare its fingerprint before you log in, or keep them on loopback
   behind an SSH tunnel ([beyond loopback](../dev/web-uis.md#beyond-loopback)).
 
-Done only at the CLI: `install`, `update`, `uninstall`, `service`, `setup`,
-`sudo on`, `backup`, `restore`, the `ui` settings and the settings that
-decide the account commands run as.
+Not in the node's web UI, but in the CLI and the app: `install`, `update`,
+`uninstall`, `service`, `setup`, `sudo on`, `backup`, `restore`, the `ui`
+settings and the settings that decide the account commands run as.
 
 ## The desktop app
 
-The app is the node with a window ([install](install.md#the-desktop-app)).
-Open **Nerve** from the application menu. It does what `nerve-node` does,
-and runs the CLI for each action. Its node has the node's web UI too, off
-until **Settings › Network › Web UI** turns it on.
+The app is the node or the center with a window
+([install](install.md#the-desktop-app)). Open **Nerve** from the application
+menu. On a node it does what `nerve-node` does, and runs the CLI for each
+action. On a center it asks the center as `nerve-center` does, also with the
+web UI off ([the center in the app](center.md#in-the-app)).
 
 | Page | Does |
 |---|---|

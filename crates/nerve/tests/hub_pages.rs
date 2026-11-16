@@ -245,6 +245,20 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
         ]]
     );
 
+    // The web UI's switch in This machine: off here (the test's center runs
+    // without it), on through one administrator's command, and off again.
+    assert_eq!(hub.get_set_ui(), "off");
+    hub.invoke_web_ui_set(true);
+    assert_eq!(
+        asked.lock().unwrap().last().unwrap(),
+        &["__center", "set", "ui", "127.0.0.1:7480"].map(String::from)
+    );
+    hub.invoke_web_ui_set(false);
+    assert_eq!(
+        asked.lock().unwrap().last().unwrap(),
+        &["__center", "set", "ui", "off"].map(String::from)
+    );
+
     // The keyring switch off for what follows: only the token in memory
     // logs in again after the center was away.
     hub.invoke_keep_login_set(false);

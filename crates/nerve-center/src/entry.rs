@@ -124,7 +124,16 @@ pub fn main(argv: Vec<std::ffi::OsString>) -> std::process::ExitCode {
             Cmd::Status => crate::service::status(&layout, &state, &args.ui, &args.mcp, out),
             // The running center answers these over its attach socket or
             // pipe, as the folder's owner asks it.
-            Cmd::Pair | Cmd::Nodes { .. } | Cmd::Token(_) => {
+            Cmd::Pair
+            | Cmd::Nodes { .. }
+            | Cmd::Token(_)
+            | Cmd::Sessions { .. }
+            | Cmd::Checker { .. }
+            | Cmd::Caps { .. }
+            | Cmd::Stats
+            | Cmd::Audit { .. }
+            | Cmd::Key(_)
+            | Cmd::Config { .. } => {
                 let installed = layout.installed() && layout.is_state(&state);
                 settle(&state).and_then(|_| {
                     owner_runtime()?.block_on(crate::owner_calls::run(&state, cmd, installed, out))

@@ -886,6 +886,132 @@ fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
     assert!(wait(&mut center, Duration::from_secs(10)));
 }
 
+/// Every function of the center's pages has its command in the terminal
+/// (owner, 2026-11-16: nothing is GUI-only), with the web UI off: the
+/// checker's switches, its blocklist and skip rules (add, edit, switch,
+/// remove), the decision model and a machine's own switch; the sessions,
+/// the statistics, the audit, the center key, the center's own settings,
+/// and a machine's name, settings, sudo and capabilities.
+#[test]
+fn every_function_of_the_pages_has_its_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut center = spawn(&state);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    let said = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert!(
+            o.status.success(),
+            "{args:?}: {text}{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        text
+    };
+    let refused = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        assert!(!o.status.success(), "{args:?} was not refused");
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    // The words of the row numbered `n`, as the columns part them.
+    let row = |page: &str, n: &str| -> Vec<String> {
+        page.lines()
+            .map(|l| {
+                l.split("  ")
+                    .map(str::trim)
+                    .filter(|w| !w.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .find(|w| w.first().map(String::as_str) == Some(n))
+            .unwrap_or_default()
+    };
+    // The checker as the page shows it, its rules numbered.
+    let shown = said(&["checker"]);
+    assert!(shown.contains(" · blocklist on · model off\n"), "{shown}");
+    let builtins = shown.lines().filter(|l| l.contains("built-in: ")).count();
+    assert!(builtins > 0, "{shown}");
+    let n = (builtins + 1).to_string();
+    let added = said(&[
+        "checker",
+        "block",
+        "add",
+        "exec.run:shutdown *",
+        "--note",
+        "Turns the machine off",
+    ]);
+    assert!(added.contains("the rule is added"), "{added}");
+    assert_eq!(
+        row(&added, &n),
+        [
+            n.as_str(),
+            "on",
+            "exec.run:shutdown *",
+            "all machines",
+            "Turns the machine off"
+        ],
+        "{added}"
+    );
+    let edited = said(&["checker", "block", "edit", &n, "exec.run:poweroff *"]);
+    assert_eq!(row(&edited, &n)[2], "exec.run:poweroff *", "{edited}");
+    let off = said(&["checker", "block", "off", &n]);
+    assert_eq!(row(&off, &n)[1], "off", "{off}");
+    assert!(refused(&["checker", "block", "rm", "1"]).contains("built-in"));
+    let gone = said(&["checker", "block", "rm", &n]);
+    assert!(!gone.contains("poweroff"), "{gone}");
+    let skip = said(&["checker", "skip", "add", "exec.run:ls *"]);
+    assert!(skip.contains("Skip the model"), "{skip}");
+    assert_eq!(
+        row(&skip[skip.find("Skip the model").unwrap()..], "1")[1..],
+        ["exec.run:ls *", "all machines"],
+        "{skip}"
+    );
+    let skip = said(&["checker", "skip", "rm", "1"]);
+    assert!(!skip.contains("Skip the model"), "{skip}");
+    assert!(said(&["checker", "on", "model"]).contains(" · blocklist on · model on\n"));
+    assert!(said(&["checker", "off", "model"]).contains(" · blocklist on · model off\n"));
+    let tuned = said(&["checker", "model", "set", "threshold", "0.7"]);
+    assert!(tuned.contains("threshold 0.7"), "{tuned}");
+    assert!(refused(&["checker", "model", "set", "gpu", "maybe"]).contains("on or off"));
+    assert!(
+        refused(&["checker", "machine", "nope", "model", "on"]).contains("no machine named nope")
+    );
+    // The harness's session of this test, the statistics, the audit.
+    let sessions = said(&["sessions"]);
+    assert!(sessions.contains(" · 1 session\n"), "{sessions}");
+    assert!(sessions.contains("stdio"), "{sessions}");
+    assert!(refused(&["sessions", "end", "nope"]).contains("no such session"));
+    assert!(said(&["stats"]).contains("All machines"));
+    assert!(said(&["audit"]).contains(" · no decision yet\n"));
+    assert!(refused(&["audit", "allow", "1"]).contains("no decision numbered 1"));
+    // The center's own settings.
+    let config = said(&["config", "retention-days", "12"]);
+    assert!(
+        config
+            .lines()
+            .any(|l| l.split_whitespace().eq(["retention-days", "12"])),
+        "{config}"
+    );
+    assert!(refused(&["config", "retention-days", "999"]).contains("1 to 366"));
+    // The center key: a new one, its pin shown once, the grace ended.
+    let key = said(&["key", "rotate"]);
+    assert!(key.contains(" · new center key\n"), "{key}");
+    assert!(key.contains("\n  Pin "), "{key}");
+    assert!(said(&["key", "finish"]).contains("the old key no longer works"));
+    // A machine's commands name it; none is paired here.
+    for args in [
+        &["nodes", "rename", "nope", "lab"][..],
+        &["nodes", "settings", "nope"],
+        &["nodes", "sudo", "nope", "off"],
+        &["caps", "nope"],
+    ] {
+        assert!(refused(args).contains("no machine named nope"), "{args:?}");
+    }
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+}
+
 /// With the web UI off and MCP over HTTP on, `token new` in the terminal
 /// shows how a harness reaches the endpoint, as the web UI's card does
 /// (round 1 of #213's second pass, correctness 5: it said to turn on MCP

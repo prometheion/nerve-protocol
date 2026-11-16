@@ -1740,6 +1740,35 @@ impl Ctl {
         );
     }
 
+    /// The web UI on (at loopback) or off: `set ui`, through one
+    /// administrator's prompt, which restarts the center. Off by default on
+    /// Windows, on on Linux (owner, 2026-11-16).
+    fn hub_web_ui(self: &Rc<Self>, on: bool) {
+        let ui = match on {
+            true => nerve_center::config::UI_ADDRESS,
+            false => "off",
+        };
+        self.with_hub(|h| h.set_busy("web-ui".into()));
+        self.hub_admin(
+            vec!["set".into(), "ui".into(), ui.into()],
+            None,
+            move |c, answer| {
+                c.with_hub(|h| h.set_busy(SharedString::new()));
+                match answer {
+                    Ok(_) => c.toast(
+                        match on {
+                            true => "The web UI is on, on this machine.",
+                            false => "The web UI is off.",
+                        },
+                        Tone::Ok,
+                    ),
+                    Err(e) => c.toast(e, Tone::Danger),
+                }
+                c.hub_reload();
+            },
+        );
+    }
+
     /// Opens the center's web UI in the browser, once its service holds the
     /// port: its address file and that check are only for this now.
     fn hub_open_web_ui(&self) {
@@ -1929,6 +1958,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     h.on_uninstall(move |purge| c.hub_uninstall(purge));
     let c = ctl.clone();
     h.on_open_web_ui(move || c.hub_open_web_ui());
+    let c = ctl.clone();
+    h.on_web_ui_set(move |on| c.hub_web_ui(on));
     let c = ctl.clone();
     h.on_pair_start(move || c.hub_pair_start());
     let c = ctl.clone();

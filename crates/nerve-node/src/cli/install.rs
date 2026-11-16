@@ -106,11 +106,48 @@ pub(super) async fn install(
             &invoker,
             out,
         )?;
+        if web_ui_at_install(crate::edition::get().program, cfg!(windows)) {
+            first_web_ui(&layout.paths, out).await;
+        }
         // One first run: at a terminal setup's questions follow.
         if terminal {
             setup_after_install(&layout, &invoker, out);
         }
         Ok(())
+    }
+}
+
+/// Whether `install` turns the web UI on (owner, 2026-11-16): for the
+/// terminal program `nerve-node` on Linux, where it is the way to the node
+/// beside the CLI; not for the app `nerve`, whose window is, nor on Windows.
+/// Either turns it on in its Settings, or `ui on`.
+#[cfg_attr(windows, allow(dead_code))]
+fn web_ui_at_install(program: &str, windows: bool) -> bool {
+    program == crate::edition::NODE.program && !windows
+}
+
+/// Turns the installed node's web UI on at loopback with its first token,
+/// shown once, where the node never had one: a reinstall keeps the owner's
+/// choice. A failure leaves the install as it is, and says what to run.
+#[cfg(not(windows))]
+async fn first_web_ui(paths: &NodePaths, out: &mut dyn Write) {
+    let fresh = match read_config(paths).await {
+        Ok((c, _)) => c.ui.listen.is_none() && c.ui.tokens.is_empty(),
+        Err(_) => false,
+    };
+    if !fresh {
+        return;
+    }
+    let on = UiCmd::On {
+        listen: None,
+        names: Vec::new(),
+        new_cert: false,
+    };
+    if let Err(e) = ui::ui_cmd(paths, Some(on), out).await {
+        let _ = writeln!(
+            out,
+            "the web UI stays off ({e}); `sudo nerve-node ui on` turns it on"
+        );
     }
 }
 
@@ -278,6 +315,16 @@ fn root_owner(
 mod tests {
     use super::*;
     use crate::cli::tests::{run, setup};
+
+    /// The terminal program's install turns the web UI on, on Linux; the
+    /// app's and Windows' do not (owner, 2026-11-16).
+    #[test]
+    fn only_the_terminal_program_turns_the_web_ui_on_at_install() {
+        assert!(web_ui_at_install("nerve-node", false));
+        assert!(!web_ui_at_install("nerve", false));
+        assert!(!web_ui_at_install("nerve-node", true));
+        assert!(!web_ui_at_install("nerve", true));
+    }
 
     /// Without root, `install`, `update` and `uninstall` say on Linux that
     /// they need it before they ask the node, whose control socket such an

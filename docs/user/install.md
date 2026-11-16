@@ -49,7 +49,9 @@ sudo ./nerve-node-x86_64-linux install
 
 `install` puts the program at `/usr/local/bin/nerve-node` and starts the
 service, which starts with the machine. You become its owner: you run its
-commands without `sudo`. At a terminal it then asks [setup](#setup)'s
+commands without `sudo`. It turns the node's [web UI](web-uis.md#the-nodes-web-ui)
+on at `http://127.0.0.1:7470` and shows its first token once; the app's
+node keeps it off. At a terminal it then asks [setup](#setup)'s
 questions. Without one it says what to run (`-` reads the pairing link from
 the next line, [pair](pair.md)):
 

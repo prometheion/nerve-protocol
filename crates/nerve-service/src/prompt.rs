@@ -97,6 +97,16 @@ fn non_empty(text: String) -> Result<Passphrase, String> {
     Ok(Passphrase::new(text))
 }
 
+/// A secret from the owner, as a passphrase is asked: at a terminal
+/// without echo after `prompt` on stderr, else the first line of stdin.
+pub fn secret(prompt: &str) -> Result<String, String> {
+    let (line, _) = hidden_line(&mut std::io::stderr(), prompt)?;
+    match line.is_empty() {
+        true => Err("nothing was given".into()),
+        false => Ok(line),
+    }
+}
+
 /// One line from the terminal without echo, and whether stdin is a
 /// terminal; else one line of stdin as it comes.
 #[cfg(unix)]

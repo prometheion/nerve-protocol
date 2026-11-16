@@ -802,11 +802,17 @@ fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
         | Cmd::Pair
         | Cmd::Nodes { .. }
         | Cmd::Token(_)
+        | Cmd::Sessions { .. }
+        | Cmd::Checker { .. }
+        | Cmd::Caps { .. }
+        | Cmd::Stats
+        | Cmd::Audit { .. }
+        | Cmd::Key(_)
+        | Cmd::Config { .. }
         | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             return Err(
-                "backup, restore, owner-token, status, pair, nodes, token, log and service-files are not service commands"
-                    .into(),
+                "only install, set, service, update and uninstall are service commands".into(),
             );
         }
     })
@@ -903,6 +909,13 @@ async fn execute_on(
         | Cmd::Pair
         | Cmd::Nodes { .. }
         | Cmd::Token(_)
+        | Cmd::Sessions { .. }
+        | Cmd::Checker { .. }
+        | Cmd::Caps { .. }
+        | Cmd::Stats
+        | Cmd::Audit { .. }
+        | Cmd::Key(_)
+        | Cmd::Config { .. }
         | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             unreachable!("refused above")

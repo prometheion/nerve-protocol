@@ -361,6 +361,8 @@ export global Hub {
     in-out property <string> set-public-url;
     in-out property <string> set-listen;
     in-out property <string> set-ui;
+    // The web UI's switch in This machine: on is set ui 127.0.0.1:7480.
+    callback web-ui-set(bool);
     in-out property <string> set-mcp;
     in-out property <string> set-days;
     in-out property <string> set-minutes;

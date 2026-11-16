@@ -108,8 +108,9 @@ account.
 
 Harnesses connect over HTTP MCP: **Harnesses › Connect a harness** makes a
 harness token and the entry. The center's settings are in
-`settings\center.env` there; its web UI and MCP stay on this machine, and
-the app installs no second role beside it.
+`settings\center.env` there; MCP stays on this machine, and the app
+installs no second role beside it. The center's web UI is off:
+**Settings › This machine › Web UI** turns it on, on this machine.
 
 **Change the role…** (Settings › This machine, on a node Settings › App)
 backs up, removes the role with its data, and installs the other.

@@ -47,6 +47,14 @@ and every limit is in
   account and the account that installed it may use; everyone but root and
   an administrator gives the owner token, so a program of yours, an agent
   among them, gets nothing without it.
+- Everything the web UI and the app do for the center is a command too:
+  `sessions [end]`, `checker` (its switches, the blocklist and the rules that
+  skip the model with add, edit, on, off and rm, the decision model, a
+  machine's own switches), `caps <machine> [add|rm]`, `stats`, `audit` (and
+  `allow|deny|skip <N>`), `key rotate|finish`, `config` (name, retention,
+  pairing time, log level) and `nodes rename|settings|sudo`.
+- The center's web UI is on by default on Linux and off on Windows, where
+  the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
   fails closed by default.
@@ -198,8 +206,10 @@ and every limit is in
   ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
-- The node's own web UI, on Linux and Windows, off until it is turned on in
-  **Settings › Network › Web UI** (or `nerve-node ui on`), with its tokens.
+- The node's own web UI, on Linux and Windows, off in the app until it is
+  turned on in **Settings › Network › Web UI** (or `nerve-node ui on`), with
+  its tokens. `nerve-node install` turns it on at loopback and shows its
+  first token once.
   **Open** checks first that the node holds the port, and opens it over TLS
   where the node serves it so. On Windows only the owner's own session gets
   in, and beyond loopback is an administrator's step, also as the setting

@@ -47,8 +47,8 @@ opens the installer for the node.
 
 ## In the terminal
 
-What the web UI does for machines and harnesses, the terminal does too,
-also with the web UI off:
+What the web UI and the app do, the terminal does too, also with the web UI
+off:
 
 ```sh
 sudo nerve-center pair                  # a link that pairs a new machine
@@ -58,15 +58,23 @@ sudo nerve-center nodes rm lab          # unpaired
 sudo nerve-center token new laptop      # a harness token, shown once
 sudo nerve-center token list
 sudo nerve-center token rm laptop
+sudo nerve-center checker               # its switches and rules, numbered
+sudo nerve-center checker block add 'exec.run:shutdown *'
+sudo nerve-center audit skip 3          # such calls skip the model
 sudo nerve-center log --problems
 ```
 
-They ask the running center through its own socket, which only root and
-the center's account may use (on Windows, an administrator's terminal).
+The rest is in [commands](commands.md#nerve-center). They ask the running
+center through its own socket, which root, an administrator, the center's
+account and the account that installed it may use. All but root and an
+administrator give the owner token: a program of yours gets nothing without
+it.
 
 ## Log in to the web UI
 
-Open `http://127.0.0.1:7480` and log in with the **owner token**. `install`
+The web UI is on by default on Linux, at `http://127.0.0.1:7480`. On Windows
+it is off: **Settings › This machine › Web UI** in the app turns it on, as
+`set ui 127.0.0.1:7480` does. Log in with the **owner token**. `install`
 prints it, and this shows it again:
 
 ```sh
