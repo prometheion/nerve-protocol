@@ -1,5 +1,5 @@
-//! The center web UI: a small page (vanilla HTML/JS/CSS built into the
-//! binary) over a JSON API.
+//! The center web UI: its page (the React app of `webui/`, built into the
+//! binary by nerve_transport::webui) over a JSON API.
 //!
 //! Access: the login is the owner token ([`crate::owner`]), on loopback
 //! too, and never a harness token: an agent can read its harness's token,
@@ -31,9 +31,6 @@ use crate::listen::Server;
 use crate::owner::OwnerToken;
 use crate::store::{PAIR_CODE_MAX_MINUTES, TokenRecord};
 use crate::util::{self, now_ms};
-
-const INDEX: &str = include_str!("ui/index.html");
-const APP_JS: &str = include_str!("ui/app.js");
 
 const WRONG_TOKEN: &str = "Wrong owner token.";
 
@@ -175,13 +172,6 @@ pub(crate) fn command_of(
     }
 }
 
-/// `text` for HTML: the login's tagline names a folder.
-fn html_text(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
@@ -327,12 +317,8 @@ impl Ui {
             if let Some(r) = webui::asset(&req.path) {
                 return r;
             }
-            match req.path.as_str() {
-                "/" | "/index.html" => {
-                    return Response::new(200, "text/html; charset=utf-8", INDEX);
-                }
-                "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
-                _ => {}
+            if req.path == "/" || req.path == "/index.html" {
+                return webui::page(webui::Ui::Center);
             }
         }
         if req.method == "POST"
@@ -392,12 +378,18 @@ impl Ui {
     }
 
     fn login_page(&self) -> Response {
-        let tagline = format!(
-            "One center for all your machines. <code>{}</code>{} shows its owner token.",
-            html_text(&token_command(self.center.dir(), self.loopback)),
+        let command = token_command(self.center.dir(), self.loopback);
+        let after = format!(
+            "{} shows its owner token.",
             token_where_here(self.center.dir())
         );
-        webui::login_page("Owner token", &tagline)
+        webui::login_page(&webui::LoginText {
+            secret: "Owner token",
+            title: "Log in to this center",
+            tagline: "One center for all your machines.",
+            command: Some(&command),
+            after: &after,
+        })
     }
 
     /// Checks the token the login form posted. The answer is the session for
@@ -897,7 +889,6 @@ fn node_help() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nerve_transport::webui::{APP_CSS, KIT_JS};
     use std::collections::BTreeMap;
 
     fn req(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Request {
@@ -935,6 +926,22 @@ mod tests {
         v["session"].as_str().expect("a session").to_string()
     }
 
+    /// What the login page says (its `<meta name="nerve-login">`).
+    fn login_text(page: &str) -> Value {
+        let at = page
+            .find("<meta name=\"nerve-login\" content=\"")
+            .expect("the login's words")
+            + 34;
+        let content = &page[at..at + page[at..].find('"').unwrap()];
+        let content = content
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        serde_json::from_str(&content).unwrap()
+    }
+
     /// Signs in with the owner token of `ui`'s center, as its owner does;
     /// `host` is the request's `Host`.
     async fn owner_login(ui: &Ui, host: (&str, &str)) -> Response {
@@ -963,43 +970,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_pairing_card_offers_the_command_and_the_bare_link() {
-        let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, true);
-        let h = ("Host", "127.0.0.1:7480");
-        let session = owner_login(&ui, h).await;
-        let ck = session_token(&session);
-        let js = ui
-            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
-            .await;
-        let js = String::from_utf8(js.body).unwrap();
-        let card = &js[js.find("function pairingCard").unwrap()..];
-        let card = &card[..card.find("\n}\n").unwrap()];
-        // Two rows with a Copy each: the command, which reads the link from
-        // stdin so that it is never in the process list (#198), and the link
-        // alone for the desktop app, which a Windows machine opens. The
-        // link's parts are not shown apart.
-        assert!(card.contains("row(\"Command\", PAIR_COMMAND)"), "{card}");
-        assert!(
-            js.contains("const PAIR_COMMAND = \"nerve-node center add -\";"),
-            "{js}"
-        );
-        assert!(card.contains("row(\"Link\", p.link)"), "{card}");
-        assert!(!card.contains("center add '"), "{card}");
-        assert!(
-            card.contains("then paste the link on the next line"),
-            "{card}"
-        );
-        assert!(
-            card.contains("On a Windows machine, open this link on the machine"),
-            "{card}"
-        );
-        for gone in ["\"Center\"", "\"Code\"", "\"Certificate pin\""] {
-            assert!(!card.contains(gone), "{gone} is still a row: {card}");
-        }
-    }
-
-    #[tokio::test]
     async fn the_help_page_lists_every_node_command() {
         use clap::CommandFactory;
         let d = tempfile::tempdir().unwrap();
@@ -1007,15 +977,6 @@ mod tests {
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
-        // The page: a tab in the menu, drawn from /api/help.
-        let index = ui.request(req("GET", "/", &[h, (SESSION, &ck)], "")).await;
-        let index = String::from_utf8(index.body).unwrap();
-        assert!(index.contains("href=\"#help\""), "no Help tab in the menu");
-        let js = ui
-            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
-            .await;
-        let js = String::from_utf8(js.body).unwrap();
-        assert!(js.contains("\"/api/help\"") && js.contains("pageHelp"));
         // The data: every command of the CLI definition, with its words, on
         // cards in sections. A noun's own command is in its card's `holds`.
         let r = ui
@@ -1229,29 +1190,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_page_closes_the_pairing_card_when_the_code_is_used() {
-        let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, true);
-        let h = ("Host", "127.0.0.1:7480");
-        let session = owner_login(&ui, h).await;
-        let ck = session_token(&session);
-        let js = ui
-            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
-            .await;
-        let js = String::from_utf8(js.body).unwrap();
-        // The poll asks the center about the code on screen and drops the
-        // card when it is gone.
-        let ask = js.find("\"/api/pair/status\"").expect("the page asks");
-        let poll = js.find("async function tick()").unwrap();
-        let tick_end = js[poll..].find("\n}\n").unwrap() + poll;
-        assert!(js[poll..tick_end].contains("closePairingWhenUsed("));
-        // It names the machine the center says, not one found in the list.
-        assert!(js[ask..poll].contains("node.name") && !js.contains(".known"));
-        assert!(js[..ask].contains("function closePairingWhenUsed"));
-        assert!(js[ask..poll].contains("state.pairing = null"));
-    }
-
-    #[tokio::test]
     async fn the_statistics_page_has_a_picker_and_the_numbers_it_picks_from() {
         use crate::store::{CallStats, NodeRecord, Store};
         let d = tempfile::tempdir().unwrap();
@@ -1291,16 +1229,6 @@ mod tests {
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
-        // The page draws overall numbers, and one machine's from a searchable
-        // list of its own: a button and a search field, not a <select>.
-        let js = ui
-            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
-            .await;
-        let js = String::from_utf8(js.body).unwrap();
-        for part in ["statsPicker", "role: \"combobox\"", "\"All machines\""] {
-            assert!(js.contains(part), "the page has no {part}");
-        }
-        assert!(!js.contains("createElement(\"select\")") && !js.contains("el(\"select\""));
         // The data: the total, and each paired machine's own numbers by name.
         let r = ui
             .request(req("GET", "/api/stats", &[h, (SESSION, &ck)], ""))
@@ -1459,136 +1387,6 @@ mod tests {
                 Some((name.to_string(), value.trim_end_matches(';').to_string()))
             })
             .collect()
-    }
-
-    /// The web UI takes the desktop app's design tokens from its
-    /// theme.slint: every colour in light and dark, the type scale, the
-    /// spaces, the radii, the sizes and the motion, under the same names.
-    #[test]
-    fn the_web_ui_has_the_desktop_apps_tokens() {
-        let theme = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../nerve/ui/theme.slint"
-        ))
-        .unwrap();
-        let css = without_comments(APP_CSS);
-        let light = css_block(&css, ":root");
-        let dark = css_block(&css, ":root[data-theme=\"dark\"]");
-        // Without the theme script the system's scheme picks the dark set.
-        let system = css_block(&css, "  :root:not([data-theme])");
-        let colours = slint_global(&theme, "Theme");
-        let mut seen = 0;
-        for (name, value) in &colours {
-            // `dark ? #0f1116 : #f4f5f9`; `dark` itself is a bool.
-            let Some((d, l)) = value
-                .strip_prefix("dark ? ")
-                .and_then(|v| v.split_once(" : "))
-            else {
-                continue;
-            };
-            seen += 1;
-            assert!(light.contains(&format!("--{name}: {l};")), "light --{name}");
-            assert!(dark.contains(&format!("--{name}: {d};")), "dark --{name}");
-            assert!(
-                system.contains(&format!("--{name}: {d};")),
-                "system --{name}"
-            );
-        }
-        assert!(seen > 25, "{colours:?}");
-        // Lengths and times, each under its prefix; Motion's are those it
-        // has when motion is on.
-        let lengths = [
-            ("Type", "fs-"),
-            ("Space", "sp-"),
-            ("Radius", "r-"),
-            ("Size", ""),
-        ];
-        for (global, prefix) in lengths.into_iter().chain([("Motion", "")]) {
-            for (name, value) in slint_global(&theme, global) {
-                let value = value
-                    .strip_prefix("on ? ")
-                    .map_or(value.as_str(), |v| v.split(" : ").next().unwrap());
-                if !(value.ends_with("px") || value.ends_with("ms")) || name.starts_with("icon") {
-                    continue;
-                }
-                let name = if name == "sidebar" {
-                    "sidebar-width"
-                } else {
-                    &name
-                };
-                assert!(
-                    light.contains(&format!("--{prefix}{name}: {value};")),
-                    "--{prefix}{name}: {value}"
-                );
-            }
-        }
-        assert!(light.contains("--ease: cubic-bezier(0.25, 1, 0.5, 1);"));
-        // Less motion when the system asks for it: no time, no rise.
-        let reduce = &css[css.find("@media (prefers-reduced-motion: reduce)").unwrap()..];
-        let reduce = css_block(reduce, ":root");
-        for token in ["--quick", "--base", "--enter", "--leave"] {
-            assert!(reduce.contains(&format!("{token}: 0ms;")), "{token}");
-        }
-        assert!(reduce.contains("--rise: 0px;"));
-    }
-
-    /// Help is built as the desktop app's: the keys and the command
-    /// reference, each a part that opens and closes, the reference by topic
-    /// or from A to Z and filtered.
-    #[test]
-    fn help_is_built_as_the_desktop_apps() {
-        let help = &KIT_JS[KIT_JS.find("function buildHelp").unwrap()..];
-        let help = &help[..help.find("\n}\n").unwrap()];
-        for part in [
-            "expander(\"Keyboard shortcuts\"",
-            "expander(\"nerve-node commands\"",
-            "more(`opts:${v.name}`",
-            "[\"By topic\", \"A to Z\"]",
-            "\"Filter the commands\"",
-            "\"No command matches.\"",
-            "el(\"details\", { class: \"cmd\"",
-            "el(\"details\", { class: \"ref-group\" }",
-        ] {
-            assert!(help.contains(part), "Help has no {part}");
-        }
-        // A part a page leaves out (null) is not drawn as the word.
-        let draw = &APP_JS[APP_JS.find("function draw(").unwrap()..];
-        let draw = &draw[..draw.find("\n}\n").unwrap()];
-        assert_eq!(draw.matches(".filter((p) => p != null)").count(), 2);
-        // The same for the local model part, which three places redraw: the
-        // filter is in the function, not in each caller.
-        let parts = &APP_JS[APP_JS.find("function localInstallParts(").unwrap()..];
-        let parts = &parts[..parts.find("\n}\n").unwrap()];
-        assert!(parts.contains(".filter((p) => p != null)"), "{parts}");
-        assert_eq!(APP_JS.matches("...localInstallParts(").count(), 3);
-        assert!(!APP_JS.contains("...localInstallBlocks("));
-    }
-
-    /// The owner's note is counted in UTF-8 bytes, as the center counts it
-    /// (`maxlength` counts characters, and an umlaut takes two bytes): a
-    /// note that is too long is said so and kept in the field, not sent.
-    #[test]
-    fn the_note_field_counts_bytes_as_the_center_does() {
-        assert!(APP_JS.contains(&format!(
-            "const NOTE_MAX = {};",
-            crate::checker::config::NOTE_MAX
-        )));
-        let card = &APP_JS[APP_JS.find("function machineCard(").unwrap()..];
-        let card = &card[..card.find("\n}\n").unwrap()];
-        assert!(
-            card.contains("new TextEncoder().encode(noteIn.value.trim()).length"),
-            "{card}"
-        );
-        let save = &card[card.find("const saveNote = ").unwrap()..];
-        let save = &save[..save.find("\n  });").unwrap()];
-        assert!(
-            save.contains("if (n > NOTE_MAX) { notify(") && save.contains("return; }"),
-            "{save}"
-        );
-        assert!(
-            save.find("return; }").unwrap() < save.find("await saveChecker()").unwrap(),
-            "{save}"
-        );
     }
 
     /// The Capabilities tab's form is checked with the node's own rules
@@ -1787,79 +1585,13 @@ mod tests {
             json!(["level (an integer)", "room (a string)"])
         );
         assert_eq!(v["stale"], json!({}));
-        // The page offers them: under each rule field, and on the rows.
-        let row = &APP_JS[APP_JS.find("function auditRow(").unwrap()..];
-        let row = &row[..row.find("\n}\n").unwrap()];
-        for part in [
-            "const pins = pinPicker(d, auditKey);",
-            "pin: pin ? pin() : null",
-            r#"ruleBtn("Allow with this value", "", "allow", false, null, pins.pin)"#,
-            r#"ruleBtn("Deny with this value", "danger-soft", "deny", false, null, pins.pin)"#,
-        ] {
-            assert!(row.contains(part), "{part}");
-        }
-        let checker = &APP_JS[APP_JS.find("function checkerAuditRow(").unwrap()..];
-        assert!(checker.contains(r#"btn("Trust with this value", "", allow(false, pins.pin)"#));
-        assert_eq!(
-            APP_JS.matches(", ruleIn, ruleFieldsHint(ruleIn))").count(),
-            3
-        );
-        assert!(APP_JS.contains("    staleBanner(c.meta.stale),\n"));
-        assert!(APP_JS.contains("((state.checker && state.checker.meta.fields) || {})[scope]"));
     }
 
-    /// A Windows machine's sudo switch takes no password from the center:
-    /// it is the owner's Windows password, and the node refuses it from a
-    /// center. The card says where it is turned on, and keeps Off.
-    #[test]
-    fn a_windows_machines_sudo_is_turned_on_in_its_app() {
-        let f = &APP_JS[APP_JS.find("function sudoSwitch(").unwrap()..];
-        let f = &f[..f.find("\n}\n").unwrap()];
-        let windows = &f[f.find(r#"if (n.platform === "windows") {"#).unwrap()..];
-        let windows = &windows[..windows.find("\n  }\n").unwrap()];
-        assert!(
-            windows.contains("Turn it on in the Nerve app on that machine, Permissions, Sudo."),
-            "{windows}"
-        );
-        assert!(windows.contains("off)"), "{windows}");
-        assert!(!windows.contains("Turn sudo on"), "{windows}");
-        assert!(!windows.contains("password"), "{windows}");
-        assert!(!f.contains("account commands run as"), "{f}");
-    }
-
-    /// A sudo command's audit row has no Allow buttons, as only the
-    /// machine's owner puts a command on the sudo list: it says where,
-    /// the nerve-node command with a Copy button, or the app's place on a
-    /// Windows machine (#197). The API refuses the list as well.
+    /// Only the machine's owner puts a command on the sudo list (#197): the
+    /// API refuses the list from the web UI (the page's own test,
+    /// webui/src/center/audit.test.tsx, shows where the row sends the owner).
     #[tokio::test]
-    async fn a_sudo_commands_audit_row_says_where_the_owner_adds_it() {
-        let row = &APP_JS[APP_JS.find("function auditRow(").unwrap()..];
-        let row = &row[..row.find("\n}\n").unwrap()];
-        for part in [
-            r#"sudo ? null : ruleBtn("Allow", "", "allow", false, "check")"#,
-            r#"sudo ? null : ruleBtn("Allow as wildcard", "", "allow", true)"#,
-            "known && sudo ? sudoListHint(n, d.target, auditKey) : null",
-        ] {
-            assert!(row.contains(part), "{part}");
-        }
-        assert!(!row.contains(r#""sudo""#), "no button writes the sudo list");
-        let hint = &APP_JS[APP_JS.find("function sudoListHint(").unwrap()..];
-        let hint = &hint[..hint.find("\n}\n").unwrap()];
-        for part in [
-            r#"if (n && n.platform === "windows") {"#,
-            "const line = sudoRuleLine(command);",
-            "in the Nerve app on that machine, Permissions, Sudo",
-            // A Linux command with no line to copy still names the CLI: a
-            // headless server has no app (round 2, correctness 2).
-            "nerve-node rule add allow --action exec.run --exact 'COMMAND'",
-            r#"btn("Copy", "ghost", () => copy(line)"#,
-        ] {
-            assert!(hint.contains(part), "{part}");
-        }
-        assert!(
-            !APP_JS.contains("shellWord"),
-            "no word is quoted for one shell"
-        );
+    async fn no_button_of_an_audit_row_writes_the_sudo_list() {
         let dir = tempfile::tempdir().unwrap();
         let ui = Ui::new(&center(dir.path()), None, true);
         let (status, e) = ui
@@ -1877,511 +1609,6 @@ mod tests {
                 .unwrap()
                 .contains("only the machine's owner"),
             "{e}"
-        );
-    }
-
-    /// A Windows machine has no nerve-node: the page names the Nerve app's
-    /// places for it, and the center's own commands an administrator's
-    /// terminal where the center runs on Windows (#64). Runs the page's
-    /// function with `node` where it is there.
-    #[test]
-    fn a_windows_machine_gets_the_nerve_app_s_places() {
-        let from = APP_JS.find("function folderStep(").unwrap();
-        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
-        let script = format!(
-            "const FOLDER_STEP = \"nerve-node folder add ~/project rwx\";\n{func}\nconsole.log(JSON.stringify([folderStep({{platform: \"windows\"}}), folderStep({{platform: \"linux\"}}), folderStep(null)]));"
-        );
-        let out = match std::process::Command::new("node")
-            .args(["-e", &script])
-            .output()
-        {
-            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
-            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
-            Err(_) => {
-                eprintln!("skipped: no node here");
-                return;
-            }
-        };
-        let steps: Vec<Value> = serde_json::from_str(out.trim()).unwrap();
-        assert!(
-            steps[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Permissions › Folders")
-        );
-        assert_eq!(steps[0]["copy"], Value::Null);
-        assert_eq!(steps[1]["copy"], "nerve-node folder add ~/project rwx");
-        assert_eq!(steps[2], steps[1]);
-        // The other places a Windows machine is told the app's, and the
-        // page knows where the center runs.
-        for text in [
-            "Its owner lets it in the Nerve app on that machine: Centers, Settings grant.",
-            "in the Nerve app on that machine: Capabilities, ${e.name}.",
-            "Change them in the Nerve app on the machine.",
-            "Turn it on in the Nerve app on that machine, Permissions, Sudo.",
-            "in an administrator's terminal for the installed center.",
-            "`nerve-center install` in an administrator's terminal keeps it out.",
-            "state.overview.center.os === \"windows\"",
-        ] {
-            assert!(APP_JS.contains(text), "{text}");
-        }
-    }
-
-    /// Help says that a Windows machine has no `nerve-node` where one is
-    /// paired, and links the Windows page; with Linux machines only, or none
-    /// yet, it says nothing (docs-13). Runs the page's function with `node`
-    /// where it is there.
-    #[test]
-    fn help_tells_a_windows_machine_it_has_no_nerve_node() {
-        let from = APP_JS.find("function windowsHelpNote(").unwrap();
-        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
-        let script = format!(
-            "{func}\nconst n = (p) => ({{nodes: p.map((platform) => ({{platform}}))}});\nconsole.log(JSON.stringify([windowsHelpNote(n([\"linux\", \"windows\"])), windowsHelpNote(n([\"linux\"])), windowsHelpNote(n([])), windowsHelpNote(null)]));"
-        );
-        let out = match std::process::Command::new("node")
-            .args(["-e", &script])
-            .output()
-        {
-            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
-            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
-            Err(_) => {
-                eprintln!("skipped: no node here");
-                return;
-            }
-        };
-        let notes: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
-        assert!(
-            notes[0].as_deref().unwrap().contains("has no nerve-node"),
-            "{notes:?}"
-        );
-        assert_eq!(notes[1..], [None, None, None]);
-        assert!(APP_JS.contains("href: `${GUIDE}/windows.md`"));
-    }
-
-    /// The line the Audit page offers for a sudo command is the exact rule
-    /// (a trailing ` *` stays the command's own, not a wildcard for root),
-    /// and only for a word that reads the same in POSIX shells and in fish:
-    /// none with a quote, a backslash or a line break (round 1, security 2
-    /// and 3). Runs the page's function with `node` where it is there.
-    #[test]
-    fn the_sudo_line_is_the_exact_rule_and_is_safe_to_paste() {
-        let from = APP_JS.find("function sudoRuleLine(").unwrap();
-        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
-        let script = format!(
-            "{func}\nconst cases = [\"sudo apt update\", \"sudo chown -R me *\", \"it's\", \"a\\\\'b\", \"a\\nb\", \"a\\u0000b\", \"x\\\\\"];\nconsole.log(JSON.stringify(cases.map(sudoRuleLine)));"
-        );
-        let out = match std::process::Command::new("node")
-            .args(["-e", &script])
-            .output()
-        {
-            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
-            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
-            Err(_) => {
-                eprintln!("skipped: no node here");
-                return;
-            }
-        };
-        let lines: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
-        assert_eq!(
-            lines[0].as_deref(),
-            Some("nerve-node rule add allow --action exec.run --exact 'sudo apt update'")
-        );
-        assert_eq!(
-            lines[1].as_deref(),
-            Some("nerve-node rule add allow --action exec.run --exact 'sudo chown -R me *'")
-        );
-        assert_eq!(&lines[2..], [None, None, None, None, None], "{lines:?}");
-    }
-
-    #[test]
-    fn the_capabilities_tab_has_a_picker_a_checked_form_and_a_read_only_view() {
-        assert!(INDEX.contains(r##"<a href="#capabilities" data-page="capabilities">"##));
-        assert!(APP_JS.contains(r#"capabilities: { title: "Capabilities", view: pageCaps },"#));
-        let draw = &APP_JS[APP_JS.find("function draw(").unwrap()..];
-        assert!(draw.contains(
-            r#"if (page === "settings" || page === "checker" || page === "capabilities") {"#
-        ));
-        let page = &APP_JS[APP_JS.find("function pageCaps(").unwrap()..];
-        let page = &page[..page.find("\n}\n").unwrap()];
-        for part in [
-            "capsPicker.root",
-            "d.units.map(capUnitRow)",
-            "d.broken.map(",
-            "b.reason",
-            "!d.settings_write ? banner(",
-            "d.settings_write ? addedSection(d) : null",
-            // A machine that did not load says why, beside the picker.
-            "c.failed ? banner(\"error\", \"alert\", `The machine's capabilities did not load: ${c.failed}`) : loading()",
-        ] {
-            assert!(page.contains(part), "{part}: {page}");
-        }
-        let load = &APP_JS[APP_JS.find("async function loadCaps(").unwrap()..];
-        let load = &load[..load.find("\n}\n").unwrap()];
-        for part in [
-            "`/api/caps?id=${encodeURIComponent(state.capsNode)}`",
-            // One removed meanwhile: the machines are read again.
-            // A load a later pick took over ends quietly.
-            "      if (e.auth) throw e;\n",
-            "      if (run !== capsRun) return;\n      // A machine removed",
-            "if (e.status === 404 && !fresh) {",
-            "return loadCaps(true);",
-            "state.caps = { nodes, data: null, failed: e.message, form: null };",
-        ] {
-            assert!(load.contains(part), "{part}: {load}");
-        }
-        // Picking one keeps the picker on the page and says what failed.
-        let pick = &APP_JS[APP_JS.find("const capsPicker = picker(").unwrap()..];
-        let pick = &pick[..pick.find("\n});\n").unwrap()];
-        for part in [
-            "state.caps = { nodes: state.caps.nodes, data: null, form: null };",
-            "loadCaps().catch((e) => { if (!e.auth) notify(e.message, \"error\"); });",
-        ] {
-            assert!(pick.contains(part), "{part}: {pick}");
-        }
-        assert!(KIT_JS.contains("err.status = r.status;"));
-        let row = &APP_JS[APP_JS.find("function capUnitRow(").unwrap()..];
-        let row = &row[..row.find("\n}\n").unwrap()];
-        assert!(row.contains("u.source") && row.contains("effectPill(u.effect)"));
-        let added = &APP_JS[APP_JS.find("function addedSection(").unwrap()..];
-        let added = &added[..added.find("\n}\n").unwrap()];
-        assert!(
-            added.contains("a.refused ? null : btn(\"Add a capability\""),
-            "{added}"
-        );
-        assert!(added.contains("takes no capability from a center: ${a.refused}"));
-        let entry = &APP_JS[APP_JS.find("function addedRow(").unwrap()..];
-        let entry = &entry[..entry.find("\n}\n").unwrap()];
-        assert!(entry.contains("\"/api/caps/remove\"") && entry.contains("await modal("));
-        assert!(entry.contains("e.left_out"));
-        // One the machine neither offers nor leaves out says why.
-        assert!(entry.contains("const idle = notOffered(d, e);") && entry.contains("    idle);"));
-        let idle = &APP_JS[APP_JS.find("function notOffered(").unwrap()..];
-        let idle = &idle[..idle.find("\n}\n").unwrap()];
-        for part in [
-            "if (e.left_out || d.units.some((u) => u.name === e.name)) return null;",
-            "only the machine's owner turns it on",
-            "in folder mode with an on for it (\"caps\": {\"${e.name}\": \"on\"})",
-            "in allowlist mode with the allow rule ${e.name}.",
-        ] {
-            assert!(idle.contains(part), "{part}: {idle}");
-        }
-        let form = &APP_JS[APP_JS.find("function capForm(").unwrap()..];
-        let form = &form[..form.find("\n}\n").unwrap()];
-        for part in [
-            "api(\"POST\", \"/api/caps/check\", { form: v })",
-            "api(\"POST\", \"/api/caps/save\", { id: d.node.id, form: v, adding: f.adding })",
-            "if (e.body && e.body.errors) { show(e.body.errors); return; }",
-            "The machine refused: ${e.message}",
-            "readonly: !f.adding",
-        ] {
-            assert!(form.contains(part), "{part}");
-        }
-        // Every field the center checks has its place for what is wrong.
-        for f in ["name", "timeout", "summary", "command", "params", "result"] {
-            assert!(form.contains(&format!("field(\"{f}\", ")), "{f}");
-        }
-        for f in ["effect", "platform"] {
-            assert!(
-                form.contains(&format!("errs.{f} = el(\"span\""))
-                    && form.contains(&format!(", errs.{f})")),
-                "{f}"
-            );
-        }
-        assert!(KIT_JS.contains("err.body = v;"));
-        assert!(!APP_JS.contains("el(\"select\""));
-    }
-
-    /// The node card names each action the center left out with its
-    /// reason, from the overview's `broken`.
-    #[test]
-    fn the_node_card_shows_what_the_center_left_out() {
-        let card = &APP_JS[APP_JS.find("function nodeCard(").unwrap()..];
-        let card = &card[..card.find("\n}\n").unwrap()];
-        assert!(card.contains("const broken = n.broken || [];"), "{card}");
-        assert!(card.contains("broken.length"), "{card}");
-        // A neutral heading: a unit may be left out for its name as well
-        // as for a schema the center cannot check.
-        assert!(card.contains("\"Not offered to the agent:\""), "{card}");
-        assert!(
-            card.contains("broken.map((b) =>")
-                && card.contains("b.name")
-                && card.contains("b.reason"),
-            "{card}"
-        );
-    }
-
-    /// A button's handler gets the event: the switches of the Action checker
-    /// read `ev.currentTarget.checked`, and without the event they threw
-    /// before they saved anything.
-    #[test]
-    fn a_button_action_gets_the_event() {
-        let act = &KIT_JS[KIT_JS.find("function act(").unwrap()..];
-        let act = &act[..act.find("\n}\n").unwrap()];
-        assert!(act.contains("await fn(ev)"), "{act}");
-        assert!(!act.contains("await fn()"), "{act}");
-        // Every handler that reads the event is one of the switches, which
-        // are wrapped in act.
-        let uses: Vec<_> = APP_JS
-            .lines()
-            .filter(|l| l.contains("act(async (ev) =>"))
-            .collect();
-        assert_eq!(uses.len(), 2, "{uses:?}");
-        assert!(uses.iter().all(|l| l.contains("ev.currentTarget.checked")));
-    }
-
-    /// The Action checker page changes its working copy and then saves it.
-    /// A refused save must not leave the change behind, or the next save
-    /// (of anything on the page) sends it: the copy goes back to what the
-    /// center kept, and the error still reaches the toast. The model form
-    /// changes a copy and not the working copy. (The browser check is
-    /// `checker-failed-save.js` in the review tools.)
-    #[test]
-    fn a_refused_checker_save_leaves_no_change_behind() {
-        let save = &APP_JS[APP_JS.find("async function saveChecker(").unwrap()..];
-        let save = &save[..save.find("\n}\n").unwrap()];
-        let catch = &save[save.find("catch (e)").unwrap()..];
-        assert!(catch.contains("c.cfg = structuredClone(c.saved)"), "{save}");
-        assert!(catch.contains("draw(true)"), "{save}");
-        assert!(catch.contains("throw e"), "{save}");
-        let load = &APP_JS[APP_JS.find("async function loadChecker(").unwrap()..];
-        let load = &load[..load.find("\n}\n").unwrap()];
-        assert!(load.contains("saved: structuredClone(cfg)"), "{load}");
-        let model = &APP_JS[APP_JS.find("function modelCard(").unwrap()..];
-        let model = &model[..model.find("\n}\n").unwrap()];
-        assert!(model.contains("await saveChecker(next)"), "{model}");
-        assert!(!model.contains("m.source ="), "{model}");
-        // The page saves in one place only.
-        assert_eq!(
-            APP_JS
-                .matches("await api(\"POST\", \"/api/checker\",")
-                .count(),
-            1
-        );
-    }
-
-    /// A save draws the page anew, and the focus is put back on the control
-    /// it was on: a keyboard user toggling switches goes on from there, and
-    /// does not start at the top of the page again.
-    #[test]
-    fn a_page_drawn_anew_keeps_the_focus() {
-        let replace = &KIT_JS[KIT_JS.find("function replacePage(").unwrap()..];
-        let replace = &replace[..replace.find("\n}\n").unwrap()];
-        assert!(replace.contains("restoreFocus(spot)"), "{replace}");
-        assert!(replace.contains("focusSpot(active)"), "{replace}");
-        let act = &KIT_JS[KIT_JS.find("function act(").unwrap()..];
-        let act = &act[..act.find("\n}\n").unwrap()];
-        // Taken before the control is made busy: a disabled control may
-        // already have lost the focus.
-        assert!(
-            act.find("pendingFocus = spot").unwrap() < act.find("setBusy(b, true)").unwrap(),
-            "{act}"
-        );
-        // The pages that are redrawn on a save go through replacePage.
-        assert_eq!(APP_JS.matches("replacePage(").count(), 2);
-        assert_eq!(KIT_JS.matches("replacePage(").count(), 1);
-    }
-
-    /// The focus goes back to the control by what it is, never by where it
-    /// sat (review round 3, finding 1): after a list gained or lost an item,
-    /// a position names the End, Remove or Disable of another item, and
-    /// Enter acts on an item the user never picked. A control without a
-    /// `data-focus` key, a key that is gone and a key that is not unique
-    /// all send the focus to the section's heading, which does nothing on
-    /// Enter. (The browser check is `focus-identity.js` in the review tools.)
-    #[test]
-    fn the_focus_is_restored_by_identity_not_by_position() {
-        let spot = &KIT_JS[KIT_JS.find("function focusSpot(").unwrap()..];
-        let spot = &spot[..spot.find("\n}\n").unwrap()];
-        assert!(!spot.contains("indexOf"), "{spot}");
-        assert!(!spot.contains("path"), "{spot}");
-        assert!(spot.contains("node.dataset.focus"), "{spot}");
-        let target = &KIT_JS[KIT_JS.find("function focusTarget(").unwrap()..];
-        let target = &target[..target.find("\n}\n").unwrap()];
-        assert!(target.contains("found.length === 1"), "{target}");
-        let restore = &KIT_JS[KIT_JS.find("function restoreFocus(").unwrap()..];
-        let restore = &restore[..restore.find("\n}\n").unwrap()];
-        assert!(!restore.contains(".children["), "{restore}");
-        // No early return for a spot without a key: it reaches the
-        // heading like a key that is gone (review round 5, finding 1).
-        assert!(!restore.contains("if (!spot.key)"), "{restore}");
-        assert!(
-            restore.contains("spot.key && focusTarget(spot.key)"),
-            "{restore}"
-        );
-        assert!(restore.contains("querySelector(\"h3\")"), "{restore}");
-        // The heading takes the focus but is not a stop for Tab.
-        assert!(KIT_JS.contains("el(\"h3\", { tabindex: \"-1\""));
-        // Every control that acts on one item, without asking, has a key
-        // that names the item.
-        for (label, kind) in [
-            ("btn(\"End\"", ":end`"),
-            ("btn(n.disabled ?", ":disable`"),
-            (
-                "btn(\"Remove\", \"danger-soft\", act(async () => { cfg.",
-                ":remove`",
-            ),
-            ("btn(\"Switch on again\"", ":on`"),
-            (
-                "btn(\"Remove\", \"danger-soft\", act(async () => { await api(\"POST\", \"/api/tokens/delete\"",
-                ":delete`",
-            ),
-        ] {
-            let lines: Vec<_> = APP_JS.lines().filter(|l| l.contains(label)).collect();
-            assert!(!lines.is_empty(), "{label}");
-            assert!(
-                lines.iter().all(|l| l.contains(kind) && l.contains("${")),
-                "{label}: {lines:?}"
-            );
-        }
-        // A blocklist or allow entry is named by what it is (a built-in by
-        // its id, an own entry by rule, scope and note), and by the list it
-        // is shown in (a machine's card repeats the entries).
-        assert!(APP_JS.contains("`block:${where}:${e.id ? `id=${e.id}` :"));
-        assert!(APP_JS.contains("`allow:${where}:${a.rule}|${a.node_id || \"\"}:remove`"));
-        assert!(APP_JS.contains("`off:${m.id}:${e.id ? `id=${e.id}` :"));
-        // A key the page holds twice (an own entry with a built-in's rule
-        // and note, a rule added twice) names no control: focusSpot drops
-        // it, so removing one of two does not hand the focus, and Enter, to
-        // the other.
-        assert!(spot.contains("focusTarget(node.dataset.focus)"), "{spot}");
-        // The built-in ids the keys rest on are there and differ.
-        let ids: Vec<_> = crate::checker::config::default_blocklist()
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
-        assert!(ids.iter().all(|i| !i.is_empty()));
-        let mut unique = ids.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(unique.len(), ids.len());
-        // A session's End is named by the session.
-        assert!(APP_JS.contains("session:${s.id}:end"));
-    }
-
-    /// A text field that gets the focus back gets what was typed into it back
-    /// as well (review round 5, finding 2): the redraw builds the field from
-    /// the saved state, and the user would type on into an empty one. The
-    /// text is read from the old page when the focus is taken, only for a
-    /// field, and put back only into a field of the same kind. (The browser
-    /// check is part 5 of `focus-identity.js` in the review tools.)
-    #[test]
-    fn a_text_field_gets_back_what_was_typed_with_the_focus() {
-        let spot = &KIT_JS[KIT_JS.find("function focusSpot(").unwrap()..];
-        let spot = &spot[..spot.find("\n}\n").unwrap()];
-        assert!(spot.contains("isTextField(node)"), "{spot}");
-        assert!(spot.contains("node.value"), "{spot}");
-        assert!(spot.contains("node.selectionStart"), "{spot}");
-        let restore = &KIT_JS[KIT_JS.find("function restoreFocus(").unwrap()..];
-        let restore = &restore[..restore.find("\n}\n").unwrap()];
-        assert!(restore.contains("same.value = t.value"), "{restore}");
-        assert!(restore.contains("same.setSelectionRange("), "{restore}");
-        assert!(
-            restore.contains("same.type === spot.node.type"),
-            "{restore}"
-        );
-        // Buttons and switches are not text fields.
-        let kinds = &KIT_JS[KIT_JS.find("function isTextField(").unwrap()..];
-        let kinds = &kinds[..kinds.find("\n}\n").unwrap()];
-        assert!(kinds.contains("\"checkbox\""), "{kinds}");
-    }
-
-    /// The checker's text fields and the Audit page's buttons have a key too,
-    /// so a page drawn anew (the end of a save, the minute turning) keeps the
-    /// focus there and not on `<body>`. (The browser check is part 5 of
-    /// `focus-identity.js` in the review tools.)
-    #[test]
-    fn the_checkers_text_fields_and_audit_buttons_keep_the_focus() {
-        for field in [
-            "\"data-focus\": \"blocklist:rule\"",
-            "\"data-focus\": \"blocklist:note\"",
-            "\"data-focus\": \"allow:rule\"",
-            "\"data-focus\": `node:${m.id}:rule`",
-            "\"data-focus\": \"model:endpoint_url\"",
-            "\"data-focus\": \"model:endpoint_model\"",
-            "\"data-focus\": \"model:token\"",
-            "\"data-focus\": \"model:threshold\"",
-            "\"data-focus\": \"model:timeout\"",
-            "\"data-focus\": \"model:instructions\"",
-            "\"data-focus\": \"model:criteria_true\"",
-            "\"data-focus\": \"model:criteria_false\"",
-        ] {
-            assert!(APP_JS.contains(field), "{field}");
-        }
-        // A decision has no id: its time, machine and call name the buttons.
-        let audit = "`audit:${d.ts}:${d.node_id}:${d.cap}.${d.action}`";
-        assert_eq!(APP_JS.matches(audit).count(), 2);
-        assert!(
-            APP_JS.contains(
-                "btn(label, kind, rule(list, wildcard, pin), ic, `${auditKey}:${label}`)"
-            )
-        );
-        // The pin of an argument, and its buttons, are named by the entry.
-        assert!(APP_JS.contains("key: `${auditKey}:pin`"));
-        assert!(APP_JS.contains("`${auditKey}:Trust with this value`"));
-        assert!(APP_JS.contains("`${auditKey}:Trust as wildcard`"));
-    }
-
-    /// A save in flight pulls the focus back only while the focus is still
-    /// on the control that started it (or has fallen to the page because
-    /// that control was replaced), and only on the page it started on
-    /// (review round 3, finding 2).
-    #[test]
-    fn a_save_in_flight_does_not_pull_the_focus_back() {
-        let replace = &KIT_JS[KIT_JS.find("function replacePage(").unwrap()..];
-        let replace = &replace[..replace.find("\n}\n").unwrap()];
-        assert!(replace.contains("p.page === current()"), "{replace}");
-        assert!(replace.contains("active === p.node"), "{replace}");
-        assert!(replace.contains("document.body"), "{replace}");
-        let go = &APP_JS[APP_JS.find("function go(").unwrap()..];
-        let go = &go[..go.find("\n}\n").unwrap()];
-        assert!(go.contains("pendingFocus = null"), "{go}");
-        // A save no button started (a picker's) holds the focus the same way,
-        // and the holder lets go only of its own spot.
-        let quietly = &APP_JS[APP_JS.find("function quietly(").unwrap()..];
-        let quietly = &quietly[..quietly.find("\n}\n").unwrap()];
-        assert!(quietly.contains("pendingFocus = spot"), "{quietly}");
-        assert!(quietly.contains("if (pendingFocus === spot)"), "{quietly}");
-    }
-
-    /// The Action checker page saves one change at a time: each save posts
-    /// the whole working copy, so a second change made while the first runs
-    /// rides along, and would be saved although the first was refused and
-    /// taken back (review round 3, finding 3). The page's controls are off
-    /// from the start of a save until it has settled, and are on again
-    /// before the page is drawn anew (a disabled control cannot take the
-    /// focus). (The browser check is `focus-identity.js` in the review tools.)
-    #[test]
-    fn the_checker_page_saves_one_change_at_a_time() {
-        let save = &APP_JS[APP_JS.find("async function saveChecker(").unwrap()..];
-        let save = &save[..save.find("\n}\n").unwrap()];
-        assert!(
-            save.find("lockSaves(true)").unwrap() < save.find("await api(").unwrap(),
-            "{save}"
-        );
-        let catch = &save[save.find("catch (e)").unwrap()..];
-        assert!(
-            catch.find("endSave()").unwrap() < catch.find("draw(true)").unwrap(),
-            "{save}"
-        );
-        assert!(save.contains("await loadChecker(true)"), "{save}");
-        let fin = &save[save.find("finally").unwrap()..];
-        assert!(fin.contains("endSave()"), "{save}");
-        let load = &APP_JS[APP_JS.find("async function loadChecker(").unwrap()..];
-        let load = &load[..load.find("\n}\n").unwrap()];
-        assert!(
-            load.find("endSave()").unwrap() < load.find("draw(true)").unwrap(),
-            "{load}"
-        );
-        // A page drawn while a save runs is locked too.
-        let draw = &APP_JS[APP_JS.find("function draw(").unwrap()..];
-        let draw = &draw[..draw.find("\n}\n").unwrap()];
-        assert!(draw.contains("checkerSaving) lockSaves(true)"), "{draw}");
-        // Nothing else on the page posts the whole copy.
-        assert_eq!(
-            APP_JS
-                .matches("await api(\"POST\", \"/api/checker\",")
-                .count(),
-            1
         );
     }
 
@@ -2438,8 +1665,14 @@ mod tests {
         ))
         .unwrap();
         assert!(widgets.contains("root.checked ? Theme.accent : Theme.switch-off;"));
-        let css = without_comments(APP_CSS);
-        assert!(css_block(&css, ".switch input").contains("background: var(--switch-off);"));
+        // The web UIs draw the off track with the same token.
+        let css = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../webui/src/styles/app.css"
+        ))
+        .unwrap();
+        let css = without_comments(&css);
+        assert!(css_block(&css, ".switch .track").contains("background: var(--switch-off);"));
     }
 
     #[tokio::test]
@@ -2560,17 +1793,22 @@ mod tests {
         }
         // The page and what it loads hold nothing secret: a navigation
         // carries no session, and the page asks /api/session first.
-        for (path, kind) in [
-            ("/", "text/html"),
-            ("/index.html", "text/html"),
-            ("/app.js", "text/javascript"),
-            ("/kit.js", "text/javascript"),
-            ("/app.css", "text/css"),
-            ("/login.js", "text/javascript"),
-            ("/theme-init.js", "text/javascript"),
-            ("/icon.svg", "image/svg+xml"),
-        ] {
-            let r = ui.request(req("GET", path, &[HOST], "")).await;
+        let built = nerve_transport::webui::DIST
+            .iter()
+            .filter(|(p, _)| !p.ends_with(".html"))
+            .map(|(p, _)| {
+                let kind = match p.rsplit_once('.').unwrap().1 {
+                    "js" => "text/javascript",
+                    "css" => "text/css",
+                    _ => "image/svg+xml",
+                };
+                (format!("/{p}"), kind)
+            });
+        let pages = [("/", "text/html"), ("/index.html", "text/html")]
+            .into_iter()
+            .map(|(p, k)| (p.to_string(), k));
+        for (path, kind) in pages.chain(built) {
+            let r = ui.request(req("GET", &path, &[HOST], "")).await;
             assert_eq!(r.status, 200, "{path}");
             assert!(header(&r, "Content-Type").unwrap().starts_with(kind));
         }
@@ -2588,7 +1826,15 @@ mod tests {
         let r = ui.request(req("GET", "/login", &[HOST], "")).await;
         assert_eq!(r.status, 200);
         assert!(body(&r).contains("Owner token"));
-        assert!(body(&r).contains(r#"src="/login.js""#));
+        assert!(body(&r).contains(r#"<script type="module" crossorigin src="/assets/login-"#));
+        // A page of another UI is not served here.
+        for path in ["/center.html", "/node.html", "/login.html", "/app.js"] {
+            assert_eq!(
+                ui.request(req("GET", path, &[HOST], "")).await.status,
+                404,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2611,11 +1857,9 @@ mod tests {
         );
         // The login page names the command for this center, which runs from
         // a folder of its own here: no sudo.
-        let page = body(&ui.request(req("GET", "/login", &[local], "")).await);
-        assert!(
-            page.contains(&format!("<code>{command}</code> shows its owner token")),
-            "{page}"
-        );
+        let page = login_text(&body(&ui.request(req("GET", "/login", &[local], "")).await));
+        assert_eq!(page["command"], command, "{page}");
+        assert_eq!(page["after"], " shows its owner token.", "{page}");
         use std::path::Path;
         let (installed, default) = (
             Path::new("/var/lib/nerve-center"),
@@ -2672,7 +1916,14 @@ mod tests {
         let folder = d.path().display().to_string();
         let page = body(&open.request(req("GET", "/login", &[HOST], "")).await);
         assert!(!page.contains(&folder), "{page}");
-        assert!(page.contains("--state-dir &lt;this center"), "{page}");
+        let page = login_text(&page);
+        assert!(
+            page["command"]
+                .as_str()
+                .unwrap()
+                .contains("--state-dir <this center"),
+            "{page}"
+        );
         let r = sign_in(&open, "not-the-secret").await;
         assert!(!body(&r).contains(&folder), "{}", body(&r));
         assert!(!body(&r).contains("not-the-secret"));
@@ -3184,39 +2435,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_log_page_has_its_lists_and_nothing_native() {
-        let d = tempfile::tempdir().unwrap();
-        let (_c, ui, ck) = with_a_log(d.path()).await;
-        let h = ("Host", "127.0.0.1:7480");
-        let index = ui.request(req("GET", "/", &[h, (SESSION, &ck)], "")).await;
-        let index = body(&index);
-        assert!(index.contains("href=\"#log\""), "no Log tab in the menu");
-        let js = ui
-            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
-            .await;
-        let js = body(&js);
-        // The level and the machine are picked from lists of the page's own, a
-        // button and a search field, as the statistics page does; the file is
-        // a link to the download.
-        for part in [
-            "pageLog",
-            "logLevelPicker",
-            "logNodePicker",
-            "\"/api/log\"",
-            "/api/log/download",
-            "role: \"combobox\"",
-            "\"Errors only\"",
-            "\"The center itself\"",
-        ] {
-            assert!(js.contains(part), "the page has no {part}");
-        }
-        assert!(!js.contains("createElement(\"select\")") && !js.contains("el(\"select\""));
-        assert!(!index.contains("<select"));
-        // The level of the center is chosen from a list too, in the settings.
-        assert!(js.contains("levelPicker") && js.contains("log_level"));
-    }
-
-    #[tokio::test]
     async fn the_log_view_is_newest_first_and_filters_by_level_node_and_text() {
         let d = tempfile::tempdir().unwrap();
         let (_c, ui, ck) = with_a_log(d.path()).await;
@@ -3610,82 +2828,5 @@ mod tests {
         let m = mcp(ui.request(get).await);
         assert_eq!(m["url"], "https://0.0.0.0:7481/mcp");
         assert_eq!(m["fingerprint"], "PIN");
-    }
-
-    /// The page's words and parts for a new user: Connect a harness with its
-    /// token and what to paste, the folder after a pairing, the checker's
-    /// Skip the model and Trust this, the way from a blocklist refusal to
-    /// its switch, a banner for a model that is on and does not run, and
-    /// folds for the detail (H6, H7, H10, H11, F4, F5).
-    #[test]
-    fn the_page_has_the_short_words_and_the_folds() {
-        for want in [
-            r#"el("span", { class: "name" }, "Connect a harness")"#,
-            "Make a token",
-            "claude mcp add --transport http nerve",
-            // `rwx`: in folder mode a command runs only where the folder has
-            // `x`, so `rw` would hand over a folder that refuses `git status`
-            // (round 4, correctness 3). The whole word, quote and all.
-            "folder add ~/project rwx\"",
-            "is paired",
-            "Skip the model",
-            "Trust this",
-            "Trust as wildcard",
-            "Switch this entry off for this machine",
-            "The decision model is on but does not run",
-            "every call it checks is refused. The Log page says why.",
-            "With the model on and none installed",
-            // With fail closed off the page says the calls pass unjudged,
-            // and does not fold that switch away (round 1, security 2).
-            "and fail closed is off: its calls pass unjudged",
-            "every checked call passes unjudged (fail closed is off)",
-            "fail closed is off, so a call it cannot judge runs",
-            // The Help page's harness card follows its token, and says what
-            // the Claude Code line costs (round 1, security 5 and 6).
-            "if (key !== helpKey) { helpParts = null; helpKey = key; }",
-            "the Claude Code line puts the token in your shell's history",
-            "m.fail_closed ? null : el(\"label\", { class: \"switch\" }, failClosed",
-            "more(\"settings:center\"",
-            "more(\"settings:machines\", \"Advanced",
-            "more(\"checker:advanced\", \"Advanced\"",
-        ] {
-            assert!(APP_JS.contains(want), "{want}");
-        }
-        // One word for taking a thing away, and the checker's rules are not
-        // allow rules: a node's allow rule lets a call run.
-        for gone in [
-            "\"Delete\"",
-            "\"Allow rules\"",
-            "Added a checker allow rule",
-            "~/project rw\"",
-        ] {
-            assert!(!APP_JS.contains(gone), "{gone}");
-        }
-    }
-
-    /// One line first (plan 4.1): every subtitle, banner and note of the
-    /// page says its short part in at most 120 characters; the rest is in a
-    /// fold.
-    #[test]
-    fn every_subtitle_is_short() {
-        assert_eq!(
-            nerve_transport::webui::long_subtitles(APP_JS, 120),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn the_page_builds_no_html_from_text() {
-        assert_eq!(
-            nerve_transport::webui::html_sinks(APP_JS),
-            Vec::<&str>::new()
-        );
-        for line in INDEX.lines().filter(|l| l.contains("<script")) {
-            assert!(line.contains(" src=\""), "an inline script: {line}");
-        }
-        let handler = INDEX
-            .split_whitespace()
-            .find(|w| w.starts_with("on") && w.contains('='));
-        assert_eq!(handler, None, "an inline handler");
     }
 }

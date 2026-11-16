@@ -189,41 +189,6 @@ fn a_command_says_its_data_or_its_error() {
     );
 }
 
-/// One line first (plan 4.1): every subtitle, banner and note of the page
-/// says its short part in at most 120 characters; the rest is in a fold.
-#[test]
-fn every_subtitle_is_short() {
-    assert_eq!(webui::long_subtitles(APP_JS, 120), Vec::<String>::new());
-}
-
-/// A limit stays in the first line (plan 4.1): the Rules section says what
-/// the guard does not do outside its fold.
-#[test]
-fn the_rules_say_the_guards_limit_unfolded() {
-    let line = APP_JS
-        .lines()
-        .find(|l| l.contains("section(\"Rules\""))
-        .unwrap();
-    assert!(
-        line.contains("guard catches mistakes, not someone who hides the name"),
-        "{line}"
-    );
-}
-
-/// No script of the page builds HTML from text: what a center or the node
-/// wrote goes into text nodes only. The page has no inline script.
-#[test]
-fn the_page_builds_no_html_from_text() {
-    assert_eq!(webui::html_sinks(APP_JS), Vec::<&str>::new());
-    for line in INDEX.lines().filter(|l| l.contains("<script")) {
-        assert!(line.contains(" src=\""), "an inline script: {line}");
-    }
-    let handler = INDEX
-        .split_whitespace()
-        .find(|w| w.starts_with("on") && w.contains('='));
-    assert_eq!(handler, None, "an inline handler");
-}
-
 #[test]
 fn a_loopback_ui_answers_to_its_own_address_and_loopback_names_only() {
     let at = |s: &str| s.parse::<SocketAddr>().unwrap();

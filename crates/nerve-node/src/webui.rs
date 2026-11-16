@@ -62,9 +62,6 @@ impl Lookup {
     }
 }
 
-const INDEX: &str = include_str!("webui/index.html");
-const APP_JS: &str = include_str!("webui/app.js");
-
 /// The largest request body: the biggest form of the UI is far smaller.
 const BODY_MAX: usize = 256 * 1024;
 /// Connections at once, but for the wrong tokens that wait
@@ -733,23 +730,19 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr, tls: bool) -> (Resp
             return (r, false);
         }
         match req.path.as_str() {
-            "/" | "/index.html" => {
-                return (Response::new(200, "text/html; charset=utf-8", INDEX), false);
-            }
-            "/app.js" => {
-                return (
-                    Response::new(200, "text/javascript; charset=utf-8", APP_JS),
-                    false,
-                );
-            }
+            "/" | "/index.html" => return (webui::page(webui::Ui::Node), false),
             // No Clear-Site-Data here: a browser clears the storage of
             // every tab of the origin with it, and a tab that opens the
             // login would sign the others out.
             "/login" => {
-                return (
-                    webui::login_page("Web UI token", "This machine's node."),
-                    false,
-                );
+                let text = webui::LoginText {
+                    secret: "Web UI token",
+                    title: "Log in to this node",
+                    tagline: "This machine's node.",
+                    command: None,
+                    after: "",
+                };
+                return (webui::login_page(&text), false);
             }
             _ => {}
         }

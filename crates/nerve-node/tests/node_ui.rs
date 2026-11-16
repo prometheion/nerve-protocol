@@ -280,6 +280,33 @@ async fn off_listens_on_nothing() {
     daemon.stop().await;
 }
 
+/// What a browser loads for the node's page: the page itself and the files
+/// the built page names (its scripts, its stylesheet, its icon).
+fn node_page_paths() -> Vec<String> {
+    let html = String::from_utf8_lossy(nerve_transport::webui::dist_file("node.html").unwrap());
+    let mut paths = vec!["/".to_string()];
+    for attr in [" src=\"/", " href=\"/"] {
+        for (i, _) in html.match_indices(attr) {
+            let from = i + attr.len() - 1;
+            paths.push(html[from..from + html[from..].find('"').unwrap()].to_string());
+        }
+    }
+    paths
+}
+
+/// What the web UI serves without a session: the page, the login and every
+/// file of the built web UIs (nerve_transport::webui::DIST).
+fn page_paths() -> Vec<String> {
+    let mut paths = vec!["/".to_string(), "/login".to_string()];
+    paths.extend(
+        nerve_transport::webui::DIST
+            .iter()
+            .filter(|(p, _)| !p.ends_with(".html"))
+            .map(|(p, _)| format!("/{p}")),
+    );
+    paths
+}
+
 /// The login and the session: a token made at the CLI logs in, a session
 /// goes as a header and never as a cookie, a wrong token costs time and
 /// never locks the login, and the page's rules hold.
@@ -293,8 +320,8 @@ async fn a_token_logs_in_and_the_session_is_the_header() {
     let addr = ui_address(&daemon).unwrap();
 
     // The page is public, and holds nothing secret; the API is not.
-    for path in ["/", "/app.js", "/kit.js", "/app.css", "/login", "/login.js"] {
-        assert_eq!(get(addr, path, "").await.status, 200, "{path}");
+    for path in page_paths() {
+        assert_eq!(get(addr, &path, "").await.status, 200, "{path}");
     }
     for (method, path) in [
         ("GET", "/api/overview"),
@@ -385,7 +412,8 @@ async fn a_page_loads_on_many_connections_at_once() {
     let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
     let addr = ui_address(&daemon).unwrap();
     assert!(out.contains("token "), "{out}");
-    let paths = ["/", "/app.js", "/kit.js", "/app.css", "/login", "/login.js"];
+    let paths = node_page_paths();
+    assert!(paths.len() >= 4 && paths.len() <= 8, "{paths:?}");
     let loads = paths.iter().chain(paths.iter()).map(|path| async move {
         let mut io = TcpStream::connect(addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -440,7 +468,7 @@ async fn wrong_tokens_on_many_connections_do_not_keep_the_owner_out() {
             .await
             .unwrap_or_else(|a| panic!("login {i} during the flood: {a:?}"));
         assert_eq!(get(addr, "/api/overview", &session).await.status, 200);
-        assert_eq!(get(addr, "/app.css", "").await.status, 200);
+        assert_eq!(get(addr, &page_paths()[2], "").await.status, 200);
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut tries = 0;

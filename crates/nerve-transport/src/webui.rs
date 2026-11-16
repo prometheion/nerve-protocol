@@ -1,8 +1,8 @@
 //! What the web UIs of the center and the node share: the security headers,
 //! the `Host` and `Origin` checks, the session a page holds in its tab, the
-//! delay on a wrong secret ([`WrongSecrets`]), the login page, and the assets both pages load
-//! (the stylesheet, the theme script, the icon and `kit.js`, the helpers of
-//! both pages' scripts).
+//! delay on a wrong secret ([`WrongSecrets`]), and the pages themselves: the
+//! built web UIs of `webui/` ([`DIST`]), served as they were built, the login
+//! page and both UIs' pages and assets.
 //!
 //! A session is a random token the login answers with. The page keeps it in
 //! its tab's `sessionStorage` and sends it as [`SESSION_HEADER`] with every
@@ -21,22 +21,38 @@ use tokio::sync::Notify;
 
 use crate::http::{Request, Response};
 
-pub const APP_CSS: &str = include_str!("webui/app.css");
-pub const THEME_JS: &str = include_str!("webui/theme-init.js");
-pub const ICON: &str = include_str!("webui/icon.svg");
+include!(concat!(env!("OUT_DIR"), "/webui_dist.rs"));
+
 /// The git ref of the user guide the program's help links to: the release's
 /// tag in a release build, `main` in any other (build.rs).
 pub const GUIDE_REF: &str = env!("NERVE_GUIDE_REF");
-/// The kit, after the guide's ref: its help links to the user guide there
-/// (`GUIDE` in kit.js), which matches the program.
-pub const KIT_JS: &str = concat!(
-    "const NERVE_GUIDE_REF = \"",
-    env!("NERVE_GUIDE_REF"),
-    "\";\n",
-    include_str!("webui/kit.js")
-);
-pub const LOGIN: &str = include_str!("webui/login.html");
-pub const LOGIN_JS: &str = include_str!("webui/login.js");
+
+/// Which web UI a page is: each has its own page, and both share the login
+/// and the assets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ui {
+    Center,
+    Node,
+}
+
+/// The built file at `path` of `webui/dist`.
+pub fn dist_file(path: &str) -> Option<&'static [u8]> {
+    DIST.iter().find(|(p, _)| *p == path).map(|(_, b)| *b)
+}
+
+/// The type a browser is told for a file of the built web UIs.
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, e)| e) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
 
 /// The header that carries a page's session (lowercase, as
 /// [`Request::header`] takes it).
@@ -213,26 +229,58 @@ impl Sessions {
     }
 }
 
-/// The asset of both UIs at `path`, if it is one.
+/// The asset of both UIs at `path`, if it is one: a script, a stylesheet or
+/// an image of the built web UIs (their names hold a hash of their
+/// content), and the icon. A built page is no asset: each is served at its
+/// own path ([`page`], [`login_page`]).
 pub fn asset(path: &str) -> Option<Response> {
-    let (kind, body) = match path {
-        "/app.css" => ("text/css; charset=utf-8", APP_CSS),
-        "/theme-init.js" => ("text/javascript; charset=utf-8", THEME_JS),
-        "/kit.js" => ("text/javascript; charset=utf-8", KIT_JS),
-        "/login.js" => ("text/javascript; charset=utf-8", LOGIN_JS),
-        "/icon.svg" => ("image/svg+xml", ICON),
-        _ => return None,
-    };
-    Some(Response::new(200, kind, body))
+    let rel = path.strip_prefix('/')?;
+    if rel.ends_with(".html") || rel.contains("..") {
+        return None;
+    }
+    let body = dist_file(rel)?;
+    Some(Response::new(200, content_type(rel), body))
 }
 
-/// The login page: `secret` names what is asked for, `tagline` is the line
-/// under the name.
-pub fn login_page(secret: &str, tagline: &str) -> Response {
-    let page = LOGIN
-        .replace("{{SECRET}}", secret)
-        .replace("{{TAGLINE}}", tagline);
-    Response::new(200, "text/html; charset=utf-8", page)
+/// A UI's page, with the ref of the user guide its help links to.
+pub fn page(ui: Ui) -> Response {
+    let name = match ui {
+        Ui::Center => "center.html",
+        Ui::Node => "node.html",
+    };
+    let html = String::from_utf8_lossy(dist_file(name).unwrap_or_default())
+        .replace("{{GUIDE_REF}}", &attr(GUIDE_REF));
+    Response::new(200, "text/html; charset=utf-8", html)
+}
+
+/// What the login page says: what is asked for (`secret`), its title and
+/// line, and the command that shows the secret, with what follows it.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LoginText<'a> {
+    pub secret: &'a str,
+    pub title: &'a str,
+    pub tagline: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<&'a str>,
+    pub after: &'a str,
+}
+
+/// The login page. Its words go into the page as data (a `<meta>` the page
+/// reads), never as markup.
+pub fn login_page(text: &LoginText) -> Response {
+    let json = serde_json::to_string(text).unwrap_or_default();
+    let html = String::from_utf8_lossy(dist_file("login.html").unwrap_or_default())
+        .replace("{{LOGIN}}", &attr(&json));
+    Response::new(200, "text/html; charset=utf-8", html)
+}
+
+/// `text` for an attribute between double quotes.
+fn attr(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// The secret a login posted, as JSON (`{"token": …}`, what the login page
@@ -307,98 +355,6 @@ pub fn with_security_headers(r: Response, api: bool) -> Response {
     } else {
         r
     }
-}
-
-/// The lines of a script that write markup, for the tests that keep every
-/// text of the pages in text nodes.
-pub fn html_sinks(js: &str) -> Vec<&str> {
-    const SINKS: [&str; 5] = [
-        "innerHTML",
-        "outerHTML",
-        "insertAdjacentHTML",
-        "document.write",
-        "srcdoc",
-    ];
-    js.lines()
-        .filter(|l| SINKS.iter().any(|s| l.contains(s)))
-        .collect()
-}
-
-/// The short texts of a page's script that are longer than `max`
-/// characters: a section's or a page head's subtitle, a banner, and a
-/// `meta` or `lead` paragraph that is not inside a `more()` fold, each as
-/// written (`${…}` counts as nothing). They say one line; the rest folds.
-pub fn long_subtitles(js: &str, max: usize) -> Vec<String> {
-    // Where the text is: after the call's name, the literals to skip first.
-    const AT: [(&str, usize); 5] = [
-        ("section(", 1),
-        ("head(", 2),
-        ("banner(", 2),
-        ("class: \"meta\" }, ", 0),
-        ("class: \"lead\" }, ", 0),
-    ];
-    let mut out = Vec::new();
-    for (at, skip) in AT {
-        for (i, _) in js.match_indices(at) {
-            // A word that ends in the name (`pageHead(`) is another call.
-            if js[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.') {
-                continue;
-            }
-            let before = &js[i.saturating_sub(60)..i];
-            if skip == 0 && before.contains("more(") {
-                continue;
-            }
-            let mut rest = &js[i + at.len()..];
-            let mut text = None;
-            for n in 0..=skip {
-                let Some((lit, after)) = literal(rest.trim_start()) else {
-                    break;
-                };
-                rest = after.trim_start();
-                if n == skip {
-                    text = Some(lit);
-                } else if let Some(r) = rest.strip_prefix(',') {
-                    rest = r;
-                } else {
-                    break;
-                }
-            }
-            if let Some(t) = text
-                && t.chars().count() > max
-            {
-                out.push(t);
-            }
-        }
-    }
-    out
-}
-
-/// A string literal at the start of `s` ("…" or `…`, its `${…}` left out)
-/// and what follows it.
-fn literal(s: &str) -> Option<(String, &str)> {
-    let quote = s.chars().next().filter(|c| *c == '"' || *c == '`')?;
-    let mut text = String::new();
-    let mut depth = 0;
-    let mut chars = s.char_indices().skip(1).peekable();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\\' if depth == 0 => {
-                if let Some((_, e)) = chars.next() {
-                    text.push(e);
-                }
-            }
-            '$' if quote == '`' && depth == 0 && chars.peek().map(|p| p.1) == Some('{') => {
-                chars.next();
-                depth = 1;
-            }
-            '{' if depth > 0 => depth += 1,
-            '}' if depth > 0 => depth -= 1,
-            _ if depth > 0 => {}
-            c if c == quote => return Some((text, &s[i + 1..])),
-            c => text.push(c),
-        }
-    }
-    None
 }
 
 /// Whether `path` is an API call's, which needs a session.
@@ -527,58 +483,154 @@ mod tests {
         assert!(!page.headers.iter().any(|(k, _)| k == "Cache-Control"));
     }
 
-    /// No script of the UIs builds HTML from text: what a node or a center
-    /// wrote goes into text nodes only. The icons are the one place markup
-    /// is set, from the fixed table at the head of kit.js.
+    fn header(r: &Response, n: &str) -> Option<String> {
+        r.headers
+            .iter()
+            .find(|(k, _)| k == n)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// The built web UIs are embedded whole, and each asset is served with
+    /// its type, which `nosniff` makes the browser keep to: a script as a
+    /// script, a stylesheet as one. A built page is not an asset, and no
+    /// path climbs out of the folder.
     #[test]
-    fn the_shared_script_builds_no_html_from_text() {
-        assert_eq!(
-            html_sinks(KIT_JS),
-            vec!["  s.innerHTML = ICONS[name] || \"\";"]
-        );
-        assert_eq!(html_sinks(LOGIN_JS), Vec::<&str>::new());
+    fn every_asset_is_served_with_its_type() {
+        for page in ["center.html", "node.html", "login.html", "icon.svg"] {
+            assert!(dist_file(page).is_some(), "{page} is not built");
+        }
+        let mut kinds = 0;
+        for (path, body) in DIST {
+            let r = asset(&format!("/{path}"));
+            if path.ends_with(".html") {
+                assert!(r.is_none(), "{path} is served as an asset");
+                continue;
+            }
+            let r = r.unwrap_or_else(|| panic!("{path} is not served"));
+            assert_eq!(r.status, 200);
+            assert_eq!(&r.body, body);
+            let kind = header(&r, "Content-Type").unwrap();
+            let want = match path.rsplit_once('.').unwrap().1 {
+                "js" => "text/javascript; charset=utf-8",
+                "css" => "text/css; charset=utf-8",
+                "svg" => "image/svg+xml",
+                other => panic!("{path}: a file of type {other} in the build"),
+            };
+            assert_eq!(kind, want, "{path}");
+            kinds += 1;
+        }
+        assert!(kinds >= 3, "{kinds}");
+        for path in [
+            "/center.html",
+            "/assets/../center.html",
+            "/nothing.js",
+            "assets/x.js",
+            "/",
+        ] {
+            assert!(asset(path).is_none(), "{path}");
+        }
+    }
+
+    /// The CSP allows no inline script or style: every page loads its
+    /// scripts and styles as files of the build, and holds none itself.
+    #[test]
+    fn the_pages_load_only_files_of_the_build() {
+        for page in ["center.html", "node.html", "login.html"] {
+            let html = String::from_utf8(dist_file(page).unwrap().to_vec()).unwrap();
+            assert!(!html.contains("<style"), "{page}: an inline style");
+            assert!(!html.contains(" style="), "{page}: a style attribute");
+            let lower = html.to_ascii_lowercase();
+            for (i, _) in lower.match_indices("<script") {
+                let tag = &html[i..i + html[i..].find('>').unwrap()];
+                assert!(
+                    tag.contains(" src=\"/assets/"),
+                    "{page}: an inline script: {tag}"
+                );
+                assert!(
+                    html[i..].starts_with(&format!("{tag}></script>")),
+                    "{page}: {tag}"
+                );
+            }
+            let handler = lower
+                .split(|c: char| c.is_whitespace() || c == '<')
+                .find(|w| w.starts_with("on") && w.contains('='));
+            assert_eq!(handler, None, "{page}: an inline handler");
+            for attr in [" src=\"/", " href=\"/"] {
+                for (i, _) in html.match_indices(attr) {
+                    let from = i + attr.len();
+                    let file = &html[from..from + html[from..].find('"').unwrap()];
+                    assert!(
+                        dist_file(file).is_some(),
+                        "{page} loads {file}, which is not built"
+                    );
+                }
+            }
+        }
     }
 
     /// The help's guide links name the docs of this release, at its tag,
     /// when it is a release build, and `main` in any other build: a tag
-    /// that does not exist yet would be a dead link.
+    /// that does not exist yet would be a dead link. The page says it in a
+    /// `<meta>` its script reads.
     #[test]
     fn the_guide_is_the_one_of_this_release() {
         assert!(
             GUIDE_REF == "main" || GUIDE_REF == concat!("v", env!("CARGO_PKG_VERSION")),
             "{GUIDE_REF}"
         );
+        for ui in [Ui::Center, Ui::Node] {
+            let r = page(ui);
+            assert_eq!(
+                header(&r, "Content-Type").unwrap(),
+                "text/html; charset=utf-8"
+            );
+            let html = String::from_utf8(r.body).unwrap();
+            assert!(
+                html.contains(&format!(
+                    "<meta name=\"nerve-guide\" content=\"{GUIDE_REF}\">"
+                )),
+                "{html}"
+            );
+            assert!(!html.contains("{{"), "{html}");
+        }
         assert!(
-            KIT_JS.starts_with(&format!("const NERVE_GUIDE_REF = \"{GUIDE_REF}\";\n")),
-            "{}",
-            &KIT_JS[..80]
+            String::from_utf8(page(Ui::Center).body)
+                .unwrap()
+                .contains("Nerve center")
         );
-        let guide = KIT_JS
-            .lines()
-            .find(|l| l.starts_with("const GUIDE = "))
-            .unwrap();
         assert!(
-            guide.contains("/tree/${NERVE_GUIDE_REF}/docs/user`"),
-            "{guide}"
+            String::from_utf8(page(Ui::Node).body)
+                .unwrap()
+                .contains("Nerve node")
         );
     }
 
-    /// The scanner of short texts finds a long subtitle, a long banner and a
-    /// long note, and leaves a fold's body and a short line alone.
+    /// The login's words go into the page as data: a folder name with a
+    /// quote or markup in it ends up as text, never as an element.
     #[test]
-    fn long_subtitles_finds_the_walls() {
-        let wall = "x".repeat(130);
-        let js = format!(
-            "section(\"T\", \"{wall}\", null);\nhead(\"i\", \"T\", `${{a}}{wall}`);\nbanner(\"warn\", \"alert\", \"{wall}\");\nel(\"p\", {{ class: \"meta\" }}, \"{wall}\");\nmore(\"k\", \"More\", el(\"p\", {{ class: \"meta\" }}, \"{wall}\"));\nsection(\"T\", \"short\");\npageHead(\"a\", \"b\", \"{wall}\");"
-        );
-        assert_eq!(
-            long_subtitles(&js, 120).len(),
-            4,
-            "{:?}",
-            long_subtitles(&js, 120)
-        );
-        assert_eq!(long_subtitles(&js, 200), Vec::<String>::new());
-        assert_eq!(long_subtitles(KIT_JS, 120), Vec::<String>::new());
+    fn the_login_says_its_words_as_data() {
+        let text = LoginText {
+            secret: "Owner token",
+            title: "Log in to this center",
+            tagline: "One center\"><script>x</script> for all",
+            command: Some("nerve-center owner-token --state-dir '/srv/a&b'"),
+            after: " shows it.",
+        };
+        let html = String::from_utf8(login_page(&text).body).unwrap();
+        assert!(!html.contains("<script>x"), "{html}");
+        assert!(!html.contains("{{LOGIN}}"), "{html}");
+        let at = html.find("<meta name=\"nerve-login\" content=\"").unwrap() + 34;
+        let content = &html[at..at + html[at..].find('"').unwrap()];
+        let back = content
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        let v: serde_json::Value = serde_json::from_str(&back).unwrap();
+        assert_eq!(v["tagline"], text.tagline);
+        assert_eq!(v["command"], text.command.unwrap());
+        assert_eq!(v["secret"], "Owner token");
     }
 
     #[test]

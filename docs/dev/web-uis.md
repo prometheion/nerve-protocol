@@ -4,6 +4,68 @@ The center's web UI and the node's web UI: the login model, the throttle,
 the `Host` rule, sessions, TLS beyond loopback, and a tour of each page. The
 user guide's [web UIs page](../user/web-uis.md) is the short version.
 
+## How the pages are built
+
+Both web UIs are one frontend project, [`webui/`](../../webui) at the
+repository's root: TypeScript, React and Vite, with no UI library. It has
+three pages: `center.html` (the center's web UI), `node.html` (the node's)
+and `login.html` (the login of both).
+
+- **Layout.** The pages follow the desktop app's layout B (#231, #232): a
+  list on the left and the picked row's details on the right, side by side
+  from a 1100 px window, in turns with **Back to the list** on a smaller one,
+  and a third pane from 1800 px where a page has one. Adding is a form in the
+  details pane, pairing an overlay, and a removal asks in its row. The shared
+  pieces are in `webui/src/ui.tsx` (buttons, switches, the rows of choices,
+  fields, the list and its details, the inline question, overlays, the
+  searchable picker) and `webui/src/frame.tsx` (the sidebar, the page the
+  address names, the polls); each UI's pages are in `webui/src/center/` and
+  `webui/src/node/`.
+- **Look.** `webui/src/styles/tokens.css` holds the app's design tokens, the
+  values of `crates/nerve/ui/theme.slint`, and a test checks each one
+  against the app's (`webui/src/tokens.test.ts`). The icons are the app's own
+  (`crates/nerve/ui/icons`), written into `webui/src/icons.ts` as data by
+  `node scripts/icons.mjs`.
+- **The build is committed.** `npm run build` writes `webui/dist`, which is in
+  the repository. `nerve-transport`'s `build.rs` lists every file there for
+  `include_bytes!`, so `cargo build` needs no Node, and both servers serve the
+  same files (`nerve_transport::webui`): their page at `/`, the login at
+  `/login`, the scripts and the stylesheet at `/assets/…` with a hash of
+  their content in the name, and the icon.
+- **The CSP stays strict.** Every script and style is a file of the build;
+  the pages hold no inline script, style or handler, and no source writes
+  markup from text (`webui/src/sources.test.ts`;
+  `nerve_transport::webui::tests::the_pages_load_only_files_of_the_build`).
+  What a server says to a page goes in as data: the login's words and the
+  user guide's ref are `<meta>` tags the page reads.
+- **CI.** The `webui` job of `ci.yml` runs `npm ci`, the type check, the
+  tests and the build, fails when `webui/dist` is not what the sources build,
+  and runs `npm audit --audit-level=high`.
+
+### Changing the pages
+
+```sh
+cd webui
+npm ci                 # once
+npm run check          # the type check
+npm test               # the page tests, against a fake API
+npm run build          # writes dist/: commit it with the change
+```
+
+A page test renders a page with a fake server (`webui/src/test/fake.ts`) and
+acts on it as a person does (`webui/src/test/dom.tsx`); every change of a page
+gets one. To try a page against a real center or node, run it and point the
+dev server at it, then open `http://localhost:5173/center.html` (or
+`node.html`) and log in at `/login`:
+
+```sh
+NERVE_DEV_UI=http://127.0.0.1:7480 npm run dev
+```
+
+A new npm dependency needs a reason: the project has React and React DOM,
+and for the build and the tests Vite, its React plugin, TypeScript, Vitest,
+happy-dom (the DOM of the page tests) and React's type definitions.
+
 ## The center's web UI
 
 `nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`). Its pages,
@@ -86,8 +148,8 @@ not running.
 
 ### Look
 
-The web UI has the desktop app's design: the same colours, type, controls and
-motion. The switch at the foot of the menu picks **System**, **Light** or
+The web UI has the desktop app's design and layout: the same colours, type,
+controls and motion, a list and its details on every page. The switch at the foot of the menu picks **System**, **Light** or
 **Dark**; the choice stays in this browser. When the system asks for less
 motion, nothing moves. On a phone the menu opens from the button at the top.
 
