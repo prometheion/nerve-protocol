@@ -422,7 +422,17 @@ jobs:
           $image = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\nerve-center').ImagePath
           $want = "`"$bin`" __center service --state-dir `"$env:ProgramData\nerve-center\state`""
           if ($image -ne $want) { throw "the service runs $image, not $want" }
-          $ui = Get-Content "$env:ProgramData\nerve-center\run\ui" -Raw | ConvertFrom-Json
+          # The web UI is off by default on Windows (owner, 2026-11-16): the
+          # file, where there is one, says so; `set ui` turns it on.
+          $file = "$env:ProgramData\nerve-center\run\ui"
+          if (Test-Path $file) {
+            $ui = Get-Content $file -Raw | ConvertFrom-Json
+            if ($null -ne $ui.url) { throw "the web UI is on by default: $($ui.url)" }
+          }
+          if (Get-NetTCPConnection -LocalPort 7480 -State Listen -ErrorAction SilentlyContinue) { throw 'something listens on 7480 by default' }
+          & $bin __center set ui 127.0.0.1:7480 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "set ui did not turn the web UI on ($LASTEXITCODE)" }
+          $ui = Get-Content $file -Raw | ConvertFrom-Json
           if ($ui.url -ne 'http://127.0.0.1:7480') { throw "the web UI's file says $($ui.url)" }
           $rule = Get-NetFirewallRule -DisplayName 'Nerve center' | Get-NetFirewallServiceFilter
           if ($rule.Service -ne 'nerve-center') { throw "the firewall rule is for '$($rule.Service)', not the service" }

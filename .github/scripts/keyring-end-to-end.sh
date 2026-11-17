@@ -248,7 +248,7 @@ NERVE_NODE_REAL=$NODE real "$ROOT_TESTS" --ignored --exact --nocapture a_program
 printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 
 step "2. Install the node as the owner"
-owners_sudo "$NODE" install
+owners_sudo "$NODE" install | tee "$OUT/install-node"
 as_owner status | tee "$OUT/status-files"
 grep -q ' · running$' "$OUT/status-files"
 as_owner config get machine.secret_storage | tee "$OUT/storage"
@@ -405,19 +405,18 @@ step "6. real_account.rs: a center, a restart, a folder mode command as nerve-ru
 NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=$OWNER \
   real "$TESTS" --ignored --exact --nocapture the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run
 
-step "6b. The web UI: off until ui on, the owner's account only, a token to log in"
-# On the installed node with a real owner and nerve-run (issue #161): off,
-# nothing listens; `ui on` listens at once; the owner's account logs in with
-# the token and changes a setting; a command's account, nerve-run, is closed
-# before it gets a byte; `ui off` leaves nothing.
+step "6b. The web UI: on from the install, the owner's account only, a token to log in"
+# On the installed node with a real owner and nerve-run (issue #161): the
+# server program's install turned it on at loopback and showed its first
+# token once (owner, 2026-11-16); the owner's account logs in with the token
+# and changes a setting; a command's account, nerve-run, is closed before it
+# gets a byte; `ui off` leaves nothing, and `ui on` brings it back.
 UI=http://127.0.0.1:7470
 ui_listeners() { ss -Hltnp 'sport = :7470' | tee -a "$OUT/ui-ss"; }
-[ -z "$(ui_listeners)" ] || fail "something listens on 7470 before ui on"
-as_owner ui on | tee "$OUT/ui-on"
-grep -q 'listening on 127.0.0.1:7470' "$OUT/ui-on" || fail "ui on does not say the web UI listens"
-UI_TOKEN=$(sed -n 's/^token [^:]*: //p' "$OUT/ui-on" | head -n 1)
-[ -n "$UI_TOKEN" ] || fail "ui on showed no first token"
-ui_listeners | grep -q '"nerve-node"' || fail "7470 is not the node's"
+grep -q 'listening on 127.0.0.1:7470' "$OUT/install-node" || fail "the install does not say the web UI listens"
+UI_TOKEN=$(sed -n 's/^token [^:]*: //p' "$OUT/install-node" | head -n 1)
+[ -n "$UI_TOKEN" ] || fail "the install showed no first token of the web UI"
+ui_listeners | grep -q '"nerve-node"' || fail "7470 is not the node's after the install"
 # One socket for each loopback family the machine has: 127.0.0.1 and ::1
 # (the node holds both, so another account cannot take the one it did not
 # bind), both its own, and nothing else.
@@ -451,6 +450,12 @@ ui_smoke "$UI/" "$UI_TOKEN"
 as_owner ui off | tee "$OUT/ui-off"
 for _ in $(seq 1 50); do [ -z "$(ui_listeners)" ] && break; sleep 0.1; done
 [ -z "$(ui_listeners)" ] || fail "the web UI still listens after ui off"
+as_owner ui on | tee "$OUT/ui-on"
+grep -q 'listening on 127.0.0.1:7470' "$OUT/ui-on" || fail "ui on does not say the web UI listens"
+ui_listeners | grep -q '"nerve-node"' || fail "7470 is not the node's after ui on"
+as_owner ui off >/dev/null
+for _ in $(seq 1 50); do [ -z "$(ui_listeners)" ] && break; sleep 0.1; done
+[ -z "$(ui_listeners)" ] || fail "the web UI still listens after the second ui off"
 summary "- the web UI on the installed node: passed"
 
 step "7. uninstall --purge"

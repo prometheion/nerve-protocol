@@ -1676,7 +1676,9 @@ mod tests {
         assert!(mcp("none").is_err());
         assert!(Args::try_parse_from(["nerve-center", "--mcp-listen", "127.0.0.1:1"]).is_err());
         assert_eq!(a.listen, "0.0.0.0:7443");
-        assert!(!a.ui_off());
+        // The web UI is on by default on Linux and off on Windows (owner,
+        // 2026-11-16).
+        assert_eq!(a.ui_off(), cfg!(windows));
         assert_eq!(a.call_wait, crate::jobs::CALL_WAIT);
         let a = Args::try_parse_from(["nerve-center", "--call-wait", "500ms"]).unwrap();
         assert_eq!(a.call_wait, std::time::Duration::from_millis(500));

@@ -1354,7 +1354,7 @@ mod tests {
         let e = set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut Vec::new()).unwrap_err();
         assert!(
             e.ends_with(
-                "`nerve-center set ui 127.0.0.1:7480` in an administrator's terminal puts back the value before"
+                "`nerve-center set ui off` in an administrator's terminal puts back the value before"
             ),
             "{e}"
         );
