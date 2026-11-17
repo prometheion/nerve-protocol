@@ -44,9 +44,11 @@ Every run builds and publishes the Linux and the Windows programs.
 ## What a run does
 
 1. Checks the inputs, the version and the tag (for a release, also the notes).
-   Then it runs `cargo fmt --check`,
-   `cargo clippy --locked --workspace --all-targets -- -D warnings` and
-   `cargo test --locked --workspace` with the pinned toolchain.
+   Then it waits until CI (`ci.yml`: fmt, clippy and the whole test suite on
+   Linux and Windows, musl, the installed tests) has passed on that very
+   commit, at most two hours; a commit with no CI run, or a failed one, is
+   not released. A pre-release of a branch needs the branch's pull request
+   to have run CI on that commit.
 2. Builds `nerve-center` and `nerve-node` for `x86_64-unknown-linux-musl` and
    `aarch64-unknown-linux-musl` (static). Each Linux binary must be static.
    Each binary must print its version from `--version`, and it must equal the
