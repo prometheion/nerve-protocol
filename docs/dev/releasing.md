@@ -73,15 +73,21 @@ Every run builds and publishes the Linux and the Windows programs.
    The release's Windows tests are these installed ones, not the whole
    `cargo test --workspace` of CI's `windows` job.
 4. Publishes, only once every job above passed, a GitHub Release with
-   `SHA256SUMS` and nine files. The five Linux binaries:
+   `SHA256SUMS` and nine files. The eight Linux files:
    `nerve-center` and `nerve-node` for each machine, and
-   `nerve-x86_64-linux`, which also comes as
-   `nerve_<version>_amd64.deb` and
-   `nerve-<version>.x86_64.rpm`: packed from that program with
-   `dpkg-deb` and `rpmbuild` (`.github/scripts/desktop-packages.sh`) and
-   installed on Ubuntu 22.04 and 24.04 and Fedora in containers first
-   (`desktop-packages-test`). And the one for Windows,
-   `nerve-x86_64-windows.exe`, the app, which is the node or the center
+   `nerve-x86_64-linux`, the app, which also comes as
+   `nerve_<version>_amd64.deb`,
+   `nerve-<version>.x86_64.rpm` and
+   `nerve-<version>-1-x86_64.pkg.tar.zst`. The `.deb` and the `.rpm` are
+   packed from that program with `dpkg-deb` and `rpmbuild`
+   (`.github/scripts/desktop-packages.sh`) and installed on Ubuntu 22.04
+   and 24.04 and Fedora in containers first (`desktop-packages-test`). The
+   Arch package is built with `makepkg` from `packaging/arch/PKGBUILD` in an
+   archlinux container (`.github/scripts/arch-package.sh`, job
+   `desktop-arch-package`) and installed there with `pacman -U`, started
+   with `--version`, upgraded and removed
+   (`desktop-arch-package-test`). There is no AUR package. The ninth file
+   is `nerve-x86_64-windows.exe`, the app, which is the node or the center
    there (the Windows job builds `nerve-center.exe` for the install test
    only). The release text ends with a
    footer that names the programs it has. The desktop app's update takes its

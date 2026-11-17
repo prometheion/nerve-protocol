@@ -6,16 +6,19 @@ settings. The user guide's [install](../user/install.md#the-desktop-app) and
 [web UIs](../user/web-uis.md#the-desktop-app) pages are the short version,
 and on Windows its [Windows page](../user/windows.md).
 
-`nerve` is the node with a window, for a machine with a desktop:
-Linux x86_64 with GNOME or KDE Plasma (Wayland or X11), and Windows x86_64.
-It is one program: it holds the node, its CLI and the app. It installs
-itself like any other program, runs the node as a service, and does what
-`nerve-node` does in a terminal (pairing, modes, folders, rules, sudo, the
-proxy, the relay, the audit log, backups, the account commands run as)
-without one; on Linux two things stay with the terminal
-([settings](#settings)). On Windows the app is the only way to the node:
-there is no `nerve-node` for a terminal there. The window runs the CLI for
-every action, so it has the CLI's checks and audit records.
+`nerve` is the node or the center with a window, for a machine with a
+desktop: Linux x86_64 with GNOME or KDE Plasma (Wayland or X11), and Windows
+x86_64. It is one program: it holds the node, the center, their CLIs and the
+app, and one machine has one role. It installs itself like any other
+program, runs its role as a service, and does what `nerve-node` or
+`nerve-center` does in a terminal (as a node: pairing, modes, folders,
+rules, sudo, the proxy, the relay, the audit log, backups, the account
+commands run as) without one; on Linux two things stay with the terminal
+([settings](#settings)). On Windows the app is the only way to either role:
+there is no `nerve-node` or `nerve-center` for a terminal there. The node's
+window runs the CLI for every action, so it has the CLI's checks and audit
+records; the center's pages ask the center over its owner channel
+([the center's pages](#the-centers-pages)).
 
 ## One program, two roles
 
@@ -144,7 +147,7 @@ From [Releases](https://github.com/prometheion/nerve-protocol/releases):
 
 | System | File |
 |---|---|
-| Linux, x86_64 | `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm`, or the plain `nerve-x86_64-linux` (each needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) |
+| Linux, x86_64 | `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm`, `nerve-<version>-1-x86_64.pkg.tar.zst` (Arch Linux), or the plain `nerve-x86_64-linux` (each needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36, Arch Linux and later) |
 | Windows, x86_64 | `nerve-x86_64-windows.exe` |
 
 Check it against `SHA256SUMS` ([install](service.md#download)).
@@ -155,17 +158,25 @@ Check it against `SHA256SUMS` ([install](service.md#download)).
 
 Double-click the `.deb` or `.rpm` and press **Install** in the software
 installer, or `sudo apt install ./nerve_<version>_amd64.deb`,
-`sudo dnf install ./nerve-<version>.x86_64.rpm`. The package
+`sudo dnf install ./nerve-<version>.x86_64.rpm`,
+`sudo pacman -U ./nerve-<version>-1-x86_64.pkg.tar.zst`. The package
 puts the program in `/usr/bin`, **Nerve** in the application menu with its
-icon, and the mark `/usr/share/nerve/package` (`deb` or `rpm`),
+icon, and the mark `/usr/share/nerve/package` (`deb`, `rpm` or `pacman`),
 and brings fontconfig. Then open **Nerve** and press **Install**: the
-installer finds the program in place and goes on with the node.
+installer finds the program in place and asks what the machine is.
 
 How the release makes them: `.github/scripts/desktop-packages.sh` runs the
 released program's `__package-root <folder> deb|rpm`, which writes the
 packages' files (`parts::package_root`), and packs them with `dpkg-deb` and
 `rpmbuild`; the release installs each on Ubuntu 22.04 and 24.04 and Fedora
-before it publishes them.
+before it publishes them. The Arch package is `packaging/arch/PKGBUILD`,
+which runs `__package-root <folder> pacman` and builds with `makepkg`
+(`.github/scripts/arch-package.sh`); the release installs it with
+`pacman -U` in an archlinux container, and checks the menu entry, an upgrade
+and `pacman -R`. Its `nerve.install` script does after an install and an
+upgrade what the `.deb`'s and the `.rpm`'s do. There is no AUR package
+(owner, 2026-11-14). The package conflicts with and replaces the
+pre-releases' `nerve-node-desktop`.
 
 What the mark changes (`service::Layout::of`, `service::Package`):
 
@@ -177,9 +188,10 @@ What the mark changes (`service::Layout::of`, `service::Package`):
   removes the plain program and menu entry an earlier install put in
   `/usr/local`; `nerve-node` becomes a link to `/usr/bin/nerve`.
 - `update` takes the release's package of the same kind from `SHA256SUMS`,
-  checks it, refuses an older one, installs it with `apt-get install -y` or
-  `dnf install -y` (the same version again with `apt-get install --reinstall`
-  or `dnf reinstall`, as a pre-release and its release share one), and
+  checks it, refuses an older one, installs it with `apt-get install -y`,
+  `dnf install -y` or `pacman -U --noconfirm` (the same version again with
+  `apt-get install --reinstall` or `dnf reinstall`, as a pre-release and its
+  release share one; `pacman -U` takes the same version as it is), and
   restarts the service with it, the service's files
   as the new program has them; a new program that does not start is put
   back. `update --from <file>` is refused: only the package manager replaces
@@ -192,8 +204,8 @@ What the mark changes (`service::Layout::of`, `service::Package`):
   change time, `nerve_service::stale`; Linux only, as Windows replaces no
   running program), and `status` and the Overview say to restart it; the
   center's `status` likewise.
-- `uninstall` removes the node and leaves the program; `apt remove` or
-  `dnf remove` removes the app. Removing the package first leaves a service
+- `uninstall` removes the node and leaves the program; `apt remove`,
+  `dnf remove` or `pacman -R` removes the app. Removing the package first leaves a service
   without its program: uninstall in the app first.
 
 ### Let the file run (Linux)
@@ -207,8 +219,9 @@ The plain program, downloaded, may not run as a program yet.
 
 ### The installer
 
-The first start shows the app's installer. It says what it installs, and
-**Install** does it:
+The first start shows the app's installer. Its first step asks what the
+machine is, **A node** or **A center**. For a node it says what it installs,
+and **Install** does it (a center's install is [below](#the-centers-pages)):
 
 - the node, as a service under a user of its own, `nerve`, that starts with
   the machine (what `nerve-node install` does, [service](service.md#the-node-as-a-service));
@@ -238,9 +251,9 @@ and in folder mode give it a first folder, as `nerve-node setup` asks; **Back**
 goes to the step before, **Skip** past one. The downloaded file is no longer
 needed.
 
-On Windows `nerve.exe --silent` installs without a window and
-without a question, for winget; the app asks for your Windows password later,
-where it is needed. Apps & features has a `QuietUninstallString`,
+On Windows `nerve.exe --silent` installs the node without a window and
+without a question, for scripts; the app asks for your Windows password
+later, where it is needed. Apps & features has a `QuietUninstallString`,
 `"…\nerve.exe" uninstall`, which keeps the data.
 
 | What | Linux | Windows |
@@ -423,7 +436,9 @@ so the node checks a value as it checks the command line's.
   ([Windows](windows.md#the-node-as-a-service-on-windows)). Where it cannot
   (no keyring answering for the account the node runs as), the app says why
   and keeps them in files.
-- **Network**: the **Proxy**. The relay has a page of its own
+- **Network**: the **Proxy**, and the **Web UI** group, which turns the
+  node's [web UI](web-uis.md#the-nodes-web-ui) on and off, makes and revokes
+  its tokens and opens it with **Open**. The relay has a page of its own
   ([Relay](#relay)).
 - **Limits**: what one command may use and the most a call may ask for
   (`limits.command`, [limits](sandbox-linux.md#limits-per-command)), how long a command runs
@@ -636,8 +651,8 @@ With **Pre-releases** on, the newest release, a pre-release too
 (`update --pre`).
 The update replaces the program, puts the menu entry back and restarts the
 service; the node's settings, keys and audit log stay. The app from a package
-installs the release's newer package with `apt-get` or `dnf` instead
-([the package](#the-package-linux)). **Restart Nerve**
+installs the release's newer package with `apt-get`, `dnf` or `pacman`
+instead ([the package](#the-package-linux)). **Restart Nerve**
 opens the new version. Opening a newer downloaded file offers **Update** too,
 also while the app is open: the open window comes to the front and says
 which version the file is (on Wayland, where no program may raise itself,
@@ -654,8 +669,8 @@ the downloaded file again offers **Uninstall…** too, and on Windows so does
 **Uninstall** at Nerve in **Settings**, **Apps** (Apps & features): it opens
 the same in the app. Kept data comes back with the next install
 ([uninstall](service.md#uninstall-the-node)). The app from a package stays,
-with its menu entry: `sudo apt remove nerve` or
-`sudo dnf remove nerve` removes it.
+with its menu entry: `sudo apt remove nerve`,
+`sudo dnf remove nerve` or `sudo pacman -R nerve` removes it.
 
 ## What the app needs
 
@@ -707,18 +722,22 @@ On Linux, `nerve <command>` is `nerve-node <command>`, with
 `nerve-node`, the command `nerve-node` runs the app's program, which says
 `nerve` for `--version`.
 
-On Windows there is no command line for the node. The app's program,
-started with arguments, is how the app talks to the node, not a command for
-a person, and it shows nothing in a terminal. Where a message of the node
-names one of its commands (`nerve-node folder rm`), the app on Windows shows
-the place in the app that does it instead (**Permissions › Folders**).
+On Windows there is no command line for the node or the center. The app's
+program, started with arguments, is how the app talks to the node, not a
+command for a person, and it shows nothing in a terminal. Where a message of
+the node names one of its commands (`nerve-node folder rm`), the app on
+Windows shows the place in the app that does it instead (**Permissions ›
+Folders**).
 
-## The web UI (Linux)
+## The web UI
 
-On Linux the app's node has the [node web UI](web-uis.md#the-nodes-web-ui) too, off unless
-you turn it on: `nerve ui on` (or `nerve-node ui on`). It works as
-for the plain `nerve-node`, and the app does not switch it. On Windows there is
-none: the app is the node's UI there.
+The app's node has the [node web UI](web-uis.md#the-nodes-web-ui) too, on
+Linux and Windows, off unless you turn it on: **Settings › Network › Web UI**
+(`nerve ui on` or `nerve-node ui on` on Linux). It works as for the plain
+`nerve-node`, and the app does not switch it on for you. The center role has
+its own switch, **Settings › This machine › Web UI**: on by default on Linux,
+off on Windows ([the defaults](web-uis.md)). The app does not need either:
+the node's pages run the CLI, the center's pages use the owner channel.
 
 ## Keyboard
 
@@ -769,7 +788,8 @@ asks the desktop portal's `reduced-motion` first, and GTK's
 `gtk-enable-animations` on other desktops. It follows a change within a few
 seconds.
 
-The appearance (system, light or dark), the **Pre-releases** switch, and the
+The appearance (system, light or dark), the **Pre-releases** switch, the
+choice to keep the center's log-in in the keyring and the
 card on commands that run as you when you hid it, are kept in
 `~/.config/nerve-app/settings.json` on Linux and
 `%APPDATA%\nerve-app\settings.json` on Windows, apart from the

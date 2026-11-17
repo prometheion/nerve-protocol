@@ -70,11 +70,11 @@ From the quickest to the most thorough:
 
 | You want | Do |
 |---|---|
-| Stop one agent session | Web UI, Overview, Sessions, **End** |
-| Hide a machine from the agent | Web UI, Overview, **Disable** at the machine |
+| Stop one agent session | Web UI or app, Harnesses, Sessions, **End** |
+| Hide a machine from the agent | Web UI or app, Nodes, **Disable** at the machine |
 | Stop one center on a machine | `nerve-node center pause lab` |
 | Stop every center on a machine | `nerve-node panic` |
-| End a pairing | `nerve-node center rm lab`, or **Remove** in the web UI |
+| End a pairing | `nerve-node center rm lab`, or **Remove** on the center's Nodes page |
 
 ```sh
 nerve-node panic                       # every link ends; nothing runs

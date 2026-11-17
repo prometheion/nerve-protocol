@@ -2,8 +2,9 @@
 
 Pairing links a machine to a center. Do it once per machine and center.
 
-1. In the center's web UI, on **Nodes** (or the Overview), press **Pair a machine**. It
-   shows a command and the pairing link, each with a Copy button.
+1. In the center's web UI or the app, on **Nodes** (or the Overview), press
+   **Pair a machine**. It shows a command and the pairing link, each with a
+   Copy button. `sudo nerve-center pair` makes the link in a terminal.
 2. On the machine, run the command, then paste the link on the next line:
 
    ```sh

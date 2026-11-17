@@ -7,7 +7,8 @@ center, so a machine behind NAT needs no open port.
 ## Start here
 
 1. [Install](install.md) the center as a service, and the node on each
-   machine; on Windows the node is the [desktop app](windows.md).
+   machine; the [desktop app](install.md#the-desktop-app) installs either,
+   and on Windows it is the only way ([Windows](windows.md)).
 2. Log in to the center's web UI with the owner token, and
    [connect your harness](center.md).
 3. [Pair](pair.md) each machine with the center.

@@ -1560,9 +1560,10 @@ On Linux (Windows differs, see [sudo on Windows](windows.md#sudo-on-windows)):
 ### From the web UI
 
 A center with the [settings grant](settings-and-config.md#the-settings-grant) can turn sudo on and off.
-In Settings, open the machine and press **Turn sudo on**. The browser seals the
-password for the node, and the center only passes it on. The center cannot read
-it.
+In Settings, open the machine and press **Turn sudo on** (or run `nerve-center
+nodes sudo <machine> on`, which asks for the password at the terminal). The
+browser, or the command, seals the password for the node, and the center only
+passes it on. The center cannot read it.
 
 The center serves the form that takes the password. A tampered center could
 capture the password before the browser seals it. Turn sudo on from the

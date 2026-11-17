@@ -10,7 +10,7 @@ Three programs:
 |---|---|---|
 | `nerve` | The app: one download for both roles. Its first step asks what this machine is, a node or a center, and installs that role with a window for it | a Linux desktop (x86_64, GNOME or KDE Plasma), and every Windows machine |
 | `nerve-center` | The center alone, for Linux servers and aarch64. Your harness reaches the center as an MCP server and gets two tools, `list` and `execute`. It pairs machines and serves a web UI | the machine where the harness runs, or a server it reaches |
-| `nerve-node` | The node alone, for Linux servers and aarch64: a service, a CLI for pairing, folders, rules and the audit log, and a web UI you may turn on | each Linux machine the agent may use |
+| `nerve-node` | The node alone, for Linux servers and aarch64: a service, a CLI for pairing, folders, rules and the audit log, and a web UI that its `install` turns on | each Linux machine the agent may use |
 
 The app installs one role per machine; on Linux the terminal programs may
 install both, for tests. Nerve runs on Linux (x86_64, aarch64) and Windows
@@ -35,8 +35,9 @@ On ARM, take the `aarch64` files.
    `sudo nerve-center owner-token` shows the token again.
 
 2. Open the web UI, `http://127.0.0.1:7480`, and log in with the owner token.
-   Its **Connect a harness** card makes a harness token and gives you the
-   entry for your harness: the JSON, or a `claude mcp add` line.
+   Its **Harnesses** page makes a harness token under **Connect a harness**
+   and gives you the entry for your harness: the JSON, or a `claude mcp add`
+   line.
 
 3. Install the node on each machine the agent may use:
 
@@ -68,21 +69,19 @@ On ARM, take the `aarch64` files.
    widen its own rights up to `user` mode: give it only to a center you would
    also give a shell ([the settings grant](docs/user/rules.md#the-settings-grant)).
 
-The node has a web UI of its own, off until you turn it on. It listens on
-`http://127.0.0.1:7470` and shows its first token once:
-
-```sh
-nerve-node ui on
-```
+The node has a web UI of its own. This `install` turns it on at
+`http://127.0.0.1:7470` and shows its first token once. The app's node keeps
+it off: `nerve-node ui on` or **Settings › Network** turns it on.
 
 ### The desktop app
 
 On a Linux desktop, take the app `nerve` in place of the terminal programs:
-the `.deb` (Ubuntu, Debian) or the `.rpm` (Fedora). Double-click it,
-install it, then open **Nerve**: it asks what this machine is, a node or a
-center, and installs that role. The plain `nerve-x86_64-linux` works too
-([install](docs/user/install.md#the-desktop-app)). It names the role's
-terminal command, `nerve-node` or `nerve-center`, as a link to itself.
+the `.deb` (Ubuntu, Debian), the `.rpm` (Fedora) or the `.pkg.tar.zst`
+(Arch Linux). Double-click it, install it, then open **Nerve**: it asks what
+this machine is, a node or a center, and installs that role. The plain
+`nerve-x86_64-linux` works too ([install](docs/user/install.md#the-desktop-app)).
+It names the role's terminal command, `nerve-node` or `nerve-center`, as a
+link to itself.
 
 ### On Windows
 
@@ -90,8 +89,10 @@ Double-click `nerve-x86_64-windows.exe`. It is not signed: SmartScreen asks,
 **More info**, **Run anyway**. Its installer asks what this machine is:
 
 1. **A center**: after the UAC prompt it installs the center as a service,
-   and its last step shows the owner token and opens the web UI. Harnesses
-   connect over HTTP MCP (**Connect a harness** in the web UI).
+   and its last step shows the owner token. The app then opens the center's
+   pages, which ask for that token; its browser web UI is off until
+   **Settings › This machine** turns it on. Harnesses connect over HTTP MCP
+   (**Harnesses › Connect a harness**).
 2. **A node**, on each machine the agent may use: it asks for your Windows
    password, installs the node as a service, and pairs your first center.
 

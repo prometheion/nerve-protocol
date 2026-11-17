@@ -8,7 +8,7 @@ version, task by task.
 ## Linux and Windows
 
 The center and the node run on Linux (x86_64, aarch64) and Windows (x86_64),
-the [desktop app](desktop.md) (`nerve`, the node with an app) on
+the [desktop app](desktop.md) (`nerve`, the node or the center with an app) on
 Linux x86_64 and Windows x86_64. The node behaves the same except where this
 page says so. The Linux programs are static and run on any distribution;
 installing them as a service needs systemd ([distributions](service.md#linux-distributions)).
@@ -17,7 +17,7 @@ Debian 12, Fedora 36 and later) and fontconfig.
 
 | | Linux | Windows |
 |---|---|---|
-| The node's program | `nerve-node`, or the [desktop app](desktop.md) | The desktop app only |
+| The node's and the center's program | `nerve-node` and `nerve-center`, or the [desktop app](desktop.md) | The desktop app only |
 | Shell for commands | `/bin/sh -c` | Windows PowerShell 5.1 (`powershell.exe -NoProfile -Command`) |
 | `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, as `nerve-run` in the pairing's AppContainer ([the account](#the-account-commands-run-as-on-windows)) |
 | `allowlist` and `user` mode run commands | Yes | Yes: `allowlist` as `nerve-run` in the pairing's AppContainer, or as you with `--as-owner`; `user` as you. Each in a Job Object |
@@ -514,7 +514,9 @@ The install does this, and says each step:
    ports need a rule of their own, `Nerve center web UI` or `Nerve center
    MCP`, whose `New-NetFirewallRule -Service nerve-center` line `set` prints.
 6. Starts the service and waits until the center runs, then says the web
-   UI's address, the owner token and where harnesses connect.
+   UI's address (the web UI is off on Windows until `set ui 127.0.0.1:7480`
+   or the app's **Settings › This machine › Web UI** turns it on), the owner
+   token and where harnesses connect.
 
 The service reads its settings only from `center.env`, the same
 `NERVE_CENTER_*` lines as on Linux; MCP is over HTTP unless the file says

@@ -40,7 +40,9 @@ sudo nerve-center backup /var/lib/nerve-center/center.bak
 sudo nerve-center restore ~/nerve-center.bak     # stops the service and starts it again
 ```
 
-The backup holds the center's key and certificate, its paired machines, its
+The app's **Settings › Backup** does both for a center it installed
+([the center in the app](center.md#in-the-app)). The backup holds the
+center's key and certificate, its paired machines, its
 harness token hashes and the action checker's settings. The machines find it
 again by the same pin and need not pair again.
 

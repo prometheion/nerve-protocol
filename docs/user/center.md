@@ -165,7 +165,7 @@ The center on a server, the harness on your laptop:
 
 - **Beyond loopback**: `sudo nerve-center set mcp 0.0.0.0:7481` (and
   `set ui 0.0.0.0:7480` for the web UI). They then use TLS with the center's
-  self-signed certificate. The Connect a harness card shows its fingerprint:
+  self-signed certificate. **Connect a harness** shows its fingerprint:
   let the harness and the browser trust that certificate, and compare the
   fingerprint before you log in
   ([TLS](../dev/settings-and-config.md#tls)).
@@ -175,9 +175,10 @@ pin, so a node trusts exactly that center.
 
 ## Rotate the key
 
-**Settings › Center key › Rotate key** makes a new key and shows its pin.
-The center tells every machine that links in the next 7 days. Then it
-switches; **Serve the new key now** switches at once.
+**Settings › Center key › Rotate key** (or `sudo nerve-center key rotate`)
+makes a new key and shows its pin. The center tells every machine that links
+in the next 7 days. Then it switches; **Serve the new key now**
+(`key finish`) switches at once.
 
 - A machine that does not link within the 7 days must be paired again.
 - Update the nodes before you rotate the key.

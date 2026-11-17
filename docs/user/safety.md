@@ -117,6 +117,10 @@ leads to the detail.
 - A center you run as yourself keeps its owner token where your agent may
   read it. Run the center as the service
   ([center](center.md#a-center-your-harness-starts)).
+- The center's terminal commands and the app's pages reach it over a local
+  socket or pipe: root and an administrator need no token, the account that
+  installed it only the owner token, so a program of yours gets nothing
+  without it ([center](center.md#in-the-terminal)).
 - A machine that does not link within 7 days of a center key rotation must
   be paired again ([rotation](../dev/identity-and-pairing.md#rotate-the-centers-key)).
 - A backup holds neither the owner token nor the checker's endpoint token
