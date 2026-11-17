@@ -60,7 +60,7 @@ sudo nerve-center token list
 sudo nerve-center token rm laptop
 sudo nerve-center checker               # its switches and rules, numbered
 sudo nerve-center checker block add 'exec.run:shutdown *'
-sudo nerve-center audit skip 3a9f01c2   # such calls skip the model
+sudo nerve-center audit skip 3a9f01c2d4e5b678   # such calls skip the model
 sudo nerve-center log --problems
 ```
 

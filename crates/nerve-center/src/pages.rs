@@ -337,17 +337,12 @@ fn refused(e: &Value) -> bool {
     s(&e["decision"]) == "forbidden"
 }
 
-/// The short name `audit` gives a decision and its rule commands take: eight
-/// hex digits of what the decision holds (FNV-1a), so it is the same
-/// whenever it is listed.
+/// The short name `audit` gives a decision and its rule commands take: the
+/// first sixteen hex digits of the SHA-256 of what the decision holds, so it
+/// is the same whenever it is listed and a node cannot make a decision of its
+/// own that carries the id the owner read.
 fn decision_id(e: &Value) -> String {
-    let hash = e
-        .to_string()
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-    format!("{:08x}", (hash >> 32) ^ (hash & 0xffff_ffff))
+    crate::util::sha256_hex(e.to_string().as_bytes())[..16].to_string()
 }
 
 /// The decision `audit` showed under `id`: the list moves with every call
@@ -1051,7 +1046,12 @@ mod tests {
         let b = json!({"ts": 2, "cap": "exec", "action": "run", "target": "ls"});
         assert_eq!(decision_id(&a), decision_id(&a.clone()));
         assert_ne!(decision_id(&a), decision_id(&b));
-        assert_eq!(decision_id(&a).len(), 8);
+        assert_eq!(decision_id(&a).len(), 16);
+        // The first sixteen digits of the SHA-256 of the entry's JSON.
+        assert_eq!(
+            decision_id(&json!({"a": 1})),
+            crate::util::sha256_hex(br#"{"a":1}"#)[..16]
+        );
         assert!(decision_id(&a).bytes().all(|c| c.is_ascii_hexdigit()));
         // The rule command finds the decision it was shown, whatever came in
         // since; one that dropped off is said.

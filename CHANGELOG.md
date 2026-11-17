@@ -363,7 +363,7 @@ and aarch64, and the desktop app for Linux x86_64. Windows comes with 0.1.0.
   runs.
 - A home and a temporary folder per pairing, `/var/lib/nerve-run/<center>`.
 - `nerve-node network off` keeps a center's commands off the network.
-- The node's web UI (`nerve-node ui on`): owner only, off by default.
+- The node's web UI (`nerve-node ui on`): owner only. It is off in the app by default.
 - Capabilities of your own in `node.toml` (`nerve-node cap add`), and programs
   that add state, events and streams (`nerve-node provider add`).
 - Allow and deny rules on an action's arguments (`lamp.set:room=office`).
