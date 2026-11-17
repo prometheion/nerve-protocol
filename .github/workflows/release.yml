@@ -81,8 +81,12 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    # A runner that dies is said in time, not after the six hours' default.
-    timeout-minutes: 120
+    # The wait for CI is two hours at most.
+    timeout-minutes: 130
+    # It reads the tags and CI's runs.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
       tag: ${{ steps.tag.outputs.tag }}
@@ -190,27 +194,31 @@ jobs:
           name: release-notes
           path: notes/changelog.md
           if-no-files-found: error
-      - run: cargo fmt --check
-      # The desktop app (crates/nerve) links the system's fontconfig.
-      - name: Build dependencies of the desktop app
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
-      # CI's cargo cache of the same lock file, restored and never saved, so
-      # this job does not build every dependency again.
-      - name: Cargo cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # The test programs build at two at a time: the app's test programs each
-      # link Slint, and built side by side they took the runner's memory, which
-      # shut it down mid-build (exit 143, three runs).
-      - run: cargo test --locked --workspace --no-run -j 2
-      - run: cargo test --locked --workspace
+      # fmt, clippy and the whole test suite on Linux and Windows are CI's
+      # (ci.yml), which runs them on every commit of main and every pull
+      # request: the release waits until CI passed on this very commit
+      # instead of building and testing it a second time. (Its own copy of
+      # the Linux tests had the runner shut down mid-build four times in a
+      # row while CI's passed on the same commit.) A commit with no CI run,
+      # or a failed one, is not released.
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          for _ in $(seq 1 120); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.event == "push" or .event == "pull_request")] | sort_by(.created_at) | last | "\(.status) \(.conclusion) \(.html_url)"')
+            case "$run" in
+              "completed success "*) echo "CI passed on $SHA: ${run#completed success }"; exit 0 ;;
+              completed*) echo "CI did not pass on $SHA: $run" >&2; exit 1 ;;
+              "" | null*) echo "no CI run on $SHA yet" ;;
+              *) echo "CI on $SHA: $run" ;;
+            esac
+            sleep 60
+          done
+          echo "CI did not finish on $SHA within two hours" >&2
+          exit 1
 
   linux:
     needs: check

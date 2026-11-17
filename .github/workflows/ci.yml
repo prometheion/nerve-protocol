@@ -6,10 +6,10 @@
 # real-machine tests and the center as a service, on kernels older than 7.1
 # (6.8 and 7.0), and the desktop app's own install. A test
 # that skips says why, and a job fails on a skip that .github/test-skips.txt
-# does not give it (docs/dev/building.md). The release workflow runs
-# the same fmt, clippy and tests on Linux before it builds anything
-# (docs/dev/releasing.md); for Windows it runs the install test of
-# `windows-installed` on the programs it built, not the whole suite.
+# does not give it (docs/dev/building.md). The release workflow waits until
+# this workflow passed on the commit it releases, before it builds anything
+# (docs/dev/releasing.md); it runs the install tests again on the programs it
+# built.
 #
 # The Windows job runs the same `cargo test --workspace`, so the tests that are
 # compiled only on Windows run there: grants, the integrity level, the service
