@@ -21,24 +21,10 @@ Everything else is refused.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    harness["Agent harness<br>Claude Code, Codex, …"]
-    subgraph center["Center"]
-        direction TB
-        mcp["MCP server<br>list · execute"]
-        checker["Action checker<br>optional"]
-        mcp --> checker
-    end
-    subgraph machines["Your machines: a node on each"]
-        direction TB
-        laptop["Linux laptop"]
-        server["Linux server"]
-        pc["Windows PC"]
-    end
-    harness -- "MCP" --> mcp
-    checker -- "TLS, dialled by the node" --> machines
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/how-it-works-dark.svg">
+  <img src="docs/images/how-it-works-light.svg" alt="The harness talks MCP to the center; the center passes each call through the optional action checker to the nodes on your machines, which dial it over TLS; you set each machine's rules in the app, a web UI or the terminal" width="880">
+</picture>
 
 - **The center** is what your harness talks to: an MCP server with two
   tools, `list` and `execute`. It passes each call to the right machine.
@@ -46,7 +32,7 @@ flowchart LR
   so the machine opens no port, and its own rules decide every call.
 - **You** set those rules per machine, in the app, a web UI or the terminal.
 
-| | |
+| Feature | What it does |
 |---|---|
 | **Folders and modes** | In `folder` mode the agent works only in the folders you give it, with read, write and run rights, as an account of its own. `allowlist` allows only what a rule names; `user` runs as you |
 | **Rules** | Allow and deny commands, protected paths, sudo for named commands |
