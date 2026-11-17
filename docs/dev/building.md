@@ -20,9 +20,9 @@ debugger, build with `CARGO_PROFILE_DEV_DEBUG=true`.
 program. Its UI is in `crates/nerve/ui/`, its colours, type and spaces
 in `ui/theme.slint`. The crate `crates/nerve-ui` compiles those files into
 Rust and has no tests of its own, so cargo compiles the generated code once,
-as a dependency of the app: one rustc for it takes about 9 GB, and the app's
-crate, built twice side by side for its tests, would take that twice (more
-than a 16 GB runner has). `nerve` re-exports the generated types
+as a dependency of the app: one rustc for it takes about 8 GB. Inside the
+app's crate, which `cargo test` builds twice side by side, it took that twice,
+more than a 16 GB runner has. `nerve` re-exports the generated types
 (`nerve::AppWindow`). Screenshots of every page, light and dark:
 
 ```sh
