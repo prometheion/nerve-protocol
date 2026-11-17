@@ -154,7 +154,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
             center.log().record(
                 Level::Warn,
                 None,
-                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made in the web UI (Settings, Harness tokens) or set with NERVE_CENTER_HARNESS_TOKEN",
+                "no harness token yet: the HTTP MCP endpoint refuses every client until one is made on the Harnesses page or with `nerve-center token new`, or set with NERVE_CENTER_HARNESS_TOKEN",
             );
         }
         tasks.push(tokio::spawn(
@@ -410,6 +410,9 @@ pub async fn run(mut args: Args) -> Result<(), String> {
         tracing::info!("attaching to the center that runs in {}", state.display());
         return crate::attach::relay(&state).await;
     };
+    // Listened for before the start line goes out: a signal sent the moment
+    // a script reads that line must stop the center, not be lost.
+    let mut stop = Stop::listen()?;
     let running = start(&args, lock).await?;
     // The Windows service runs now; nothing where this is no service.
     #[cfg(windows)]
@@ -421,7 +424,7 @@ pub async fn run(mut args: Args) -> Result<(), String> {
             // bye to the nodes and the statistics written.
             tokio::select! {
                 _ = crate::mcp::serve_stdio(running.center.clone()) => {}
-                _ = signal() => {
+                _ = stop.wait() => {
                     running.stop().await;
                     return Ok(());
                 }
@@ -431,34 +434,90 @@ pub async fn run(mut args: Args) -> Result<(), String> {
             while running.center.session_count() > 0 {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    _ = signal() => break,
+                    _ = stop.wait() => break,
                 }
             }
         }
-        McpMode::Http(_) | McpMode::Off => signal().await,
+        McpMode::Http(_) | McpMode::Off => stop.wait().await,
     }
     running.stop().await;
     Ok(())
 }
 
-async fn signal() {
+/// What stops the center: SIGTERM and SIGINT, or the service control
+/// manager on Windows. Its listeners are made once, before the center
+/// starts. Made when the center waits, tokio lost a signal that came while
+/// one was being made (its handler is on before the listener subscribes),
+/// and a test that stops the center on its start line timed out in CI.
+struct Stop {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("a SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+    term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    int: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: Option<tokio::signal::windows::CtrlC>,
+}
+
+impl Stop {
+    fn listen() -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let handler = |e: std::io::Error| format!("cannot listen for signals: {e}");
+            Ok(Self {
+                term: signal(SignalKind::terminate()).map_err(handler)?,
+                int: signal(SignalKind::interrupt()).map_err(handler)?,
+            })
+        }
+        // The Windows service control manager asks the service to stop; a
+        // service has no console that could send Ctrl+C.
+        #[cfg(windows)]
+        {
+            let ctrl_c = match nerve_service::win::dispatch::is_service() {
+                true => None,
+                false => Some(
+                    tokio::signal::windows::ctrl_c()
+                        .map_err(|e| format!("cannot listen for Ctrl+C: {e}"))?,
+                ),
+            };
+            Ok(Self { ctrl_c })
         }
     }
-    // The Windows service control manager asks the service to stop; a
-    // service has no console that could send Ctrl+C.
-    #[cfg(windows)]
-    {
-        if nerve_service::win::dispatch::is_service() {
-            nerve_service::win::dispatch::stop_requested().await;
-        } else {
-            let _ = tokio::signal::ctrl_c().await;
+
+    /// Until a signal came, also one that came before this was called.
+    async fn wait(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
         }
+        #[cfg(windows)]
+        match &mut self.ctrl_c {
+            Some(c) => {
+                c.recv().await;
+            }
+            None => nerve_service::win::dispatch::stop_requested().await,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A SIGTERM that comes after the listeners are made, before the center
+    /// waits, still stops it: in CI one came while tokio made its listener
+    /// at the wait, and the center ran on.
+    #[tokio::test]
+    async fn a_signal_before_the_wait_still_stops_the_center() {
+        let mut stop = Stop::listen().unwrap();
+        // SAFETY: a signal to this process, which listens for it now.
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        // The runtime hands the signal out before the center waits; a
+        // listener made only now would never see it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::timeout(Duration::from_secs(10), stop.wait())
+            .await
+            .expect("the signal is seen");
     }
 }
