@@ -6,10 +6,11 @@ center, so a machine behind NAT needs no open port.
 
 ## Start here
 
-1. [Install](install.md) the center as a service, and the node on each
-   machine; the [desktop app](install.md#the-desktop-app) installs either,
-   and on Windows it is the only way ([Windows](windows.md)).
-2. Log in to the center's web UI with the owner token, and
+1. [Install](install.md) the app `nerve` as the center where your harness
+   runs, and as a node on each machine the agent may use
+   ([Windows](windows.md)). On a server, take the terminal programs
+   `nerve-center` and `nerve-node`.
+2. Log in to the center's pages with the owner token, and
    [connect your harness](center.md).
 3. [Pair](pair.md) each machine with the center.
 4. Give the pairing a [folder](folders-and-modes.md). Until then it writes
