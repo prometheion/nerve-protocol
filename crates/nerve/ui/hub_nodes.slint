@@ -1,0 +1,423 @@
+// The center's Nodes: the paired machines in a list, the picked one's
+// details (rename, turn off, remove, sudo), and Pair a machine, an overlay
+// opened by the page's button (the dialog is in hub_dialogs.slint).
+
+import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Hub, HubNode, HubPage } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, EmptyState, Reveal, IconTile,
+    StatusDot, Split, ListPane, DetailsPane, ListCard, ListGroup, ListItem, DetailCard, Fact,
+    TextField, RemoveAsk, FormButtons,
+} from "widgets.slint";
+
+// The machines, each with its platform and its state.
+export component NodeList inherits ListCard {
+    label: "Nodes";
+    step(d) => {
+        Hub.node-pick = Math.max(0, Math.min(Hub.nodes.length - 1, Hub.node-pick + d));
+        Hub.node-sudo = "";
+        Hub.sudo-error = "";
+    }
+    ListGroup {
+        text: "Nodes";
+        count: Hub.nodes-count;
+    }
+    for n[i] in Hub.nodes: ListItem {
+        tall: true;
+        selected: i == Math.min(Hub.node-pick, Hub.nodes.length - 1);
+        label: n.name;
+        clicked => {
+            Hub.node-pick = i;
+            Hub.rename-open = false;
+            Hub.node-sudo = "";
+            Hub.sudo-error = "";
+            Hub.details-open = true;
+        }
+        VerticalLayout {
+            alignment: center;
+            StatusDot {
+                tone: n.tone;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+            Text {
+                text: n.name;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.semibold;
+                overflow: elide;
+            }
+            Text {
+                text: n.platform;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: n.state;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One machine: its head with the buttons, its line, its facts and what it
+// offers, and its sudo switch where it gave this center the settings
+// grant.
+export component NodeDetails inherits DetailCard {
+    in property <HubNode> item;
+    property <bool> waiting: Hub.busy == root.item.id;
+    property <bool> disabled: root.item.state == "disabled";
+    FlexboxLayout {
+        spacing: Space.md;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.md;
+            IconTile {
+                icon: @image-url("icons/server.svg");
+                tone: root.item.state == "online" ? Tone.ok : Tone.neutral;
+            }
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                font-size: Type.title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+                overflow: elide;
+                min-width: min(80px, self.preferred-width);
+            }
+            VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: root.item.state;
+                    tone: root.item.tone;
+                    dot: true;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            Button {
+                text: "Rename";
+                icon: @image-url("icons/edit.svg");
+                enabled: !root.waiting;
+                clicked => {
+                    Hub.rename-text = root.item.name;
+                    Hub.rename-error = "";
+                    Hub.rename-open = true;
+                }
+            }
+            Button {
+                text: root.disabled ? "Turn on" : "Turn off";
+                icon: root.disabled ? @image-url("icons/play.svg") : @image-url("icons/ban.svg");
+                enabled: !root.waiting;
+                busy: root.waiting && Hub.asking == "";
+                clicked => {
+                    Hub.node-disable(root.item.id, !root.disabled);
+                }
+            }
+            RemoveAsk {
+                asking: Hub.asking == "node:" + root.item.id;
+                label: "Remove " + root.item.name;
+                question: "Remove this machine?";
+                busy: root.waiting;
+                ask => {
+                    Hub.asking = "node:" + root.item.id;
+                }
+                cancel => {
+                    Hub.asking = "";
+                }
+                confirmed => {
+                    Hub.node-remove(root.item.id);
+                }
+            }
+        }
+    }
+    // Renaming, in place of the line.
+    Reveal {
+        shown: Hub.rename-open;
+        VerticalLayout {
+            spacing: Space.sm;
+            TextField {
+                text <=> Hub.rename-text;
+                label: "New name of " + root.item.name;
+                invalid: Hub.rename-error != "";
+                accepted => {
+                    Hub.node-rename();
+                }
+            }
+            Reveal {
+                shown: Hub.rename-error != "";
+                Text {
+                    text: Hub.rename-error;
+                    color: Theme.danger;
+                    font-size: Type.caption;
+                    wrap: word-wrap;
+                }
+            }
+            FormButtons {
+                busy: root.waiting;
+                save => {
+                    Hub.node-rename();
+                }
+                cancel => {
+                    Hub.rename-open = false;
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: root.item.summary != "";
+        Text {
+            text: root.item.summary;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+    }
+    Reveal {
+        shown: root.item.broken != "";
+        Banner {
+            tone: Tone.warn;
+            title: "Left out for the agent";
+            text: root.item.broken;
+        }
+    }
+    VerticalLayout {
+        spacing: Space.md;
+        Fact {
+            label: "Platform";
+            Text {
+                text: root.item.platform;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+        }
+        Fact {
+            label: "Link";
+            Text {
+                text: root.item.link;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        if root.item.folders != "": Fact {
+            label: "Folders";
+            Text {
+                text: root.item.folders;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+        }
+        if root.item.software != "": Fact {
+            label: "Version";
+            Text {
+                text: root.item.software;
+                color: Theme.text;
+                font-size: Type.body;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if root.item.offers.length > 0: VerticalLayout {
+        spacing: Space.sm;
+        Text {
+            text: "What it offers";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        FlexboxLayout {
+            spacing-horizontal: 6px;
+            spacing-vertical: 6px;
+            for o in root.item.offers: Pill {
+                text: o;
+            }
+        }
+    }
+    // Sudo, where the machine lets this center change its settings: on
+    // with the password its `sudo -v` takes, sealed here for the machine.
+    VerticalLayout {
+        spacing: Space.sm;
+        Text {
+            text: "Sudo";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+        }
+        Reveal {
+            shown: !root.item.settings-write;
+            Text {
+                text: root.item.windows ? "This machine keeps its settings to itself. Change them in the Nerve app on it."
+                    : "This machine keeps its settings to itself. Change them with nerve-node on it.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+        Reveal {
+            shown: root.item.settings-write && root.item.state != "online";
+            Text {
+                text: "Its settings can be changed while it is online.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+        Reveal {
+            shown: root.item.settings-write && root.item.state == "online";
+            HorizontalLayout {
+                spacing: Space.sm;
+                Text {
+                    horizontal-stretch: 1;
+                    text: Hub.node-sudo == "on" ? "On: the sudo list runs with sudo."
+                        : Hub.node-sudo == "off" ? "Off: nothing runs with sudo."
+                        : "Not asked yet.";
+                    color: Theme.text;
+                    font-size: Type.small;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                if Hub.node-sudo == "": Button {
+                    text: "Ask";
+                    small: true;
+                    busy: root.waiting;
+                    clicked => {
+                        Hub.node-sudo-ask(root.item.id);
+                    }
+                }
+                if Hub.node-sudo == "on": Button {
+                    text: "Turn off";
+                    small: true;
+                    busy: root.waiting;
+                    clicked => {
+                        Hub.node-sudo-set(root.item.id, false);
+                    }
+                }
+            }
+        }
+        Reveal {
+            shown: root.item.settings-write && root.item.state == "online" && Hub.node-sudo == "off" && root.item.windows;
+            Text {
+                text: "Turn it on in the Nerve app on that machine, Permissions, Sudo.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+        if root.item.settings-write && root.item.state == "online" && Hub.node-sudo == "off" && !root.item.windows: HorizontalLayout {
+            spacing: Space.sm;
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.sudo-password;
+                password: true;
+                placeholder: "Its sudo password";
+                label: "Sudo password of " + root.item.name;
+                accepted => {
+                    Hub.node-sudo-set(root.item.id, true);
+                }
+            }
+            Button {
+                text: "Turn on";
+                icon: @image-url("icons/key.svg");
+                busy: root.waiting;
+                clicked => {
+                    Hub.node-sudo-set(root.item.id, true);
+                }
+            }
+        }
+        Reveal {
+            shown: Hub.sudo-error != "";
+            Text {
+                text: Hub.sudo-error;
+                color: Theme.danger;
+                font-size: Type.caption;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export component HubNodesPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Hub.node-pick, Hub.nodes.length - 1));
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/server.svg");
+        title: "Nodes";
+        error-title: "The nodes could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+        Button {
+            text: "Pair a machine";
+            icon: @image-url("icons/plus.svg");
+            kind: ButtonKind.primary;
+            clicked => {
+                Hub.pair-start();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.state != "" && Hub.nodes.length == 0;
+        gap: Space.xxl;
+        Card {
+            EmptyState {
+                icon: @image-url("icons/server.svg");
+                title: "No machine paired yet";
+                text: "Pair a machine makes a link: on Linux paste it into nerve-node, on Windows open it on that machine.";
+                Button {
+                    text: "Pair a machine";
+                    icon: @image-url("icons/plus.svg");
+                    kind: ButtonKind.primary;
+                    clicked => {
+                        Hub.pair-start();
+                    }
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.nodes.length > 0;
+        gap: Space.xl;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                NodeList { }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                NodeDetails {
+                    item: Hub.nodes[root.pick];
+                }
+            }
+        }
+    }
+}

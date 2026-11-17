@@ -82,7 +82,7 @@ pub const APP: Edition = Edition {
     parts: AppParts(None),
 };
 
-/// The mark the app's .deb and .rpm leave (nerve_node::service::Package's
+/// The mark the app's .deb, .rpm and Arch package leave (nerve_node::service::Package's
 /// `MARK`, which a test of the app keeps equal): its program is then the
 /// package's, in /usr/bin.
 pub const PACKAGE_MARK: &str = "/usr/share/nerve/package";

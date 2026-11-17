@@ -21,6 +21,7 @@
 
 pub mod blocklist;
 pub mod config;
+pub mod edit;
 pub mod install;
 pub mod model;
 pub mod normalize;

@@ -494,6 +494,65 @@ fn a_center_is_backed_up_while_it_runs_and_restored_only_when_it_does_not() {
     assert!(!bad.status.success());
 }
 
+/// `nerve-center` with `stdin` on its input.
+fn owner_with(args: &[&str], state: &std::path::Path, stdin: &str) -> std::process::Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    bare(&mut c)
+        .args(args)
+        .arg("--state-dir")
+        .arg(state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The app's broker names no file (#232): a backup to `-` comes in the
+/// `--json` answer and a restore from `-` reads it from the input, the
+/// passphrase on the line after it; the backup round-trips.
+#[test]
+fn a_backup_is_handed_over_its_answer_and_its_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+    let mut center = spawn(&old);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+    let pass = "correct horse battery";
+    // Without --json there is nowhere to put it.
+    let plain = owner_with(&["backup", "-", "--passphrase-file", "-"], &old, pass);
+    assert!(!plain.status.success());
+    let made = owner_with(
+        &["--json", "backup", "-", "--passphrase-file", "-"],
+        &old,
+        &format!("{pass}\n"),
+    );
+    let answer: Value = serde_json::from_slice(&made.stdout).unwrap();
+    let sealed = answer["backup"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{answer}"));
+    assert!(!dir.path().join("-").exists());
+    let restored = owner_with(
+        &["--json", "restore", "-", "--passphrase-file", "-"],
+        &new,
+        &format!("{sealed}\n{pass}\n"),
+    );
+    let answer: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert!(answer.get("error").is_none(), "{answer}");
+    assert_eq!(
+        std::fs::read(old.join("tls.pem")).unwrap(),
+        std::fs::read(new.join("tls.pem")).unwrap()
+    );
+}
+
 /// A center that runs a node's link and a harness over stdio, stopped by a
 /// signal, and one that serves MCP over HTTP beyond loopback with port 0.
 #[cfg(unix)]
@@ -823,6 +882,157 @@ fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
     let gone = owner(&["nodes", "rm", "nope"], Some(&state));
     assert!(!gone.status.success());
     assert!(String::from_utf8_lossy(&gone.stderr).contains("no machine named nope"));
+    drop(center.stdin.take());
+    assert!(wait(&mut center, Duration::from_secs(10)));
+}
+
+/// Every function of the center's pages has its command in the terminal
+/// (owner, 2026-11-16: nothing is GUI-only), with the web UI off: the
+/// checker's switches, its blocklist and skip rules (add, edit, switch,
+/// remove), the decision model and a machine's own switch; the sessions,
+/// the statistics, the audit, the center key, the center's own settings,
+/// and a machine's name, settings, sudo and capabilities.
+#[test]
+fn every_function_of_the_pages_has_its_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut center = spawn(&state);
+    let mut center_out = BufReader::new(center.stdout.take().unwrap());
+    init(&mut center, &mut center_out);
+    let said = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert!(
+            o.status.success(),
+            "{args:?}: {text}{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        text
+    };
+    let refused = |args: &[&str]| {
+        let o = owner(args, Some(&state));
+        assert!(!o.status.success(), "{args:?} was not refused");
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    // The words of the row numbered `n`, as the columns part them.
+    let row = |page: &str, n: &str| -> Vec<String> {
+        page.lines()
+            .map(|l| {
+                l.split("  ")
+                    .map(str::trim)
+                    .filter(|w| !w.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .find(|w| w.first().map(String::as_str) == Some(n))
+            .unwrap_or_default()
+    };
+    // The checker as the page shows it, its rules numbered.
+    let shown = said(&["checker"]);
+    assert!(shown.contains(" · blocklist on · model off\n"), "{shown}");
+    let builtins = shown.lines().filter(|l| l.contains("built-in: ")).count();
+    assert!(builtins > 0, "{shown}");
+    let n = (builtins + 1).to_string();
+    let added = said(&[
+        "checker",
+        "block",
+        "add",
+        "exec.run:shutdown *",
+        "--note",
+        "Turns the machine off",
+    ]);
+    assert!(added.contains("the rule is added"), "{added}");
+    assert_eq!(
+        row(&added, &n),
+        [
+            n.as_str(),
+            "on",
+            "exec.run:shutdown *",
+            "all machines",
+            "Turns the machine off"
+        ],
+        "{added}"
+    );
+    let edited = said(&["checker", "block", "edit", &n, "exec.run:poweroff *"]);
+    assert_eq!(row(&edited, &n)[2], "exec.run:poweroff *", "{edited}");
+    let off = said(&["checker", "block", "off", &n]);
+    assert_eq!(row(&off, &n)[1], "off", "{off}");
+    assert!(refused(&["checker", "block", "rm", "1"]).contains("built-in"));
+    let gone = said(&["checker", "block", "rm", &n]);
+    assert!(!gone.contains("poweroff"), "{gone}");
+    let skip = said(&["checker", "skip", "add", "exec.run:ls *"]);
+    assert!(skip.contains("Skip the model"), "{skip}");
+    assert_eq!(
+        row(&skip[skip.find("Skip the model").unwrap()..], "1")[1..],
+        ["exec.run:ls *", "all machines"],
+        "{skip}"
+    );
+    let skip = said(&["checker", "skip", "rm", "1"]);
+    assert!(!skip.contains("Skip the model"), "{skip}");
+    assert!(said(&["checker", "on", "model"]).contains(" · blocklist on · model on\n"));
+    assert!(said(&["checker", "off", "model"]).contains(" · blocklist on · model off\n"));
+    let tuned = said(&["checker", "model", "set", "threshold", "0.6"]);
+    assert!(tuned.contains("threshold 0.6,"), "{tuned}");
+    assert!(refused(&["checker", "model", "set", "gpu", "maybe"]).contains("on or off"));
+    // The endpoint's token: given on a line of stdin, kept when nothing is
+    // given, and removed only on request.
+    let token_file = state.join("checker-model.token");
+    let mut give = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+    let mut give = bare(&mut give)
+        .args(["checker", "model", "token", "--state-dir"])
+        .arg(&state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    give.stdin
+        .take()
+        .unwrap()
+        .write_all(b"endpoint-secret\n")
+        .unwrap();
+    assert!(give.wait_with_output().unwrap().status.success());
+    assert_eq!(
+        std::fs::read_to_string(&token_file).unwrap().trim(),
+        "endpoint-secret"
+    );
+    assert!(refused(&["checker", "model", "token"]).contains("nothing was given"));
+    assert!(token_file.exists(), "an empty input removed the token");
+    assert!(said(&["checker", "model", "token", "--remove"]).contains("token is removed"));
+    assert!(!token_file.exists());
+    assert!(
+        refused(&["checker", "machine", "nope", "model", "on"]).contains("no machine named nope")
+    );
+    // The harness's session of this test, the statistics, the audit.
+    let sessions = said(&["sessions"]);
+    assert!(sessions.contains(" · 1 session\n"), "{sessions}");
+    assert!(sessions.contains("stdio"), "{sessions}");
+    assert!(refused(&["sessions", "end", "nope"]).contains("no such session"));
+    assert!(said(&["stats"]).contains("All machines"));
+    assert!(said(&["audit"]).contains(" · no decision yet\n"));
+    assert!(refused(&["audit", "allow", "0badc0de"]).contains("no decision 0badc0de"));
+    // The center's own settings.
+    let config = said(&["config", "retention-days", "12"]);
+    assert!(
+        config
+            .lines()
+            .any(|l| l.split_whitespace().eq(["retention-days", "12"])),
+        "{config}"
+    );
+    assert!(refused(&["config", "retention-days", "999"]).contains("1 to 366"));
+    // The center key: a new one, its pin shown once, the grace ended.
+    let key = said(&["key", "rotate"]);
+    assert!(key.contains(" · new center key\n"), "{key}");
+    assert!(key.contains("\n  Pin "), "{key}");
+    assert!(said(&["key", "finish"]).contains("the old key no longer works"));
+    // A machine's commands name it; none is paired here.
+    for args in [
+        &["nodes", "rename", "nope", "lab"][..],
+        &["nodes", "settings", "nope"],
+        &["nodes", "sudo", "nope", "off"],
+        &["caps", "nope"],
+    ] {
+        assert!(refused(args).contains("no machine named nope"), "{args:?}");
+    }
     drop(center.stdin.take());
     assert!(wait(&mut center, Duration::from_secs(10)));
 }

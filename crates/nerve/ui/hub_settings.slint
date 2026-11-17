@@ -1,0 +1,877 @@
+// The center's Settings and Help: each a list of its sections on the left,
+// the chosen one on the right.
+
+import { Theme, Type, Space, Radius, Tone, Size } from "theme.slint";
+import { Hub, HubPage } from "hub.slint";
+import { Store, Install } from "store.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, Icon, IconTile,
+    Split, ListPane, DetailsPane, ListCard, ListItem, DetailCard, TextField, Segmented, Switch,
+    Fold, Field, Code,
+} from "widgets.slint";
+import { TaskFold, KeyRow } from "help.slint";
+
+// A section of a list of sections: its icon and name, and a chevron.
+component SectionItem inherits ListItem {
+    in property <image> icon;
+    in property <string> text;
+    label: root.text;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: root.icon;
+            colorize: root.selected ? Theme.accent-text : Theme.text-muted;
+        }
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.text;
+        color: root.selected ? Theme.accent-text : Theme.text;
+        font-size: Type.body;
+        font-weight: root.selected ? Type.semibold : Type.regular;
+        vertical-alignment: center;
+    }
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            source: @image-url("icons/chev-right.svg");
+            colorize: Theme.text-faint;
+        }
+    }
+}
+
+// The head of a section's card: its icon, name and line.
+component SectionHead inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> line;
+    spacing: Space.md;
+    VerticalLayout {
+        alignment: start;
+        IconTile {
+            icon: root.icon;
+            size: 28px;
+        }
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 2px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Type.heading;
+            font-weight: Type.semibold;
+        }
+        Reveal {
+            shown: root.line != "";
+            Text {
+                text: root.line;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// A setting's row: its name on the left, its field on the right.
+component SetRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: Space.lg;
+    Text {
+        width: 150px;
+        text: root.label;
+        color: Theme.text;
+        font-size: Type.small;
+        font-weight: Type.semibold;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    @children
+}
+
+// A row of This machine: what, a line, and its buttons.
+component MachineRow inherits VerticalLayout {
+    in property <string> title;
+    in property <string> line;
+    in property <bool> first;
+    spacing: Space.md;
+    if !root.first: Rectangle {
+        height: 1px;
+        background: Theme.border;
+    }
+    FlexboxLayout {
+        spacing-horizontal: Space.md;
+        spacing-vertical: Space.sm;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        VerticalLayout {
+            min-width: 200px;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.semibold;
+            }
+            Text {
+                text: root.line;
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.sm;
+            @children
+        }
+    }
+}
+
+component CenterSection inherits DetailCard {
+    SectionHead {
+        icon: @image-url("icons/settings.svg");
+        title: "Center";
+        line: "An address's change restarts the service, after one administrator's prompt.";
+    }
+    VerticalLayout {
+        spacing: Space.md;
+        SetRow {
+            label: "Name";
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.set-name;
+                label: "Name";
+            }
+        }
+        SetRow {
+            label: "Public address";
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.set-public-url;
+                mono: true;
+                placeholder: "https://center.example.net:7443";
+                label: "Public address";
+            }
+        }
+        SetRow {
+            label: "Node port";
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.set-listen;
+                mono: true;
+                placeholder: "0.0.0.0:7443";
+                label: "Node port";
+            }
+        }
+        SetRow {
+            label: "Web UI";
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.set-ui;
+                mono: true;
+                placeholder: "127.0.0.1:7480, or off";
+                label: "Web UI";
+            }
+        }
+        SetRow {
+            label: "MCP for harnesses";
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Hub.set-mcp;
+                mono: true;
+                placeholder: "127.0.0.1:7481, stdio or off";
+                label: "MCP for harnesses";
+            }
+        }
+        SetRow {
+            label: "Keep statistics";
+            TextField {
+                width: 120px;
+                text <=> Hub.set-days;
+                label: "Keep statistics, days";
+            }
+            Text {
+                text: "days";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+        SetRow {
+            label: "Pairing code valid";
+            TextField {
+                width: 120px;
+                text <=> Hub.set-minutes;
+                label: "Pairing code valid, minutes";
+            }
+            Text {
+                text: "minutes";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+        SetRow {
+            label: "Log";
+            Segmented {
+                options: ["Normal", "Debug"];
+                current: Hub.set-debug ? 1 : 0;
+                small: true;
+                label: "Log";
+                chosen(i) => {
+                    Hub.set-debug = i == 1;
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.set-error != "";
+        Banner {
+            tone: Tone.danger;
+            title: "Not saved";
+            text: Hub.set-error;
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        Button {
+            text: "Save";
+            kind: ButtonKind.primary;
+            small: true;
+            busy: Hub.busy == "settings";
+            clicked => {
+                Hub.settings-save();
+            }
+        }
+    }
+}
+
+component MachineSection inherits DetailCard {
+    SectionHead {
+        icon: @image-url("icons/monitor.svg");
+        title: "This machine";
+        line: "One role per machine.";
+    }
+    MachineRow {
+        first: true;
+        title: "Role: center";
+        line: "Changing it backs up the center, removes it with its data, then installs a node.";
+        Button {
+            text: "Change the role…";
+            small: true;
+            clicked => {
+                Hub.role-node = false;
+                Hub.role-ask();
+            }
+        }
+    }
+    MachineRow {
+        title: "Service: " + (Hub.service-state == "running" ? "running" : Hub.service-state == "" ? "…" : Hub.service-state);
+        line: Hub.service-line;
+        if Hub.service-state != "running": Button {
+            text: "Start";
+            icon: @image-url("icons/play.svg");
+            small: true;
+            busy: Hub.busy == "service-start";
+            clicked => {
+                Hub.service("start");
+            }
+        }
+        if Hub.service-state == "running": Button {
+            text: "Restart";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            busy: Hub.busy == "service-restart";
+            clicked => {
+                Hub.service("restart");
+            }
+        }
+        if Hub.service-state == "running": Button {
+            text: "Stop";
+            icon: @image-url("icons/stop.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            busy: Hub.busy == "service-stop";
+            clicked => {
+                Hub.service("stop");
+            }
+        }
+    }
+    MachineRow {
+        title: "Version " + Hub.version;
+        line: Hub.update-line;
+        Button {
+            text: "Update";
+            icon: @image-url("icons/download.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            busy: Hub.busy == "update";
+            clicked => {
+                Hub.update();
+            }
+        }
+    }
+    MachineRow {
+        title: "Web UI";
+        line: "The center's pages in your browser, on this machine.";
+        if Hub.set-ui != "" && Hub.set-ui != "off": Button {
+            text: "Open the web UI";
+            icon: @image-url("icons/external.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Hub.open-web-ui();
+            }
+        }
+        Switch {
+            checked: Hub.set-ui != "" && Hub.set-ui != "off";
+            enabled: Hub.busy != "web-ui";
+            label: "Web UI";
+            toggled(on) => {
+                Hub.web-ui-set(on);
+            }
+        }
+    }
+    MachineRow {
+        title: "Uninstall";
+        line: "Removes the center; you choose whether its data stays.";
+        Button {
+            text: "Uninstall…";
+            kind: ButtonKind.danger-soft;
+            small: true;
+            clicked => {
+                Hub.uninstall-purge = false;
+                Hub.uninstall-open = true;
+            }
+        }
+    }
+}
+
+component OwnerSection inherits DetailCard {
+    SectionHead {
+        icon: @image-url("icons/key.svg");
+        title: "Owner token";
+        line: "Logs in to the web UI and to these pages.";
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.inset;
+            border-radius: Radius.sm;
+            border-width: 1px;
+            border-color: Theme.border;
+            min-height: shown.preferred-height + 14px;
+            shown := Text {
+                x: 10px;
+                width: parent.width - 20px;
+                text: Hub.owner-token != "" ? Hub.owner-token : "nrv_owner_••••••••••••••••";
+                color: Theme.text;
+                font-size: Type.small;
+                font-family: Type.mono;
+                wrap: char-wrap;
+                vertical-alignment: center;
+            }
+        }
+        if Hub.owner-token == "": Button {
+            text: "Show…";
+            icon: @image-url("icons/eye.svg");
+            small: true;
+            busy: Hub.busy == "owner-token";
+            clicked => {
+                Hub.token-show();
+            }
+        }
+        if Hub.owner-token != "": Button {
+            text: "Copy";
+            icon: @image-url("icons/copy.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Hub.copy-secret(Hub.owner-token);
+            }
+        }
+        if Hub.owner-token != "": Button {
+            text: "Hide";
+            icon: @image-url("icons/eye-off.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Hub.owner-token = "";
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        Button {
+            text: "Make a new one…";
+            icon: @image-url("icons/refresh.svg");
+            small: true;
+            busy: Hub.busy == "owner-token-new";
+            clicked => {
+                Hub.token-new();
+            }
+        }
+        Button {
+            text: "Log out here";
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Hub.logout();
+            }
+        }
+    }
+    Text {
+        text: "Show and a new one ask for an administrator's password. A new one ends every log-in with the old one.";
+        color: Theme.text-faint;
+        font-size: Type.small;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        VerticalLayout {
+            alignment: start;
+            Switch {
+                checked: Hub.keep-login;
+                label: "Remember the log-in in my keyring";
+                toggled(on) => {
+                    Hub.keep-login-set(on);
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: "Remember the log-in in my keyring";
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: Type.medium;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Off: asked at each start. On: other programs of yours, an agent among them, could read it.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+component KeySection inherits DetailCard {
+    SectionHead {
+        icon: @image-url("icons/lock.svg");
+        title: "Center key";
+        line: "Machines know the center by this key.";
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            text: "Pin";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: Hub.key-pin;
+            color: Theme.text;
+            font-size: Type.small;
+            font-family: Type.mono;
+            wrap: char-wrap;
+        }
+    }
+    Reveal {
+        shown: Hub.key-rotating;
+        HorizontalLayout {
+            spacing: Space.md;
+            Text {
+                text: "New";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: Hub.key-next;
+                color: Theme.text;
+                font-size: Type.small;
+                font-family: Type.mono;
+                wrap: char-wrap;
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.key-line != "";
+        Text {
+            text: Hub.key-line;
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        if !Hub.key-rotating && Hub.asking != "key": Button {
+            text: "Make a new key…";
+            icon: @image-url("icons/key.svg");
+            small: true;
+            clicked => {
+                Hub.asking = "key";
+            }
+        }
+        if Hub.key-rotating: Button {
+            text: "End the old key now";
+            small: true;
+            busy: Hub.busy == "key";
+            clicked => {
+                Hub.key-finish();
+            }
+        }
+    }
+    // Asked in place before a new key is made.
+    Reveal {
+        shown: Hub.asking == "key";
+        VerticalLayout {
+            spacing: Space.sm;
+            Text {
+                text: "Make a new key? The machines take it while the old one still counts.";
+                color: Theme.text;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                Button {
+                    text: "Cancel";
+                    kind: ButtonKind.ghost;
+                    small: true;
+                    clicked => {
+                        Hub.asking = "";
+                    }
+                }
+                Button {
+                    text: "Make it";
+                    kind: ButtonKind.primary;
+                    small: true;
+                    busy: Hub.busy == "key";
+                    clicked => {
+                        Hub.key-rotate();
+                    }
+                }
+            }
+        }
+    }
+    Fold {
+        more: "A new key is for a key that may have leaked. Every paired machine takes the new key at its next link, while the old one counts for a while; a machine that stays away longer is paired again.";
+    }
+}
+
+component BackupSection inherits DetailCard {
+    SectionHead {
+        icon: @image-url("icons/archive.svg");
+        title: "Backup";
+        line: "Keys, pairings and settings, sealed with a passphrase.";
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        Button {
+            text: "Back up…";
+            icon: @image-url("icons/download.svg");
+            small: true;
+            clicked => {
+                Hub.backup-choose();
+            }
+        }
+        Button {
+            text: "Restore…";
+            small: true;
+            clicked => {
+                Hub.restore-choose();
+            }
+        }
+    }
+}
+
+export component HubSettingsPage inherits PageFrame {
+    property <[{name: string, icon: image}]> sections: [
+        { name: "Center", icon: @image-url("icons/settings.svg") },
+        { name: "This machine", icon: @image-url("icons/monitor.svg") },
+        { name: "Owner token", icon: @image-url("icons/key.svg") },
+        { name: "Center key", icon: @image-url("icons/lock.svg") },
+        { name: "Backup", icon: @image-url("icons/archive.svg") },
+    ];
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/settings.svg");
+        title: "Settings";
+        error-title: "The settings could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+    }
+    Rectangle {
+        height: Space.xl;
+    }
+    Split {
+        ListPane {
+            open: Hub.details-open;
+            ListCard {
+                label: "Settings";
+                step(d) => {
+                    Hub.set-pick = Math.max(0, Math.min(root.sections.length - 1, Hub.set-pick + d));
+                }
+                Rectangle {
+                    height: 6px;
+                }
+                for section[i] in root.sections: SectionItem {
+                    first: i == 0;
+                    selected: i == Hub.set-pick;
+                    icon: section.icon;
+                    text: section.name;
+                    clicked => {
+                        Hub.set-pick = i;
+                        Hub.asking = "";
+                        Hub.details-open = true;
+                    }
+                }
+            }
+        }
+        DetailsPane {
+            open: Hub.details-open;
+            view-top: root.view-top;
+            view-height: root.view-height;
+            back => {
+                Hub.details-open = false;
+            }
+            if Hub.set-pick == 0: CenterSection { }
+            if Hub.set-pick == 1: MachineSection { }
+            if Hub.set-pick == 2: OwnerSection { }
+            if Hub.set-pick == 3: KeySection { }
+            if Hub.set-pick == 4: BackupSection { }
+        }
+    }
+}
+
+export component HubHelpPage inherits PageFrame {
+    property <[{name: string, icon: image}]> sections: [
+        { name: "Tasks", icon: @image-url("icons/check.svg") },
+        { name: "nerve-center commands", icon: @image-url("icons/terminal.svg") },
+        { name: "Keyboard shortcuts", icon: @image-url("icons/keyboard.svg") },
+    ];
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/help.svg");
+        title: "Help";
+        Button {
+            text: "User guide";
+            icon: @image-url("icons/external.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/center.md");
+            }
+        }
+    }
+    Rectangle {
+        height: Space.xl;
+    }
+    Split {
+        ListPane {
+            open: Hub.details-open;
+            ListCard {
+                label: "Help";
+                step(d) => {
+                    Hub.help-pick = Math.max(0, Math.min(root.sections.length - 1, Hub.help-pick + d));
+                }
+                Rectangle {
+                    height: 6px;
+                }
+                for section[i] in root.sections: SectionItem {
+                    first: i == 0;
+                    selected: i == Hub.help-pick;
+                    icon: section.icon;
+                    text: section.name;
+                    clicked => {
+                        Hub.help-pick = i;
+                        Hub.details-open = true;
+                    }
+                }
+            }
+        }
+        DetailsPane {
+            open: Hub.details-open;
+            view-top: root.view-top;
+            view-height: root.view-height;
+            back => {
+                Hub.details-open = false;
+            }
+            Card {
+                pad: 0;
+                gap: 0;
+                HorizontalLayout {
+                    padding-left: Space.xl;
+                    padding-right: Space.xl;
+                    padding-top: Space.lg;
+                    padding-bottom: Space.lg;
+                    spacing: Space.md;
+                    IconTile {
+                        icon: root.sections[Hub.help-pick].icon;
+                        size: 28px;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.sections[Hub.help-pick].name;
+                        color: Theme.text;
+                        font-size: Type.heading;
+                        font-weight: Type.semibold;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+                // The task map, a fold per group, each task's place a link.
+                Reveal {
+                    shown: Hub.help-pick == 0;
+                    VerticalLayout {
+                        for group[g] in Hub.task-groups: TaskFold {
+                            name: group;
+                            count: Hub.task-counts[g];
+                            first: g == 0;
+                            open: Hub.tasks-open[g];
+                            toggled => {
+                                Hub.tasks-open[g] = !Hub.tasks-open[g];
+                            }
+                            for t in Hub.tasks: HorizontalLayout {
+                                visible: t.group == g;
+                                height: t.group == g ? self.preferred-height : 0px;
+                                spacing: Space.lg;
+                                Text {
+                                    width: 230px;
+                                    text: t.task;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        Button {
+                                            text: t.where;
+                                            icon: @image-url("icons/arrow-right.svg");
+                                            kind: ButtonKind.ghost;
+                                            small: true;
+                                            clicked => {
+                                                if (t.page == HubPage.settings && t.at >= 0) {
+                                                    Hub.set-pick = t.at;
+                                                }
+                                                if (t.page == HubPage.checker && t.at >= 0) {
+                                                    Hub.chk-view = t.at;
+                                                }
+                                                if (t.page == HubPage.harnesses && t.at >= 0) {
+                                                    Hub.harn-view = t.at;
+                                                }
+                                                Hub.show(t.page);
+                                                if (t.page == HubPage.nodes && t.at == 1) {
+                                                    Hub.pair-start();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Reveal {
+                    shown: Hub.help-pick == 1;
+                    VerticalLayout {
+                        padding: Space.xl;
+                        spacing: Space.md;
+                        Text {
+                            text: Install.windows ? "The center's own commands. On Windows the app runs them for you."
+                                : "The center's own commands, for its machine's terminal; with sudo for the installed center.";
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            wrap: word-wrap;
+                        }
+                        for c in Hub.commands: HorizontalLayout {
+                            spacing: Space.lg;
+                            Text {
+                                width: 130px;
+                                text: c.name;
+                                color: Theme.text;
+                                font-size: Type.small;
+                                font-family: Type.mono;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: c.line;
+                                color: Theme.text-muted;
+                                font-size: Type.body;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+                if Hub.help-pick == 2: VerticalLayout {
+                    padding: Space.xl;
+                    spacing: Space.md;
+                    KeyRow {
+                        keys: "Ctrl+1 … Ctrl+9";
+                        does: "The pages, in the sidebar's order";
+                    }
+                    KeyRow {
+                        keys: "Ctrl+R, F5";
+                        does: "Read the page again";
+                    }
+                    KeyRow {
+                        keys: "Esc";
+                        does: "Close a dialog or a form";
+                    }
+                    KeyRow {
+                        keys: "Enter";
+                        does: "The dialog's or form's main button";
+                    }
+                    KeyRow {
+                        keys: "↑ ↓";
+                        does: "The next or last row of a list";
+                    }
+                    KeyRow {
+                        keys: "← →";
+                        does: "Choose in a row of choices";
+                    }
+                }
+            }
+        }
+    }
+}

@@ -57,23 +57,86 @@ machine (#232):
   harness's settings where a center runs too (`cli/beside.rs`).
 - **The installer asks first** what the machine is: **A node** or **A center**
   (two cards, one column, in its 760x700 window). A center is installed by
-  `nerve __center install`, with the rights; its last step, and the installer
-  on a machine that is a center, open its web UI after checking that the
-  center's service holds the port ([web UIs](web-uis.md#where-it-listens)).
-  The app at its installed place opens as the installer too while the
-  machine has no role (the package's program before its first start) or is a
-  center (its step, with **Uninstall…**; Apps & features' Uninstall opens
-  that), until the center gets pages of its own; a node run by hand (its
-  folders named, or no systemd) keeps the app's pages.
+  `nerve __center install`, with the rights; its last step opens the
+  installed app. The app at its installed place opens as the installer too
+  while the machine has no role (the package's program before its first
+  start), and for a center's uninstall from Apps & features
+  (`app::install::opens`); on a center it opens [the center's
+  pages](#the-centers-pages); a node run by hand (its folders named, or no
+  systemd) keeps the node's pages.
 - **The broker's closed lists**, by the installed role: the node's commands
   where the machine is no center only; behind `__center` the center's `install` where none is, else its
   administrator's commands and `status`, never with a setting of the center's
   (`--state-dir` would point an elevated command at another folder), no
-  `backup` or `restore` (their file would be one a request names; the
-  center's pages say how it crosses), and `update` from the release only
+  `backup` or `restore` with a file (a request would name it): only
+  `backup -` and `restore -` with `--passphrase-file -`, which hand the sealed
+  backup over the `--json` answer and the input, and `update` from the release only
   (from a file it stays a terminal's: the file would lie in the user's
   folders), and never where the machine has a node: a center beside a node
   is the terminal's. The center's commands always take the broker.
+
+## The center's pages
+
+On a center the app installed, the window shows the center's pages
+(`src/app/hub.rs`, `ui/hub*.slint`, global `Hub`), drawn in the layout of
+the node's (#231, proposal B; Pair a machine is an overlay). They ask the
+center as its CLI does, over its local owner channel (`src/hub.rs`,
+`nerve_center::attach`), not through the web UI, which may be off (owner,
+2026-11-16). The channel's owner calls (`nerve_center::ui::OWNER_CALLS`) are
+every call of the web UI's pages, answered by the same handlers.
+
+- **Where.** The installed center serves an owner endpoint for the account
+  that installed it (`attach::OWNER_FILE` in its state folder, the uid that
+  sudo or pkexec named, or on Windows the app's user the broker names with
+  `--desktop-user-sid`): the socket `/run/nerve-center/owner.sock` (mode
+  0666 in the service's runtime folder; the center checks the peer's uid) or
+  the pipe `\\.\pipe\nerve-center-owner` (open to that account with
+  `CLIENT_RIGHTS`, the center's account, SYSTEM and the administrators; the
+  caller is named by its token at identification level). Not there, or
+  nobody listening: the log-in says the center is not running and offers a
+  start through the broker.
+- **The peer check.** Before anything goes out, on every request,
+  `attach::is_center_service` must say that the other end is the center's:
+  Linux, the socket's peer is `nerve-center` or root; Windows, the pipe's
+  owner is the service's account, SYSTEM or the administrators. Another one
+  gets nothing.
+- **The log-in.** Every caller but root and an administrator gives the owner
+  token in the hello (`attach::owner_hello`), checked as the web UI's login
+  checks it (`Ui::channel_login`: the same refusals, log lines and wait). The
+  app sends it once to `/login`, which only checks it, then with every call;
+  it keeps the token in memory. On Linux the app is made undumpable before
+  it holds it (`broker::shut_out_the_user`). **Remember the log-in in my
+  keyring** (`settings.json`'s `keep_center_login`, off by default) keeps the
+  token in the user's keyring (`hub::keep`, service `nerve-app`), and logging
+  out or a token the center refuses forgets it.
+- **The calls** are the web UI's (`/api/overview`, `/api/checker`,
+  `/api/caps`, `/api/audit/rule`, ...), with its checks; the checker is saved
+  whole with the version it was read at, and a change in between is refused
+  and read again (409). **Open the web UI** still reads the address file
+  (`/run/nerve-center/ui`) and checks the port's holder
+  (`nerve_center::holder`) before the browser opens it.
+- **Administrator's commands** (`service`, `set`, `update`, `uninstall`,
+  `owner-token`, `backup -`, `restore -`) each start a broker of their own,
+  which ends with the command (one Save that changes two addresses runs both
+  in one broker). The center role keeps no broker.
+- **Copied secrets** (`hub::clip`): a harness line, the owner token, a
+  pairing link. On Windows the copy is set with
+  `ExcludeClipboardContentFromMonitorProcessing`,
+  `CanIncludeInClipboardHistory` = 0 and `CanUploadToCloudClipboard` = 0;
+  after a minute the clipboard is emptied if its sequence number is still
+  the copy's. On Linux the copy goes through Slint's platform clipboard and
+  is cleared after a minute while the clipboard still holds it.
+- **The role change** (`HubRoleDialog`, `app/hub.rs` `role_*`): a backup
+  (the role's own dialog), the machines that still trust this one, then the
+  old role's `uninstall --purge --keep-program` through the broker (hidden
+  flag, `nerve_service::keeps_program`: the service, accounts, data and parts
+  go, the app's program stays), and only after it worked the installer at the
+  role step with the other role picked. The node's Settings › App has the
+  same row.
+- **Tests:** `tests/hub.rs` and `tests/hub_pages.rs` against a center started
+  in the test (the peer check answered by the test), `tests/hub_fit.rs` at the
+  four sizes, `tests/hub_shots.rs` for the screenshots (made-up data,
+  `tests/hub_sample`).
 
 ## Download
 

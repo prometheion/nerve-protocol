@@ -38,6 +38,7 @@ pub fn main(argv: Vec<std::ffi::OsString>) -> std::process::ExitCode {
         Err(e) if !is_service => e.exit(),
         Err(e) => return refuse(&layout, is_service, &e.to_string()),
     };
+    crate::attach::set_desktop_user(args.desktop_user_sid.as_deref());
     // `--json` is for the commands the desktop app runs (crate::json).
     if args.json && !crate::json::takes(args.cmd.as_ref()) {
         return answered(true, &[], Err(crate::json::ONLY_FOR.into()));
@@ -123,7 +124,16 @@ pub fn main(argv: Vec<std::ffi::OsString>) -> std::process::ExitCode {
             Cmd::Status => crate::service::status(&layout, &state, &args.ui, &args.mcp, out),
             // The running center answers these over its attach socket or
             // pipe, as the folder's owner asks it.
-            Cmd::Pair | Cmd::Nodes { .. } | Cmd::Token(_) => {
+            Cmd::Pair
+            | Cmd::Nodes { .. }
+            | Cmd::Token(_)
+            | Cmd::Sessions { .. }
+            | Cmd::Checker { .. }
+            | Cmd::Caps { .. }
+            | Cmd::Stats
+            | Cmd::Audit { .. }
+            | Cmd::Key(_)
+            | Cmd::Config { .. } => {
                 let installed = layout.installed() && layout.is_state(&state);
                 settle(&state).and_then(|_| {
                     owner_runtime()?.block_on(crate::owner_calls::run(&state, cmd, installed, out))

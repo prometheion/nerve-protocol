@@ -86,6 +86,8 @@ mod winsvc;
 
 pub use daemon::{Daemon, Event, Hold, HoldAt, NodeOptions};
 pub use paths::NodePaths;
+/// The user's keyring for the app's own secret (the center's log-in).
+pub use secrets::user_keyring;
 
 /// Milliseconds since the Unix epoch.
 pub use nerve_proto::msg::now_ms;

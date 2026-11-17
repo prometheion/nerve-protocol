@@ -1,0 +1,28 @@
+# The Linux desktop app as an Arch Linux package (#230), from the release's
+# own program. .github/scripts/arch-package.sh sets pkgver to the version the
+# program says and the program's checksum, and runs makepkg; the release
+# tests the package in an archlinux container. No AUR package.
+pkgname=nerve
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Nerve, the app for a node or a center"
+arch=(x86_64)
+url="https://github.com/prometheion/nerve-protocol"
+license=('Apache-2.0' 'LicenseRef-Slint-Royalty-free-2.0')
+# The glibc and the fontconfig the program links.
+depends=('glibc>=2.35' 'fontconfig')
+# It takes the place of the pre-releases' nerve-node-desktop.
+conflicts=(nerve-node-desktop)
+replaces=(nerve-node-desktop)
+# The release's program as it is.
+options=(!strip !debug)
+install=nerve.install
+source=("nerve-x86_64-linux")
+sha256sums=('SKIP')
+
+package() {
+  # The program puts the package's files in place itself: the program in
+  # /usr/bin, its menu entry and icon, and the mark of the package's kind.
+  install -m 0755 "$srcdir/nerve-x86_64-linux" "$srcdir/nerve"
+  "$srcdir/nerve" __package-root "$pkgdir" pacman > /dev/null
+}

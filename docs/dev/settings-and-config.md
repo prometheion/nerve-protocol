@@ -938,7 +938,7 @@ The center then listens on:
 | Port | For | Flag |
 |---|---|---|
 | 7443 | nodes | `--listen` |
-| 7480 | the [web UI](web-uis.md#the-centers-web-ui), on this machine only | `--ui` |
+| 7480 | the [web UI](web-uis.md#the-centers-web-ui), on this machine only (off on Windows by default) | `--ui` |
 
 Open `http://127.0.0.1:7480` to [pair a machine](identity-and-pairing.md#pairing-as-the-owner-does-it). It asks for
 the [owner token](web-uis.md#log-in), which the center made at its first
@@ -957,7 +957,7 @@ cat ~/.local/state/nerve-center/owner-token
 | `--listen` | `NERVE_CENTER_LISTEN` | `0.0.0.0:7443` | Where nodes connect |
 | `--public-url` | `NERVE_CENTER_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links; `{port}` in it is the port the center got (for a `--listen` with port 0) |
 | `--plain-loopback` | `NERVE_CENTER_PLAIN_LOOPBACK` | off | Plain HTTP for nodes; only with a loopback `--listen` |
-| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` | Web UI address, or `off` |
+| `--ui` | `NERVE_CENTER_UI` | `127.0.0.1:7480` (`off` on Windows) | Web UI address, or `off` |
 | `--mcp` | `NERVE_CENTER_MCP` | `stdio` | `stdio`, `off`, `http` (HTTP MCP at `127.0.0.1:7481`) or the address of the HTTP MCP endpoint |
 | `--harness-token` | `NERVE_CENTER_HARNESS_TOKEN` | none | A [harness token](mcp-surface.md#tokens) for the HTTP MCP endpoint; it does not log in to the web UI |
 | `--call-wait` | `NERVE_CENTER_CALL_WAIT` | `20s` | How long a call may run before `execute` answers with a job instead ([long calls](mcp-surface.md#long-calls-become-jobs-1)): `20`, `20s` or `500ms`, 10 ms to 600 s. Keep it below the time your harness gives a tool call |

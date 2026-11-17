@@ -24,11 +24,92 @@ import {
     MissingDialog, RelayNodeDialog, OtherCopyDialog, ConnectDialog,
 } from "dialogs.slint";
 import { InstallerView } from "installer.slint";
+import { Hub, HubPage, HubNode, HubToken, HubSession, HubRule, HubWhere, HubMachine, HubCap, HubFigure, HubCall, HubCount, HubStatRow, HubAudit, HubLog, HubTask, HubRef } from "hub.slint";
+import { HubLoginPage } from "hub_login.slint";
+import { HubOverviewPage } from "hub_overview.slint";
+import { HubNodesPage } from "hub_nodes.slint";
+import { HubHarnessesPage } from "hub_harnesses.slint";
+import { HubCheckerPage } from "hub_checker.slint";
+import { HubCapsPage } from "hub_caps.slint";
+import { HubStatsPage, HubAuditPage, HubLogPage } from "hub_watch.slint";
+import { HubSettingsPage, HubHelpPage } from "hub_settings.slint";
+import { HubPairDialog, HubUninstallDialog, HubBackupDialog, HubRestoreDialog, HubRoleDialog } from "hub_dialogs.slint";
 
 export {
     Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Shape, Tone, Page, Load, NodeStatus, CenterRow,
     AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow, ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup,
-    RelayNodeRow, TunnelRow, Pick, Limit,
+    RelayNodeRow, TunnelRow, Pick, Limit, Hub, HubPage, HubNode, HubToken, HubSession, HubRule, HubWhere,
+    HubMachine, HubCap, HubFigure, HubCall, HubCount, HubStatRow, HubAudit, HubLog, HubTask, HubRef,
+}
+
+// The center role's pages in the sidebar, in the order of their keys
+// (Ctrl+1 to Ctrl+8).
+component HubNav inherits VerticalLayout {
+    spacing: 2px;
+    NavItem {
+        icon: @image-url("icons/overview.svg");
+        text: "Overview";
+        selected: Hub.logged-in && Hub.page == HubPage.overview;
+        clicked => {
+            Hub.show(HubPage.overview);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/server.svg");
+        text: "Nodes";
+        selected: Hub.logged-in && Hub.page == HubPage.nodes;
+        clicked => {
+            Hub.show(HubPage.nodes);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/terminal.svg");
+        text: "Harnesses";
+        selected: Hub.logged-in && Hub.page == HubPage.harnesses;
+        clicked => {
+            Hub.show(HubPage.harnesses);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/octagon.svg");
+        text: "Action checker";
+        selected: Hub.logged-in && Hub.page == HubPage.checker;
+        clicked => {
+            Hub.show(HubPage.checker);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/plug.svg");
+        text: "Capabilities";
+        selected: Hub.logged-in && Hub.page == HubPage.caps;
+        clicked => {
+            Hub.show(HubPage.caps);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/gauge.svg");
+        text: "Statistics";
+        selected: Hub.logged-in && Hub.page == HubPage.stats;
+        clicked => {
+            Hub.show(HubPage.stats);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/audit.svg");
+        text: "Audit";
+        selected: Hub.logged-in && Hub.page == HubPage.audit;
+        clicked => {
+            Hub.show(HubPage.audit);
+        }
+    }
+    NavItem {
+        icon: @image-url("icons/log.svg");
+        text: "Log";
+        selected: Hub.logged-in && Hub.page == HubPage.log;
+        clicked => {
+            Hub.show(HubPage.log);
+        }
+    }
 }
 
 component Sidebar inherits Rectangle {
@@ -64,66 +145,70 @@ component Sidebar inherits Rectangle {
                     font-weight: Type.bold;
                 }
                 Text {
-                    text: "Node on this machine";
+                    text: Hub.shown ? "Center on this machine" : "Node on this machine";
                     color: Theme.accent-text;
                     font-size: Type.caption;
                 }
             }
         }
-        NavItem {
-            icon: @image-url("icons/overview.svg");
-            text: "Overview";
-            selected: Store.page == Page.overview;
-            clicked => {
-                Store.show(Page.overview);
+        if Hub.shown: HubNav { }
+        if !Hub.shown: VerticalLayout {
+            spacing: 2px;
+            NavItem {
+                icon: @image-url("icons/overview.svg");
+                text: "Overview";
+                selected: Store.page == Page.overview;
+                clicked => {
+                    Store.show(Page.overview);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/centers.svg");
-            text: "Centers";
-            selected: Store.page == Page.centers;
-            clicked => {
-                Store.show(Page.centers);
+            NavItem {
+                icon: @image-url("icons/centers.svg");
+                text: "Centers";
+                selected: Store.page == Page.centers;
+                clicked => {
+                    Store.show(Page.centers);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/route.svg");
-            text: "Relay";
-            selected: Store.page == Page.relay;
-            clicked => {
-                Store.show(Page.relay);
+            NavItem {
+                icon: @image-url("icons/route.svg");
+                text: "Relay";
+                selected: Store.page == Page.relay;
+                clicked => {
+                    Store.show(Page.relay);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/shield.svg");
-            text: "Permissions";
-            selected: Store.page == Page.policy;
-            clicked => {
-                Store.show(Page.policy);
+            NavItem {
+                icon: @image-url("icons/shield.svg");
+                text: "Permissions";
+                selected: Store.page == Page.policy;
+                clicked => {
+                    Store.show(Page.policy);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/plug.svg");
-            text: "Capabilities";
-            selected: Store.page == Page.capabilities;
-            clicked => {
-                Store.show(Page.capabilities);
+            NavItem {
+                icon: @image-url("icons/plug.svg");
+                text: "Capabilities";
+                selected: Store.page == Page.capabilities;
+                clicked => {
+                    Store.show(Page.capabilities);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/audit.svg");
-            text: "Audit";
-            selected: Store.page == Page.audit;
-            clicked => {
-                Store.show(Page.audit);
+            NavItem {
+                icon: @image-url("icons/audit.svg");
+                text: "Audit";
+                selected: Store.page == Page.audit;
+                clicked => {
+                    Store.show(Page.audit);
+                }
             }
-        }
-        NavItem {
-            icon: @image-url("icons/log.svg");
-            text: "Log";
-            selected: Store.page == Page.log;
-            clicked => {
-                Store.show(Page.log);
+            NavItem {
+                icon: @image-url("icons/log.svg");
+                text: "Log";
+                selected: Store.page == Page.log;
+                clicked => {
+                    Store.show(Page.log);
+                }
             }
         }
         Rectangle {
@@ -132,17 +217,25 @@ component Sidebar inherits Rectangle {
         NavItem {
             icon: @image-url("icons/settings.svg");
             text: "Settings";
-            selected: Store.page == Page.settings;
+            selected: Hub.shown ? Hub.logged-in && Hub.page == HubPage.settings : Store.page == Page.settings;
             clicked => {
-                Store.show(Page.settings);
+                if (Hub.shown) {
+                    Hub.show(HubPage.settings);
+                } else {
+                    Store.show(Page.settings);
+                }
             }
         }
         NavItem {
             icon: @image-url("icons/help.svg");
             text: "Help";
-            selected: Store.page == Page.help;
+            selected: Hub.shown ? Hub.logged-in && Hub.page == HubPage.help : Store.page == Page.help;
             clicked => {
-                Store.show(Page.help);
+                if (Hub.shown) {
+                    Hub.show(HubPage.help);
+                } else {
+                    Store.show(Page.help);
+                }
             }
         }
         NavItem {
@@ -157,7 +250,41 @@ component Sidebar inherits Rectangle {
             height: Space.md;
         }
         // The node's state, on every page, in its colour.
+        if Hub.shown: Rectangle {
+            border-radius: Radius.md;
+            background: Theme.tone-soft(Hub.state-tone);
+            border-width: 1px;
+            border-color: Theme.tone(Hub.state-tone).transparentize(0.75);
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 9px;
+                VerticalLayout {
+                    alignment: center;
+                    StatusDot {
+                        tone: Hub.state-tone;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 1px;
+                    Text {
+                        text: Hub.state == "running" ? "Running" : Hub.state == "" ? "Asking the center…" : "Not running";
+                        color: Theme.text;
+                        font-size: Type.small;
+                        font-weight: Type.semibold;
+                    }
+                    Text {
+                        text: Hub.state-line;
+                        color: Theme.text-muted;
+                        font-size: Type.caption;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
         state := Rectangle {
+            visible: !Hub.shown;
+            height: Hub.shown ? 0px : self.preferred-height;
             property <Tone> tone: Store.status-load == Load.failed ? Tone.danger : Store.status.tone;
             border-radius: Radius.md;
             background: Theme.tone-soft(self.tone);
@@ -241,7 +368,8 @@ export component AppWindow inherits Window {
         || Prefs.proxy-open
         || Prefs.once-open || Prefs.relay-edit-open || Prefs.backup-open || Prefs.restore-open
         || Store.setup-open || Store.elevate-open || Install.update-open || Install.uninstall-open
-        || Store.missing-open || Prefs.connect-open || Install.other-open;
+        || Store.missing-open || Prefs.connect-open || Install.other-open
+        || Hub.pair-open || Hub.uninstall-open || Hub.backup-open || Hub.restore-open || Hub.role-open;
     changed dialog-open => {
         if (!self.dialog-open) {
             keys.focus();
@@ -269,77 +397,121 @@ export component AppWindow inherits Window {
             keys: @keys(Control + "1");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.overview);
+                if (Hub.shown) {
+                    Hub.show(HubPage.overview);
+                } else {
+                    Store.show(Page.overview);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "2");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.centers);
+                if (Hub.shown) {
+                    Hub.show(HubPage.nodes);
+                } else {
+                    Store.show(Page.centers);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "3");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.relay);
+                if (Hub.shown) {
+                    Hub.show(HubPage.harnesses);
+                } else {
+                    Store.show(Page.relay);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "4");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.policy);
+                if (Hub.shown) {
+                    Hub.show(HubPage.checker);
+                } else {
+                    Store.show(Page.policy);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "5");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.audit);
+                if (Hub.shown) {
+                    Hub.show(HubPage.caps);
+                } else {
+                    Store.show(Page.audit);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "6");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.log);
+                if (Hub.shown) {
+                    Hub.show(HubPage.stats);
+                } else {
+                    Store.show(Page.log);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "7");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.settings);
+                if (Hub.shown) {
+                    Hub.show(HubPage.audit);
+                } else {
+                    Store.show(Page.settings);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "8");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.help);
+                if (Hub.shown) {
+                    Hub.show(HubPage.log);
+                } else {
+                    Store.show(Page.help);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "9");
             enabled: keys.pages;
             activated => {
-                Store.show(Page.capabilities);
+                if (Hub.shown) {
+                    Hub.show(HubPage.settings);
+                } else {
+                    Store.show(Page.capabilities);
+                }
             }
         }
         KeyBinding {
             keys: @keys(Control + "r");
             enabled: keys.pages;
             activated => {
-                Store.reload();
+                if (Hub.shown) {
+                    Hub.reload();
+                } else {
+                    Store.reload();
+                }
             }
         }
         KeyBinding {
             keys: @keys(F5);
             enabled: keys.pages;
             activated => {
-                Store.reload();
+                if (Hub.shown) {
+                    Hub.reload();
+                } else {
+                    Store.reload();
+                }
             }
         }
 
@@ -372,15 +544,27 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if Store.page == Page.overview: OverviewPage { }
-                if Store.page == Page.centers: CentersPage { }
-                if Store.page == Page.relay: RelayPage { }
-                if Store.page == Page.policy: PermissionsPage { }
-                if Store.page == Page.capabilities: CapabilitiesPage { }
-                if Store.page == Page.audit: AuditPage { }
-                if Store.page == Page.log: LogPage { }
-                if Store.page == Page.settings: SettingsPage { }
-                if Store.page == Page.help: HelpPage { }
+                if !Hub.shown && Store.page == Page.overview: OverviewPage { }
+                if !Hub.shown && Store.page == Page.centers: CentersPage { }
+                if !Hub.shown && Store.page == Page.relay: RelayPage { }
+                if !Hub.shown && Store.page == Page.policy: PermissionsPage { }
+                if !Hub.shown && Store.page == Page.capabilities: CapabilitiesPage { }
+                if !Hub.shown && Store.page == Page.audit: AuditPage { }
+                if !Hub.shown && Store.page == Page.log: LogPage { }
+                if !Hub.shown && Store.page == Page.settings: SettingsPage { }
+                if !Hub.shown && Store.page == Page.help: HelpPage { }
+                // The center role: its log-in until the app holds a session.
+                if Hub.shown && !Hub.logged-in: HubLoginPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.overview: HubOverviewPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.nodes: HubNodesPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.harnesses: HubHarnessesPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.checker: HubCheckerPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.caps: HubCapsPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.stats: HubStatsPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.audit: HubAuditPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.log: HubLogPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.settings: HubSettingsPage { }
+                if Hub.shown && Hub.logged-in && Hub.page == HubPage.help: HubHelpPage { }
             }
         }
 
@@ -406,6 +590,8 @@ export component AppWindow inherits Window {
         if Prefs.once-open: OnceDialog { }
         if Prefs.relay-edit-open: RelayNodeDialog { }
         if Prefs.connect-open: ConnectDialog { }
+        // Under the backups it may open.
+        if Hub.role-open: HubRoleDialog { }
         if Prefs.backup-open: BackupDialog { }
         if Prefs.restore-open: RestoreDialog { }
         if Store.setup-open: SetupDialog { }
@@ -416,6 +602,10 @@ export component AppWindow inherits Window {
         if Install.uninstall-open: UninstallDialog { }
         if Store.missing-open: MissingDialog { }
         if Install.other-open: OtherCopyDialog { }
+        if Hub.pair-open: HubPairDialog { }
+        if Hub.uninstall-open: HubUninstallDialog { }
+        if Hub.backup-open: HubBackupDialog { }
+        if Hub.restore-open: HubRestoreDialog { }
     }
 
     // The note in the corner rises and fades in, and fades out when its

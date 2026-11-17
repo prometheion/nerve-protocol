@@ -237,7 +237,7 @@ component Answer inherits Text {
 }
 
 // A key or keys, and what they do.
-component KeyRow {
+export component KeyRow {
     in property <string> keys;
     in property <string> does;
     HorizontalLayout {
@@ -379,7 +379,7 @@ component GroupHead inherits Rectangle {
 
 // A group of the task map: its name and count, and its tasks while it is
 // open. Each opens and closes on its own.
-component TaskFold inherits VerticalLayout {
+export component TaskFold inherits VerticalLayout {
     in property <string> name;
     in property <int> count;
     in property <bool> open;

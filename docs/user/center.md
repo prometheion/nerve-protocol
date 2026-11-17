@@ -12,13 +12,43 @@ nerve-center status
 do next. `sudo nerve-center service start|stop|restart` starts and stops
 it. The app `nerve` installs the center too, as its role
 ([the desktop app](install.md#the-desktop-app)); then `nerve-center` is a
-link to it. On Windows the app installs it, and its web UI manages it
-([Windows](windows.md#the-center-as-a-service)).
+link to it, and the app manages it ([in the app](#in-the-app)). On Windows
+the app installs it ([Windows](windows.md#the-center-as-a-service)).
+
+## In the app
+
+On a machine where the app `nerve` installed the center (on Windows always),
+**Nerve** in the menu opens the center's pages: Overview, Nodes, Harnesses,
+Action checker, Capabilities, Statistics, Audit, Log, Settings and Help.
+They ask for the owner token first: paste it, or **Read it from this
+machine…**, which asks for an administrator's password once. The app keeps
+it in memory until it closes; **Settings › Owner token › Remember the log-in
+in my keyring** keeps it for the next start, where other programs of yours,
+an agent among them, could read it.
+
+The pages ask the center as its terminal commands do, with the web UI on or
+off. Before the token goes out, the app checks that the center's service
+answers; another program gets nothing. What only an administrator may do
+(start and stop, an address in **Settings › Center**, update, uninstall, the
+owner token, backup and restore) asks for the password each time.
+
+A copied harness token, harness line or pairing link leaves the clipboard
+after a minute, or when the app closes.
+
+**Settings › Backup › Restore…** takes a backup of this center. To move a
+center to a new machine, install the center there, then restore its backup
+with **It is another center's backup** ticked: the new center takes the old
+one's key, pairings and settings.
+
+**Settings › This machine › Change the role…** makes the machine a node:
+it offers a backup first, names the machines paired with this center (they
+keep it until it is removed there), removes the center with its data, and
+opens the installer for the node.
 
 ## In the terminal
 
-What the web UI does for machines and harnesses, the terminal does too,
-also with the web UI off:
+What the web UI and the app do, the terminal does too, also with the web UI
+off:
 
 ```sh
 sudo nerve-center pair                  # a link that pairs a new machine
@@ -28,15 +58,23 @@ sudo nerve-center nodes rm lab          # unpaired
 sudo nerve-center token new laptop      # a harness token, shown once
 sudo nerve-center token list
 sudo nerve-center token rm laptop
+sudo nerve-center checker               # its switches and rules, numbered
+sudo nerve-center checker block add 'exec.run:shutdown *'
+sudo nerve-center audit skip 3a9f01c2d4e5b678   # such calls skip the model
 sudo nerve-center log --problems
 ```
 
-They ask the running center through its own socket, which only root and
-the center's account may use (on Windows, an administrator's terminal).
+The rest is in [commands](commands.md#nerve-center). They ask the running
+center through its own socket, which root, an administrator, the center's
+account and the account that installed it may use. All but root and an
+administrator give the owner token: a program of yours gets nothing without
+it.
 
 ## Log in to the web UI
 
-Open `http://127.0.0.1:7480` and log in with the **owner token**. `install`
+The web UI is on by default on Linux, at `http://127.0.0.1:7480`. On Windows
+it is off: **Settings › This machine › Web UI** in the app turns it on, as
+`set ui 127.0.0.1:7480` does. Log in with the **owner token**. `install`
 prints it, and this shows it again:
 
 ```sh
@@ -85,7 +123,7 @@ the 20 seconds; keep it below your harness's own timeout for a tool call
 | Port | For | Setting |
 |---|---|---|
 | 7443 | nodes, over TLS | `--listen`, `NERVE_CENTER_LISTEN` |
-| 7480 | the web UI, this machine only | `--ui`, `NERVE_CENTER_UI` |
+| 7480 | the web UI, this machine only (off on Windows until you turn it on) | `--ui`, `NERVE_CENTER_UI` |
 | 7481 | harnesses over HTTP, this machine only | `--mcp`, `NERVE_CENTER_MCP` |
 
 Set `--public-url` when nodes reach the center under another name than its

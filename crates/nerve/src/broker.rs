@@ -78,8 +78,9 @@ fn output_of(v: &Value) -> Output {
 /// - The center's (`__center` first): `install` where no center is yet;
 ///   where one is installed, its administrator's commands and `status` (none
 ///   with a setting of the center's, like `--state-dir`, which would point an
-///   elevated command at another folder; no `backup` or `restore`, whose
-///   file a request would name), and
+///   elevated command at another folder; `backup` and `restore` only handed
+///   over their answer and input (`-`, the passphrase on the input too), as
+///   a file a request named would be one a program of the user chose), and
 ///   `update` from the release only (from a file it stays a terminal's: the
 ///   file would lie in the user's folders, where a program of the user could
 ///   replace it before the broker reads it). Not on a machine that has a
@@ -114,6 +115,24 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
                 "an update from a file is a terminal's; the app updates the center from the release"
                     .into(),
             ),
+            Cmd::Backup {
+                file,
+                overwrite: false,
+                passphrase_file: Some(pass),
+            }
+            // A restore may replace this center with another one's backup:
+            // the owner ticks that in the restore dialog, as with
+            // `--replace` in a terminal; a freshly installed center is
+            // always another one than the backup's.
+            | Cmd::Restore {
+                file,
+                replace: _,
+                passphrase_file: Some(pass),
+            } if handed(&file) && handed(&pass) => Ok(()),
+            Cmd::Backup { .. } | Cmd::Restore { .. } => Err(
+                "the broker hands a center's backup over its answer and input only, never a file"
+                    .into(),
+            ),
             Cmd::Update { .. }
             | Cmd::Uninstall { .. }
             | Cmd::Service { cmd: Some(_) }
@@ -130,6 +149,22 @@ pub fn allowed(args: &[String], roles: nerve_node::role::Roles) -> Result<(), St
         return Err("this machine is a center: the broker runs no node commands here".into());
     }
     Ok(())
+}
+
+/// Whether `args` (`__center` and its words) are the center's install.
+fn is_center_install(args: &[String]) -> bool {
+    let argv = std::iter::once(nerve_center::edition::TERMINAL_NAME)
+        .chain(args.iter().skip(1).map(String::as_str));
+    matches!(
+        nerve_center::config::command_given(argv),
+        Some((nerve_center::config::Cmd::Install, _))
+    )
+}
+
+/// Whether a center backup's file is the one handed over the command's
+/// answer and input (nerve_center::backup::HANDED).
+fn handed(file: &std::path::Path) -> bool {
+    file.as_os_str() == nerve_center::backup::HANDED
 }
 
 /// The broker's side: answers the requests on `input` with `exe`, the
@@ -219,11 +254,14 @@ fn serve_with(
             send(&out, &json!({ "id": id, "done": done(&refused) }));
             continue;
         }
-        // The center's command line has no such option: its commands are
-        // the administrator's, whoever asked, and `__center` must stay the
-        // first word, by which this program runs as the center.
+        // The center's commands are the administrator's, whoever asked, and
+        // `__center` must stay the first word, by which this program runs
+        // as the center. Only its install takes the app's user, which may
+        // then ask the center with the owner token (nerve_center::attach).
         if args.first().map(String::as_str) != Some(nerve_center::edition::APP_WORD) {
             args.splice(0..0, named.iter().cloned());
+        } else if is_center_install(&args) {
+            args.splice(1..1, named.iter().cloned());
         }
         let input = req["input"].as_str().map(str::to_string);
         let (out, exe) = (out.clone(), exe.clone());
@@ -540,7 +578,7 @@ fn elevate(pkexec: &Path, exe: &Path) -> Result<Arc<Client>, String> {
 /// app's file dialogs run in a process of their own
 /// ([`crate::dialog`]).
 #[cfg(target_os = "linux")]
-fn shut_out_the_user() -> Result<(), String> {
+pub(crate) fn shut_out_the_user() -> Result<(), String> {
     // SAFETY: prctl with integer arguments only.
     let (set, now) = unsafe {
         (
@@ -972,6 +1010,33 @@ mod tests {
             &["__center", "--json", "set", "ui", "off"],
             &["__center", "--json", "owner-token"],
             &["__center", "--json", "status"],
+            // A backup handed over the answer and the input (#232).
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "-",
+                "--passphrase-file",
+                "-",
+            ],
+            &[
+                "__center",
+                "--json",
+                "restore",
+                "-",
+                "--passphrase-file",
+                "-",
+            ],
+            // Another center's backup, where the owner said so.
+            &[
+                "__center",
+                "--json",
+                "restore",
+                "-",
+                "--passphrase-file",
+                "-",
+                "--replace",
+            ],
         ] {
             assert!(allowed(&args(ok), center).is_ok(), "{ok:?}");
         }
@@ -986,6 +1051,24 @@ mod tests {
             &["__center", "--json", "backup", "/tmp/b"],
             &["__center", "--json", "backup", "/tmp/b", "--overwrite"],
             &["__center", "--json", "restore", "/tmp/b"],
+            &["__center", "--json", "backup", "-"],
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "-",
+                "--passphrase-file",
+                "/tmp/p",
+            ],
+            &[
+                "__center",
+                "--json",
+                "backup",
+                "/tmp/b",
+                "--passphrase-file",
+                "-",
+            ],
+            &["__center", "--json", "restore", "/tmp/b", "--replace"],
             // A setting of the center's points an owner command at another
             // folder than the installed center's, before the command or after.
             &["__center", "--state-dir", "/tmp/s", "--json", "status"],
@@ -1174,9 +1257,11 @@ mod tests {
     }
 
     /// The broker on Windows names the app's user for the node's commands
-    /// only: a center's command keeps `__center` first, by which this
-    /// program runs as the center (before, it ran as the node and refused
-    /// the word, so the app could not install a center).
+    /// and the center's install only: a center's command keeps `__center`
+    /// first, by which this program runs as the center (before, it ran as
+    /// the node and refused the word, so the app could not install a
+    /// center). The install's user may then ask the center with the owner
+    /// token (nerve_center::attach::OWNER_FILE).
     #[cfg(unix)]
     #[test]
     fn a_center_command_keeps_its_word_first() {
@@ -1191,7 +1276,10 @@ mod tests {
                 Box::new(ans_w),
                 exe,
                 Some("S-1-5-21-1-2-3-1001"),
-                Roles::default,
+                || Roles {
+                    node: false,
+                    center: true,
+                },
             )
         });
         let mut lines = BufReader::new(ans_r).lines();
@@ -1203,12 +1291,24 @@ mod tests {
         )
         .unwrap();
         let done = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
+        writeln!(
+            req_w,
+            "{}",
+            json!({"id": 2, "args": ["__center", "--json", "status"]})
+        )
+        .unwrap();
+        let status = serde_json::from_str::<Value>(&lines.next().unwrap().unwrap()).unwrap();
         drop(req_w);
         t.join().unwrap();
         assert_eq!(
             done["done"]["stdout"].as_str().unwrap().trim(),
-            "__center --json install unset",
+            "__center --desktop-user-sid S-1-5-21-1-2-3-1001 --json install unset",
             "{done}"
+        );
+        assert_eq!(
+            status["done"]["stdout"].as_str().unwrap().trim(),
+            "__center --json status unset",
+            "{status}"
         );
     }
 

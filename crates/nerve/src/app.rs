@@ -17,12 +17,14 @@ use crate::runner::{Follow, Runner};
 use crate::{AppWindow, Install, Load, Manual, Motion, Page, Perm, Prefs, Store, Tone, Type, view};
 
 mod caps;
+mod hub;
 mod install;
 mod live;
 mod node;
 mod perm;
 mod prefs;
 
+pub use hub::Admin;
 pub use perm::PermAnswers;
 
 /// Where the commands run: on threads of their own, answering on the
@@ -49,6 +51,10 @@ pub enum Choose {
     Folder,
     /// Where a new backup goes.
     SaveBackup,
+    /// Where a new backup of the center goes.
+    SaveCenterBackup,
+    /// Where the center's log goes.
+    SaveLog,
     /// The backup to restore.
     OpenBackup,
     /// The program an update takes.
@@ -186,6 +192,8 @@ pub struct Ctl {
     ref_opened: RefCell<crate::reference::Opened>,
     /// Where a new relay link says this machine is, as `relay` guessed.
     relay_address: RefCell<String>,
+    /// The center role's pages (src/app/hub.rs).
+    hub: hub::HubState,
 }
 
 thread_local! {
@@ -330,6 +338,7 @@ impl Ctl {
             reference: crate::reference::commands(&nerve_node::cli::help()),
             ref_opened: RefCell::default(),
             relay_address: RefCell::new(String::new()),
+            hub: hub::HubState::default(),
         });
         CURRENT.with(|c| *c.borrow_mut() = Some(ctl.clone()));
         window.global::<Type>().set_mono(mono_font().into());
@@ -420,6 +429,7 @@ impl Ctl {
         prefs::wire(&ctl, window);
         live::wire(&ctl, window);
         install::wire(&ctl, window);
+        hub::wire(&ctl, window);
         ctl
     }
 
@@ -1200,6 +1210,18 @@ impl Ctl {
         if installer {
             return;
         }
+        // On a center the node's pairing and update from a file are none of
+        // the window's (design of #232, 4): only the center's own uninstall
+        // opens, as from Apps & features.
+        if self.with_hub(|h| h.get_shown()).unwrap_or(false) {
+            if asked.uninstall {
+                self.with_hub(|h| {
+                    h.set_uninstall_purge(false);
+                    h.set_uninstall_open(true);
+                });
+            }
+            return;
+        }
         if let Some(link) = asked.link {
             self.open_link(link);
         } else if asked.uninstall {
@@ -1392,20 +1414,23 @@ pub fn run(start: crate::instance::Asked) -> Result<(), Failed> {
     }
     ctl.take_starts(instance);
     // At its installed place the app is the installer still where the
-    // machine has no role yet, or is a center (install::opens_the_installer).
-    // A role a terminal program installed beside the app's is not the app's
-    // to show (nerve_node::role::Roles::of_app).
+    // machine has no role yet; on a center it shows the center's pages
+    // (install::opens). A role a terminal program installed beside the
+    // app's is not the app's to show (nerve_node::role::Roles::of_app).
     let roles = nerve_node::role::Roles::of_app_here(crate::parts::PROGRAM);
     let by_hand = std::env::var_os(nerve_node::paths::CONFIG_DIR_VAR).is_some()
         || std::env::var_os(nerve_node::paths::STATE_DIR_VAR).is_some()
         || (cfg!(target_os = "linux") && !std::path::Path::new("/run/systemd/system").is_dir());
+    let opens = install::opens(roles, by_hand, start.uninstall);
     if here.is_none() || here != installed {
         ctl.installer(Launch::Elevated, &layout.bin);
-    } else if install::opens_the_installer(roles, by_hand) {
+    } else if opens == install::Opens::Installer {
         if roles.center && start.uninstall {
             ctl.ask_uninstall_center();
         }
         ctl.installer(Launch::Elevated, &layout.bin);
+    } else if opens == install::Opens::Center {
+        ctl.center_role(crate::hub::endpoint());
     } else {
         // The node's default folders: the service's when it is installed.
         let paths = nerve_node::NodePaths::from_args(None, None);

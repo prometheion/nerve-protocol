@@ -280,7 +280,7 @@ NERVE_CENTER_HARNESS_TOKEN={token}
             line("NERVE_CENTER_NAME", "nerve-center"),
             line("NERVE_CENTER_LISTEN", "0.0.0.0:7443"),
             line("NERVE_CENTER_PUBLIC_URL", "https://<host name>:7443"),
-            line("NERVE_CENTER_UI", "127.0.0.1:7480"),
+            line("NERVE_CENTER_UI", crate::config::DEFAULT_UI),
             line("NERVE_CENTER_MCP", "127.0.0.1:7481"),
             owner = crate::owner::path(&self.state).display(),
         )
@@ -626,7 +626,7 @@ fn status_page_of(
     let at = |var: &str| file.and_then(|f| setting_in(f, var));
     let web = crate::config::address_url;
     let ui = match installed {
-        true => at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into()),
+        true => at("NERVE_CENTER_UI").unwrap_or_else(|| crate::config::DEFAULT_UI.into()),
         false => given_ui.to_string(),
     };
     p.row(
@@ -802,11 +802,17 @@ fn service_command(cmd: &Cmd) -> Result<&'static str, String> {
         | Cmd::Pair
         | Cmd::Nodes { .. }
         | Cmd::Token(_)
+        | Cmd::Sessions { .. }
+        | Cmd::Checker { .. }
+        | Cmd::Caps { .. }
+        | Cmd::Stats
+        | Cmd::Audit { .. }
+        | Cmd::Key(_)
+        | Cmd::Config { .. }
         | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             return Err(
-                "backup, restore, owner-token, status, pair, nodes, token, log and service-files are not service commands"
-                    .into(),
+                "only install, set, service, update and uninstall are service commands".into(),
             );
         }
     })
@@ -887,7 +893,13 @@ async fn execute_on(
             let layout = with_release(layout, pre, tag).await?;
             update(&layout, sys, from.as_deref(), out).await
         }
-        Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
+        Cmd::Uninstall {
+            purge,
+            keep_program,
+        } => {
+            nerve_service::set_keep_program(keep_program);
+            uninstall(layout, sys, purge, out)
+        }
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         Cmd::Backup { .. }
         | Cmd::Restore { .. }
@@ -897,6 +909,13 @@ async fn execute_on(
         | Cmd::Pair
         | Cmd::Nodes { .. }
         | Cmd::Token(_)
+        | Cmd::Sessions { .. }
+        | Cmd::Checker { .. }
+        | Cmd::Caps { .. }
+        | Cmd::Stats
+        | Cmd::Audit { .. }
+        | Cmd::Key(_)
+        | Cmd::Config { .. }
         | Cmd::Log { .. }
         | Cmd::ServiceFiles => {
             unreachable!("refused above")
@@ -1043,6 +1062,7 @@ pub fn install_with(
         // refused.
         let _owner = as_owner_of(state)?;
         set_mode(state, 0o700)?;
+        crate::attach::keep_owner_account(state, crate::attach::installing_account().as_deref())?;
         crate::owner::ensure(state)?.0
     };
     // The folder may be left from an earlier install, whose user had
@@ -1126,7 +1146,13 @@ pub(crate) fn done_page(
 
 /// The web UI's address the settings `file` give the service.
 fn ui_address(file: &str) -> String {
-    setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into())
+    ui_address_on(file, cfg!(windows))
+}
+
+/// [`ui_address`] as it is on Windows (`windows`) or elsewhere: the web UI
+/// is off by default on Windows.
+fn ui_address_on(file: &str, windows: bool) -> String {
+    setting_in(file, "NERVE_CENTER_UI").unwrap_or_else(|| crate::config::default_ui(windows).into())
 }
 
 /// The HTTP MCP address the settings `file` give the service, which runs
@@ -1139,7 +1165,7 @@ fn mcp_address(file: &str) -> String {
 }
 
 /// The web UI's value on a page, with the same `off` as `status` shows.
-fn ui_value(file: &str) -> String {
+pub(crate) fn ui_value(file: &str) -> String {
     match ui_address(file) {
         a if a.eq_ignore_ascii_case("off") => "off".into(),
         a => crate::config::address_url(&a),
@@ -1439,7 +1465,7 @@ fn default_of(var: &str, file: &str) -> Option<String> {
             crate::winsvc::node_port(file)
         )),
         "NERVE_CENTER_LISTEN" => Some("0.0.0.0:7443".into()),
-        "NERVE_CENTER_UI" => Some("127.0.0.1:7480".into()),
+        "NERVE_CENTER_UI" => Some(crate::config::DEFAULT_UI.into()),
         "NERVE_CENTER_MCP" => Some("http".into()),
         _ => None,
     }
@@ -1652,7 +1678,9 @@ pub fn uninstall(
     for gone in remove_parts(layout)? {
         step(out, gone);
     }
-    if !packaged(layout) && layout.bin.exists() {
+    if nerve_service::keeps_program() {
+        step(out, nerve_service::kept_program(&layout.bin));
+    } else if !packaged(layout) && layout.bin.exists() {
         std::fs::remove_file(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
         step(out, format!("removed the program {}", layout.bin.display()));
     }
@@ -1858,7 +1886,10 @@ async fn update_as(
         (true, Some(f)) if real(f).is_some() && real(f) == real(&layout.bin) => {
             Some(nerve_service::Placed::default())
         }
-        (true, _) => return Err(APP_PACKAGE.into()),
+        (true, _) => {
+            let mark = std::fs::read_to_string(crate::edition::PACKAGE_MARK).unwrap_or_default();
+            return Err(app_package(&mark));
+        }
     };
     let p = nerve_service::Program {
         name: program,
@@ -1977,9 +2008,22 @@ fn packaged(layout: &Layout) -> bool {
     layout.word.is_some() && layout.bin.starts_with("/usr/bin")
 }
 
-/// What `update` of the app from its package says: the package manager
-/// replaces the program, and the package's script brings the service to it.
-pub const APP_PACKAGE: &str = "the app came from its package here, so its package manager updates it (the newer package, or `sudo apt upgrade` or `sudo dnf upgrade`): the package's script restarts the center with the new program";
+/// What `update` of the app from its package says, with the package
+/// manager its mark names (crate::edition::PACKAGE_MARK: `deb`, `rpm` or
+/// `pacman`): the package manager replaces the program, and the package's
+/// script brings the service to it.
+pub fn app_package(mark: &str) -> String {
+    let how = match mark.trim() {
+        "deb" => "the newer .deb, or `sudo apt upgrade`",
+        "rpm" => "the newer .rpm, or `sudo dnf upgrade`",
+        // No repository: the release's package, installed as a file.
+        "pacman" => "the newer package of the release, with `sudo pacman -U` and its file",
+        _ => "the newer package, or `sudo apt upgrade` or `sudo dnf upgrade`",
+    };
+    format!(
+        "the app came from its package here, so its package manager updates it ({how}): the package's script restarts the center with the new program"
+    )
+}
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -2703,7 +2747,13 @@ mod tests {
                     tag: None,
                 },
             ),
-            ("uninstall", Cmd::Uninstall { purge: false }),
+            (
+                "uninstall",
+                Cmd::Uninstall {
+                    purge: false,
+                    keep_program: false,
+                },
+            ),
         ] {
             let r = execute_on(cmd, &[], &[], &l, &NotRoot, &node, &mut Vec::new()).await;
             results.push((what, r));
@@ -2742,7 +2792,10 @@ mod tests {
         // NotRoot answers nothing but that it is not root: the refusal
         // comes first.
         let e = execute_on(
-            Cmd::Uninstall { purge: true },
+            Cmd::Uninstall {
+                purge: true,
+                keep_program: false,
+            },
             &["NERVE_CENTER_LISTEN".to_string()],
             &[],
             &l,
@@ -2807,8 +2860,9 @@ mod tests {
         );
         let out = String::from_utf8(out).unwrap();
         let token = crate::owner::read(&l.state).unwrap().unwrap();
+        let web_ui = ui_value("");
         assert!(
-            out.contains("  Web UI        http://127.0.0.1:7480\n"),
+            out.contains(&format!("  Web UI        {web_ui}\n")),
             "{out}"
         );
         assert!(out.contains(&format!("  Owner token   {token}\n")), "{out}");
@@ -2940,7 +2994,7 @@ mod tests {
         assert_eq!(
             changed,
             [(
-                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                &format!("#NERVE_CENTER_UI={}", crate::config::DEFAULT_UI)[..],
                 "NERVE_CENTER_UI=0.0.0.0:7480"
             )]
         );
@@ -3272,6 +3326,17 @@ Next  Change one:  sudo nerve-center set <name> <value>
         assert!(text.contains("  Machines    "), "{text}");
     }
 
+    /// The pages that tell where the web UI is read the platform's default.
+    #[test]
+    fn the_status_pages_take_the_web_ui_default_of_the_platform() {
+        assert_eq!(ui_address_on("", true), "off");
+        assert_eq!(ui_address_on("", false), "127.0.0.1:7480");
+        assert_eq!(
+            ui_address_on("NERVE_CENTER_UI=0.0.0.0:7480\n", true),
+            "0.0.0.0:7480"
+        );
+    }
+
     /// `install` ends with the page `status` shows, the owner token on it
     /// once, and `off` for a web UI and MCP that are off.
     #[test]
@@ -3516,6 +3581,29 @@ Next  Change one:  sudo nerve-center set <name> <value>
         let l = installed(d.path(), &sys, "1.0.0");
         assert_eq!(token(&l), token_before);
         assert!(l.state.join("state.json").exists());
+    }
+
+    /// The app's role change (#232) takes the center whole, its data too,
+    /// and keeps the app's program for the node's install.
+    #[test]
+    fn a_role_change_keeps_the_program_and_takes_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let mut out = Vec::new();
+        nerve_service::set_keep_program(true);
+        let r = uninstall(&l, &sys, true, &mut out);
+        nerve_service::set_keep_program(false);
+        r.unwrap();
+        assert!(l.bin.exists());
+        assert!(!l.unit.exists() && !l.state.exists());
+        assert!(sys.user.borrow().is_none());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("kept the program"), "{out}");
+        // Without it, the program goes as before.
+        let l = installed(d.path(), &sys, "1.0.0");
+        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        assert!(!l.bin.exists());
     }
 
     #[test]
@@ -3909,5 +3997,18 @@ Next  Change one:  sudo nerve-center set <name> <value>
         drop(listener);
         assert!(socket.exists());
         assert!(!answers(&socket));
+    }
+
+    /// The app's update from its package names the package manager of its
+    /// kind: pacman on Arch, never apt or dnf there.
+    #[test]
+    fn the_update_of_a_packaged_center_names_its_package_manager() {
+        let arch = app_package("pacman\n");
+        assert!(arch.contains("sudo pacman -U"), "{arch}");
+        assert!(!arch.contains("apt") && !arch.contains("dnf"), "{arch}");
+        assert!(app_package("deb").contains("sudo apt upgrade"));
+        assert!(!app_package("deb").contains("dnf"));
+        assert!(app_package("rpm").contains("sudo dnf upgrade"));
+        assert!(app_package("").contains("apt upgrade` or `sudo dnf"));
     }
 }

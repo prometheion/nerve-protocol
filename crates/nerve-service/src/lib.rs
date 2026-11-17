@@ -74,6 +74,33 @@ pub trait System {
     }
 }
 
+thread_local! {
+    // Whether the uninstall that runs on this thread keeps the app's
+    // program ([`keeps_program`]).
+    static KEEP_PROGRAM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The app's role change (#232) uninstalls one role with
+/// `--keep-program`: the role's service, account, data and parts go as
+/// always, and the app's program stays, which the other role's install
+/// takes next. Set by the command that runs, on its thread.
+pub fn set_keep_program(on: bool) {
+    KEEP_PROGRAM.with(|k| k.set(on));
+}
+
+/// Whether the uninstall that runs keeps the app's program.
+pub fn keeps_program() -> bool {
+    KEEP_PROGRAM.with(std::cell::Cell::get)
+}
+
+/// What an uninstall that kept the program says.
+pub fn kept_program(bin: &Path) -> String {
+    format!(
+        "kept the program {} for the other role's install",
+        bin.display()
+    )
+}
+
 /// Whether the file at `program` is the Nerve app: it runs as the service's
 /// user `user` and says a version of `nerve`. Another program of that name
 /// (a `nerve` of other software in `/usr/local/bin`) is not the app's to

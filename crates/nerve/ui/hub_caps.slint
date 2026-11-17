@@ -1,0 +1,306 @@
+// The center's Capabilities, per machine: what the machine offers, what
+// this center added there (where the machine gave it the settings grant),
+// and what the center leaves out, with the picked one's details beside
+// them.
+
+import { Theme, Type, Space, Radius, Tone, Size } from "theme.slint";
+import { Hub, HubCap } from "hub.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, Icon, Split, ListPane,
+    DetailsPane, ListCard, ListGroup, ListItem, AddItem, DetailCard, TextField, RemoveAsk,
+    PaneForm, Field, Segmented, EmptyState, ListSwitch, Code,
+} from "widgets.slint";
+
+component CapItem inherits ListItem {
+    in property <HubCap> cap;
+    Text {
+        horizontal-stretch: 1;
+        text: root.cap.name;
+        color: Theme.text;
+        font-size: Type.small;
+        font-family: Type.mono;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    VerticalLayout {
+        alignment: center;
+        Pill {
+            text: root.cap.kind;
+            tone: root.cap.tone;
+        }
+    }
+}
+
+component CapDetails inherits DetailCard {
+    in property <HubCap> cap;
+    FlexboxLayout {
+        spacing: Space.sm;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: root.cap.name;
+                color: Theme.text;
+                font-size: Type.heading;
+                font-family: Type.mono;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: root.cap.kind;
+                    tone: root.cap.tone;
+                }
+            }
+            Text {
+                text: root.cap.source;
+                color: Theme.text-faint;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+        }
+        if root.cap.group == 1 && Hub.cap-write: RemoveAsk {
+            asking: Hub.asking == "cap:" + root.cap.name;
+            label: "Remove " + root.cap.name;
+            busy: Hub.busy == root.cap.name;
+            ask => {
+                Hub.asking = "cap:" + root.cap.name;
+            }
+            cancel => {
+                Hub.asking = "";
+            }
+            confirmed => {
+                Hub.cap-remove(root.cap.name);
+            }
+        }
+    }
+    Reveal {
+        shown: root.cap.text != "";
+        Text {
+            text: root.cap.text;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+    }
+    if root.cap.command != "": Code {
+        text: root.cap.command;
+    }
+    Text {
+        text: root.cap.group == 2 ? "The center does not offer it to the agent."
+            : "Offered on " + Hub.cap-machines[Hub.cap-machine] + ".";
+        color: Theme.text-faint;
+        font-size: Type.small;
+        wrap: word-wrap;
+    }
+}
+
+component CapForm inherits PaneForm {
+    icon: @image-url("icons/terminal.svg");
+    title: "Add a capability on " + Hub.cap-machines[Hub.cap-machine];
+    subtitle: "A fixed command the machine runs as nerve-run, in its folders.";
+    error: Hub.cap-error;
+    error-title: "The machine did not take it";
+    save-text: "Add";
+    busy: Hub.busy == "cap";
+    can-save: Hub.cap-name != "" && Hub.cap-command != "";
+    cancel => {
+        Hub.cap-form = false;
+        Hub.cap-error = "";
+    }
+    save => {
+        Hub.cap-save();
+    }
+    Field {
+        label: "Name";
+        hint: "capability.action, like backup.db.";
+        TextField {
+            text <=> Hub.cap-name;
+            mono: true;
+            placeholder: "backup.db";
+            label: "Name";
+        }
+    }
+    Field {
+        label: "What it does";
+        Segmented {
+            options: ["read", "write", "execute", "sense", "actuate"];
+            current: Hub.cap-kind;
+            small: true;
+            label: "What it does";
+            chosen(i) => {
+                Hub.cap-kind = i;
+            }
+        }
+    }
+    Field {
+        label: "Command";
+        hint: "Run as nerve-run, without a shell.";
+        TextField {
+            text <=> Hub.cap-command;
+            mono: true;
+            placeholder: "pg_dump site -f backups/site.sql";
+            label: "Command";
+        }
+    }
+    Field {
+        label: "Its line for the agent";
+        TextField {
+            text <=> Hub.cap-summary;
+            placeholder: "Backs up the site's database.";
+            label: "Its line for the agent";
+        }
+    }
+}
+
+export component HubCapsPage inherits PageFrame {
+    property <int> pick: Math.max(0, Math.min(Hub.cap-pick, Hub.caps.length - 1));
+    gap: 0;
+    init => {
+        Hub.details-open = false;
+    }
+    PageHeader {
+        icon: @image-url("icons/plug.svg");
+        title: "Capabilities";
+        error-title: "The capabilities could not be read";
+        error: Hub.error;
+        error-action: "Try again";
+        error-acted => {
+            Hub.reload();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.reload();
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.cap-machines.length == 0 && Hub.state != "";
+        gap: Space.xxl;
+        Card {
+            EmptyState {
+                icon: @image-url("icons/plug.svg");
+                title: "No machine paired yet";
+                text: "A machine's capabilities show here once it is paired.";
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.cap-machines.length > 0;
+        gap: Space.xl;
+        HorizontalLayout {
+            spacing: Space.md;
+            alignment: start;
+            Text {
+                text: "Machine";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            Segmented {
+                options: Hub.cap-machines;
+                current: Hub.cap-machine;
+                small: true;
+                label: "Machine";
+                chosen(i) => {
+                    Hub.caps-machine(i);
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.cap-note != "";
+        gap: Space.lg;
+        Banner {
+            tone: Tone.accent;
+            text: Hub.cap-note;
+        }
+    }
+    Reveal {
+        shown: Hub.cap-machines.length > 0;
+        gap: Space.lg;
+        Split {
+            ListPane {
+                open: Hub.details-open;
+                ListCard {
+                    label: "Capabilities";
+                    step(d) => {
+                        Hub.cap-form = false;
+                        Hub.cap-pick = Math.max(0, Math.min(Hub.caps.length - 1, Hub.cap-pick + d));
+                    }
+                    ListGroup {
+                        text: "Offered";
+                        count: "" + Hub.cap-counts[0];
+                    }
+                    for c[i] in Hub.caps: CapItem {
+                        collapsed: c.group != 0;
+                        cap: c;
+                        selected: !Hub.cap-form && i == root.pick;
+                        label: c.name;
+                        clicked => {
+                            Hub.cap-form = false;
+                            Hub.cap-pick = i;
+                            Hub.details-open = true;
+                        }
+                    }
+                    ListGroup {
+                        text: "Added by this center";
+                        count: "" + Hub.cap-counts[1];
+                    }
+                    for c[i] in Hub.caps: CapItem {
+                        collapsed: c.group != 1;
+                        cap: c;
+                        selected: !Hub.cap-form && i == root.pick;
+                        label: c.name;
+                        clicked => {
+                            Hub.cap-form = false;
+                            Hub.cap-pick = i;
+                            Hub.details-open = true;
+                        }
+                    }
+                    if Hub.cap-write: AddItem {
+                        text: "Add a capability…";
+                        active: Hub.cap-form;
+                        clicked => {
+                            Hub.cap-add();
+                            Hub.details-open = true;
+                        }
+                    }
+                    ListGroup {
+                        text: "Left out";
+                        count: "" + Hub.cap-counts[2];
+                    }
+                    for c[i] in Hub.caps: CapItem {
+                        collapsed: c.group != 2;
+                        cap: c;
+                        selected: !Hub.cap-form && i == root.pick;
+                        label: c.name;
+                        clicked => {
+                            Hub.cap-form = false;
+                            Hub.cap-pick = i;
+                            Hub.details-open = true;
+                        }
+                    }
+                }
+            }
+            DetailsPane {
+                open: Hub.details-open;
+                view-top: root.view-top;
+                view-height: root.view-height;
+                back => {
+                    Hub.details-open = false;
+                }
+                if Hub.cap-form: CapForm { }
+                if !Hub.cap-form && Hub.caps.length > 0: CapDetails {
+                    cap: Hub.caps[root.pick];
+                }
+            }
+        }
+    }
+}

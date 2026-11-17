@@ -106,11 +106,54 @@ pub(super) async fn install(
             &invoker,
             out,
         )?;
+        if web_ui_at_install(crate::edition::get().program, cfg!(windows)) {
+            first_web_ui(&layout.paths, out).await;
+        }
         // One first run: at a terminal setup's questions follow.
         if terminal {
             setup_after_install(&layout, &invoker, out);
         }
         Ok(())
+    }
+}
+
+/// Whether `install` turns the web UI on (owner, 2026-11-16): for the
+/// terminal program `nerve-node` on Linux, where it is the way to the node
+/// beside the CLI; not for the app `nerve`, whose window is, nor on Windows.
+/// Either turns it on in its Settings, or `ui on`.
+#[cfg_attr(windows, allow(dead_code))]
+fn web_ui_at_install(program: &str, windows: bool) -> bool {
+    program == crate::edition::NODE.program && !windows
+}
+
+/// Turns the installed node's web UI on at loopback with its first token,
+/// shown once, where the node never had one: a reinstall keeps the owner's
+/// choice. A failure leaves the install as it is, and says what to run.
+#[cfg(not(windows))]
+async fn first_web_ui(paths: &NodePaths, out: &mut dyn Write) {
+    first_web_ui_at(paths, None, out).await
+}
+
+/// [`first_web_ui`] at `listen` (the default address where none).
+#[cfg(not(windows))]
+async fn first_web_ui_at(paths: &NodePaths, listen: Option<String>, out: &mut dyn Write) {
+    let fresh = match read_config(paths).await {
+        Ok((c, _)) => c.ui.listen.is_none() && c.ui.tokens.is_empty(),
+        Err(_) => false,
+    };
+    if !fresh {
+        return;
+    }
+    let on = UiCmd::On {
+        listen,
+        names: Vec::new(),
+        new_cert: false,
+    };
+    if let Err(e) = ui::ui_cmd(paths, Some(on), out).await {
+        let _ = writeln!(
+            out,
+            "the web UI stays off ({e}); `sudo nerve-node ui on` turns it on"
+        );
     }
 }
 
@@ -278,6 +321,80 @@ fn root_owner(
 mod tests {
     use super::*;
     use crate::cli::tests::{run, setup};
+
+    /// The terminal program's install turns the web UI on, on Linux; the
+    /// app's and Windows' do not (owner, 2026-11-16).
+    #[test]
+    fn only_the_terminal_program_turns_the_web_ui_on_at_install() {
+        assert!(web_ui_at_install("nerve-node", false));
+        assert!(!web_ui_at_install("nerve", false));
+        assert!(!web_ui_at_install("nerve-node", true));
+        assert!(!web_ui_at_install("nerve", true));
+    }
+
+    /// What `install` does for the web UI of a node that serves one: a
+    /// fresh node gets it on, with its first token shown once; a reinstall
+    /// keeps what the owner chose, also an owner's `ui off`; a node that
+    /// cannot serve one stays as it is and says what to run (owner,
+    /// 2026-11-16).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fresh_node_gets_its_web_ui_on_and_a_reinstall_keeps_the_owner_s_choice() {
+        use crate::owner::{Endpoint, Owners};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let listen = || Some("127.0.0.1:0".to_string());
+        let lines = |out: Vec<u8>| String::from_utf8(out).unwrap();
+        // A node run by hand serves none: nothing changes, the hint says why.
+        let (d, paths) = setup(&[]);
+        let mut out = Vec::new();
+        rt.block_on(first_web_ui_at(&paths, listen(), &mut out));
+        let said = lines(out);
+        assert!(said.contains("the web UI stays off ("), "{said}");
+        assert!(
+            said.contains("`sudo nerve-node ui on` turns it on"),
+            "{said}"
+        );
+        assert_eq!(crate::cli::tests::load(&paths).ui.listen, None);
+        // The installed node, as a running one with an owner endpoint.
+        let (d2, paths) = setup(&[]);
+        let mut opts = NodeOptions::new(paths.clone());
+        opts.home = d2.path().to_path_buf();
+        opts.cgroups = Some(Err("no cgroup for this test".into()));
+        std::fs::create_dir_all(d2.path().join("run")).unwrap();
+        opts.owners = Some(Endpoint {
+            at: d2.path().join("run/owner.sock"),
+            owners: Owners::Uids(vec![crate::account::own_uid()]),
+            program: std::env::current_exe().unwrap(),
+        });
+        let daemon = rt.block_on(crate::Daemon::start(opts)).unwrap();
+        let mut out = Vec::new();
+        rt.block_on(first_web_ui_at(&paths, listen(), &mut out));
+        let said = lines(out);
+        assert!(said.contains("token "), "{said}");
+        let cfg = crate::cli::tests::load(&paths);
+        assert_eq!(cfg.ui.listen.as_deref(), Some("127.0.0.1:0"));
+        assert_eq!(cfg.ui.tokens.len(), 1);
+        // A reinstall: nothing changes, no second token.
+        let mut out = Vec::new();
+        rt.block_on(first_web_ui_at(&paths, listen(), &mut out));
+        assert_eq!(lines(out), "");
+        assert_eq!(crate::cli::tests::load(&paths).ui.tokens.len(), 1);
+        // The owner turned it off: a reinstall does not turn it on.
+        let mut out = Vec::new();
+        rt.block_on(ui::ui_cmd(&paths, Some(UiCmd::Off), &mut out))
+            .unwrap();
+        assert_eq!(crate::cli::tests::load(&paths).ui.listen, None);
+        let mut out = Vec::new();
+        rt.block_on(first_web_ui_at(&paths, listen(), &mut out));
+        assert_eq!(lines(out), "");
+        assert_eq!(crate::cli::tests::load(&paths).ui.listen, None);
+        rt.block_on(daemon.stop());
+        drop(d);
+    }
 
     /// Without root, `install`, `update` and `uninstall` say on Linux that
     /// they need it before they ask the node, whose control socket such an

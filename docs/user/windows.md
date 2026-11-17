@@ -100,15 +100,20 @@ installs the center as the service `nerve-center`, which runs the app's
 program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
 `C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
 the node port (7443) of the center's service. Its last step shows what it
-did, the owner token among it, and **Open the web UI**, which checks first
-that the center holds the web UI's port. Keep the token in your password
-manager: the web UI asks for it. **Nerve** in the Start menu opens that step
-again; it opens no `nerve://` links.
+did, the owner token among it. Keep the token in your password manager.
+**Nerve** in the Start menu then opens the center's pages, which ask for
+the token ([the center in the app](center.md#in-the-app)). Any program of
+yours can read the open app's memory: run the harness under another
+account.
 
-Harnesses connect over HTTP MCP: the web UI's **Connect a harness** makes a
+Harnesses connect over HTTP MCP: **Harnesses › Connect a harness** makes a
 harness token and the entry. The center's settings are in
-`settings\center.env` there; its web UI and MCP stay on this machine, and
-the app installs no second role beside it.
+`settings\center.env` there; MCP stays on this machine, and the app
+installs no second role beside it. The center's web UI is off:
+**Settings › This machine › Web UI** turns it on, on this machine.
+
+**Change the role…** (Settings › This machine, on a node Settings › App)
+backs up, removes the role with its data, and installs the other.
 
 A relay on Windows needs a firewall rule for its port, which you add yourself.
 
@@ -121,7 +126,7 @@ builds too.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. On a center, Apps & features or
-**Uninstall…** in the app's center step removes the center and the app. The quiet uninstall of Apps & features
+**Settings › This machine › Uninstall…** removes the center and the app. The quiet uninstall of Apps & features
 keeps it. The data holds your stored Windows password too, open to the
 administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
 `nerve-run` that Windows still holds goes after a restart; the uninstall

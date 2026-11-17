@@ -174,13 +174,13 @@ pub struct Args {
     pub plain_loopback: bool,
     /// The web UI address, or off
     ///
-    /// It always asks for the owner token, which `nerve-center owner-token` shows. Beyond loopback it uses TLS with the center's self-signed certificate.
+    /// It always asks for the owner token, which `nerve-center owner-token` shows. Beyond loopback it uses TLS with the center's self-signed certificate. On by default on Linux; off on Windows, where the app's Settings turn it on.
     #[arg(
         long,
         env = "NERVE_CENTER_UI",
         hide_env = true,
         value_name = "ADDRESS",
-        default_value = "127.0.0.1:7480",
+        default_value = DEFAULT_UI,
         global = true
     )]
     pub ui: String,
@@ -230,11 +230,28 @@ pub struct Args {
     /// For the administrator's commands and status: the lines they print as {"messages": [...]} with their data, an error as {"error": ...}.
     #[arg(long, global = true, hide = true)]
     pub json: bool,
+    // The app's user, by SID, which the app's broker names (Windows): the
+    // account whose app installs the center may ask it with the owner token
+    // (crate::attach::OWNER_FILE). A variable would be one the account's
+    // unelevated programs may set, so it is an argument.
+    /// The app's user (Windows)
+    #[arg(
+        long = "desktop-user-sid",
+        global = true,
+        hide = true,
+        value_name = "SID"
+    )]
+    pub desktop_user_sid: Option<String>,
     /// Where the running center says where its web UI listens
     /// ([`crate::ui_file`]): the installed service's file, which
     /// [`crate::server::run`] names; no flag sets it.
     #[arg(skip)]
     pub ui_file: Option<PathBuf>,
+    /// Where the running center serves the account that installed it
+    /// (crate::attach::owner_endpoint): the installed service's socket or
+    /// pipe, which [`crate::server::run`] names; no flag sets it.
+    #[arg(skip)]
+    pub owner_endpoint: Option<PathBuf>,
 }
 
 /// What the owner runs by hand; a harness never does. Without one,
@@ -294,6 +311,11 @@ pub enum Cmd {
         /// That is the center's key, its pairings and its log.
         #[arg(long)]
         purge: bool,
+        /// The app's role change: keep the app's program
+        ///
+        /// The other role's install takes it next (nerve_service::keeps_program).
+        #[arg(long, hide = true)]
+        keep_program: bool,
     },
     /// Save the center's identity and pairings to a passphrase-protected file
     ///
@@ -345,6 +367,62 @@ pub enum Cmd {
     /// A new token is shown once, as the web UI's Connect a harness card shows it; the center keeps only its hash. It asks the running center.
     #[command(subcommand)]
     Token(TokenCmd),
+    /// List the harnesses' sessions, or end one
+    ///
+    /// As the web UI's Harnesses page shows them. A harness whose session ended connects again with its token. It asks the running center.
+    #[command(args_conflicts_with_subcommands = true)]
+    Sessions {
+        #[command(subcommand)]
+        cmd: Option<SessionsCmd>,
+    },
+    /// Show the action checker, or change its switches, rules and model
+    ///
+    /// As the web UI's Action checker page: the blocklist, the rules that let calls skip the decision model, the model, and each machine's own switches. A change counts from the next call. It asks the running center.
+    #[command(args_conflicts_with_subcommands = true)]
+    Checker {
+        #[command(subcommand)]
+        cmd: Option<CheckerCmd>,
+    },
+    /// Show a machine's capabilities, or add or remove one
+    ///
+    /// As the web UI's Capabilities page: what the machine offers, and the ones this center added. The machine checks a new one and may refuse it. It asks the running center.
+    #[command(args_conflicts_with_subcommands = true)]
+    Caps {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+        #[command(subcommand)]
+        cmd: Option<CapsCmd>,
+    },
+    /// Show what each machine did: its calls and their refusals
+    ///
+    /// As the web UI's Statistics page shows it, for the days the center keeps (`config retention-days`). It asks the running center.
+    Stats,
+    /// Show the latest decisions on calls, or make a rule from one
+    ///
+    /// The newest first, each with an id. `audit allow <ID>` lets that call on its machine, `audit deny <ID>` refuses it there, `audit skip <ID>` lets such calls skip the decision model, as the web UI's Audit buttons do. It asks the running center.
+    #[command(args_conflicts_with_subcommands = true)]
+    Audit {
+        /// Show only the newest N.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        last: usize,
+        #[command(subcommand)]
+        cmd: Option<AuditCmd>,
+    },
+    /// Make a new center key, or end the old key's grace
+    ///
+    /// The paired machines take the new key while the old one still works; `key finish` ends that grace early. The new pin is shown once. It asks the running center.
+    #[command(subcommand)]
+    Key(KeyCmd),
+    /// Show or change the center's own settings
+    ///
+    /// Alone, it shows them. With a setting and a value it changes one: name, retention-days (1 to 366), pair-code-minutes (1 to 1440) or log-level (error, warn, info or debug). The service's settings are `set`'s. It asks the running center.
+    Config {
+        /// The setting to change
+        #[arg(value_parser = ["name", "retention-days", "pair-code-minutes", "log-level"], requires = "value")]
+        setting: Option<String>,
+        /// Its new value
+        value: Option<String>,
+    },
     /// Show the center's log: its starts, its machines, and what went wrong
     ///
     /// The log file in its state folder, the older one first.
@@ -408,6 +486,250 @@ pub enum NodesCmd {
         /// The machine's name, as `nodes` shows it.
         name: String,
     },
+    /// Give a machine another name.
+    Rename {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+        /// Its new name.
+        new_name: String,
+    },
+    /// Show a machine's settings as JSON, or replace them from a file.
+    Settings {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+        /// The settings to save, as JSON; - reads them from stdin.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
+    /// Turn sudo on a machine on (it asks the machine's sudo password) or off.
+    Sudo {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+        /// on or off
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+/// What `sessions` does.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SessionsCmd {
+    /// List the sessions, as `sessions` alone does.
+    List,
+    /// End a session: its harness loses its tools until it connects again.
+    End {
+        /// The session's id, as `sessions` shows it.
+        id: String,
+    },
+}
+
+/// A switch of the action checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CheckerSwitch {
+    /// The blocklist of dangerous commands and paths
+    Blocklist,
+    /// The decision model
+    Model,
+    /// Taint marking of sessions that read from outside
+    Taint,
+}
+
+/// What `checker` changes.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum CheckerCmd {
+    /// Show the checker, as `checker` alone does.
+    Show,
+    /// Turn the blocklist, the decision model or taint marking on.
+    On {
+        #[arg(value_enum)]
+        what: CheckerSwitch,
+    },
+    /// Turn one of them off.
+    Off {
+        #[arg(value_enum)]
+        what: CheckerSwitch,
+    },
+    /// Add, change, switch or remove a rule of the blocklist.
+    #[command(subcommand)]
+    Block(RuleCmd),
+    /// Add, change or remove a rule that lets calls skip the model.
+    #[command(subcommand)]
+    Skip(RuleCmd),
+    /// Set the decision model, or install or remove the local one.
+    #[command(subcommand)]
+    Model(ModelCmd),
+    /// Give a machine its own blocklist or model switch, or the center's.
+    Machine {
+        /// The machine's name, as `nodes` shows it.
+        name: String,
+        /// blocklist or model
+        #[arg(value_parser = ["blocklist", "model"])]
+        what: String,
+        /// on, off, or center (follow the center's switch)
+        #[arg(value_parser = ["on", "off", "center"])]
+        state: String,
+    },
+}
+
+/// What `checker block` and `checker skip` do with a rule, by its number in
+/// `checker`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum RuleCmd {
+    /// Add a rule, like 'exec.run:shutdown *', for every machine or the named ones.
+    Add {
+        /// The rule: a capability and action, a colon, and a pattern.
+        rule: String,
+        /// What the rule is for, shown with it (the blocklist only).
+        #[arg(long)]
+        note: Option<String>,
+        /// Only for this machine; give it again for more.
+        #[arg(long = "machine", value_name = "NAME")]
+        machines: Vec<String>,
+    },
+    /// Change the rule numbered N.
+    Edit {
+        /// The rule's number, as `checker` shows it.
+        n: usize,
+        /// The new rule.
+        rule: String,
+        /// The new note (the blocklist only).
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Turn the blocklist rule numbered N on, for every machine or one.
+    On {
+        /// The rule's number, as `checker` shows it.
+        n: usize,
+        /// Only for this machine.
+        #[arg(long = "machine", value_name = "NAME")]
+        machine: Option<String>,
+    },
+    /// Turn it off, for every machine or one.
+    Off {
+        /// The rule's number, as `checker` shows it.
+        n: usize,
+        /// Only for this machine.
+        #[arg(long = "machine", value_name = "NAME")]
+        machine: Option<String>,
+    },
+    /// Remove the rule numbered N.
+    Rm {
+        /// The rule's number, as `checker` shows it.
+        n: usize,
+    },
+}
+
+/// What `checker model` does.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ModelCmd {
+    /// Change a setting of the decision model.
+    ///
+    /// source (local or endpoint), endpoint-url, endpoint-model, gpu (on or off), local-model (d1-2b or kev-4b), threshold (0 to 1), timeout-ms, scope (effects, with-reads or tainted-only), on-error (refuse or allow), instructions, criteria-true or criteria-false; `-` reads the value from stdin.
+    Set {
+        /// The setting
+        #[arg(value_parser = MODEL_SETTINGS)]
+        setting: String,
+        /// Its new value
+        value: String,
+    },
+    /// Install the local model and llama.cpp, and run it.
+    Install {
+        /// Run it on the GPU (Vulkan).
+        #[arg(long)]
+        gpu: bool,
+        /// d1-2b (the default, faster) or kev-4b (catches more, slower).
+        #[arg(long, value_parser = ["d1-2b", "kev-4b"])]
+        model: Option<String>,
+    },
+    /// Remove the local model.
+    Remove,
+    /// Set the endpoint's token (asked without echo; from stdin if piped), or remove it.
+    Token {
+        /// Remove the token, instead of asking for one.
+        #[arg(long)]
+        remove: bool,
+    },
+}
+
+/// The settings `checker model set` takes.
+pub const MODEL_SETTINGS: [&str; 12] = [
+    "source",
+    "endpoint-url",
+    "endpoint-model",
+    "gpu",
+    "local-model",
+    "threshold",
+    "timeout-ms",
+    "scope",
+    "on-error",
+    "instructions",
+    "criteria-true",
+    "criteria-false",
+];
+
+/// What `caps <machine>` does.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum CapsCmd {
+    /// List the machine's capabilities, as `caps <machine>` alone does.
+    List,
+    /// Add a capability that runs a command on the machine.
+    Add {
+        /// Its name, like backup.run
+        cap: String,
+        /// What it does: read, write, execute, sense or actuate.
+        #[arg(long, value_parser = ["read", "write", "execute", "sense", "actuate"], default_value = "execute")]
+        effect: String,
+        /// The command it runs.
+        #[arg(long)]
+        command: String,
+        /// One line the agent reads about it.
+        #[arg(long)]
+        summary: String,
+    },
+    /// Remove a capability this center added.
+    Rm {
+        /// Its name, as `caps <machine>` shows it.
+        cap: String,
+    },
+}
+
+/// What `audit` does with a decision, by its number.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum AuditCmd {
+    /// Allow such calls on the decision's machine (its allow list).
+    Allow(AuditRule),
+    /// Refuse such calls on the decision's machine (its forbidden list).
+    Deny(AuditRule),
+    /// Let such calls skip the decision model, on every machine or this one.
+    Skip {
+        #[command(flatten)]
+        rule: AuditRule,
+        /// Only on the decision's machine.
+        #[arg(long)]
+        this_machine: bool,
+    },
+}
+
+/// The decision a rule is made of, and how wide the rule is.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct AuditRule {
+    /// The decision's id, as `audit` shows it.
+    pub id: String,
+    /// Any target, not only this one.
+    #[arg(long, conflicts_with = "pin")]
+    pub wildcard: bool,
+    /// Pin this argument of the call (like room) to the value it had.
+    #[arg(long, value_name = "FIELD")]
+    pub pin: Option<String>,
+}
+
+/// What `key` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum KeyCmd {
+    /// Make a new center key; the machines follow.
+    Rotate,
+    /// End the old key's grace now.
+    Finish,
 }
 
 /// What `token` does with the harness tokens.
@@ -593,12 +915,18 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "pair",
             "nodes",
             "token",
+            "sessions",
             "log",
             "owner-token",
             "backup",
             "restore",
         ],
     ),
+    (
+        "What the agent may do",
+        &["checker", "caps", "audit", "stats"],
+    ),
+    ("This center", &["config", "key"]),
 ];
 
 /// The commands in their groups and the options under Settings and
@@ -692,8 +1020,9 @@ pub fn settings_given(m: &clap::ArgMatches) -> Vec<String> {
     let mut given = Vec::new();
     for a in cmd.get_arguments() {
         let id = a.get_id().as_str();
-        // `--json` says how to answer: no setting of the center.
-        if id == "json" {
+        // `--json` says how to answer, and `--desktop-user-sid` whose app asks
+        // (the app's broker adds it): no settings of the center.
+        if id == "json" || id == "desktop_user_sid" {
             continue;
         }
         // A global flag may come after the subcommand, where its value is.
@@ -755,6 +1084,17 @@ pub fn refuse_install_variables(given: &[String], elevated: bool) -> Result<(), 
 }
 
 impl Args {
+    /// The arguments of `argv`, its first word the program's name: for a
+    /// program that starts a center of its own without clap (the app's
+    /// tests).
+    pub fn from_argv<I, T>(argv: I) -> Result<Args, String>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Args::try_parse_from(argv).map_err(|e| e.to_string())
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.state_dir.clone().unwrap_or_else(default_state_dir)
     }
@@ -809,6 +1149,22 @@ pub fn default_state_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".local/state/nerve-center")
+}
+
+/// The web UI's address on this machine, where it is turned on.
+pub const UI_ADDRESS: &str = "127.0.0.1:7480";
+
+/// The web UI by default: on at loopback on Linux, for the server program
+/// and the app; off on Windows, where the app is the way to the center and
+/// its Settings turn the web UI on (owner, 2026-11-16).
+pub const DEFAULT_UI: &str = default_ui(cfg!(windows));
+
+/// [`DEFAULT_UI`] on Windows (`windows`) or elsewhere.
+pub const fn default_ui(windows: bool) -> &'static str {
+    match windows {
+        true => "off",
+        false => UI_ADDRESS,
+    }
 }
 
 /// Whether an address like `127.0.0.1:7480` or `[::1]:7480` is loopback.
@@ -1059,7 +1415,7 @@ mod tests {
             );
         }
         assert!(
-            line_of("--ui").ends_with("  The web UI address, or off (127.0.0.1:7480)"),
+            line_of("--ui").ends_with(&format!("  The web UI address, or off ({DEFAULT_UI})")),
             "{top}"
         );
         assert!(line_of("--call-wait").ends_with("(20s)"), "{top}");
@@ -1118,6 +1474,16 @@ mod tests {
             }
         }
         assert!(said_again.is_empty(), "{said_again:#?}");
+    }
+
+    /// The web UI is on by default on Linux and off on Windows, where the
+    /// app's Settings turn it on (owner, 2026-11-16).
+    #[test]
+    fn the_web_ui_is_on_by_default_on_linux_and_off_on_windows() {
+        assert_eq!(default_ui(false), "127.0.0.1:7480");
+        assert_eq!(default_ui(true), "off");
+        let args = Args::from_argv(["nerve-center"]).unwrap();
+        assert_eq!(args.ui_off(), cfg!(windows));
     }
 
     /// One line first (plan 4.1): every command's `about` and every flag's
@@ -1239,6 +1605,7 @@ mod tests {
         assert!(given(&["uninstall", "--purge"]).is_empty());
         // How a program asks for the answer is no setting.
         assert!(given(&["--json", "install"]).is_empty());
+        assert!(given(&["--desktop-user-sid", "S-1-5-21-1-2-3-1001", "install"]).is_empty());
         assert!(given(&["set", "ui", "off", "--json"]).is_empty());
         assert_eq!(
             given(&["--public-url", "https://center.example:7443", "install"]),
@@ -1309,7 +1676,9 @@ mod tests {
         assert!(mcp("none").is_err());
         assert!(Args::try_parse_from(["nerve-center", "--mcp-listen", "127.0.0.1:1"]).is_err());
         assert_eq!(a.listen, "0.0.0.0:7443");
-        assert!(!a.ui_off());
+        // The web UI is on by default on Linux and off on Windows (owner,
+        // 2026-11-16).
+        assert_eq!(a.ui_off(), cfg!(windows));
         assert_eq!(a.call_wait, crate::jobs::CALL_WAIT);
         let a = Args::try_parse_from(["nerve-center", "--call-wait", "500ms"]).unwrap();
         assert_eq!(a.call_wait, std::time::Duration::from_millis(500));
@@ -1393,7 +1762,10 @@ mod tests {
         }
         assert_eq!(
             cmd(&["uninstall", "--purge"]),
-            Some(Cmd::Uninstall { purge: true })
+            Some(Cmd::Uninstall {
+                purge: true,
+                keep_program: false
+            })
         );
         assert!(Args::try_parse_from(["nerve-center", "install", "x"]).is_err());
         // The service's go to the service, backup and restore to the state

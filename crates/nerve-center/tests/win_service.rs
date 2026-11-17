@@ -303,7 +303,9 @@ fn the_center_runs_as_a_windows_service() {
                 Duration::from_secs(60),
             );
             assert_eq!(made.code, Some(0), "{}", made.err);
-            let (ok, said) = center(&["install", "--name", "win-test", "--listen", &port]);
+            let (ok, said) = center(&[
+                "install", "--name", "win-test", "--listen", &port, "--ui", UI,
+            ]);
             assert!(!ok, "{said}");
             assert!(said.contains("nerve-center: another account"), "{said}");
             assert!(!home.join("state").exists());
@@ -313,7 +315,11 @@ fn the_center_runs_as_a_windows_service() {
             "skipped: a folder another account made first, as NERVE_WIN_STD_ACCOUNT is not set"
         ),
     }
-    let (ok, said) = center(&["install", "--name", "win-test", "--listen", &port]);
+    // The web UI is off by default on Windows (owner, 2026-11-16): this
+    // test turns it on at install, as `--ui` does, to try it.
+    let (ok, said) = center(&[
+        "install", "--name", "win-test", "--listen", &port, "--ui", UI,
+    ]);
     assert!(ok, "{said}");
     assert!(said.contains("runs as NT SERVICE\\nerve-center"), "{said}");
     assert!(said.contains("the service nerve-center runs"), "{said}");

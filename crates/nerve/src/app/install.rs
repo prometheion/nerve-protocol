@@ -153,14 +153,30 @@ pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) ->
     }
 }
 
-/// Whether the app at its installed place opens as the installer: where no
-/// role is installed (the program from a package, before its first start)
-/// it asks what the machine becomes; on a center it shows the center's step,
-/// where the center's web UI opens and the center is removed. A node this
-/// user runs by hand (`by_hand`: its folders named, or no systemd) keeps the
-/// app's pages, as no service is installed for it.
-pub fn opens_the_installer(roles: nerve_node::role::Roles, by_hand: bool) -> bool {
-    !roles.node && (roles.center || !by_hand)
+/// What the app at its installed place opens as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opens {
+    /// The installer: what the machine becomes, or the center's uninstall.
+    Installer,
+    /// The center's pages.
+    Center,
+    /// The node's pages.
+    Node,
+}
+
+/// What the app at its installed place opens as: where no role is
+/// installed (the program from a package, before its first start) the
+/// installer asks what the machine becomes; on a center the center's pages,
+/// or its uninstall where Apps & features asked for it (`uninstall`). A
+/// node this user runs by hand (`by_hand`: its folders named, or no
+/// systemd) keeps the node's pages, as no service is installed for it.
+pub fn opens(roles: nerve_node::role::Roles, by_hand: bool, uninstall: bool) -> Opens {
+    match (roles.node, roles.center) {
+        (false, true) if uninstall => Opens::Installer,
+        (false, true) => Opens::Center,
+        (false, false) if !by_hand => Opens::Installer,
+        _ => Opens::Node,
+    }
 }
 
 /// What the center step says of a node that a terminal program installed
@@ -179,28 +195,12 @@ pub fn also_node(
 /// The twin of the Overview's note, on the center's step.
 pub const ALSO_NODE: &str = "Also a node, installed in the terminal: the app leaves it as it is.";
 
-/// Where the installed center's web UI listens, as it says in its file
-/// (nerve_center::ui_file); `None` while it does not run or it is off.
-fn center_ui() -> Option<String> {
-    let file = nerve_center::ui_file::path_in(&nerve_center::service::Layout::system().run);
-    nerve_center::ui_file::read(&file).ok()??.url
-}
-
 /// Opens the center's web UI in the browser once the center's service is
 /// found to hold its port (nerve_center::holder): a program that took the
 /// port while the center was stopped would get the owner token a password
-/// manager fills there.
-pub fn open_center_ui() -> Result<(), String> {
-    open_center_ui_in(
-        &nerve_center::service::Layout::system().run,
-        nerve_center::holder::of,
-        crate::browser::open,
-    )
-}
-
-/// [`open_center_ui`] for the center's run folder `run`, the holder `held`
-/// says and the browser `open`.
-fn open_center_ui_in(
+/// manager fills there. `run` is the center's run folder, `held` says who
+/// holds a port, `open` is the browser.
+pub(super) fn open_center_ui_in(
     run: &Path,
     held: impl FnOnce(std::net::SocketAddr) -> Result<nerve_center::holder::Holder, String>,
     open: impl FnOnce(&str) -> Result<(), String>,
@@ -245,7 +245,6 @@ impl Ctl {
                 i.set_installed_version(version.as_str().into());
                 i.set_newer(app && newer(&i.get_version(), &version));
                 i.set_node_only(node_only);
-                i.set_center_ui(center_ui().unwrap_or_default().into());
                 i.set_also(
                     also_node(roles, || {
                         nerve_node::role::in_terminal(
@@ -570,12 +569,6 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     let c = ctl.clone();
     i.on_ask_uninstall_center(move || c.ask_uninstall_center());
     let c = ctl.clone();
-    i.on_open_center_ui(move || {
-        if let Err(e) = open_center_ui() {
-            c.with_install(|i| i.set_error(e.into()));
-        }
-    });
-    let c = ctl.clone();
     i.on_update(move || c.update_go());
     let c = ctl.clone();
     i.on_uninstall(move || c.uninstall_go());
@@ -600,7 +593,8 @@ mod tests {
     use super::*;
 
     /// The installed app opens as the installer where it has no role yet,
-    /// and on a center; on a node, and for a node run by hand, as the app.
+    /// on a center as its pages (the installer for the uninstall of Apps &
+    /// features); on a node, and for a node run by hand, as the node's.
     #[test]
     fn the_installed_app_opens_by_the_machine_s_role() {
         use nerve_node::role::Roles;
@@ -613,11 +607,13 @@ mod tests {
             center: false,
             node: true,
         };
-        assert!(opens_the_installer(none, false));
-        assert!(opens_the_installer(center, false));
-        assert!(opens_the_installer(center, true));
-        assert!(!opens_the_installer(node, false));
-        assert!(!opens_the_installer(none, true));
+        assert_eq!(opens(none, false, false), Opens::Installer);
+        assert_eq!(opens(center, false, false), Opens::Center);
+        assert_eq!(opens(center, true, false), Opens::Center);
+        assert_eq!(opens(center, false, true), Opens::Installer);
+        assert_eq!(opens(node, false, false), Opens::Node);
+        assert_eq!(opens(node, false, true), Opens::Node);
+        assert_eq!(opens(none, true, false), Opens::Node);
     }
 
     /// A node a terminal program installed beside the app's center is said
@@ -656,7 +652,7 @@ mod tests {
         );
         unit("nerve-node", "/usr/local/bin/nerve-node --state-dir y run");
         let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
-        assert!(opens_the_installer(roles, false));
+        assert_eq!(opens(roles, false, false), Opens::Center);
         assert_eq!(first_step(true, false, roles), "center");
         assert_eq!(also_node(roles, || true), ALSO_NODE);
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -666,7 +662,7 @@ mod tests {
         unit("nerve-center", "/usr/local/bin/nerve-center --state-dir x");
         unit("nerve-node", "/usr/local/bin/nerve --state-dir y run");
         let roles = Roles::of_app_in(d.path(), crate::parts::PROGRAM);
-        assert!(!opens_the_installer(roles, false));
+        assert_eq!(opens(roles, false, false), Opens::Node);
         assert_eq!(first_step(true, false, roles), "installed");
         assert!(crate::broker::allowed(&args(&["__center", "--json", "status"]), roles).is_err());
     }
@@ -691,6 +687,21 @@ mod tests {
         assert!(opened.borrow().is_empty());
         open_center_ui_in(d.path(), |_| Ok(Holder::Service), open).unwrap();
         assert_eq!(*opened.borrow(), ["http://127.0.0.1:7480"]);
+    }
+
+    /// The center's step does not promise a web UI on Windows, where it is
+    /// off until Settings turn it on (owner, 2026-11-16).
+    #[test]
+    fn the_center_step_names_the_web_ui_default_of_the_platform() {
+        let slint = include_str!("../../ui/installer.slint");
+        let row = slint
+            .split("title: \"Its web UI\";")
+            .nth(1)
+            .and_then(|r| r.lines().find(|l| l.contains("text:")))
+            .unwrap();
+        assert!(row.contains("Install.windows ?"), "{row}");
+        assert!(row.contains("Off until you turn it on"), "{row}");
+        assert!(row.contains("127.0.0.1:7480"), "{row}");
     }
 
     /// The installer starts with what this machine becomes where no role is

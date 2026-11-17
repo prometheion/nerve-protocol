@@ -1,0 +1,432 @@
+// The center role's state and actions (src/app/hub.rs fills it over the
+// center's local owner channel; nothing here decides anything about it).
+
+import { Tone } from "theme.slint";
+
+export enum HubPage { login, overview, nodes, harnesses, checker, caps, stats, audit, log, settings, help }
+
+// A paired machine, as the center sees it.
+export struct HubNode {
+    id: string,
+    name: string,
+    // linux/x86_64
+    platform: string,
+    // online, offline, disabled
+    state: string,
+    tone: Tone,
+    summary: string,
+    // "Since 1 min ago", "Last seen 3 h ago"
+    link: string,
+    folders: string,
+    software: string,
+    offers: [string],
+    settings-write: bool,
+    windows: bool,
+    // What the center leaves out of it, in a line ("" none).
+    broken: string,
+}
+
+// A harness token: made here, or the one of the settings.
+export struct HubToken {
+    id: string,
+    label: string,
+    made: string,
+    settings: bool,
+}
+
+// A harness connected now.
+export struct HubSession {
+    id: string,
+    client: string,
+    transport: string,
+    since: string,
+    calls: string,
+    nodes: string,
+    tainted: bool,
+}
+
+// A rule of the blocklist, or one that skips the model.
+export struct HubRule {
+    rule: string,
+    note: string,
+    on: bool,
+    builtin: bool,
+    // "All machines", or the machine it is for.
+    where: string,
+    // Its place in the config's list.
+    index: int,
+    // Whether its rule names an argument a machine no longer has.
+    stale: bool,
+}
+
+// Where a picked rule counts, one machine.
+export struct HubWhere {
+    id: string,
+    name: string,
+    on: bool,
+}
+
+// A machine's own checker settings: 0 follows the center, 1 on, 2 off.
+export struct HubMachine {
+    id: string,
+    name: string,
+    line: string,
+    blocklist: int,
+    model: int,
+    note: string,
+}
+
+// A capability of a machine, as the center lists it.
+export struct HubCap {
+    name: string,
+    kind: string,
+    tone: Tone,
+    // built-in, config, a program's name, this center, left out
+    source: string,
+    text: string,
+    command: string,
+    // 0 offered, 1 added by this center, 2 left out
+    group: int,
+}
+
+export struct HubFigure {
+    label: string,
+    value: string,
+}
+
+export struct HubCall {
+    name: string,
+    count: string,
+    time: string,
+}
+
+export struct HubCount {
+    name: string,
+    count: string,
+}
+
+// A line of the Statistics list: every machine ("" id), or one.
+export struct HubStatRow {
+    id: string,
+    name: string,
+    calls: string,
+}
+
+// A decision the machines or the action checker made.
+export struct HubAudit {
+    tone: Tone,
+    // allowed, refused, checker, blocklist
+    kind: string,
+    call: string,
+    target: string,
+    node: string,
+    badge: string,
+    detail: string,
+    when: string,
+    when-exact: string,
+    // The machine's four buttons (a rule on the machine), and why not.
+    rules: bool,
+    rules-why: string,
+    sudo: bool,
+    // The checker's Trust buttons (a rule that skips the model).
+    trust: bool,
+    pins: [string],
+    index: int,
+}
+
+export struct HubLog {
+    tone: Tone,
+    level: string,
+    msg: string,
+    node: string,
+    when: string,
+    when-exact: string,
+}
+
+// A group of the Help page's task map: its tasks and where each is done.
+export struct HubTask {
+    group: int,
+    task: string,
+    where: string,
+    page: HubPage,
+    // The Settings section or the list the link opens, -1 none.
+    at: int,
+}
+
+export struct HubRef {
+    name: string,
+    line: string,
+}
+
+export global Hub {
+    // The window shows the center's pages: this machine is a center the
+    // app installed.
+    in-out property <bool> shown;
+    in-out property <HubPage> page: HubPage.login;
+    // Below 1100 px a page shows its list or a row's details.
+    in-out property <bool> details-open;
+    // The row whose remove asks before it removes ("" none).
+    in-out property <string> asking;
+    // What a change that waits for its answer is about.
+    in-out property <string> busy;
+    // A page's reading failed: why.
+    in-out property <string> error;
+    in-out property <bool> loading;
+
+    // ---- Log in ----
+    in-out property <bool> logged-in;
+    in-out property <string> login-token;
+    in-out property <bool> login-busy;
+    in-out property <string> login-error;
+    // The check of the owner endpoint: whether it is the center's service,
+    // and the line that says so ("This is the center's service.").
+    in-out property <bool> login-checked;
+    in-out property <string> login-check;
+    // The center does not run.
+    in-out property <bool> not-running;
+    callback login();
+    callback login-read();
+    callback logout();
+    callback check-again();
+    callback start-service();
+
+    // ---- The sidebar's state and the Overview ----
+    in-out property <string> state: "";
+    in-out property <string> state-line;
+    in-out property <Tone> state-tone: Tone.neutral;
+    in-out property <string> center-name;
+    in-out property <string> public-url;
+    in-out property <string> mcp-line;
+    in-out property <string> service-state;
+    in-out property <string> service-line;
+    in-out property <string> sessions-count;
+    in-out property <string> checker-line;
+    in-out property <string> nodes-count;
+    in-out property <[string]> alerts;
+
+    // ---- Nodes ----
+    in-out property <[HubNode]> nodes;
+    in-out property <int> node-pick;
+    in-out property <bool> rename-open;
+    in-out property <string> rename-text;
+    in-out property <string> rename-error;
+    // The sudo switch of the picked machine: on, off, "" not asked.
+    in-out property <string> node-sudo;
+    in-out property <string> sudo-password;
+    in-out property <string> sudo-error;
+    callback node-rename();
+    callback node-disable(string, bool);
+    callback node-remove(string);
+    callback node-sudo-ask(string);
+    callback node-sudo-set(string, bool);
+
+    // Pair a machine: the overlay.
+    in-out property <bool> pair-open;
+    in-out property <string> pair-link;
+    in-out property <string> pair-command;
+    in-out property <string> pair-until;
+    in-out property <string> pair-done;
+    in-out property <bool> pair-busy;
+    in-out property <string> pair-error;
+    callback pair-start();
+    callback pair-new();
+
+    // ---- Harnesses ----
+    // -1 Connect a harness, else the token or session by its place.
+    in-out property <int> harn-pick: -1;
+    // 0 tokens, 1 sessions
+    in-out property <int> harn-view;
+    in-out property <[HubToken]> tokens;
+    in-out property <[HubSession]> sessions;
+    in-out property <string> mcp-url;
+    // MCP is served over HTTP; else why not (stdio, off).
+    in-out property <bool> mcp-http;
+    in-out property <string> mcp-why;
+    in-out property <string> token-label;
+    // The token made now, shown once, and whether it is shown in clear.
+    in-out property <string> new-token;
+    in-out property <bool> token-shown;
+    // The lines a harness takes with the new token: in clear, and with
+    // the token hidden.
+    in-out property <[HubFigure]> connect-lines;
+    in-out property <[HubFigure]> connect-masked;
+    callback token-create();
+    callback token-delete(string);
+    callback session-end(string);
+    // A secret to copy: it leaves the clipboard after a minute.
+    callback copy-secret(string);
+
+    // ---- Action checker ----
+    in-out property <bool> blocklist-on;
+    in-out property <bool> model-on;
+    in-out property <bool> taint-on;
+    // 0 blocklist, 1 skip the model, 2 decision model, 3 per machine
+    in-out property <int> chk-view;
+    // The picked row of the view, -1 the Add a rule form.
+    in-out property <int> chk-pick;
+    in-out property <[HubRule]> block-rules;
+    in-out property <[HubRule]> skip-rules;
+    in-out property <[HubMachine]> machines;
+    // Where the picked rule counts.
+    in-out property <[HubWhere]> rule-where;
+    in-out property <bool> rule-form;
+    in-out property <string> rule-text;
+    in-out property <string> rule-note;
+    in-out property <bool> rule-all: true;
+    in-out property <[HubWhere]> rule-chosen;
+    in-out property <string> rule-error;
+    // The decision model: its line, whether it is installed, the install's
+    // state, whether a GPU is used and offered.
+    in-out property <string> model-line;
+    in-out property <Tone> model-tone;
+    in-out property <bool> model-installed;
+    in-out property <bool> model-installing;
+    in-out property <bool> model-gpu;
+    in-out property <bool> model-supported;
+    in-out property <string> model-gpu-hint;
+    in-out property <bool> model-local;
+    in-out property <bool> model-has-token;
+    in-out property <string> model-token;
+    in-out property <bool> model-wanted;
+    in-out property <string> chk-warning;
+    callback checker-switch(int, bool);
+    callback rule-pick(int);
+    callback rule-add();
+    callback rule-save();
+    callback rule-remove(bool, int);
+    callback rule-on(bool, int, bool);
+    callback rule-where-set(bool, int, string, bool);
+    callback machine-set(string, int, int);
+    callback model-install(bool);
+    callback model-remove();
+    callback model-token-save();
+
+    // ---- Capabilities ----
+    in-out property <[string]> cap-machines;
+    in-out property <int> cap-machine;
+    in-out property <[HubCap]> caps;
+    // How many of each group: offered, added by this center, left out.
+    in-out property <[int]> cap-counts: [0, 0, 0];
+    in-out property <int> cap-pick;
+    in-out property <bool> cap-write;
+    in-out property <string> cap-note;
+    // The form of a capability this center adds.
+    in-out property <bool> cap-form;
+    in-out property <string> cap-name;
+    in-out property <int> cap-kind: 1;
+    in-out property <string> cap-command;
+    in-out property <string> cap-summary;
+    in-out property <string> cap-error;
+    callback caps-machine(int);
+    callback cap-add();
+    callback cap-save();
+    callback cap-remove(string);
+
+    // ---- Statistics ----
+    in-out property <[HubStatRow]> stat-rows;
+    in-out property <int> stat-pick;
+    in-out property <string> stat-name;
+    in-out property <string> stat-kept;
+    in-out property <[HubFigure]> figures;
+    in-out property <[HubCall]> calls;
+    in-out property <[HubCount]> errors;
+    callback stats-picked(int);
+
+    // ---- Audit ----
+    in-out property <[HubAudit]> audit;
+    in-out property <int> audit-decision;
+    in-out property <string> audit-text;
+    in-out property <int> audit-node;
+    in-out property <[string]> audit-node-options: ["Every machine"];
+    in-out property <[int]> audit-counts: [0, 0, 0];
+    in-out property <int> audit-pick;
+    in-out property <int> audit-pin;
+    callback audit-filtered();
+    callback audit-rule(int, string, bool, int);
+    callback audit-trust(int, bool, int);
+
+    // ---- Log ----
+    in-out property <[HubLog]> log;
+    in-out property <bool> log-problems;
+    in-out property <string> log-search;
+    in-out property <int> log-pick;
+    in-out property <string> log-foot;
+    callback log-filtered();
+    callback log-download();
+
+    // ---- Settings ----
+    // 0 Center, 1 This machine, 2 Owner token, 3 Center key, 4 Backup
+    in-out property <int> set-pick;
+    in-out property <string> set-name;
+    in-out property <string> set-public-url;
+    in-out property <string> set-listen;
+    in-out property <string> set-ui;
+    // The web UI's switch in This machine: on is set ui 127.0.0.1:7480.
+    callback web-ui-set(bool);
+    in-out property <string> set-mcp;
+    in-out property <string> set-days;
+    in-out property <string> set-minutes;
+    in-out property <bool> set-debug;
+    in-out property <string> set-error;
+    in-out property <string> firewall-line;
+    callback settings-save();
+    in-out property <string> version;
+    in-out property <string> update-line;
+    callback service(string);
+    callback update();
+    callback uninstall(bool);
+    callback open-web-ui();
+    in-out property <bool> uninstall-open;
+    in-out property <bool> uninstall-purge: true;
+    // The role change (Settings, This machine; the node's Settings, App):
+    // its steps, and whether this machine is a node (else a center).
+    in-out property <bool> role-open;
+    in-out property <bool> role-node;
+    in-out property <int> role-step;
+    in-out property <string> role-passphrase;
+    in-out property <string> role-passphrase2;
+    in-out property <string> role-error;
+    in-out property <bool> role-busy;
+    in-out property <[string]> role-trusted;
+    callback role-ask();
+    callback role-backup();
+    callback role-change();
+    // The owner token: shown through the broker, a new one too.
+    in-out property <bool> keep-login;
+    in-out property <string> owner-token;
+    callback token-show();
+    callback token-new();
+    callback keep-login-set(bool);
+    // The center key.
+    in-out property <string> key-pin;
+    in-out property <string> key-next;
+    in-out property <string> key-line;
+    in-out property <bool> key-rotating;
+    callback key-rotate();
+    callback key-finish();
+    // Backup and restore with a passphrase.
+    in-out property <bool> backup-open;
+    in-out property <bool> restore-open;
+    // The backup is another center's: it replaces this one.
+    in-out property <bool> restore-replace;
+    in-out property <string> backup-pass;
+    in-out property <string> backup-pass2;
+    in-out property <string> backup-file;
+    in-out property <string> backup-error;
+    in-out property <bool> backup-busy;
+    callback backup();
+    callback restore();
+    callback backup-choose();
+    callback restore-choose();
+
+    // ---- Help ----
+    in-out property <int> help-pick;
+    in-out property <[bool]> tasks-open: [true, false, false, false];
+    in-out property <[string]> task-groups;
+    in-out property <[int]> task-counts;
+    in-out property <[HubTask]> tasks;
+    in-out property <[HubRef]> commands;
+
+    callback show(HubPage);
+    callback reload();
+}

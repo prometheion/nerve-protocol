@@ -47,8 +47,23 @@ and every limit is in
 - The center's owner commands in the terminal, also with the web UI off:
   `service start|stop|restart`, `pair`, `nodes list|disable|enable|rm`,
   `token new|list|rm` and `log`. They ask the running center through
-  its own socket or pipe, which only root, an administrator and the center's
-  account may use.
+  its own socket or pipe, which root, an administrator, the center's
+  account and the account that installed it may use; everyone but root and
+  an administrator gives the owner token, so a program of yours, an agent
+  among them, gets nothing without it.
+- Everything the web UI and the app do for the center is a command too:
+  `sessions [end]`, `checker` (its switches, the blocklist and the rules that
+  skip the model with add, edit, on, off and rm, the decision model, a
+  machine's own switches), `caps <machine> [add|rm]`, `stats`, `audit` (and
+  `allow|deny|skip <id>`), `key rotate|finish`, `config` (name, retention,
+  pairing time, log level) and `nodes rename|settings|sudo`. `audit` gives
+  each decision an id that stays the same while new ones come in, and
+  `nodes settings` prints a file (with the version it was read at) that
+  `--from` takes back, refusing it where the settings changed since. The
+  `audit` list shows the whole call, last, before you make a rule of it, and
+  `nodes settings` writes a machine's control characters as `\u` escapes.
+- The center's web UI is on by default on Linux and off on Windows, where
+  the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
   fails closed by default.
@@ -154,15 +169,45 @@ and every limit is in
   On Linux the role's terminal name, `nerve-node` or `nerve-center`, is a
   link to it (a link to another program stays as it is). The `.deb` and `.rpm` are named `nerve` and replace
   `nerve-node-desktop`: a pre-release tester removes that first. The
-  package's app asks the role at its first start. In the center role
-  **Nerve** in the menu opens the center's web UI and removes the center
-  (also Apps & features on Windows). A role a terminal program installed
+  package's app asks the role at its first start.
+- Arch Linux: the release has the app as a package too,
+  `nerve-<version>-1-x86_64.pkg.tar.zst` (`sudo pacman -U` with the file; no
+  AUR package). The app's **Update** installs the next one with pacman, and
+  `sudo pacman -R nerve` removes it. In the center role
+  **Nerve** in the menu opens the center's pages (Apps & features on Windows
+  opens its uninstall). A role a terminal program installed
   beside it is said, as "Also a center, installed in the terminal", and left
   alone; uninstalling one role keeps the program while the other role's
   service runs it. The package's menu entry opens no `nerve://` links; the node role
   adds the handler, so a center answers none.
 - The node with a window: Overview, Centers, Relay, Permissions,
   Capabilities, Audit, Log, Settings and Help, which opens on a task map.
+- The center with a window: Overview, Nodes (with **Pair a machine**),
+  Harnesses (**Connect a harness**, the tokens and the sessions), Action
+  checker (the blocklist, the rules that skip the model, the decision model,
+  each machine's own switches), Capabilities per machine, Statistics, Audit,
+  Log, Settings (the center, this machine, the owner token, the center key,
+  backup) and Help. They ask the center as its terminal commands do, over
+  its own socket or pipe, so they work with the web UI off; the app first
+  makes sure the other end is the center's service.
+- The center's pages log in with the owner token: pasted, or **Read it from
+  this machine…** with one administrator's prompt. It is kept in memory until
+  the app closes; **Settings › Owner token** can keep it in your keyring
+  instead, which other programs of yours could then read.
+- A copied token, harness line or pairing link leaves the clipboard after a
+  minute; on Windows it stays out of the clipboard history and the cloud
+  clipboard. A new harness token is hidden until **Show the token**.
+- Each administrator's step of the center (start and stop, update,
+  uninstall, an address, the owner token, backup and restore) asks once and
+  ends with it.
+- **Change the role…** (the center's Settings › This machine, the node's
+  Settings › App) offers a backup first, names the machines that still trust
+  this one, removes the old role whole with its data, then opens the
+  installer for the other role.
+- `nerve-center --json backup -` and `restore -` hand the sealed backup over
+  the answer and the input, with `--passphrase-file -`. The app's restore
+  takes another center's backup where **It is another center's backup** is
+  ticked (`--replace`), so a center moves to a new machine, Windows too.
 - Each page is a list and the picked row's details: side by side from a
   window of 1100 px, in turns with Back to the list on a smaller one, and the
   page scrolls as a whole. Switches sit in the rows, adding is a form where it
@@ -170,8 +215,10 @@ and every limit is in
   ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
-- The node's own web UI, on Linux and Windows, off until it is turned on in
-  **Settings › Network › Web UI** (or `nerve-node ui on`), with its tokens.
+- The node's own web UI, on Linux and Windows, off in the app until it is
+  turned on in **Settings › Network › Web UI** (or `nerve-node ui on`), with
+  its tokens. `nerve-node install` turns it on at loopback and shows its
+  first token once.
   **Open** checks first that the node holds the port, and opens it over TLS
   where the node serves it so. On Windows only the owner's own session gets
   in, and beyond loopback is an administrator's step, also as the setting
@@ -316,7 +363,7 @@ and aarch64, and the desktop app for Linux x86_64. Windows comes with 0.1.0.
   runs.
 - A home and a temporary folder per pairing, `/var/lib/nerve-run/<center>`.
 - `nerve-node network off` keeps a center's commands off the network.
-- The node's web UI (`nerve-node ui on`): owner only, off by default.
+- The node's web UI (`nerve-node ui on`): owner only. It is off in the app by default.
 - Capabilities of your own in `node.toml` (`nerve-node cap add`), and programs
   that add state, events and streams (`nerve-node provider add`).
 - Allow and deny rules on an action's arguments (`lamp.set:room=office`).

@@ -82,6 +82,12 @@
                   "more": "Windows: an uninstall that keeps the data puts the keys and the proxy's login that the service's Credential Manager keeps aside first, which needs the node to run. Where it does not, uninstall stops and changes nothing; with this flag it goes on, and they are lost.",
                   "name": "--forget-secrets",
                   "optional": true
+                },
+                {
+                  "line": "The app's role change: keep the app's program",
+                  "more": "The other role's install takes it next (nerve_service::keeps_program).",
+                  "name": "--keep-program",
+                  "optional": true
                 }
               ],
               "line": "Remove the service and the program; config and state stay",

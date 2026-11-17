@@ -1,0 +1,403 @@
+// The center role's overlays: Pair a machine, the center's uninstall, and
+// its backup and restore.
+
+import { Theme, Type, Space, Radius, Tone } from "theme.slint";
+import { Hub } from "hub.slint";
+import {
+    Button, ButtonKind, Dialog, DialogButtons, Field, TextField, CheckBox, Code, Icon, Reveal,
+    Banner,
+} from "widgets.slint";
+
+// A line of the pairing: what it is, the text, and Copy (a secret: it
+// leaves the clipboard after a minute).
+component PairLine inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> text;
+    property <bool> copied;
+    spacing: Space.md;
+    Text {
+        width: 76px;
+        text: root.label;
+        color: Theme.text;
+        font-size: Type.small;
+        font-weight: Type.semibold;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+        background: Theme.inset;
+        border-radius: Radius.md;
+        border-width: 1px;
+        border-color: Theme.border;
+        min-height: line.preferred-height + 16px;
+        line := Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.text;
+            color: Theme.text;
+            font-size: Type.small;
+            font-family: Type.mono;
+            wrap: char-wrap;
+            vertical-alignment: center;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        Button {
+            text: root.copied ? "Copied" : "Copy";
+            icon: root.copied ? @image-url("icons/check.svg") : @image-url("icons/copy.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            accessible-label: "Copy the " + root.label;
+            clicked => {
+                Hub.copy-secret(root.text);
+                root.copied = true;
+            }
+        }
+    }
+    changed text => {
+        root.copied = false;
+    }
+}
+
+export component HubPairDialog inherits Dialog {
+    title: "Pair a machine";
+    subtitle: "On a Linux machine, run the command, then paste the link on the next line. On Windows, open the link on that machine: the Nerve app pairs with it.";
+    card-width: 640px;
+    close => {
+        Hub.pair-open = false;
+    }
+    enter => {
+        Hub.pair-open = false;
+    }
+    if Hub.pair-link == "" && Hub.pair-error == "": Text {
+        text: "Making a link…";
+        color: Theme.text-muted;
+        font-size: Type.small;
+    }
+    Reveal {
+        shown: Hub.pair-error != "";
+        Banner {
+            tone: Tone.danger;
+            title: "No link";
+            text: Hub.pair-error;
+        }
+    }
+    Reveal {
+        shown: Hub.pair-link != "";
+        VerticalLayout {
+            spacing: 10px;
+            PairLine {
+                label: "Command";
+                text: Hub.pair-command;
+            }
+            PairLine {
+                label: "Link";
+                text: Hub.pair-link;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: Hub.pair-done != "" ? @image-url("icons/ok.svg") : @image-url("icons/wait.svg");
+                        colorize: Hub.pair-done != "" ? Theme.ok : Theme.text-faint;
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: Hub.pair-done != "" ? Hub.pair-done : Hub.pair-until;
+                    color: Hub.pair-done != "" ? Theme.text : Theme.text-muted;
+                    font-size: Type.small;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+    DialogButtons {
+        Button {
+            text: "New code";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            busy: Hub.pair-busy;
+            clicked => {
+                Hub.pair-new();
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Done";
+            kind: ButtonKind.primary;
+            clicked => {
+                Hub.pair-open = false;
+            }
+        }
+    }
+}
+
+export component HubUninstallDialog inherits Dialog {
+    title: "Uninstall the center";
+    subtitle: "The service stops and is removed, with the app's program and menu entry.";
+    card-width: 520px;
+    close => {
+        Hub.uninstall-open = false;
+    }
+    enter => {
+        Hub.uninstall(Hub.uninstall-purge);
+    }
+    CheckBox {
+        text: "Delete the data too";
+        detail: "The center's key, its pairings, its tokens and its log. The machines paired with it then need a new pairing with another center.";
+        checked: Hub.uninstall-purge;
+        toggled(on) => {
+            Hub.uninstall-purge = on;
+        }
+    }
+    DialogButtons {
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.uninstall-open = false;
+            }
+        }
+        Button {
+            text: "Uninstall";
+            kind: ButtonKind.danger;
+            busy: Hub.busy == "uninstall";
+            clicked => {
+                Hub.uninstall(Hub.uninstall-purge);
+            }
+        }
+    }
+}
+
+export component HubBackupDialog inherits Dialog {
+    title: "Back up this center";
+    subtitle: "Sealed with the passphrase: without it nobody can use the file, you included.";
+    card-width: 540px;
+    close => {
+        Hub.backup-open = false;
+    }
+    enter => {
+        if (Hub.backup-pass != "" && Hub.backup-pass == Hub.backup-pass2 && !Hub.backup-busy) {
+            Hub.backup();
+        }
+    }
+    Code {
+        text: Hub.backup-file;
+    }
+    Field {
+        label: "Passphrase";
+        hint: "At least 12 characters.";
+        TextField {
+            text <=> Hub.backup-pass;
+            password: true;
+            label: "Passphrase";
+            init => {
+                self.focus();
+            }
+        }
+    }
+    Field {
+        label: "The passphrase again";
+        TextField {
+            text <=> Hub.backup-pass2;
+            password: true;
+            label: "The passphrase again";
+            invalid: Hub.backup-pass2 != "" && Hub.backup-pass2 != Hub.backup-pass;
+            accepted => {
+                Hub.backup();
+            }
+        }
+    }
+    DialogButtons {
+        error: Hub.backup-error;
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.backup-open = false;
+            }
+        }
+        Button {
+            text: "Back up";
+            kind: ButtonKind.primary;
+            busy: Hub.backup-busy;
+            enabled: Hub.backup-pass != "" && Hub.backup-pass == Hub.backup-pass2;
+            clicked => {
+                Hub.backup();
+            }
+        }
+    }
+}
+
+export component HubRestoreDialog inherits Dialog {
+    title: "Restore a backup";
+    subtitle: "Its key, pairings and settings replace this center's. The service restarts for it.";
+    card-width: 540px;
+    close => {
+        Hub.restore-open = false;
+    }
+    enter => {
+        if (Hub.backup-pass != "" && !Hub.backup-busy) {
+            Hub.restore();
+        }
+    }
+    Code {
+        text: Hub.backup-file;
+    }
+    Field {
+        label: "Passphrase";
+        TextField {
+            text <=> Hub.backup-pass;
+            password: true;
+            label: "Passphrase";
+            accepted => {
+                Hub.restore();
+            }
+            init => {
+                self.focus();
+            }
+        }
+    }
+    CheckBox {
+        text: "It is another center's backup";
+        detail: "Replace this center with it: the machines paired with this one pair again.";
+        checked: Hub.restore-replace;
+        toggled(on) => {
+            Hub.restore-replace = on;
+        }
+    }
+    DialogButtons {
+        error: Hub.backup-error;
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.restore-open = false;
+            }
+        }
+        Button {
+            text: "Restore";
+            kind: ButtonKind.danger;
+            busy: Hub.backup-busy;
+            enabled: Hub.backup-pass != "";
+            clicked => {
+                Hub.restore();
+            }
+        }
+    }
+}
+
+// The role change: a backup first, the machines that still trust this one,
+// then the old role goes whole, its data too, and the installer installs the
+// other.
+export component HubRoleDialog inherits Dialog {
+    property <string> old: Hub.role-node ? "node" : "center";
+    property <string> new: Hub.role-node ? "center" : "node";
+    title: "Make this machine a " + root.new;
+    subtitle: Hub.role-step == 0 ? "First a backup: the change deletes this " + root.old + "'s keys, pairings and settings here."
+        : Hub.role-step == 1 ? "Then the " + root.old + " is removed with its data, and the installer installs a " + root.new + "."
+        : "Removing the " + root.old + "…";
+    card-width: 560px;
+    close => {
+        if (!Hub.role-busy) {
+            Hub.role-open = false;
+        }
+    }
+    enter => {
+        if (Hub.role-step == 1 && !Hub.role-busy) {
+            Hub.role-change();
+        }
+    }
+    Reveal {
+        shown: Hub.role-step == 0;
+        Text {
+            text: "The backup is sealed with a passphrase. With it a later " + root.old + " here, or on another machine, takes them up again.";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    Reveal {
+        shown: Hub.role-step == 1;
+        VerticalLayout {
+            spacing: Space.sm;
+            Text {
+                text: Hub.role-trusted.length == 0 ? (Hub.role-node ? "No center is paired with this node." : "No machine is paired with this center.")
+                    : Hub.role-node ? "These centers keep this node paired until it is removed there, in their Nodes:"
+                    : "These machines keep this center paired until it is removed there, in the Nerve app on each, Centers, Unpair:";
+                color: Theme.text;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+            for name in Hub.role-trusted: HorizontalLayout {
+                spacing: Space.sm;
+                padding-left: Space.md;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: Hub.role-node ? @image-url("icons/centers.svg") : @image-url("icons/server.svg");
+                        colorize: Theme.text-muted;
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+    Reveal {
+        shown: Hub.role-step == 2;
+        Text {
+            text: "The system asks for an administrator's password.";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    DialogButtons {
+        error: Hub.role-error;
+        error-title: "The role did not change";
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            enabled: !Hub.role-busy;
+            clicked => {
+                Hub.role-open = false;
+            }
+        }
+        if Hub.role-step == 0: Button {
+            text: "Without a backup";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Hub.role-step = 1;
+            }
+        }
+        if Hub.role-step == 0: Button {
+            text: "Back up…";
+            icon: @image-url("icons/download.svg");
+            kind: ButtonKind.primary;
+            clicked => {
+                Hub.role-backup();
+            }
+        }
+        if Hub.role-step >= 1: Button {
+            text: "Make it a " + root.new;
+            kind: ButtonKind.danger;
+            busy: Hub.role-busy;
+            clicked => {
+                Hub.role-change();
+            }
+        }
+    }
+}

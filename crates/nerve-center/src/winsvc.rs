@@ -279,7 +279,13 @@ pub async fn execute(
             let layout = crate::service::with_release(layout, pre, tag).await?;
             update(&layout, sys, from.as_deref(), out).await
         }
-        Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
+        Cmd::Uninstall {
+            purge,
+            keep_program,
+        } => {
+            nerve_service::set_keep_program(keep_program);
+            uninstall(layout, sys, purge, out)
+        }
         Cmd::Service { cmd: Some(c) } => service(layout, sys, c, out),
         _ => Err("only install, set, service, update and uninstall are service commands".into()),
     }
@@ -334,6 +340,12 @@ pub fn install(
     // Made here, before the service first starts, so that install can say
     // it; one an earlier install made is kept.
     let owner_token = crate::owner::ensure(&layout.state)?.0;
+    // The account whose app (or terminal) installs it may ask it over the
+    // owner pipe, with the owner token (crate::attach).
+    crate::attach::keep_owner_account(
+        &layout.state,
+        crate::attach::installing_account().as_deref(),
+    )?;
     crate::service::settings_file(layout, set, steps.out)?;
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
@@ -522,7 +534,9 @@ pub fn uninstall(
     for gone in crate::service::remove_parts(layout)? {
         steps.did(gone);
     }
-    if layout.bin.exists() {
+    if nerve_service::keeps_program() {
+        steps.did(nerve_service::kept_program(&layout.bin));
+    } else if layout.bin.exists() {
         if sys.remove_program(&layout.bin)? {
             steps.did(format!("removed the program {}", layout.bin.display()));
         } else {
@@ -1155,8 +1169,9 @@ mod tests {
         );
         assert!(out.contains("runs as NT SERVICE\\nerve-center"), "{out}");
         assert!(out.contains("the node port 7443"), "{out}");
+        let web_ui = crate::service::ui_value("");
         assert!(
-            out.contains("  Web UI        http://127.0.0.1:7480\n"),
+            out.contains(&format!("  Web UI        {web_ui}\n")),
             "{out}"
         );
         assert_eq!(sys.service.get(), Some(true));
@@ -1224,7 +1239,7 @@ mod tests {
         assert_eq!(
             changed,
             [(
-                "#NERVE_CENTER_UI=127.0.0.1:7480",
+                &format!("#NERVE_CENTER_UI={}", crate::config::DEFAULT_UI)[..],
                 "NERVE_CENTER_UI=0.0.0.0:7480"
             )]
         );
@@ -1337,10 +1352,17 @@ mod tests {
         assert_eq!(e, NOT_INSTALLED);
         sys.starts.set(false);
         let e = set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut Vec::new()).unwrap_err();
+        // The value before is the platform's default: off on Windows, on at
+        // loopback elsewhere (owner, 2026-11-16).
+        let before = if cfg!(windows) {
+            "off"
+        } else {
+            "127.0.0.1:7480"
+        };
         assert!(
-            e.ends_with(
-                "`nerve-center set ui 127.0.0.1:7480` in an administrator's terminal puts back the value before"
-            ),
+            e.ends_with(&format!(
+                "`nerve-center set ui {before}` in an administrator's terminal puts back the value before"
+            )),
             "{e}"
         );
     }

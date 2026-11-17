@@ -240,6 +240,15 @@ fn no_page_scrolls_a_list_of_its_own() {
         "log",
         "settings",
         "help",
+        // The center role's (#232).
+        "hub_login",
+        "hub_overview",
+        "hub_nodes",
+        "hub_harnesses",
+        "hub_checker",
+        "hub_caps",
+        "hub_watch",
+        "hub_settings",
     ] {
         let source = std::fs::read_to_string(ui.join(format!("{page}.slint"))).unwrap();
         for scroller in ["ScrollBox", "ScrollView", "Flickable", "ListView"] {
