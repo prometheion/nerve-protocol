@@ -15,7 +15,9 @@ proxy, the relay, the audit log, backups, the account commands run as)
 without one; on Linux two things stay with the terminal
 ([settings](#settings)). On Windows the app is the only way to the node:
 there is no `nerve-node` for a terminal there. The window runs the CLI for
-every action, so it has the CLI's checks and audit records.
+every action, so it has the CLI's checks and audit records. The window is
+drawn from `crates/nerve/ui/*.slint`, which the crate `nerve-ui` compiles
+into Rust once for the app and its tests ([building](building.md#build)).
 
 ## One program, two roles
 

@@ -18,7 +18,12 @@ debugger, build with `CARGO_PROFILE_DEV_DEBUG=true`.
 (`crates/nerve`). On Linux it needs the fontconfig headers to build
 (`libfontconfig1-dev` on Debian and Ubuntu), and glibc: it is no static musl
 program. Its UI is in `crates/nerve/ui/`, its colours, type and spaces
-in `ui/theme.slint`. Screenshots of every page, light and dark:
+in `ui/theme.slint`. The crate `crates/nerve-ui` compiles those files into
+Rust and has no tests of its own, so cargo compiles the generated code once,
+as a dependency of the app: one rustc for it takes about 9 GB, and the app's
+crate, built twice side by side for its tests, would take that twice (more
+than a 16 GB runner has). `nerve` re-exports the generated types
+(`nerve::AppWindow`). Screenshots of every page, light and dark:
 
 ```sh
 NERVE_DESKTOP_SHOTS=/tmp/shots cargo test -p nerve --test shots -- --ignored
@@ -222,7 +227,8 @@ out for a crate nobody changed. It fails on:
 
 - a licence that is not in `deny.toml`'s list (licences that fit the Apache
   License 2.0); Slint's Royalty-free licence is allowed for Slint's crates and
-  the desktop app only, and Slint may be linked by the desktop app alone;
+  the desktop app only, and Slint may be linked by the desktop app and its UI
+  crate (`nerve-ui`) alone;
 - an advisory of the RustSec database, an unmaintained or unsound crate too,
   that `deny.toml` does not name with its reason (on a pull request this step
   only warns; on `main` and the weekly run it fails);

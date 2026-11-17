@@ -1,8 +1,4 @@
-//! Compiles the app's Slint files (ui/) into Rust, with the fluent style for
-//! the few std widgets it takes (the scroll bars, AboutSlint): the app draws
-//! its own controls.
-//!
-//! On Windows the program also carries its icon, which Explorer, the Start
+//! On Windows the program carries its icon, which Explorer, the Start
 //! menu entry and the link handler show, and the node's message table of
 //! the Event Log (nerve-node's build.rs does that for nerve-node.exe only):
 //! the installed service runs this program, which is the Event Log's message
@@ -33,9 +29,6 @@ const DELAYED: [&str; 13] = [
 ];
 
 fn main() {
-    let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
-    slint_build::compile_with_config("ui/app.slint", config).expect("the Slint files compile");
-
     println!("cargo:rerun-if-changed=ui/icons/app.ico");
     println!("cargo:rerun-if-changed=../nerve-service/src/eventlog.rs");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
