@@ -33,6 +33,17 @@ export async function settle(times = 3) {
   }
 }
 
+/** Settles until `done` holds, at most `ms` long: work that takes real time, as WebCrypto does, is not done in a fixed number of ticks on a slow machine. */
+export async function until(done: () => boolean, ms = 5000) {
+  const end = Date.now() + ms;
+  while (!done()) {
+    if (Date.now() > end) throw new Error("waited too long");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  }
+}
+
 export async function click(target: Element | null | undefined) {
   if (!target) throw new Error("nothing to click");
   await act(async () => {
