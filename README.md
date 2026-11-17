@@ -23,18 +23,20 @@ Everything else is refused.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/how-it-works-dark.svg">
-  <img src="docs/images/how-it-works-light.svg" alt="The harness talks MCP to the center; the center passes each call through the optional action checker to the nodes on your machines, which dial it over TLS; you set each machine's rules in the app, a web UI or the terminal" width="880">
+  <img src="docs/images/how-it-works-light.svg" alt="The harness talks MCP to the center; the center passes each call through the optional action checker to the nodes on your machines, which dial it over TLS and offer files, commands and capabilities of your own; you set each machine's rules in the app, a web UI or the terminal" width="880">
 </picture>
 
 - **The center** is what your harness talks to: an MCP server with two
   tools, `list` and `execute`. It passes each call to the right machine.
-- **A node** runs on each machine the agent may use. It dials the center,
-  so the machine opens no port, and its own rules decide every call.
+- **A node** runs on each machine the agent may use. It offers files
+  (`fs`) and commands (`exec`), plus capabilities of your own. It dials the
+  center, so the machine opens no port, and its own rules decide every call.
 - **You** set those rules per machine, in the app, a web UI or the terminal.
 
 | Feature | What it does |
 |---|---|
 | **Folders and modes** | In `folder` mode the agent works only in the folders you give it (read, write, run), as an account of its own. `allowlist` allows only what a rule names; `user` runs as you |
+| **Your own capabilities** | Give the agent more than files and commands: a fixed command of yours (**Capabilities** in the app, or `nerve-node cap add`), or a program that attaches its actions, such as a lamp it switches ([capabilities](docs/user/capabilities.md)) |
 | **Rules** | Allow and deny commands, protected paths, sudo for named commands |
 | **Watch and stop** | An audit log of every call on each machine; `panic` ends every link at once |
 | **Action checker** | An optional gate on the center: a blocklist (on by default) and a decision model. It can only refuse ([docs](docs/user/action-checker.md)) |
