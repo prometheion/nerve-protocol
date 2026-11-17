@@ -1352,10 +1352,17 @@ mod tests {
         assert_eq!(e, NOT_INSTALLED);
         sys.starts.set(false);
         let e = set(&l, &sys, Some("ui"), Some("0.0.0.0:7480"), &mut Vec::new()).unwrap_err();
+        // The value before is the platform's default: off on Windows, on at
+        // loopback elsewhere (owner, 2026-11-16).
+        let before = if cfg!(windows) {
+            "off"
+        } else {
+            "127.0.0.1:7480"
+        };
         assert!(
-            e.ends_with(
-                "`nerve-center set ui off` in an administrator's terminal puts back the value before"
-            ),
+            e.ends_with(&format!(
+                "`nerve-center set ui {before}` in an administrator's terminal puts back the value before"
+            )),
             "{e}"
         );
     }
