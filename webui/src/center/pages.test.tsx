@@ -3,7 +3,7 @@
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { center } from "../test/apps";
-import { allByText, button, byText, click, settle, text, type } from "../test/dom";
+import { allByText, button, byText, click, settle, text, type, until } from "../test/dom";
 import { refuse } from "../test/fake";
 import { centerData } from "../test/fixtures";
 import { sudoRuleLine } from "./lines";
@@ -482,7 +482,9 @@ describe("Settings", () => {
     const field = el.querySelector("input[aria-label='Sudo password of dev']") as HTMLInputElement;
     await type(field, "hunter2");
     await click(button(el, "Turn sudo on"));
-    await settle(6);
+    // The seal is real WebCrypto, which takes its time on a slow machine.
+    await until(() => f.to("POST", "/api/nodes/sudo").length > 0);
+    await settle(3);
     expect(f.to("POST", "/api/nodes/sudo/offer").map((c) => c.body)).toEqual([{ id: "n-dev" }]);
     const sent = f.to("POST", "/api/nodes/sudo")[0].body as { id: string; on: boolean; sealed: Record<string, string> };
     expect([sent.id, sent.on, sent.sealed.offer]).toEqual(["n-dev", true, "offer-1"]);
