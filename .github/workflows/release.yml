@@ -81,6 +81,8 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    # A runner that dies is said in time, not after the six hours' default.
+    timeout-minutes: 120
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
       tag: ${{ steps.tag.outputs.tag }}
@@ -192,7 +194,22 @@ jobs:
       # The desktop app (crates/nerve) links the system's fontconfig.
       - name: Build dependencies of the desktop app
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
+      # CI's cargo cache of the same lock file, restored and never saved, so
+      # this job does not build every dependency again.
+      - name: Cargo cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The test programs build at two at a time: the app's test programs each
+      # link Slint, and built side by side they took the runner's memory, which
+      # shut it down mid-build (exit 143, three runs).
+      - run: cargo test --locked --workspace --no-run -j 2
       - run: cargo test --locked --workspace
 
   linux:

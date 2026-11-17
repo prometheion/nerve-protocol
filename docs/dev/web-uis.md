@@ -40,7 +40,7 @@ and `login.html` (the login of both).
   user guide's ref are `<meta>` tags the page reads.
 - **CI.** The `webui` job of `ci.yml` runs `npm ci`, the type check, the
   tests and the build, fails when `webui/dist` is not what the sources build,
-  and runs `npm audit --audit-level=high`.
+  and runs `npm audit` (high for what the pages ship, critical for the build tools).
 
 ### Changing the pages
 
