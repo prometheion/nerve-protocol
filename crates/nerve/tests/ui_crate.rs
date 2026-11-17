@@ -59,3 +59,11 @@ fn the_app_crate_takes_its_ui_from_the_ui_crate() {
     assert!(lib.contains("pub use nerve_ui::*;"));
     assert!(!lib.contains("include_modules"));
 }
+
+/// The architecture page says where the UI is generated, so nobody adds
+/// `include_modules!` to the app's crate again.
+#[test]
+fn the_architecture_page_names_the_ui_crate() {
+    let page = read("../docs/dev/architecture.md");
+    assert!(page.contains("| `crates/nerve-ui` |"));
+}

@@ -206,9 +206,10 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # The test programs build at two at a time: the app's test programs each
-      # link Slint, and built side by side they took the runner's memory, which
-      # shut it down mid-build (exit 143, three runs).
+      # The test programs build at two at a time. This was the fix while the
+      # app's crate compiled Slint's generated code once per test build and they
+      # took the runner's memory side by side (exit 143, three runs); that code
+      # now compiles once, in nerve-ui, and -j 2 stays as a safe margin (#239).
       - run: cargo test --locked --workspace --no-run -j 2
       - run: cargo test --locked --workspace
 
