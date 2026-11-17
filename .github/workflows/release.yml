@@ -63,6 +63,11 @@ env:
   # Pinned, so a release builds the same way again.
   RUST_TOOLCHAIN: "1.99.0"
   CARGO_TERM_COLOR: never
+  # A release run never builds twice, so incremental compilation only fills
+  # the runner: with it the check job's clippy and test builds of the whole
+  # workspace (the app's Slint pages included) ran the runner out of room and
+  # it was shut down mid-build. CI builds the same way (ci.yml).
+  CARGO_INCREMENTAL: "0"
   # The inputs reach the scripts through the environment only, never as text in
   # a script.
   BRANCH: ${{ inputs.branch }}
