@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Let your agent use your machines, only as far as you allow.</b><br>
-  Linux and Windows · x86_64 and aarch64 · Apache 2.0
+  Linux · Windows · x86_64 · aarch64 · Apache 2.0
 </p>
 
 <p align="center">
@@ -15,8 +15,8 @@
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-Apache%202.0-blue"></a>
 </p>
 
-Nerve lets an agent harness read and write files and run commands on its
-owner's machines. On each machine the owner decides what is allowed.
+Nerve Protocol lets an agent harness work on its owner's machines: edit
+files, run commands. On each machine the owner decides what is allowed.
 Everything else is refused.
 
 ## How it works
@@ -34,7 +34,7 @@ Everything else is refused.
 
 | Feature | What it does |
 |---|---|
-| **Folders and modes** | In `folder` mode the agent works only in the folders you give it, with read, write and run rights, as an account of its own. `allowlist` allows only what a rule names; `user` runs as you |
+| **Folders and modes** | In `folder` mode the agent works only in the folders you give it (read, write, run), as an account of its own. `allowlist` allows only what a rule names; `user` runs as you |
 | **Rules** | Allow and deny commands, protected paths, sudo for named commands |
 | **Watch and stop** | An audit log of every call on each machine; `panic` ends every link at once |
 | **Action checker** | An optional gate on the center: a blocklist (on by default) and a decision model. It can only refuse ([docs](docs/user/action-checker.md)) |
@@ -91,8 +91,8 @@ at `http://127.0.0.1:7480`.
 
 ## On a server
 
-For a Linux server without a desktop, and on ARM, take the terminal programs
-`nerve-center` and `nerve-node` (the `aarch64` files on ARM). They need no
+On a Linux server without a desktop, or on ARM (the `aarch64` files), take
+the terminal programs `nerve-center` and `nerve-node`. They need no
 libraries. Everything the app does is a command too
 ([commands](docs/user/commands.md)).
 
@@ -159,7 +159,7 @@ service keeps the agent out ([center](docs/user/center.md)).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md): how to build and check a change, and what a pull request brings.
+See [CONTRIBUTING.md](CONTRIBUTING.md): how to build a change, how to check it, what a pull request brings.
 
 ## Security
 
