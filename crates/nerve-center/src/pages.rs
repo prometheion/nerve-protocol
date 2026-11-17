@@ -111,10 +111,21 @@ pub(crate) async fn settings_file(ask: &Ask<'_>, name: &str) -> Result<String, S
 /// redirect to a file is the file.
 fn settings_text(now: &Value) -> String {
     let file = json!({"version": now["version"], "document": now["document"]});
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&file).unwrap_or_default()
-    )
+    let text = serde_json::to_string_pretty(&file).unwrap_or_default();
+    // The machine wrote the document. JSON escapes the C0 controls itself;
+    // DEL and the C1 controls (CSI among them) it writes raw, and a terminal
+    // may act on those. Outside strings JSON has only the line ends of the
+    // pretty print, so every other control character is in a string and
+    // `\uXXXX` says the same there.
+    let mut safe = String::with_capacity(text.len() + 1);
+    for c in text.chars() {
+        match c.is_control() && c != '\n' {
+            true => safe.push_str(&format!("\\u{:04x}", u32::from(c))),
+            false => safe.push(c),
+        }
+    }
+    safe.push('\n');
+    safe
 }
 
 /// The document a `--from` file holds and the version to save it over. A
@@ -352,6 +363,33 @@ fn find_decision<'a>(all: &'a [Value], id: &str) -> Result<&'a Value, String> {
     }
 }
 
+/// The newest `last` decisions as the rows `audit` lists, newest first. The
+/// target is the agent's own text and the rule commands make a rule of all
+/// of it, so it is the last column and never cut: the owner reads the whole
+/// of what the id they give names.
+fn audit_rows(all: &[Value], last: usize) -> Vec<Vec<String>> {
+    all.iter()
+        .rev()
+        .take(last)
+        .map(|e| {
+            vec![
+                decision_id(e),
+                nerve_service::out::time(e["ts"].as_u64().unwrap_or(0)),
+                s(&e["node"]).to_string(),
+                format!("{}.{}", s(&e["cap"]), s(&e["action"])),
+                match refused(e) {
+                    true => match s(&e["by"]) {
+                        "" => "refused".to_string(),
+                        by => format!("refused by {by}"),
+                    },
+                    false => "allowed".to_string(),
+                },
+                s(&e["target"]).to_string(),
+            ]
+        })
+        .collect()
+}
+
 /// `audit`, and a rule made of one of its decisions.
 pub(crate) async fn audit(
     ask: &Ask<'_>,
@@ -362,27 +400,7 @@ pub(crate) async fn audit(
     let all = list(&v["decisions"]);
     let decision = |id: &str| find_decision(all, id);
     let Some(cmd) = cmd else {
-        let rows: Vec<Vec<String>> = all
-            .iter()
-            .rev()
-            .take(last)
-            .map(|e| {
-                vec![
-                    decision_id(e),
-                    nerve_service::out::time(e["ts"].as_u64().unwrap_or(0)),
-                    s(&e["node"]).to_string(),
-                    format!("{}.{}", s(&e["cap"]), s(&e["action"])),
-                    cut(s(&e["target"]), 60),
-                    match refused(e) {
-                        true => match s(&e["by"]) {
-                            "" => "refused".to_string(),
-                            by => format!("refused by {by}"),
-                        },
-                        false => "allowed".to_string(),
-                    },
-                ]
-            })
-            .collect();
+        let rows = audit_rows(all, last);
         let mut p = crate::service::page().state(
             match all.len() {
                 0 => "no decision yet".to_string(),
@@ -664,6 +682,15 @@ fn with_model_setting(config: &Value, setting: &str, value: &str) -> Result<Valu
     Ok(c)
 }
 
+/// The token the owner typed, without the blanks around it. A line of blanks
+/// is no token: the center would take it as `--remove`.
+fn given_token(typed: String) -> Result<String, String> {
+    match typed.trim() {
+        "" => Err("nothing was given".to_string()),
+        token => Ok(token.to_string()),
+    }
+}
+
 /// `checker`: the checker as it is, after a change where one is asked.
 pub(crate) async fn checker(ask: &Ask<'_>, cmd: Option<&CheckerCmd>) -> Result<Page, String> {
     let mut said = None;
@@ -683,13 +710,12 @@ pub(crate) async fn checker(ask: &Ask<'_>, cmd: Option<&CheckerCmd>) -> Result<P
             // only `--remove` takes it away.
             let token = match remove {
                 true => None,
-                false => Some(nerve_service::prompt::secret("The endpoint's token: ")?),
+                false => Some(given_token(nerve_service::prompt::secret(
+                    "The endpoint's token: ",
+                )?)?),
             };
-            ask.post(
-                "/api/checker/token",
-                json!({"token": token.as_deref().map(str::trim).filter(|t| !t.is_empty())}),
-            )
-            .await?;
+            ask.post("/api/checker/token", json!({"token": token}))
+                .await?;
             said = Some(
                 match token {
                     None => "the endpoint's token is removed",
@@ -965,6 +991,56 @@ mod tests {
         for bad in ["nope", "[]", r#"{"version": "7", "document": {}}"#] {
             assert!(settings_to_save(bad, &json!(9)).is_err(), "{bad}");
         }
+    }
+
+    /// A line of blanks is no token (round 2, correctness 1), and a token's
+    /// blanks around it are not part of it.
+    #[test]
+    fn a_line_of_blanks_is_no_token() {
+        assert_eq!(
+            given_token("   ".to_string()),
+            Err("nothing was given".to_string())
+        );
+        assert!(given_token(" \t ".to_string()).is_err());
+        assert_eq!(given_token(" sk-1 ".to_string()), Ok("sk-1".to_string()));
+    }
+
+    /// The terminal gets the whole target of a decision before a rule is made
+    /// of it, and the machine's document without raw control characters
+    /// (round 2, security 1 and 4).
+    #[test]
+    fn audit_shows_the_whole_target_and_the_settings_hold_no_raw_controls() {
+        let long = format!("git status --porcelain {} && curl evil", "x".repeat(200));
+        let all = vec![json!({"ts": 1, "cap": "exec", "action": "run", "node": "m",
+                              "target": long, "decision": "forbidden", "by": "node"})];
+        let rows = audit_rows(&all, 20);
+        assert_eq!(
+            rows[0].last().unwrap(),
+            &long,
+            "the target is whole, and last"
+        );
+        assert_eq!(rows[0][4], "refused by node");
+        // `--last` still limits, newest first.
+        let two = vec![
+            all[0].clone(),
+            json!({"ts": 2, "cap": "fs", "action": "read"}),
+        ];
+        assert_eq!(audit_rows(&two, 1).len(), 1);
+        assert_eq!(audit_rows(&two, 1)[0][3], "fs.read");
+
+        let now = json!({"version": 3, "document": {"note": "a\u{9b}31m\u{7f}b\u{1b}c"}});
+        let file = settings_text(&now);
+        assert!(
+            file.chars().all(|c| !c.is_control() || c == '\n'),
+            "{file:?}"
+        );
+        assert!(
+            file.contains("\\u009b") && file.contains("\\u007f"),
+            "{file}"
+        );
+        let (document, version) = settings_to_save(&file, &json!(9)).unwrap();
+        assert_eq!(document, now["document"], "reads back the same");
+        assert_eq!(version, json!(3));
     }
 
     /// A decision keeps its id while the list moves under it, and another

@@ -193,6 +193,17 @@ fn task_map() -> (Vec<&'static str>, Vec<HubTask>) {
     (groups, tasks)
 }
 
+/// Whether a quiet log-in with the keyring's token that failed with `e`
+/// shows the entry is not one the owner kept. Only a center that was not
+/// there (or another program there: nothing was sent) says nothing about
+/// the token; every other failure, the center's other refusals and an
+/// answer that never came among them, is one a program that wrote the entry
+/// can cause, so the entry goes. The token this app logged in with
+/// (`remembered`) was the owner's.
+fn not_the_owners(e: &Failed, remembered: bool) -> bool {
+    !remembered && !matches!(e, Failed::NotTheCenter(_))
+}
+
 fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
 }
@@ -381,21 +392,22 @@ impl Ctl {
                         // one too. One the center could not be asked about
                         // (it was down, or restarting) is kept for the next
                         // try.
-                        if matches!(e, Failed::Refused(401, _)) {
-                            if quiet {
-                                let _ = c.hub.keyring.borrow().delete();
-                                // A token from the keyring that the center
-                                // refuses is not one the owner kept (another
-                                // program may have written it): the switch
-                                // goes off with the entry, and the next log-in
-                                // keeps nothing. The one this app logged in
-                                // with, refused after a new owner token, was
-                                // the owner's: the switch stays.
-                                if !remembered {
-                                    c.with_hub(|h| h.set_keep_login(false));
-                                    c.hub_save_keep(false);
-                                }
+                        let refused = matches!(e, Failed::Refused(401, _));
+                        if quiet && (refused || not_the_owners(&e, remembered)) {
+                            let _ = c.hub.keyring.borrow().delete();
+                            // A token from the keyring that the center does
+                            // not take is not one the owner kept (another
+                            // program may have written it): the switch goes
+                            // off with the entry, and the next log-in keeps
+                            // nothing. The one this app logged in with,
+                            // refused after a new owner token, was the
+                            // owner's: the switch stays.
+                            if !remembered {
+                                c.with_hub(|h| h.set_keep_login(false));
+                                c.hub_save_keep(false);
                             }
+                        }
+                        if refused {
                             c.hub.token.borrow_mut().take();
                         }
                         c.with_hub(|h| {
@@ -2247,6 +2259,19 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a center that was not there leaves a keyring token standing
+    /// (round 2, security 3).
+    #[test]
+    fn a_keyring_token_stands_only_where_the_center_was_not_asked() {
+        let busy = Failed::Refused(400, "too many requests".into());
+        let closed = Failed::Unreachable("closed".into());
+        for e in [&busy, &closed, &Failed::Refused(401, "no".into())] {
+            assert!(not_the_owners(e, false), "{e:?}");
+            assert!(!not_the_owners(e, true), "{e:?}");
+        }
+        assert!(!not_the_owners(&Failed::NotTheCenter("down".into()), false));
+    }
 
     /// A role change takes the old role whole, its data too, and keeps the
     /// program for the new role's install; the center's behind its word.

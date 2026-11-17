@@ -291,6 +291,10 @@ const HELLO_MAX: u64 = 64 * 1024;
 /// and room for the rest of the request, so what the web UI saves (a long
 /// rule list, a checker config) saves here too.
 const OWNER_REQUEST: u64 = crate::ui::API_BODY as u64 + 64 * 1024;
+/// How much of a too long request line is read and dropped before the
+/// answer says so (a few times the web UI's body); a client that sends more
+/// gets a broken connection.
+const OWNER_SKIP: u64 = 16 * 1024 * 1024;
 /// How many connections of the account that installed the center it
 /// serves at once, each held for one request of at most a few seconds: the
 /// bound that keeps one account's idle connections from using up the
@@ -436,6 +440,25 @@ async fn attached<S>(
     }
 }
 
+/// Reads and drops the rest of the line `r` is in, up to `max` bytes.
+async fn skip_line<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, max: u64) {
+    use tokio::io::AsyncBufReadExt;
+    let mut left = max;
+    while left > 0 {
+        let buf = match r.fill_buf().await {
+            Ok(buf) if !buf.is_empty() => buf,
+            _ => return,
+        };
+        let n = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        if let Some(end) = buf[..n].iter().position(|&b| b == b'\n') {
+            r.consume(end + 1);
+            return;
+        }
+        r.consume(n);
+        left -= n as u64;
+    }
+}
+
 /// The line that says a full house.
 #[cfg(unix)]
 fn busy() -> String {
@@ -462,25 +485,35 @@ async fn owner_request<R, W>(
     ui: &crate::ui::Ui,
     caller: Caller,
     token: Option<&str>,
-    r: R,
+    mut r: R,
     mut w: W,
 ) where
     R: tokio::io::AsyncBufRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let mut line = String::new();
+    // Bytes, not text: a line cut inside a multi-byte character is too long,
+    // not invalid.
+    let mut line = Vec::new();
     let read = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        r.take(OWNER_REQUEST).read_line(&mut line),
+        (&mut r).take(OWNER_REQUEST).read_until(b'\n', &mut line),
     )
     .await;
     let parsed = match read {
-        // A line cut at the limit is no request, and is said so.
-        Ok(Ok(n)) if n as u64 >= OWNER_REQUEST && !line.ends_with('\n') => {
+        // A line cut at the limit is no request, and is said so. The rest of
+        // it is read and dropped first: the clients write their whole
+        // request before they read, and a center that closed on it would
+        // break their write, so the words never arrive.
+        Ok(Ok(n)) if n as u64 >= OWNER_REQUEST && !line.ends_with(b"\n") => {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                skip_line(&mut r, OWNER_SKIP),
+            )
+            .await;
             Err("the request is longer than the center takes".to_string())
         }
-        Ok(Ok(n)) if n > 0 => serde_json::from_str::<serde_json::Value>(&line)
+        Ok(Ok(n)) if n > 0 => serde_json::from_slice::<serde_json::Value>(&line)
             .map_err(|e| format!("not a request: {e}")),
         Ok(Err(e)) => Err(format!("not a request: {e}")),
         _ => return,
@@ -690,6 +723,26 @@ mod unix {
 #[cfg(unix)]
 pub use unix::{bind, bind_owner, relay, serve};
 
+/// The DACL of the attach pipe and the owner pipe in SDDL (Windows): SYSTEM,
+/// the administrators and `own`, the account the center runs as, which makes
+/// the pipe's instances, and `owner`, the account that installed it, which
+/// may read and write data and nothing else
+/// ([`nerve_service::win::pipe::CLIENT_RIGHTS`]). The app takes the pipe for
+/// the center's by its owner, which every instance shares with the first; an
+/// account that could make an instance of its own would be taken for the
+/// center and be handed the owner token.
+#[cfg(any(windows, test))]
+fn pipe_dacl_text(own: &str, owner: Option<&str>) -> String {
+    let mut dacl = nerve_service::win::pipe::dacl_text(own);
+    if let Some(o) = owner {
+        dacl.push_str(&format!(
+            "(A;;{};;;{o})",
+            nerve_service::win::pipe::CLIENT_RIGHTS
+        ));
+    }
+    dacl
+}
+
 #[cfg(windows)]
 mod windows {
     use std::os::windows::io::AsRawHandle;
@@ -697,8 +750,7 @@ mod windows {
     use std::time::Duration;
 
     use nerve_service::win::pipe::{
-        CLIENT_RIGHTS, Descriptor, PIPE_BUSY, client_identity, dacl_text, foreign_owner, instance,
-        open_identified,
+        Descriptor, PIPE_BUSY, client_identity, foreign_owner, instance, open_identified,
     };
     use nerve_service::win::process::user_of;
     use nerve_service::win::sid::sid_text;
@@ -729,7 +781,7 @@ mod windows {
     /// Makes the installed center's owner pipe `name`: the attach pipe's
     /// accounts, and the account that installed it (`owner`, a SID), which
     /// may read and write on it and make no instance of it
-    /// ([`CLIENT_RIGHTS`]).
+    /// ([`nerve_service::win::pipe::CLIENT_RIGHTS`]).
     pub fn bind_owner(name: &str, owner: Option<&str>) -> Result<Listener, String> {
         make(name, owner)
     }
@@ -754,11 +806,7 @@ mod windows {
         let own = user_of(None)
             .map_err(|e| format!("the pipe {name}: {e}"))
             .and_then(|s| sid_text(&s))?;
-        let mut dacl = dacl_text(&own);
-        if let Some(o) = owner {
-            dacl.push_str(&format!("(A;;{CLIENT_RIGHTS};;;{o})"));
-        }
-        let sd = Descriptor::from_sddl(&dacl)
+        let sd = Descriptor::from_sddl(&super::pipe_dacl_text(&own, owner))
             .map_err(|e| format!("the pipe {name}: cannot make its DACL: {e}"))?;
         let first = instance(name, &sd, true).map_err(|e| match e.kind() {
             std::io::ErrorKind::PermissionDenied => {
@@ -1341,6 +1389,80 @@ mod role_tests {
         let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
         assert!(v.get("ok").is_some(), "{v}");
         let answer = answer_of(&center, &ui, admin, &line(2 * 1024 * 1024)).await;
+        let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(
+            v["error"], "the request is longer than the center takes",
+            "{v}"
+        );
+    }
+
+    /// The owner pipe's DACL: the installing account may read and write data
+    /// and make no instance of the pipe, and no other account or package is
+    /// in it (round 2, security 2; the node's owner pipe has the same test).
+    #[test]
+    fn the_owner_pipe_lets_the_installing_account_make_no_instance() {
+        let d = pipe_dacl_text("S-1-5-21-1-2-3-1057", Some("S-1-5-21-1-2-3-1056"));
+        assert_eq!(
+            d,
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1057)(A;;0x12008b;;;S-1-5-21-1-2-3-1056)"
+        );
+        let entry = d.split(')').find(|e| e.ends_with("1056")).unwrap();
+        assert!(!entry.contains("GA") && !entry.contains("GW"), "{d}");
+        let rights = entry.split(';').nth(2).unwrap().trim_start_matches("0x");
+        // FILE_APPEND_DATA (0x4) is FILE_CREATE_PIPE_INSTANCE on a pipe.
+        assert_eq!(u32::from_str_radix(rights, 16).unwrap() & 0x4, 0, "{d}");
+        for other in ["WD", "BU", "AU", "IU", "AC", "S-1-15-"] {
+            assert!(!d.contains(other), "{other}");
+        }
+        // Without an installing account, only the service's own.
+        assert_eq!(
+            pipe_dacl_text("S-1-5-18", None),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        );
+    }
+
+    /// A request that is too long is answered in words that reach a client
+    /// that writes it whole before it reads, as the app and the CLI do
+    /// (round 2, correctness 2). A real socket: the in-memory pipe of
+    /// `answer_of` ignores what the write does when the center closes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_too_long_request_is_answered_to_a_client_that_writes_it_whole() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let d = tempfile::tempdir().unwrap();
+        let center = center_in(d.path());
+        let ui = crate::ui::Ui::new(&center, None, true);
+        // Two bytes of 'é' straddle the limit's cut, the case of a cut that
+        // is no valid UTF-8.
+        let body = "é".repeat(OWNER_REQUEST as usize);
+        let request = format!(
+            "{OWNER_HELLO}\n{}\n",
+            serde_json::json!({"method": "POST", "path": "/api/pair/status",
+                "body": {"code": body}})
+        );
+        assert!(request.len() as u64 > OWNER_REQUEST + 64 * 1024);
+        let (mine, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let admin = Some(Caller {
+            harness: false,
+            needs_token: false,
+        });
+        tokio::spawn(attached(
+            center.clone(),
+            ui.clone(),
+            theirs,
+            move || admin,
+            None,
+        ));
+        let (mut r, mut w) = mine.into_split();
+        // Written before anything is read, the write must not break.
+        let wrote = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            w.write_all(request.as_bytes()),
+        )
+        .await;
+        assert!(matches!(wrote, Ok(Ok(()))), "the write broke: {wrote:?}");
+        let mut answer = String::new();
+        r.read_to_string(&mut answer).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
         assert_eq!(
             v["error"], "the request is longer than the center takes",

@@ -530,6 +530,36 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
     assert!(hub3.get_logged_in(), "{}", hub3.get_login_error());
     assert_eq!(planted.get().unwrap(), None, "the log-in kept a token");
 
+    // A planted entry the center cannot even read (longer than its first
+    // line takes) is no more the owner's than one it refuses: the switch
+    // goes off with it, and a log-in typed after keeps nothing.
+    let window4 = AppWindow::new().unwrap();
+    let ctl4 = Ctl::attach(
+        &window4,
+        Runner::new(env!("CARGO_BIN_EXE_nerve").into(), None, None),
+        Exec::Inline,
+    );
+    ctl4.set_hub_judge(judge.clone());
+    let huge = Arc::new(keep::Memory::default());
+    huge.set(&"x".repeat(200 * 1024)).unwrap();
+    ctl4.set_hub_keyring(huge.clone());
+    let settings4 = dir.path().join("nerve-app4/settings.json");
+    nerve::settings::save_keep_login(&settings4, true).unwrap();
+    ctl4.keep_settings(settings4.clone());
+    ctl4.center_role(at.clone());
+    let hub4 = window4.global::<Hub>();
+    assert!(!hub4.get_logged_in());
+    assert!(
+        !hub4.get_keep_login(),
+        "the switch stays on for an entry the center cannot answer"
+    );
+    assert!(!nerve::settings::keep_login(&settings4));
+    assert_eq!(huge.get().unwrap(), None);
+    hub4.set_login_token(token.as_str().into());
+    hub4.invoke_login();
+    assert!(hub4.get_logged_in(), "{}", hub4.get_login_error());
+    assert_eq!(huge.get().unwrap(), None, "the log-in kept a token");
+
     // An administrator's command through a real broker: it ends with the
     // command, the center role keeps none (design of #232, 3).
     #[cfg(target_os = "linux")]
