@@ -644,7 +644,7 @@ the web UI off, and it adds no way in for another account.
   holds the state, and on Linux the account that installed the center (the
   uid `sudo` or `pkexec` named, in `owner-account` in the state folder; on
   Windows its SID, which the app's broker names with `--desktop-user-sid`).
-  A program of the owner's, an agent among them, so gets nothing without the
+  So a program of the owner's, an agent among them, gets nothing without the
   token.
 - **Anyone else** is refused.
 

@@ -71,7 +71,7 @@ From the quickest to the most thorough:
 | You want | Do |
 |---|---|
 | Stop one agent session | Web UI or app, Harnesses, Sessions, **End** |
-| Hide a machine from the agent | Web UI or app, Nodes, **Disable** at the machine |
+| Hide a machine from the agent | Web UI or app, Nodes, **Disable** (in the app **Turn off**) at the machine |
 | Stop one center on a machine | `nerve-node center pause lab` |
 | Stop every center on a machine | `nerve-node panic` |
 | End a pairing | `nerve-node center rm lab`, or **Remove** on the center's Nodes page |
