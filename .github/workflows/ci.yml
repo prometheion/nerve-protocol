@@ -69,7 +69,8 @@ jobs:
   # `cargo build` needs no Node (docs/dev/web-uis.md). This job checks the
   # types, runs the page tests and builds them, and fails when the committed
   # build is not what the sources build; npm audit fails on a high or
-  # critical advisory of a dependency.
+  # critical advisory of what the pages ship (react, react-dom), and on a
+  # critical one of the build tools, which never reach a browser.
   webui:
     name: Web UIs (types, tests, build, audit)
     runs-on: ubuntu-24.04
@@ -99,7 +100,10 @@ jobs:
             echo "$untracked"
             exit 1
           fi
-      - run: npm audit --audit-level=high
+      - name: Advisories of what the pages ship
+        run: npm audit --omit=dev --audit-level=high
+      - name: Advisories of the build tools
+        run: npm audit --audit-level=critical
 
   linux:
     name: Linux (fmt, clippy, tests)
