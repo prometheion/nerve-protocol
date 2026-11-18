@@ -1,0 +1,25 @@
+[package]
+name = "nerve-ui"
+description = "The desktop app's Slint UI, compiled into Rust: the window, its pages and dialogs, for the app (crates/nerve) only."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+# Its own code is Apache-2.0 like the workspace; Slint, which it uses, is
+# under Slint's Royalty-free license 2.0, as for the app (crates/nerve/LICENSE.md).
+license.workspace = true
+# Slint's own minimum.
+rust-version = "1.92"
+publish = false
+
+# No tests of its own: a test build of this crate would compile the code
+# Slint generates a second time, and that one rustc takes most of a CI
+# runner's memory. The app's tests (crates/nerve) test the UI.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+slint.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

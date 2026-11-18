@@ -3156,11 +3156,11 @@ dependencies = [
  "nerve-policy",
  "nerve-proto",
  "nerve-transport",
+ "nerve-ui",
  "png",
  "rfd",
  "serde_json",
  "slint",
- "slint-build",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",
@@ -3299,6 +3299,14 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nerve-ui"
+version = "0.1.0"
+dependencies = [
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

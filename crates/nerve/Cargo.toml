@@ -20,6 +20,9 @@ nerve-node.workspace = true
 # The center, whose command line the program runs behind `__center` and
 # by the name `nerve-center` (src/main.rs).
 nerve-center.workspace = true
+# The window, its pages and dialogs, compiled from ui/ (src/lib.rs
+# re-exports them).
+nerve-ui = { path = "../nerve-ui" }
 slint.workspace = true
 serde_json.workspace = true
 
@@ -65,9 +68,6 @@ windows-sys = { workspace = true, features = [
 [target.'cfg(unix)'.dependencies]
 # Asks a node the app started to end, as Ctrl+C would (src/app/node.rs).
 libc.workspace = true
-
-[build-dependencies]
-slint-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

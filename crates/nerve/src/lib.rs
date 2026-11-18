@@ -3,7 +3,9 @@
 //! ([`view`]), so the app has the CLI's checks and audit records and keeps
 //! no settings of its own.
 
-slint::include_modules!();
+/// The window, its pages and dialogs, compiled from ui/ in a crate of
+/// their own (crates/nerve-ui), so that the tests' builds compile them once.
+pub use nerve_ui::*;
 
 pub mod app;
 pub mod broker;
