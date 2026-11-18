@@ -38,6 +38,22 @@ fn words(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
+/// The words a reader reads: a diagram's source (a `mermaid` block) and a
+/// line of HTML (the README's logo, badges and picture) are drawn, not read.
+fn prose_words(text: &str) -> usize {
+    let mut diagram = false;
+    text.lines()
+        .filter(|line| {
+            if line.starts_with("```") {
+                diagram = !diagram && line.trim_end() == "```mermaid";
+                return false;
+            }
+            !diagram && !line.trim_start().starts_with('<')
+        })
+        .map(words)
+        .sum()
+}
+
 /// The cells of a table row: the text between its unescaped `|`s.
 fn cells(row: &str) -> Vec<String> {
     let mut cells = Vec::new();
@@ -60,7 +76,7 @@ fn cells(row: &str) -> Vec<String> {
 /// table cell over [`CELL_WORDS`].
 fn faults(name: &str, text: &str, budget: usize) -> Vec<String> {
     let mut found = Vec::new();
-    let n = words(text);
+    let n = prose_words(text);
     if n * 5 > budget * 6 {
         found.push(format!(
             "{name}: {n} words, over its budget of {budget} by more than 20 %: move the depth to docs/dev/"
@@ -125,6 +141,16 @@ fn the_budget_and_the_cell_limit_are_held() {
     assert_eq!(faults("p", &long, 1000).len(), 1, "{long}");
     let fine = format!("| a | {} |\n", page(40));
     assert!(faults("p", &fine, 1000).is_empty());
+    // A diagram's source and a line of HTML count no words; a code block's do.
+    let drawn = format!(
+        "{}\n```mermaid\n{}\n```\n<p align=\"center\"> {} </p>\n",
+        page(120),
+        page(50),
+        page(50)
+    );
+    assert!(faults("p", &drawn, 100).is_empty(), "{drawn}");
+    let code = format!("{}\n```sh\n{}\n```\n", page(120), page(1));
+    assert_eq!(faults("p", &code, 100).len(), 1, "{code}");
     let piped = format!("| `a \\| b` {} |\n", page(39));
     assert_eq!(cells(&piped).len(), 1, "{:?}", cells(&piped));
     // A table in a code block is no table.

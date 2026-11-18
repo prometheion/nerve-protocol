@@ -117,7 +117,7 @@ or run `nerve-node folder sync`.
 |---|---|
 | `another nerve-center already runs the center in …` | Stop the other center, or use another `--state-dir` |
 | `rename NERVE_… to NERVE_CENTER_… in /etc/nerve-center/center.env` | Rename it there, then `sudo systemctl restart nerve-center` |
-| `401` for a harness | Make a harness token on the Connect a harness card |
+| `401` for a harness | Make a harness token under **Connect a harness** on the Harnesses page (or `nerve-center token new`) |
 
 </details>
 

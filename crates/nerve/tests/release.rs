@@ -523,42 +523,49 @@ fn the_notes_say_the_update_order() {
     assert!(!changelog.contains("### Windows (with 0.1.0)"));
 }
 
-/// The README is the first thing a new user reads (#213): its quick start
-/// covers Linux and Windows, and its desktop app comes as the .deb and the
-/// .rpm first.
+/// The README is the first thing a new user reads (#213): its start covers
+/// Linux and Windows, and the app comes first, before the terminal programs
+/// of a server (owner, 2026-11-18), as the .deb, the .rpm and the Arch
+/// package before the plain program.
 #[test]
 fn the_readme_starts_on_linux_and_windows() {
     let readme = include_str!("../../../README.md");
     let section = |head: &str| {
+        let level = head.split(' ').next().unwrap();
         readme
             .split(&format!("\n{head}\n"))
             .nth(1)
             .unwrap_or_else(|| panic!("README has no {head}"))
-            .split("\n#")
+            .split(&format!("\n{level} "))
             .next()
             .unwrap()
             .to_string()
     };
-    let windows = section("### On Windows");
+    let app = section("## Get started with the app");
     for needed in [
         "nerve-x86_64-windows.exe",
         "A center",
         "A node",
+        "owner token",
+        "### On Windows",
         "HTTP MCP",
         "(docs/user/windows.md)",
+        ".rpm",
+        ".pkg.tar.zst",
     ] {
-        assert!(windows.contains(needed), "{needed}: {windows}");
+        assert!(app.contains(needed), "{needed}: {app}");
     }
+    let deb = app.find(".deb").expect("the .deb");
+    assert!(deb < app.find("nerve-x86_64-linux").unwrap(), "{app}");
+    // The app first, the server's terminal programs after it.
+    let server = section("## On a server");
+    assert!(server.contains("nerve-center-x86_64-linux"), "{server}");
+    assert!(
+        readme.find("## Get started with the app") < readme.find("## On a server"),
+        "{readme}"
+    );
     // No center of its own for Windows (owner, 2026-11-14).
     assert!(!readme.contains("nerve-center-x86_64-windows"), "{readme}");
-    let app = section("### The desktop app");
-    let deb = app.find(".deb").expect("the .deb");
-    assert!(app.contains(".rpm"), "{app}");
-    assert!(deb < app.find("nerve-x86_64-linux").unwrap(), "{app}");
-    let table = readme.split("\n## Quick start\n").next().unwrap();
-    let desktop = table.lines().find(|l| l.starts_with("| `nerve`")).unwrap();
-    assert!(desktop.contains("Windows"), "{desktop}");
-    assert!(readme.contains("owner token"));
 }
 
 /// The Breaks of 0.0.7 tell a user what to change in a script or a state

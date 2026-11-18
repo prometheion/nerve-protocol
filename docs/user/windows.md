@@ -35,9 +35,9 @@ administrator (UAC). You become the node's owner. It installs:
 Then the first-run steps pair your first center, choose its mode and its
 network, and in folder mode give it a first folder.
 
-`nerve-x86_64-windows.exe --silent` installs without a window
-or a question, for scripts and winget. The app asks for your password later,
-where it needs it.
+`nerve-x86_64-windows.exe --silent` installs the node without a window
+or a question, for scripts. The app asks for your password later, where it
+needs it.
 
 ### What it needs
 

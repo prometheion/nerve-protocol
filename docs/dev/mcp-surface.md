@@ -23,7 +23,7 @@ and its action checker may refuse a call first.
 |---|---|
 | stdio | The harness starts `nerve-center` (`--mcp stdio`, the default) |
 | HTTP | `POST /mcp` with `Authorization: Bearer <token>` (`--mcp http`) |
-| Attach | A second `nerve-center --mcp stdio` on the same state folder relays its stdio over `<state>/run/harness.sock` (on Windows a named pipe) to the first one. The owner's commands `pair`, `nodes` and `token` use it too ([the service](service.md#the-owners-commands)) |
+| Attach | A second `nerve-center --mcp stdio` on the same state folder relays its stdio over `<state>/run/harness.sock` (on Windows a named pipe) to the first one. The owner's commands and the app's center pages use the same socket, as one request after an owner's hello ([the service](service.md#the-owners-commands)) |
 
 The server speaks MCP revision `2025-06-18` and accepts `2025-03-26` and
 `2024-11-05` at `initialize`. Its methods are `initialize`,
@@ -97,7 +97,7 @@ conversation the model asks for it, like a skill:
 - The node already cuts its descriptor to what its policy can allow, so
   `list` offers nothing that would be refused.
 - An action whose name or schemas the center cannot handle (protocol.md §6.1)
-  is not offered; the Overview lists it under "Not offered to the agent", with
+  is not offered; the Nodes page lists it under "Not offered to the agent", with
   the reason.
 - Beside a node's own capabilities the center offers its own `job.status`
   and `job.cancel`, `stream.read` and `stream.close`
@@ -247,7 +247,8 @@ center as the [service](service.md#the-center-as-a-service), which keeps its
 folder to its own account.
 
 - Give one with `--harness-token` or `NERVE_CENTER_HARNESS_TOKEN`.
-- Or make more in the web UI: Settings, Harness tokens. The token is shown
+- Or make more in the web UI, on the **Harnesses** page (the app's
+  **Harnesses** page, or `nerve-center token new <label>`). The token is shown
   once. Delete it there to stop it. The one of the settings is listed there
   too; remove it from the settings.
 
@@ -537,7 +538,7 @@ have stops coming, though the subscription stays.
 Each MCP connection is one session. The center tells the machines a session
 used when it ends, and they stop that session's commands; its jobs stop
 and its streams go too.
-End a session by hand in the web UI, Overview, Sessions.
+End a session by hand on the Harnesses page, under Sessions (in the web UI and in the app), or with `nerve-center sessions end <id>`.
 
 Over stdio a session ends with the harness. Over HTTP it ends when the
 harness sends `DELETE /mcp`, which many harnesses never do, after 30 minutes

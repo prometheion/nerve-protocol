@@ -39,6 +39,44 @@ sha256sum --check --ignore-missing SHA256SUMS
 
 On Windows, `Get-FileHash` ([Windows](windows.md#download-and-check)).
 
+## The desktop app
+
+1. Download the package: the `.deb` for Ubuntu and Debian, the `.rpm` for
+   Fedora, the `.pkg.tar.zst` for Arch Linux.
+2. Double-click it, and press **Install** in the software installer (or
+   `sudo apt install ./nerve_<version>_amd64.deb`,
+   `sudo dnf install ./nerve-<version>.x86_64.rpm`,
+   `sudo pacman -U ./nerve-<version>-1-x86_64.pkg.tar.zst`). There is no AUR
+   package.
+3. Open **Nerve** from the application menu. It asks what this machine is,
+   **A node** or **A center**, and installs that role; the system asks for
+   an administrator's password.
+
+The plain program works too: download `nerve-x86_64-linux`,
+switch on **Executable as Program** in its **Properties** (GNOME Files) or
+tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
+press **Install**.
+
+As a node it installs the node as a service, `nerve://` links, so a pairing
+link opens in Nerve, the command `nerve-node` (a link to the app) and, for the
+plain program, **Nerve** in the application menu. You become the node's
+owner. Its first steps pair your first center and choose its mode.
+
+As a center it installs the center as a service, as `nerve-center install`
+does below, and the command `nerve-center` (a link to the app); its last
+step shows the owner token. **Nerve** in the menu then opens the center's
+pages, which ask for that token ([the center in the app](center.md#in-the-app)).
+A role installed in the
+terminal stays that program's: the app does not install the other role
+beside it, and says "Also a node, installed in the terminal" (or a center)
+where one runs.
+After that the app needs the password only for what changes the system
+([rights](../dev/desktop.md#administrator-rights)).
+
+A node installed before with `nerve-node install` keeps its settings,
+pairings and keys; `nerve-node` keeps working. **Settings › App** updates
+and uninstalls the app.
+
 ## The node as a service
 
 ```sh
@@ -108,44 +146,6 @@ The owner needs no `sudo` for these at the machine itself. Over SSH, use
 A machine without systemd runs `nerve-node run` under its own service
 manager. Such a node runs every command as you
 ([a node run by hand](../dev/service.md#a-node-you-run-by-hand)).
-
-## The desktop app
-
-1. Download the package: the `.deb` for Ubuntu and Debian, the `.rpm` for
-   Fedora, the `.pkg.tar.zst` for Arch Linux.
-2. Double-click it, and press **Install** in the software installer (or
-   `sudo apt install ./nerve_<version>_amd64.deb`,
-   `sudo dnf install ./nerve-<version>.x86_64.rpm`,
-   `sudo pacman -U ./nerve-<version>-1-x86_64.pkg.tar.zst`). There is no AUR
-   package.
-3. Open **Nerve** from the application menu. It asks what this machine is,
-   **A node** or **A center**, and installs that role; the system asks for
-   an administrator's password.
-
-The plain program works too: download `nerve-x86_64-linux`,
-switch on **Executable as Program** in its **Properties** (GNOME Files) or
-tick **Is executable** under **Permissions** (KDE Dolphin), open it, and
-press **Install**.
-
-As a node it installs the node as a service, `nerve://` links, so a pairing
-link opens in Nerve, the command `nerve-node` (a link to the app) and, for the
-plain program, **Nerve** in the application menu. You become the node's
-owner. Its first steps pair your first center and choose its mode.
-
-As a center it installs the center as a service, as `nerve-center install`
-does below, and the command `nerve-center` (a link to the app); its last
-step shows the owner token. **Nerve** in the menu then opens the center's
-pages, which ask for that token ([the center in the app](center.md#in-the-app)).
-A role installed in the
-terminal stays that program's: the app does not install the other role
-beside it, and says "Also a node, installed in the terminal" (or a center)
-where one runs.
-After that the app needs the password only for what changes the system
-([rights](../dev/desktop.md#administrator-rights)).
-
-A node installed before with `nerve-node install` keeps its settings,
-pairings and keys; `nerve-node` keeps working. **Settings › App** updates
-and uninstalls the app.
 
 ## The center as a service
 

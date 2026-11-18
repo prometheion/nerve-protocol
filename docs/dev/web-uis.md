@@ -4,6 +4,23 @@ The center's web UI and the node's web UI: the login model, the throttle,
 the `Host` rule, sessions, TLS beyond loopback, and a tour of each page. The
 user guide's [web UIs page](../user/web-uis.md) is the short version.
 
+The web UI is one more GUI beside the desktop app: every function of the
+pages is a command of the CLI too, and the app reaches the center the way the
+CLI does, over its owner channel ([the center's pages in the
+app](desktop.md#the-centers-pages)), not through the web UI. So each is on or
+off by itself:
+
+| Web UI | Linux | Windows |
+|---|---|---|
+| The center's | on, at `127.0.0.1:7480`, for the `nerve-center` program and for the app | off |
+| The node's | on for the `nerve-node` program: its `install` turns it on at `127.0.0.1:7470` and shows the first token once; off in the app | off |
+
+On Windows, and for the node in the app, a switch in the app's Settings turns
+it on (the center's under **This machine**, the node's under **Network**).
+Off, the center serves no web page and no browser login; the loopback API
+stays for the app, which it asks only with the owner token. The center's
+default is `--ui` (`NERVE_CENTER_UI`), `set ui` changes the installed one.
+
 ## How the pages are built
 
 Both web UIs are one frontend project, [`webui/`](../../webui) at the
@@ -68,7 +85,8 @@ happy-dom (the DOM of the page tests) and React's type definitions.
 
 ## The center's web UI
 
-`nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`). Its pages,
+`nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`, on by
+default on Linux, off on Windows). Its pages,
 scripts and styles are built into the program. It loads nothing from another
 host. The installed node, on Linux and Windows, has a web UI of its own:
 [node web UI](#the-nodes-web-ui).
@@ -138,8 +156,10 @@ web UI is off. The file goes when the center stops.
 
 The file says where to look, not who listens: any account may listen on a
 free port while the center is stopped. So before a program of this machine
-sends the owner token there (the desktop app's log-in), it checks that every
-listener a connection could reach is the center's service
+sends the owner token there (the desktop app's **Open the web UI** opens the
+browser only after this check; the app's own log-in goes over the owner
+channel, [with its own peer check](desktop.md#the-centers-pages)), it checks
+that every listener a connection could reach is the center's service
 (`nerve_center::holder`): on Linux a socket of the `nerve-center` account in
 `/proc/net/tcp` and `tcp6`; on Windows a socket of the process the service
 control manager names for `nerve-center`, in the table of TCP listeners. A
@@ -202,6 +222,10 @@ A picked machine's details:
   [action checker](action-checker.md#taint-1) marked it. **End** stops one
   session.
 
+The tokens and the sessions are the two lists of a **Tokens** / **Sessions**
+switch above the list. **Connect a harness** and the harness tokens are on
+this page, not under Settings.
+
 A disabled machine stays paired and connected. The agent's `list` shows it as
 disabled with no capabilities, and calls to it are refused. The agent's calls
 that run there stop, its [jobs](mcp-surface.md#long-calls-become-jobs-1) too, and so
@@ -210,28 +234,13 @@ the agent opens them again with `execute`.
 
 #### Statistics
 
-The numbers of all machines together: time online, links, drops, calls, failed
-calls, then calls per action with the average and the longest time, and errors
-by code. Only counts and times are kept, never content. They are kept for the
-number of days set in Settings.
-
-To see one machine, open the **Machine** list under the page header and pick it.
-The header then names the machine ("Statistics: web-1") and the page shows its
-numbers alone.
-
-- Type in the search field to narrow the list to the entries whose name
-  contains what you typed, in any letter case. The list shows a few entries at a
-  time and scrolls, so it stays short with many machines.
-- With the keyboard: **Down** or **Up** on the list's button opens it, **Down**
-  and **Up** move through the entries (**Page Down** and **Page Up** by six),
-  **Enter** picks the marked one and **Escape** closes the list without a
-  change.
-- **All machines**, the first entry, goes back to the numbers of all machines
-  together. It is filtered like the others: clear the search field to see it.
-
-The list names every paired machine, also one that has no numbers yet. Its
-numbers are then zero. When a picked machine is removed or renamed, the page
-goes back to all machines. The choice lasts until you reload the page.
+The list has **All machines** first and then every paired machine, also one
+that has no numbers yet (its numbers are zero). The details show the picked
+row's numbers: time online, links, drops, calls, failed calls, then calls per
+action with the average and the longest time, and errors by code. Only counts
+and times are kept, never content. They are kept for the number of days set
+in Settings. When a picked machine is removed, the page goes back to all
+machines.
 
 #### Audit
 
@@ -277,7 +286,10 @@ as that machine's.
 
 The center's gate on every call ([action-checker](action-checker.md#the-checker-as-the-owner-sets-it-up)): a
 deterministic blocklist, saved allow rules, and an optional decision model,
-each with its own switch. The page lets you edit the blocklist (add, remove,
+each with its own switch. A switch above the list picks the group it shows:
+**Blocklist**, **Skip the model**, **Decision model** or **Per machine**; the
+two groups of rules have an **Add a rule…** entry, which opens the rule's form
+in the details. The page lets you edit the blocklist (add, remove,
 switch single entries off, reset to the defaults) with entries for every
 machine or one, keep allow rules for every machine or one, set the blocklist
 and the model on or off per machine, switch single entries off for one
@@ -300,7 +312,7 @@ make the change again.
 
 What each machine offers the agent, and the capabilities this center added
 there itself. Pick the machine from the **Machine** list under the page
-header (it works like the one on the Statistics page). A machine whose list
+header. A machine whose list
 does not load says why there, and one removed meanwhile drops out of the
 list.
 
@@ -372,9 +384,9 @@ own [log](logging.md#the-log-as-the-owner-reads-it); it is not the audit page ab
   one file with a JSON object per line. The page shows the latest 500 lines
   that match; the file has all the center kept.
 
-The two lists work like the one on the Statistics page: type in the search
-field to narrow a list, **Down** and **Up** move through it, **Enter** picks
-the marked entry and **Escape** closes it.
+The two lists work as every picker of the web UI: type in the search field
+to narrow a list, **Down** and **Up** move through it, **Enter** picks the
+marked entry and **Escape** closes it.
 
 #### Help
 
@@ -413,14 +425,16 @@ Its sections as a list:
 ## The node's web UI
 
 The installed node, on Linux and Windows, can serve a web UI like the desktop
-app: the same pages, the same look. It is off unless you turn it on, and the
-CLI keeps working beside it. It is part of the service: no other program runs
-for it.
+app: the same pages, the same look. On Linux, `nerve-node install` (the
+program `nerve-node`, not the app) turns it on at `127.0.0.1:7470` and shows
+the first token once, where the node had none; installed by the app, and on
+Windows, it is off until you turn it on. The CLI keeps working beside it. It
+is part of the service: no other program runs for it.
 
 The desktop app turns it on and off in **Settings › Network › Web UI**, makes
 and revokes its tokens there (by `ui` commands), and opens it with **Open**,
 which first checks that the node's service holds the port (as the center's
-log-in does, [where it listens](#where-it-listens)). On Windows, where there
+**Open the web UI** does, [where it listens](#where-it-listens)). On Windows, where there
 is no terminal, that is the way; listening beyond loopback is an
 administrator's step there (`ui on --listen` needs one, and so does a
 change of the setting `ui.listen` to such an address, by `config set`, a

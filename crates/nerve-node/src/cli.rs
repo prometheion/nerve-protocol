@@ -399,7 +399,7 @@ pub enum Cmd {
     },
     /// Turn the node's web UI on or off, and manage its tokens
     ///
-    /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
+    /// Turn the node's web UI on or off, and make the tokens that log in to it. `install` turns it on at loopback on Linux; on Windows, and for a node the app installed, it is off until turned on.
     #[command(args_conflicts_with_subcommands = true)]
     Ui {
         #[command(subcommand)]

@@ -1129,14 +1129,14 @@
           "doc": "web-uis.md",
           "holds": [],
           "line": "Turn the node's web UI on or off, and manage its tokens",
-          "more": "Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).",
+          "more": "Turn the node's web UI on or off, and make the tokens that log in to it. `install` turns it on at loopback on Linux; on Windows, and for a node the app installed, it is off until turned on.",
           "name": "ui",
           "shared_args": [],
           "verbs": [
             {
               "args": [],
               "line": "Turn the node's web UI on or off, and manage its tokens",
-              "more": "Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).",
+              "more": "Turn the node's web UI on or off, and make the tokens that log in to it. `install` turns it on at loopback on Linux; on Windows, and for a node the app installed, it is off until turned on.",
               "name": "ui",
               "usage": "nerve-node ui"
             },

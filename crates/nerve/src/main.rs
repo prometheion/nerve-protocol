@@ -76,7 +76,7 @@ fn main() {
             .collect();
         std::process::exit(nerve::parts::package_root_main(&rest));
     }
-    // A silent install, for winget (#67): no window, no question.
+    // A silent install of the node, for scripts: no window, no question.
     if words == [Some(nerve::parts::SILENT_ARG)] {
         std::process::exit(nerve::parts::silent_install());
     }

@@ -68,7 +68,7 @@ impl Parts for Desktop {
 /// it for one.
 pub const UNINSTALL_ARG: &str = "__desktop-uninstall";
 
-/// The switch of a silent install (winget, #67): `install` without a
+/// The switch of a silent install, for scripts: the node's `install` without a
 /// window and without a question; the app asks for the owner's password
 /// later, where it is needed.
 pub const SILENT_ARG: &str = "--silent";

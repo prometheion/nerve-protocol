@@ -46,8 +46,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The release workflow runs the same three with `--locked --workspace` before it
-builds anything ([releasing](releasing.md)).
+The release workflow does not run them again: it waits until CI has passed on
+the commit it releases ([releasing](releasing.md#what-a-run-does)).
 
 The `CI` workflow (`.github/workflows/ci.yml`) runs on every pull request and on
 every push to `main`, with the toolchain of the release and a cargo cache keyed

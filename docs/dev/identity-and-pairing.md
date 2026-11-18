@@ -77,7 +77,7 @@ live link, signed by the old one, and the old key stays valid for a grace of
 | Key | Started by | Code |
 |---|---|---|
 | The node's key for a center | `nerve-node center rotate-key` | `crates/nerve-node/src/rotate.rs`, `Center::rotate_node_key` |
-| The center's TLS key | the web UI (Settings, Center key) | `Center::rotate_key`, `crate::rotate::center_rotated` on the node |
+| The center's TLS key | the web UI or the app (Settings, Center key), or `nerve-center key rotate` | `Center::rotate_key`, `crate::rotate::center_rotated` on the node |
 
 - The node id stays the one of the first key. The center keeps the node's
   old key beside the new one (`old_key` in `state.json`) until the grace
@@ -109,10 +109,12 @@ Pairing links a machine to a center. Do it once per machine and center.
 
 ### Steps
 
-1. Open the center's web UI (`http://127.0.0.1:7480`). On Overview, press
-   **Pair a machine**. It shows a command and the pairing link, each with a
-   Copy button. With the [desktop app](desktop.md), paste the link there
-   (Centers, **Pair a center**) and skip the command.
+1. Open the center's web UI (`http://127.0.0.1:7480`), or the app's center
+   pages. On Nodes (or the Overview), press **Pair a machine**. It shows a
+   command and the pairing link, each with a Copy button. `sudo nerve-center
+   pair` makes the link in a terminal. With the [desktop app](desktop.md) on
+   the node, paste the link there (Centers, **Pair a center**) and skip the
+   command.
 2. On the machine, as a normal user, run the command it shows, then paste
    the link on the next line:
 
@@ -124,7 +126,7 @@ Pairing links a machine to a center. Do it once per machine and center.
    `-` reads the link from stdin (#198): `center add` waits for your yes
    with the unused code, and as an argument it would sit in the process
    list meanwhile, where another pairing's command could read it and pair
-   a machine of its own. On a Windows machine the card says to open the
+   a machine of its own. On a Windows machine the overlay says to open the
    link there instead: the desktop app takes it from the link handler and
    hands it on at once ([desktop](desktop.md)).
 
@@ -144,7 +146,7 @@ Pairing links a machine to a center. Do it once per machine and center.
    nerve-node status
    ```
 
-   The machine shows as online in the web UI, and the pairing card there
+   The machine shows as online in the web UI, and the pairing overlay there
    closes: the code is used up.
 
 The new pairing starts in mode `folder`, with no folder of yours, and the
@@ -206,7 +208,7 @@ nerve-node center
 | From | How | Effect |
 |---|---|---|
 | The machine | `nerve-node center rm lab` | Tells the center if the link is up, forgets the center and deletes its key |
-| The center | Overview, **Remove** on the machine | Ends the link. The node stops dialling that center and shows it as `revoked` until you run `center rm` |
+| The center | Nodes, **Remove** on the machine (or `nerve-center nodes rm`) | Ends the link. The node stops dialling that center and shows it as `revoked` until you run `center rm` |
 
 To pair again, remove the old pairing on both sides, then make a new link.
 
@@ -267,7 +269,7 @@ the app pairs it under **Centers**, **Pair a center**.
 
 ### Rotate the center's key
 
-In the web UI, Settings, **Center key**, press **Rotate key**. The center makes
+In the web UI or the app, Settings, **Center key**, press **Rotate key** (or run `sudo nerve-center key rotate`). The center makes
 a new key and shows its pin once. It tells every machine that is linked, and
 every machine that links in the next 7 days, signed with the old key; each
 machine then trusts the new key too. The center keeps serving the old key for

@@ -4,8 +4,8 @@
 
 The first release of Nerve for Linux and Windows: `nerve-center` and
 `nerve-node` for Linux x86_64 and aarch64, and the app `nerve`, which is a
-node or a center, for Linux x86_64 (also as a `.deb` and an `.rpm`) and
-Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
+node or a center, for Linux x86_64 (also as a `.deb`, an `.rpm` and an Arch
+package) and Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
 `nerve-node-desktop` first; the `nerve` package replaces it.
 
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
@@ -217,8 +217,9 @@ and every limit is in
   terminal.
 - The node's own web UI, on Linux and Windows, off in the app until it is
   turned on in **Settings › Network › Web UI** (or `nerve-node ui on`), with
-  its tokens. `nerve-node install` turns it on at loopback and shows its
-  first token once.
+  its tokens. On Linux the terminal program's `nerve-node install` turns it
+  on at loopback and shows its first token once; on Windows, and for a node
+  the app installed, it stays off.
   **Open** checks first that the node holds the port, and opens it over TLS
   where the node serves it so. On Windows only the owner's own session gets
   in, and beyond loopback is an administrator's step, also as the setting

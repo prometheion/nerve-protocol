@@ -9,20 +9,21 @@ guide's [install page](../user/install.md) has the commands.
 
 Put `nerve-center` on the machine where your agent harness runs. Put a node
 on every machine the agent may use: `nerve-node`, or on a machine with a
-desktop `nerve`, the node with an app
-([desktop app](desktop.md)). On Windows the node is always the desktop app.
-A center and a node can share a machine.
+desktop `nerve`, the app, which is the node or the center
+([desktop app](desktop.md)). On Windows the node and the center are always
+the desktop app. The terminal programs may share a machine as a center and a
+node; the app installs one role.
 
 ### Download
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has these eight files, seven for Linux and one for Windows, and a
+release has these nine files, eight for Linux and one for Windows, and a
 `SHA256SUMS` file.
 
 | System | Files |
 |---|---|
-| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-x86_64-linux`, which also comes as `nerve_<version>_amd64.deb` and `nerve-<version>.x86_64.rpm` |
+| Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-x86_64-linux`, which also comes as `nerve_<version>_amd64.deb`, `nerve-<version>.x86_64.rpm` and `nerve-<version>-1-x86_64.pkg.tar.zst` (Arch Linux) |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
 | Windows, x86_64 | `nerve-x86_64-windows.exe` |
 
@@ -348,10 +349,13 @@ provider add`. Any other account is refused as it connects. The two
 sockets have places of their own, so attached programs never keep the owner's
 commands out, nor the reverse.
 
-The [web UI](web-uis.md#the-nodes-web-ui) is part of the service too, on Linux, and off
-until the owner runs `nerve-node ui on`: then the running service listens on
-`127.0.0.1:7470` itself, with no change to the unit. `nerve-node ui off`
-stops it at once. Off, the service listens on nothing for it.
+The [web UI](web-uis.md#the-nodes-web-ui) is part of the service too: the
+running service listens on `127.0.0.1:7470` itself, with no change to the
+unit. `install` of the program `nerve-node` turns it on, on Linux, and shows
+the first token once (a reinstall keeps the owner's choice); installed by the
+app, and on Windows, it is off until the owner runs `nerve-node ui on` or
+turns it on in the app. `nerve-node ui off` stops it at once. Off, the
+service listens on nothing for it.
 
 ### Setup
 
@@ -427,9 +431,10 @@ an hour per address) names its tag, and its files come from
 When GitHub refuses (HTTP 403 or 429), `update` says so and names `--tag`.
 `--tag <tag>` takes that release the same way without asking the API. An
 older version is refused; the same version is taken when the program
-differs, so a pre-release gives way to its release. The app from a `.deb` or
-`.rpm` has its package manager install the same version again (`apt-get
-install --reinstall`, `dnf reinstall`).
+differs, so a pre-release gives way to its release. The app from a `.deb`,
+`.rpm` or Arch package has its package manager install the same version again
+(`apt-get install --reinstall`, `dnf reinstall`; `pacman -U` takes it as it
+is).
 
 `update` also writes the service unit, the polkit files and the helper that
 starts and stops the service as the new program has them, for the owner the
@@ -612,27 +617,51 @@ one to it.
 
 `sudo nerve-center service start|stop|restart` runs `systemctl` on the unit
 (on Windows the service control manager); a start waits until the center
-answers. `pair`, `nodes`, `token` and `log` work as they do for a center a
-harness started ([in the terminal](../user/center.md#in-the-terminal)).
+answers. Every function of the web UI's pages is a command too, and they
+work as they do for a center a harness started
+([in the terminal](../user/center.md#in-the-terminal), the list in
+[commands](../user/commands.md#nerve-center)): `pair`, `nodes`
+(`rename`, `settings`, `sudo` too), `token`, `sessions`, `checker`, `caps`,
+`stats`, `audit` (`allow`, `deny`, `skip`), `key rotate|finish`, `config` and
+`log`.
 
-`pair`, `nodes` and `token` ask the running center over its attach socket,
-`run/harness.sock` in the state folder (on Windows its attach pipe), with
-the line `{"role":"owner"}` and then one request as the web UI would send
-it. The center answers it with the web UI's own handler, so the checks,
-limits and log lines are the same; only those requests are taken. This
-way was chosen over the owner token and the web UI's port: it works with
-the web UI off, and it adds no way in for another account. The socket is
-mode 0600 in a 0700 folder and takes root and the center's account; root's
-command first becomes the folder's owner, as `owner-token` does, so it
-follows no link put there. The pipe lets in the center's account, SYSTEM
-and the administrators; an administrator other than the center's account
-may make the owner's requests only, not attach a harness. The command
-checks that the pipe belongs to SYSTEM, the administrators or the
-center's account before it sends anything: for the installed center that
-is the service's account, not the caller's own (an administrator's
-unelevated programs run as it, and one could make the pipe while the
-service is stopped); for a center run by hand it is the caller's. `log` reads `log.jsonl` (and
-`log.jsonl.1`) in the state folder, so it works with the center stopped.
+All but `log` ask the running center over its owner channel: its attach
+socket, `run/harness.sock` in the state folder (on Windows its attach pipe),
+or, for the account that installed the center, the owner socket
+`/run/nerve-center/owner.sock` (on Windows the pipe
+`\\.\pipe\nerve-center-owner`), which the app's center pages use too. The
+caller sends the line `{"role":"owner"}` and then one request as the web UI
+would send it. The center answers it with the web UI's own handler, so the
+checks, limits and log lines are the same; only the web UI's calls
+(`nerve_center::ui::OWNER_CALLS`, which a test checks against the API's
+routes) are taken. This way was chosen over the web UI's port: it works with
+the web UI off, and it adds no way in for another account.
+
+- **Root and an elevated administrator** make the requests as they are.
+- **Any other caller that may open the channel** adds the owner token to its
+  hello, which the center checks as the web UI's login checks it (the same
+  refusals, wait and log lines). That is the center's own account, which
+  holds the state, and on Linux the account that installed the center (the
+  uid `sudo` or `pkexec` named, in `owner-account` in the state folder; on
+  Windows its SID, which the app's broker names with `--desktop-user-sid`).
+  So a program of the owner's, an agent among them, gets nothing without the
+  token.
+- **Anyone else** is refused.
+
+The attach socket is mode 0600 in a 0700 folder and takes root and the
+center's account; root's command first becomes the folder's owner, as
+`owner-token` does, so it follows no link put there. The owner socket is in
+the service's runtime folder, open to every account, and the center checks the
+peer's uid. The attach pipe lets in the center's account, SYSTEM and the
+administrators; the owner pipe also the installing account. An account other
+than the center's, SYSTEM or root makes the owner's requests only, never
+attaches a harness. The command checks that the pipe belongs to SYSTEM, the
+administrators or the center's account before it sends anything: for the
+installed center that is the service's account, not the caller's own (an
+administrator's unelevated programs run as it, and one could make the pipe
+while the service is stopped); for a center run by hand it is the caller's.
+`log` reads `log.jsonl` (and `log.jsonl.1`) in the state folder, so it works
+with the center stopped.
 
 `--json` gives the administrator's commands (`install`, `set`, `update`,
 `uninstall`, `service start|stop|restart`, `owner-token`, `backup`, `restore`)

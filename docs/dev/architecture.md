@@ -34,6 +34,12 @@ allowed, such as a desktop app, that adds capabilities to the node
 ([node-local §7](spec/node-local.md#7-capability-providers)). The node decides
 every call to them by the calling center's policy.
 
+The owner's side of the center works alike: its terminal commands and the
+desktop app's pages ask the running center over its owner channel (a local
+socket or pipe, [service](service.md#the-owners-commands)), answered by the
+web UI's own handlers. Every function of the web UI is a command too, and
+the web UI itself may be off.
+
 ## Design rules
 
 1. **The node is the authority.** The node's policy for the calling center
@@ -68,8 +74,9 @@ every call to them by the calling center's policy.
    results are untrusted content at the center and in the harness. The center
    marks every tool result as device content.
 8. **The node is configured on the machine.** By its owner, with the CLI, the
-   desktop app or the node's web UI (off until the owner turns it on, owner
-   tokens only, one CLI command per change), or by a center whose owner gave
+   desktop app or the node's web UI (on after the `nerve-node` program's
+   install on Linux, off in the app and on Windows until the owner turns it
+   on; owner tokens only, one CLI command per change), or by a center whose owner gave
    it the settings grant ([web UIs](web-uis.md#the-nodes-web-ui)).
 
 ## What the node keeps
