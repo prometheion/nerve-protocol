@@ -7,6 +7,7 @@ members = [
     "crates/nerve-sandbox",
     "crates/nerve-service",
     "crates/nerve-node",
+    "crates/nerve-ui",
     "crates/nerve",
     "crates/nerve-center",
     "crates/nerve-conformance",

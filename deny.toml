@@ -111,9 +111,11 @@ wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
     # Slint's licence covers the desktop app; no other program of Nerve may
-    # link it.
-    { crate = "slint", wrappers = ["nerve"] },
-    { crate = "slint-build", wrappers = ["nerve"] },
+    # link it. The app's UI is a crate of its own (crates/nerve-ui), which
+    # only the app takes.
+    { crate = "slint", wrappers = ["nerve", "nerve-ui"] },
+    { crate = "slint-build", wrappers = ["nerve-ui"] },
+    { crate = "nerve-ui", wrappers = ["nerve"] },
     # TLS is rustls with ring; OpenSSL would be a second, C, TLS stack.
     { crate = "openssl" },
     { crate = "openssl-sys" },

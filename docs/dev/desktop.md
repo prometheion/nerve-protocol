@@ -18,7 +18,9 @@ commands run as) without one; on Linux two things stay with the terminal
 there is no `nerve-node` or `nerve-center` for a terminal there. The node's
 window runs the CLI for every action, so it has the CLI's checks and audit
 records; the center's pages ask the center over its owner channel
-([the center's pages](#the-centers-pages)).
+([the center's pages](#the-centers-pages)). The window is drawn from
+`crates/nerve/ui/*.slint`, which the crate `nerve-ui` compiles into Rust once
+for the app and its tests ([building](building.md#build)).
 
 ## One program, two roles
 
