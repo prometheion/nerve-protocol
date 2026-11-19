@@ -1265,7 +1265,8 @@ grant or not.
   are stored at the account's home as it is.
   While the switch is on, the node ends the pairing's running commands
   (`exec.run` and config capabilities) that have the network, audited as
-  `killed` with `code: "no_network"`. It goes by each command (whether the
+  `killed` with `code: "no_network"`; the call's result has
+  `"killed": "network"` and a `reason`. It goes by each command (whether the
   filter is on it), not by the switch going on, at every config change and
   every 5 s, and also for the commands of a link that dropped and waits for
   its resume, while the node waits to dial again or for the center's

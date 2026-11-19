@@ -208,6 +208,11 @@ mod sys {
         pub fn out_of_memory(&self) -> bool {
             self.job.out_of_memory()
         }
+
+        /// Whether the job refused the command a process at its limit.
+        pub fn processes_hit(&self) -> bool {
+            self.job.processes_hit()
+        }
     }
 
     impl End for Held {

@@ -2116,13 +2116,18 @@ pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this ce
 /// [`NETWORK_NOT_HELD`] on Windows, where the Windows Firewall service keeps
 /// a container off the network ([`container_holds_network`]).
 #[cfg(windows)]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: the Windows Firewall service, which keeps their AppContainer off the network, does not run, so the node runs none of its commands; the owner starts that service, or turns the network back on with `nerve-node network on`";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: the Windows Firewall service, which keeps their AppContainer off the network, does not run, so the node runs none of its commands; the owner starts that service, or turns the network back on in the Nerve app (Permissions, Network)";
 
 /// Why a pairing's commands may not run where its owner turned their
 /// network off and they run as the owner in the mode it is in
 /// ([`Shared::network_refusal`]): nothing holds them back from the owner's
 /// programs, which reach the network for them.
+#[cfg(not(windows))]
 pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node network on`, or has them run as nerve-run: `nerve-node mode folder`, or `nerve-node mode allowlist` without `--as-owner`";
+/// [`NETWORK_AS_OWNER`] on Windows, which has no nerve-node to type: the
+/// Nerve app does it (#213, W3-6).
+#[cfg(windows)]
+pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on in the Nerve app (Permissions, Network), or has them run as nerve-run: folder mode, or allowlist mode not as the owner (Permissions, Mode)";
 
 /// Why a pairing's commands may not run where the owner turned their network
 /// off on a node run by hand, which runs them as its own user
@@ -2174,7 +2179,11 @@ pub fn by_hand_apart(full_rights: bool, landlock_abi: Option<i32>) -> bool {
 /// Why a command on the sudo list does not run while the owner keeps the
 /// pairing's commands off the network: it runs outside the filter that
 /// holds them, with rights that reach past any.
+#[cfg(not(windows))]
 pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on with `nerve-node network on`";
+/// [`NETWORK_SUDO`] on Windows, where the Nerve app turns it on.
+#[cfg(windows)]
+pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on in the Nerve app (Permissions, Network)";
 
 /// Why commands of `folder` mode may not run ([`Shared::unconfined_as`]),
 /// or `None`: `sandbox` says whether the machine confines them, `service`
@@ -6614,6 +6623,17 @@ node_id = "n1"
 #[cfg(test)]
 mod confinement_tests {
     use super::*;
+
+    /// What a refusal for the network switch tells the agent to pass on
+    /// names the place the owner changes it here: on Windows the Nerve app,
+    /// which has no nerve-node to type (#213, W3-6).
+    #[test]
+    fn the_network_refusals_name_the_owner_s_place() {
+        for why in [NETWORK_NOT_HELD, NETWORK_AS_OWNER, NETWORK_SUDO] {
+            assert_eq!(why.contains("nerve-node"), !cfg!(windows), "{why}");
+            assert_eq!(why.contains("the Nerve app"), cfg!(windows), "{why}");
+        }
+    }
 
     /// The refusal for keys in the keyring names what applies on the platform:
     /// the session bus and the installed node's nerve-run on Linux, the

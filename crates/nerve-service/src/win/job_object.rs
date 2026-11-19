@@ -25,7 +25,9 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
-use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_JOB_MEMORY_LIMIT;
+use windows_sys::Win32::System::SystemServices::{
+    JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT,
+};
 use windows_sys::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, INFINITE,
 };
@@ -276,6 +278,16 @@ impl Job {
     pub fn out_of_memory(&self) -> bool {
         self.1.get().is_some_and(Watch::hit)
     }
+
+    /// Whether the job refused a process at its limit of active processes
+    /// (JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT): the command sees only
+    /// Windows' "not enough quota", so the node says which limit it was.
+    pub fn processes_hit(&self) -> bool {
+        self.1.get().is_some_and(|w| {
+            w.hit();
+            w.processes.load(Ordering::SeqCst)
+        })
+    }
 }
 
 /// How many CPUs this machine has, in every processor group: what a job's
@@ -300,6 +312,8 @@ const STOP_KEY: usize = 3;
 pub struct Watch {
     port: usize,
     hit: Arc<AtomicBool>,
+    /// The job refused a process at its limit.
+    processes: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     flushed: Mutex<mpsc::Receiver<()>>,
 }
@@ -333,11 +347,12 @@ impl Watch {
             return Err(e);
         }
         let hit = Arc::new(AtomicBool::new(false));
+        let processes = Arc::new(AtomicBool::new(false));
         let (tx, flushed) = mpsc::channel();
-        let (p, j, h) = (port as usize, job as usize, hit.clone());
+        let (p, j, h, n) = (port as usize, job as usize, hit.clone(), processes.clone());
         let thread = std::thread::Builder::new()
             .name("job memory".into())
-            .spawn(move || listen(p as Handle, j as Handle, &h, &tx));
+            .spawn(move || listen(p as Handle, j as Handle, &h, &n, &tx));
         let thread = match thread {
             Ok(t) => t,
             Err(e) => {
@@ -349,6 +364,7 @@ impl Watch {
         Ok(Watch {
             port: port as usize,
             hit,
+            processes,
             thread: Mutex::new(Some(thread)),
             flushed: Mutex::new(flushed),
         })
@@ -370,9 +386,16 @@ impl Watch {
     }
 }
 
-/// The watch's thread: ends the job at its memory limit until it is asked
-/// to stop.
-fn listen(port: Handle, job: Handle, hit: &AtomicBool, flushed: &mpsc::Sender<()>) {
+/// The watch's thread: ends the job at its memory limit, and notes a
+/// process the job refused at its limit (`processes`), until it is asked to
+/// stop.
+fn listen(
+    port: Handle,
+    job: Handle,
+    hit: &AtomicBool,
+    processes: &AtomicBool,
+    flushed: &mpsc::Sender<()>,
+) {
     loop {
         let (mut message, mut key, mut overlapped) = (0u32, 0usize, std::ptr::null_mut());
         // SAFETY: the port is open until this thread has ended; the three
@@ -389,6 +412,9 @@ fn listen(port: Handle, job: Handle, hit: &AtomicBool, flushed: &mpsc::Sender<()
                 // SAFETY: the job is open until this thread has ended
                 // (Job's drop).
                 unsafe { TerminateJobObject(job, 1) };
+            }
+            JOB_KEY if message == JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT => {
+                processes.store(true, Ordering::SeqCst);
             }
             FLUSH_KEY => {
                 let _ = flushed.send(());

@@ -1247,7 +1247,7 @@ impl Link {
     /// Writes the end of a command that has the network after the owner's
     /// switch went on to the audit log and the node's log.
     fn audit_ended_without_network(&self, target: &str) {
-        let reason = "the owner turned off the network of this center's commands; a command that started with it does not keep it";
+        let reason = NETWORK_ENDED;
         tracing::warn!(
             "center {}: ending its running commands: {reason}",
             self.name
@@ -3717,7 +3717,9 @@ impl Link {
                 separate_held,
             ),
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network))
+            .await
+            .map(|v| guard.said_ended(v));
         drop(open);
         drop(guard);
         if let Ok(v) = &r {
@@ -3935,7 +3937,9 @@ impl Link {
             // test's stand-in for it).
             own_proc: self.shared.own_proc,
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network))
+            .await
+            .map(|v| guard.said_ended(v));
         drop(guard);
         if let Ok(v) = &r {
             self.audit_killed(inv, target, Some(ran), v);
@@ -4345,6 +4349,10 @@ fn settings_result(r: Result<u64, SetError>) -> Result<Value, RpcError> {
     }
 }
 
+/// Why the node ended a running command when the owner's network switch
+/// went on: in the audit, the node's log and the command's result.
+const NETWORK_ENDED: &str = "the owner turned off the network of this center's commands; a command that started with it does not keep it";
+
 /// A link's running `exec.run` calls: what ends each (`E`, the command's
 /// [`exec::Ender`]) and whether the owner's network switch holds it. The
 /// switch is checked against this, not against its own changes: whether a
@@ -4384,6 +4392,11 @@ impl<E: Clone> Commands<E> {
 
     fn get(&self, id: &Id) -> Option<E> {
         lock(&self.by_call).get(id).map(|c| c.ender.clone())
+    }
+
+    /// Whether the owner's network switch ended the call `id`.
+    fn ended(&self, id: &Id) -> bool {
+        lock(&self.by_call).get(id).is_some_and(|c| c.ended)
     }
 
     fn remove(&self, id: &Id) {
@@ -4456,6 +4469,19 @@ impl<'a> Running<'a> {
         self.link.commands.add(self.id.clone(), ender.clone(), held);
         self.link
             .end_commands_without_network("(a command being started)");
+    }
+}
+
+impl Running<'_> {
+    /// The command's result `v`, which says that the owner's network switch
+    /// ended it where it did, as a memory kill says its limit: the agent
+    /// got a bare `"signal": "kill"` (#213, L3-6, W3-6).
+    fn said_ended(&self, mut v: Value) -> Value {
+        if self.link.commands.ended(&self.id) {
+            v["killed"] = "network".into();
+            v["reason"] = NETWORK_ENDED.into();
+        }
+        v
     }
 }
 

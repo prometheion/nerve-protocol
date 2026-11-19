@@ -454,6 +454,15 @@ async fn a_command_running_when_the_network_goes_off_is_ended() {
     let mut others = Vec::new();
     let r = conn.answer(call, WAIT, &mut others).await.unwrap();
     assert!(started.elapsed() < Duration::from_secs(30), "{r:?}");
+    // The agent reads why, as for a memory kill (#213, L3-6).
+    let ended = r.as_ref().unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(ended["killed"], "network", "{ended}");
+    assert!(
+        ended["reason"]
+            .as_str()
+            .is_some_and(|w| w.contains("the owner turned off the network")),
+        "{ended}"
+    );
     let log = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
     assert!(
         log.contains("\"killed\"") && log.contains("no_network"),
