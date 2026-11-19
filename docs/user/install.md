@@ -207,8 +207,9 @@ kernels of these distributions:
 
 ## Update
 
-Update the center first, then the nodes: a node does not link to an older
-center.
+Update the center first, then the nodes: a newer node may use what an older
+center does not know yet. A 0.0.8 center still takes a 0.1.0 node, but that
+is not promised for later versions.
 
 ```sh
 sudo nerve-center update

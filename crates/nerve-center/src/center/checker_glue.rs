@@ -1818,6 +1818,7 @@ mod tests {
     }
 
     /// The log messages of `c` that hold `text`.
+    #[cfg(unix)]
     fn logged(c: &Center, text: &str) -> Vec<String> {
         let v = c.log_json(&nerve_transport::log::Query {
             limit: 200,

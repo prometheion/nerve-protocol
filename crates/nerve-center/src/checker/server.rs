@@ -1482,7 +1482,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     /// A [`Say`] that says nothing, for a test that does not read the log.
     fn quiet() -> Say {
         Arc::new(|_, _| {})
@@ -1551,6 +1550,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn kill_fake(dir: &std::path::Path) {
         let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
         let killed = std::process::Command::new("kill")

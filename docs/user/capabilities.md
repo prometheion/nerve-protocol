@@ -81,7 +81,9 @@ nerve-node provider rm desk            # its capabilities leave at once
 ```
 
 The node checks that the program that attaches under that name runs that
-very file. On the installed node only your own programs and root's attach.
+very file: for a script that is its interpreter, so give a script provider a
+copy of the interpreter of its own, or allowing it lets every script of that
+interpreter attach. On the installed node only your own programs and root's attach.
 A provider runs as you, with your rights; the node sees only the paths its
 actions mark ([providers](../dev/capabilities.md#capability-providers-in-use)).
 

@@ -9,7 +9,7 @@ package) and Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
 `nerve-node-desktop` first; the `nerve` package replaces it.
 
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
-0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
+0.1.0 center, and a 0.1.0 node to a 0.0.8 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
 (Apps & features), install 0.1.0, and pair the node again. The installer
 refuses to install or update over 0.0.6, whose settings 0.1.0 cannot read,
 and the app's **Update** of 0.0.6 puts the old program back.
