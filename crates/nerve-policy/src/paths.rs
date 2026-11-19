@@ -316,13 +316,22 @@ pub fn depth(path: &Path) -> usize {
 /// appended as is. A missing rest may not contain `..`, and a dangling symlink is
 /// refused, since either could point anywhere once created.
 pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
+    resolve_by(path, &canonical, &|p| fs::symlink_metadata(p).map(drop))
+}
+
+/// [`resolve`] with the file system behind `canonical` and `look` (whether
+/// anything, a link too, is at a path). The part that exists is found from
+/// the end of the path back: an account may be refused a look at a folder
+/// on the way and still reach the folders inside it (a pairing's container
+/// on Windows may not look at `C:\t213`, but may write in `C:\t213\project`),
+/// so a look from the root would stop at the first such folder.
+fn resolve_by(
+    path: &Path,
+    canonical: &dyn Fn(&Path) -> io::Result<PathBuf>,
+    look: &dyn Fn(&Path) -> io::Result<()>,
+) -> Result<PathBuf, PathError> {
     if !path.is_absolute() {
         return Err(PathError::Relative);
-    }
-    match canonical(path) {
-        Ok(p) => return Ok(p),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(PathError::Io(e)),
     }
     let comps: Vec<Component> = path.components().collect();
     // The root (and on Windows the drive) always exists.
@@ -330,26 +339,21 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
         .iter()
         .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
         .count();
-    let mut prefix: PathBuf = comps[..roots].iter().collect();
-    let mut existing = roots;
-    // The longest prefix that exists (as anything, symlinks included).
-    for (i, c) in comps.iter().enumerate().skip(roots) {
-        let next = prefix.join(c.as_os_str());
-        match fs::symlink_metadata(&next) {
-            Ok(_) => {
-                prefix = next;
-                existing = i + 1;
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+    // The longest prefix that resolves; one that does not, but is there
+    // (as a link), is a dangling link.
+    let mut existing = comps.len();
+    let real_prefix = loop {
+        let prefix: PathBuf = comps[..existing].iter().collect();
+        match canonical(&prefix) {
+            Ok(p) => break p,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && existing > roots => {}
             Err(e) => return Err(PathError::Io(e)),
         }
-    }
-    let real_prefix = match canonical(&prefix) {
-        Ok(p) => p,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(PathError::DanglingSymlink(prefix));
+        match look(&prefix) {
+            Ok(()) => return Err(PathError::DanglingSymlink(prefix)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => existing -= 1,
+            Err(e) => return Err(PathError::Io(e)),
         }
-        Err(e) => return Err(PathError::Io(e)),
     };
     let mut out = real_prefix;
     for c in &comps[existing..] {
@@ -726,6 +730,44 @@ mod tests {
             assert_eq!(depth(Path::new("/a/b/")), depth(Path::new("/a//b")));
             assert!(depth(Path::new("/a/b/c")) > depth(Path::new("/a/b///")));
         }
+    }
+
+    /// A new file, or a missing one, in a folder an account may reach but
+    /// whose parents it may not look at (a pairing's container on Windows,
+    /// which may not look at the folders above its own): it resolves into
+    /// that folder, and is not refused as the parent's "access denied".
+    /// (Paths from `/` are absolute on Unix only; the walk is the same.)
+    #[cfg(not(windows))]
+    #[test]
+    fn a_missing_path_resolves_below_a_parent_the_account_may_not_look_at() {
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let missing = || io::Error::from(io::ErrorKind::NotFound);
+        let canonical = |p: &Path| match p.to_str().unwrap() {
+            "/" | "/t/project" => Ok(p.to_path_buf()),
+            "/t" => Err(denied()),
+            _ => Err(missing()),
+        };
+        let look = |p: &Path| match p.to_str().unwrap() {
+            "/" | "/t/project" => Ok(()),
+            "/t" => Err(denied()),
+            _ => Err(missing()),
+        };
+        for (path, want) in [
+            ("/t/project/new.txt", "/t/project/new.txt"),
+            ("/t/project/sub/x.txt", "/t/project/sub/x.txt"),
+            ("/t/project", "/t/project"),
+        ] {
+            assert_eq!(
+                resolve_by(Path::new(path), &canonical, &look).unwrap(),
+                Path::new(want),
+                "{path}"
+            );
+        }
+        // A path below the folder it may not look at stays refused.
+        assert!(matches!(
+            resolve_by(Path::new("/t/other/x"), &canonical, &look),
+            Err(PathError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[test]
