@@ -179,6 +179,7 @@ nerve-node cap
 | `on` | Normal: the rules and the mode decide |
 | `off` | Calls are refused with `disabled`; the center sees it as off |
 | `hidden` | The center is not told of it, and calls are refused |
+| `default` | None chosen again: its mode decides (**By mode** in the web UI) |
 
 A switch applies in every mode, to a capability (`fs`) or one action
 (`exec.run`).

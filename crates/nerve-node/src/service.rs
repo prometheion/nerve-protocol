@@ -1764,11 +1764,29 @@ fn uninstall_steps(
         &layout.paths.state_dir,
     ];
     if purge {
+        // The centers are not told: the keys go, so the pairings cannot
+        // come back, and each center keeps the machine as offline until
+        // its owner removes it there (#213, L1-3).
+        let centers: Vec<String> = crate::secrets::stated_config(&layout.paths)
+            .map(|c| c.centers.iter().map(|e| e.name.clone()).collect())
+            .unwrap_or_default();
         for dir in folders {
             if dir.exists() {
                 std::fs::remove_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 steps.did(format!("deleted {}", dir.display()));
             }
+        }
+        if !centers.is_empty() {
+            steps.did(match centers.len() {
+                1 => format!(
+                    "note: the center {} still lists this machine, offline: remove it there (Nodes, Remove)",
+                    centers[0]
+                ),
+                _ => format!(
+                    "note: the centers {} still list this machine, offline: remove it there (Nodes, Remove)",
+                    centers.join(", ")
+                ),
+            });
         }
     } else if folders.iter().any(|d| d.exists()) {
         // Their user goes; a uid nobody has must not own the keys, since
@@ -4402,7 +4420,23 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
-        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        let mut cfg = nerve_policy::NodeConfig::parse(
+            &std::fs::read_to_string(l.paths.config_file()).unwrap_or_default(),
+        )
+        .unwrap();
+        cfg.centers.push(crate::cli::tests::entry("lab"));
+        std::fs::write(l.paths.config_file(), cfg.to_toml()).unwrap();
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        // Its centers are not told, and it says where to remove it (#213,
+        // L1-3).
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains(
+                "note: the center lab still lists this machine, offline: remove it there"
+            ),
+            "{said}"
+        );
         for p in [
             &l.unit,
             &l.bin,

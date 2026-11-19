@@ -23,7 +23,14 @@ type Listing = {
   capabilities?: Row[];
 };
 
-const SWITCH = ["on", "off", "hidden"].map((v) => ({ value: v, label: v[0].toUpperCase() + v.slice(1) }));
+// "By mode" takes a switch back to none chosen, where the mode decides
+// (#213, L2-4: nothing took it back).
+const SWITCH = [
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+  { value: "hidden", label: "Hidden" },
+  { value: "default", label: "By mode" },
+];
 
 /** The capabilities a center's switches cover, from the rows `cap` lists,
  * each with its rows in order: not `settings`, which its grant governs, and
@@ -52,7 +59,7 @@ function CapSwitch({ center, cap, value, reload }: { center: string; cap: string
     <Seg
       label={`${cap} for ${center}`}
       size="sm"
-      value={value}
+      value={value || "default"}
       onChange={async (setting) => {
         await api("POST", "/api/caps/set", { center, cap, setting });
         await reload();

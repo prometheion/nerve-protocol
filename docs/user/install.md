@@ -244,7 +244,8 @@ sudo nerve-center uninstall [--purge]
 ```
 
 `uninstall` takes `nerve-run`'s access off your folders and gives you what
-it made there. Kept folders belong to root, and a later `install` takes them
+it made there. `--purge` deletes the node's keys without telling its
+centers: it names them, and you remove the machine there (**Nodes**). Kept folders belong to root, and a later `install` takes them
 up again. Where the desktop app took over the node, `nerve-node uninstall`
 removes the app too. The app from a package: **Settings › App › Uninstall…**
 removes the node (as a center, **Settings › This machine › Uninstall…**),

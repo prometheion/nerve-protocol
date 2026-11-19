@@ -383,7 +383,6 @@ pub(crate) fn delete(paths: &NodePaths, storage: SecretStorage, key: Key) -> Res
 
 /// The node's `node.toml` as it stands, read without checking its MAC: for
 /// the service, which wrote it, to name its own entries.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn stated_config(paths: &NodePaths) -> Result<NodeConfig, String> {
     let file = paths.config_file();
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;

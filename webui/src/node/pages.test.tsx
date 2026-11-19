@@ -317,6 +317,10 @@ describe("Capabilities", () => {
     const row = allByText(el, /^fs\.read/, ".lrow")[0];
     await click(button(row, "Hidden"));
     expect(f.to("POST", "/api/caps/set")[0].body).toEqual({ center: "home", cap: "fs.read", setting: "hidden" });
+    // Back to none chosen: its mode decides (#213, L2-4).
+    const off = allByText(el, /^fs\.write/, ".lrow")[0];
+    await click(button(off, "By mode"));
+    expect(f.to("POST", "/api/caps/set")[1].body).toEqual({ center: "home", cap: "fs.write", setting: "default" });
   });
 });
 

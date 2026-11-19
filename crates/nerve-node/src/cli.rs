@@ -535,11 +535,11 @@ pub enum RuleCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum CapCmd {
-    /// Set a capability (`fs`) or one action (`exec.run`) to on, off or hidden.
+    /// Set a capability (`fs`) or one action (`exec.run`) to on, off, hidden or default.
     Set {
         /// The capability (`fs`) or action (`exec.run`).
         cap: String,
-        /// `on`, `off` or `hidden`.
+        /// `on`, `off`, `hidden`, or `default` (none chosen: its mode decides).
         setting: String,
         #[command(flatten)]
         center: CenterArg,
@@ -1832,7 +1832,7 @@ pub(crate) mod tests {
         Ok(String::from_utf8(out).unwrap())
     }
 
-    pub(super) fn entry(name: &str) -> nerve_policy::CenterEntry {
+    pub(crate) fn entry(name: &str) -> nerve_policy::CenterEntry {
         nerve_policy::CenterEntry {
             name: name.into(),
             url: "http://127.0.0.1:1".into(),
