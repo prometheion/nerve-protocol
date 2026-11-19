@@ -35,6 +35,15 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 /// app's node.
 pub const ALSO_CENTER: &str = "Also a center, installed in the terminal. The app leaves it as it is: its own program updates it.";
 
+/// The Overview's warning when the folder grants did not all go as the
+/// owner set them (`status`'s `folder_access`): the details are on
+/// Permissions, Folders.
+pub const FOLDERS_NOT_AS_SET: &str = "Some folders do not have the access you set. Permissions › Folders says which, and what to do.";
+
+/// The Overview's warning when a file in a granted folder is another
+/// account's, so the grant could not reach it.
+pub const FOLDERS_LEFT_OUT: &str = "Another account owns a file in your folders, so the commands do not reach it. Permissions › Folders says which.";
+
 /// The Overview's warning while the service runs an older program than the
 /// installed one: a package replaced it and its restart failed.
 pub const OLDER_PROGRAM: &str =
@@ -139,6 +148,13 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         }
         if v["service"]["also_center"] == true {
             warnings.push(ALSO_CENTER.into());
+        }
+        let grants = &v["folder_access"];
+        let any = |k: &str| grants[k].as_array().is_some_and(|a| !a.is_empty());
+        if any("errors") || any("stale") || any("unclosed") {
+            warnings.push(FOLDERS_NOT_AS_SET.into());
+        } else if any("left_out") {
+            warnings.push(FOLDERS_LEFT_OUT.into());
         }
     }
     // An owner with the machine's full rights is said whether the node runs
@@ -798,6 +814,11 @@ pub fn started_after_restore(restored: bool, started: Result<(), &str>) -> Strin
         ),
     }
 }
+
+/// What the app says of a panic while the installed service is stopped:
+/// the lock is saved for its start.
+pub const PANIC_WHILE_STOPPED: &str =
+    "Locked: the node is stopped, and it stays locked when it starts.";
 
 /// What the app says after it stopped the service for a lock the running
 /// node did not take: every link ended with it, and the lock is saved for
@@ -2259,6 +2280,18 @@ mod tests {
         let (st, _) = status(&v, NOW);
         let w: Vec<SharedString> = st.warnings.iter().collect();
         assert_eq!(w, [SharedString::from(ALSO_CENTER)]);
+        // Folders whose grants did not go as set, or that hold a file of
+        // another account, are said on the Overview too (#213 W2-5, W3-2).
+        for (grants, want) in [
+            (json!({"stale": ["C:\\second"]}), FOLDERS_NOT_AS_SET),
+            (json!({"errors": ["C:\\a: denied"]}), FOLDERS_NOT_AS_SET),
+            (json!({"left_out": ["C:\\a\\adm.txt"]}), FOLDERS_LEFT_OUT),
+        ] {
+            let v = json!({"daemon": "running", "locked": false, "centers": [],
+                "folder_access": grants});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(want)], "{grants}");
+        }
     }
 
     /// Giving the settings grant where root is the owner says that the

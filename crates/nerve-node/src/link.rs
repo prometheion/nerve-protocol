@@ -4577,6 +4577,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());

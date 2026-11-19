@@ -140,7 +140,9 @@ it through the service, which runs them as its own account. The node
 refuses every request from a process of a command it runs. A panic the node
 does not take over the pipe makes the app stop the service, which ends
 every link and command, and then save the lock for its next start; the app
-says that the links ended only once the service has stopped. With the node
+says that the links ended only once the service has stopped. With the
+service stopped, the app saves a panic or an unlock with the
+administrator's rights, and starts the service after an unlock. With the node
 stopped, a change goes to the signed `node.toml`, which the node takes when
 it starts; a node that runs without its pipe, or does not answer within 90
 seconds, is an error, so nothing is written behind it. A node that does not
@@ -678,6 +680,15 @@ runs in the container as well, unless the pairing runs as you.
   finished by the next sync (the grant stays marked), and one that could
   not even be marked (the record could not be written) is walked at the
   next start or by **Sync folders**.
+  A file or folder below a grant that neither the owner nor `nerve-run`
+  may change (another account's, such as one an administrator moved in
+  with its own list) is left as it is, and the walk goes on with the rest
+  (`inherit::Walk::left_out`). The grant is on; the record keeps what it
+  left out (`left_out`), which `status`, Permissions › Folders and the
+  Overview name until a walk there finds it changeable (**Sync folders**).
+  A grant taken off with such a file below stays recorded and stale, so it
+  is tried again at every sync and the owner is told to take the file over
+  or delete it; only the pairing whose grant it is stops.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
   none runs): a step by hand only, for a folder the watch leaves alone.

@@ -3240,6 +3240,11 @@ pub mod appcontainer {
         /// profile Windows gives you no right to change the list of a file
         /// another account made (#149).
         pub maker: Option<HANDLE>,
+        /// Told of what below the folder the change may not reach (another
+        /// account's, which the maker does not own either): it is left as it
+        /// is, and the change goes on ([`Walk::left_out`]). `None`: the
+        /// change stops there with the error.
+        pub left_out: Option<inherit::LeftOut<'a>>,
     }
 
     /// Passes the list `next` of the folder open as `f` (at `path`) down
@@ -3274,6 +3279,7 @@ pub mod appcontainer {
                 every,
                 links: below.links,
                 progress: below.progress,
+                left_out: below.left_out,
             },
         )
     }
@@ -3288,6 +3294,7 @@ pub mod appcontainer {
         own: bool,
     ) -> io::Result<Option<FileId>> {
         let below = Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5160,6 +5167,7 @@ mod tests {
                 Ok(inherit::Linked::Capped(cap.clone()))
             };
             let below = appcontainer::Below {
+                left_out: None,
                 links: Some(&mut capped),
                 progress: &mut |_| {},
                 maker: None,
@@ -5221,6 +5229,7 @@ mod tests {
         assert!(!writes(), "capped to read again");
 
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5250,6 +5259,7 @@ mod tests {
         let rw = acl::masks(true, true, false);
         let put = |name: &str, masks: Option<acl::Masks>, whole: bool| {
             let below = appcontainer::Below {
+                left_out: None,
                 links: None,
                 progress: &mut |_| {},
                 maker: None,
@@ -5617,6 +5627,7 @@ mod tests {
         let m = acl::masks(true, true, false);
         let set = |masks: Option<acl::Masks>, whole: bool| {
             let below = appcontainer::Below {
+                left_out: None,
                 links: None,
                 progress: &mut |_| {},
                 maker: None,
@@ -5650,6 +5661,7 @@ mod tests {
         // nothing written.
         let elsewhere = appcontainer::file_id(&outside).unwrap();
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5661,6 +5673,7 @@ mod tests {
         // The recorded folder moved away, nothing at the path: refused too,
         // not taken for nothing there.
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5700,6 +5713,7 @@ mod tests {
         };
         let mut quiet = |_: inherit::Walked| {};
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut quiet,
             maker: None,
@@ -5733,6 +5747,7 @@ mod tests {
         // Granted itself, it carries the cap in place of the grant's
         // entry, which counts as granted.
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut quiet,
             maker: None,
@@ -5751,6 +5766,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut unheld),
             progress: &mut quiet,
             maker: None,
@@ -5921,6 +5937,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut |_| {},
             maker: Some(process),
@@ -5954,6 +5971,7 @@ mod tests {
         // SAFETY: a token of this process' own user.
         assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut |_| {},
             maker: Some(process),
@@ -5965,6 +5983,7 @@ mod tests {
         assert!(walked.seen >= 2, "{walked:?}");
         assert_eq!(walked.changed, 0, "{walked:?}");
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6076,6 +6095,7 @@ mod tests {
         let name = format!("nerve.test.astoken.{}", std::process::id());
         let m = acl::masks(true, true, false);
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6102,6 +6122,7 @@ mod tests {
             assert!(icacls(&top.join(p)).contains("S-1-15-2-"), "{p}");
         }
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6139,6 +6160,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut closed),
             progress: &mut |_| {},
             maker: None,

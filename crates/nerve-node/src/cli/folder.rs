@@ -77,6 +77,11 @@ fn error_about(e: &str, path: &str) -> bool {
 /// should have lost it (`stale`) comes first, as no command of it runs
 /// until it is off; then the grants it did not get whole.
 pub(super) fn grant_lines(g: &Value) -> Vec<String> {
+    grant_lines_on(g, cfg!(windows))
+}
+
+/// [`grant_lines`] as a node on Windows (`windows`) or Linux says them.
+fn grant_lines_on(g: &Value, windows: bool) -> Vec<String> {
     let stale = texts(&g["stale"]);
     let errors = texts(&g["errors"]);
     let mut lines = Vec::new();
@@ -86,14 +91,18 @@ pub(super) fn grant_lines(g: &Value) -> Vec<String> {
             .copied()
             .filter(|e| error_about(e, p))
             .collect();
-        lines.push(format!(
-            "nerve-run keeps its access to {p}, which it should have lost; no command of nerve-run runs until it is taken off{}",
-            if why.is_empty() {
-                String::new()
-            } else {
-                format!(": {}", why.join("; "))
-            }
-        ));
+        let why = if why.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", why.join("; "))
+        };
+        // On Windows a grant is a pairing's: only that pairing's commands
+        // stop while it is left.
+        lines.push(if windows {
+            format!("{p} keeps access it should have lost; the commands of the pairing it was for do not run until it is off{why}")
+        } else {
+            format!("nerve-run keeps its access to {p}, which it should have lost; no command of nerve-run runs until it is taken off{why}")
+        });
     }
     for e in errors
         .iter()
@@ -101,6 +110,11 @@ pub(super) fn grant_lines(g: &Value) -> Vec<String> {
     {
         lines.push(format!("nerve-run did not get every folder: {e}"));
     }
+    lines.extend(
+        texts(&g["left_out"])
+            .into_iter()
+            .map(crate::grants::left_out_line),
+    );
     lines
 }
 
@@ -360,7 +374,9 @@ pub(super) async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Resu
 /// data of `folder sync --json`, beside its lines: the same fields on Linux
 /// and Windows.
 fn report_also(v: &Value) {
-    for k in ["errors", "stale", "unclosed", "failed", "skipped", "walked"] {
+    for k in [
+        "errors", "stale", "unclosed", "failed", "skipped", "left_out", "walked",
+    ] {
         super::json::also(k, v[k].clone());
     }
 }
@@ -372,11 +388,17 @@ fn report_also(v: &Value) {
 fn windows_sync_lines(v: &Value) -> Vec<String> {
     let errors = texts(&v["errors"]);
     let stale = texts(&v["stale"]);
-    if !errors.is_empty() || !stale.is_empty() {
+    let left_out = texts(&v["left_out"]);
+    if !errors.is_empty() || !stale.is_empty() || !left_out.is_empty() {
         let mut lines: Vec<String> = errors.iter().map(|e| format!("warning: {e}")).collect();
         lines.extend(stale.iter().map(|p| {
             format!("warning: {p} keeps a grant its folders no longer give; that pairing's commands do not run until it is taken off")
         }));
+        lines.extend(
+            left_out
+                .into_iter()
+                .map(|p| format!("warning: {}", crate::grants::left_out_line(p))),
+        );
         return lines;
     }
     if v["walked"].as_u64() == Some(0) {
@@ -1091,6 +1113,29 @@ mod tests {
         run(&paths, &["folder", "rm", dir]).unwrap();
         assert!(load(&paths).centers[0].policy.folders.is_empty());
         assert!(run(&paths, &["folder", "rm", dir]).is_err());
+    }
+
+    /// On Windows a grant left on stops only its pairing's commands, and a
+    /// file another account owns is said with what to do (#213 W2-5, W3-2).
+    #[test]
+    fn the_grant_lines_fit_windows() {
+        let g = json!({
+            "stale": ["C:\\second"],
+            "errors": ["C:\\second: cannot take it off"],
+            "left_out": ["C:\\project\\adm2.txt"],
+        });
+        let lines = grant_lines_on(&g, true);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("C:\\second keeps access it should have lost")
+                && !lines[0].contains("no command of nerve-run"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[1],
+            "C:\\project\\adm2.txt: another account owns it, so the commands do not reach it; take it over or move it out, then Sync folders"
+        );
+        assert!(grant_lines_on(&g, false)[0].contains("no command of nerve-run runs"));
     }
 
     /// After a change of the folders the CLI says what the node's sync

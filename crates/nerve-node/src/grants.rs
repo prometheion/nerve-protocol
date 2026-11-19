@@ -97,6 +97,12 @@ pub struct Grant {
     /// other grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<PathBuf>,
+    /// What below the folder its last change could not reach (Windows:
+    /// another account owns it, such as a file an administrator moved in):
+    /// the grant is on for the rest, and these are said until a change
+    /// walks there again (Sync folders).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_out: Vec<PathBuf>,
 }
 
 impl Grant {
@@ -188,6 +194,7 @@ pub fn wanted(cfg: &NodeConfig, paths: &NodePaths, home: &Path, platform: &Platf
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    left_out: Vec::new(),
                     closed_at: None,
                 })
         })
@@ -277,6 +284,9 @@ pub struct Synced {
     pub emptied: Vec<String>,
     /// How many grants were taken off.
     pub removed: usize,
+    /// What a grant that is on could not reach below its folder
+    /// ([`Grant::left_out`]): the commands do not reach it.
+    pub left_out: Vec<PathBuf>,
     /// The containers' profiles a cleanup removed or left ([`remove_all`]).
     pub profiles: Profiles,
 }
@@ -345,10 +355,35 @@ impl Synced {
             errors: self.errors.clone(),
             stale: paths(&self.stale),
             unclosed: paths(&self.unclosed),
+            left_out: self
+                .left_out
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
             walked,
             ..Report::default()
         }
     }
+}
+
+/// The error of a grant taken off `path` except for what is `left` below
+/// it, which another account owns: it keeps the grant until the owner
+/// takes it over or deletes it.
+fn not_taken_off(path: &Path, left: &[PathBuf]) -> String {
+    let names: Vec<String> = left.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "cannot take the grant off {} whole: another account owns {}, so it keeps the grant; take it over or delete it, then Sync folders",
+        path.display(),
+        names.join(", ")
+    )
+}
+
+/// What the owner is told of `path`, a file or folder in a granted folder
+/// that the grant could not reach ([`Report::left_out`]).
+pub fn left_out_line(path: &str) -> String {
+    format!(
+        "{path}: another account owns it, so the commands do not reach it; take it over or move it out, then Sync folders"
+    )
 }
 
 /// What a sync of the folder grants left, said the same on Linux and
@@ -370,6 +405,10 @@ pub struct Report {
     /// Files and folders left as they are (Linux): another account's, with
     /// a second name, or on another file system.
     pub skipped: usize,
+    /// Files and folders in a granted folder that the grant could not
+    /// reach (Windows): another account owns them, so the commands do not
+    /// reach them until the owner takes them over or moves them out.
+    pub left_out: Vec<String>,
     /// How many grants it walked again into every folder below them
     /// besides those that changed: every one (`folder sync`), or those where
     /// something was moved in (crate::grant_watch).
@@ -510,6 +549,11 @@ pub trait Folders {
         whole: bool,
         expect: Option<&str>,
     ) -> io::Result<Option<String>>;
+    /// What the last [`Folders::set`] could not reach below its path, which
+    /// it left as it is: another account's (Windows).
+    fn left_out(&mut self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// What a change of a grant gives a file with more than one name (hard
@@ -1045,6 +1089,7 @@ pub fn in_place(paths: &NodePaths, owner: Option<&crate::service::Account>, last
             &mut Acls {
                 report: &mut |_| {},
                 owner: None,
+                left: Vec::new(),
             },
         )
     }
@@ -1310,6 +1355,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                     shut[i] = true;
                     let id = old.id.clone().or_else(|| look.and_then(|l| l.id));
                     changed |= id != old.id;
+                    out.left_out.extend(old.left_out.iter().cloned());
                     kept.push(Grant { id, ..old.clone() });
                 }
                 Some(i) if unmarkable => {
@@ -1325,7 +1371,18 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                     match folders.set(&old.path, &old.container, None, false, links, false, id) {
                         Ok(_) => {
                             changed = true;
-                            out.removed += 1;
+                            let left_out = folders.left_out();
+                            if left_out.is_empty() {
+                                out.removed += 1;
+                            } else {
+                                out.errors.push(not_taken_off(&old.path, &left_out));
+                                out.stale.push(old.clone());
+                                kept.push(Grant {
+                                    unfinished: true,
+                                    left_out,
+                                    ..old.clone()
+                                });
+                            }
                         }
                         Err(e) if gone(&e) => changed = true,
                         Err(e) => {
@@ -1375,7 +1432,18 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                 match folders.set(&now, &old.container, None, false, links, false, id) {
                     Ok(_) => {
                         changed = true;
-                        out.removed += 1;
+                        let left_out = folders.left_out();
+                        if left_out.is_empty() {
+                            out.removed += 1;
+                        } else {
+                            out.errors.push(not_taken_off(&now, &left_out));
+                            out.stale.push(old.clone());
+                            kept.push(Grant {
+                                unfinished: true,
+                                left_out,
+                                ..old.clone()
+                            });
+                        }
                     }
                     Err(e) if gone(&e) => changed = true,
                     Err(e) => {
@@ -1518,7 +1586,13 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                             if let Some(i) = index(w) {
                                 shut[i] = true;
                             }
-                            kept.push(Grant { id, ..w.clone() })
+                            let left_out = folders.left_out();
+                            out.left_out.extend(left_out.iter().cloned());
+                            kept.push(Grant {
+                                id,
+                                left_out,
+                                ..w.clone()
+                            })
                         }
                         // Nothing there to close.
                         Err(e) if gone(&e) => {
@@ -1648,7 +1722,11 @@ pub fn apply(
             paths,
             walk,
             want,
-            &mut Acls { report, owner },
+            &mut Acls {
+                report,
+                owner,
+                left: Vec::new(),
+            },
             &mut WinProfiles,
         );
         synced.platform = used.take();
@@ -1705,6 +1783,7 @@ pub fn apply_outside(
             &mut Acls {
                 report,
                 owner: None,
+                left: Vec::new(),
             },
             &mut WinProfiles,
         )
@@ -1985,6 +2064,7 @@ pub fn remove_all(paths: &NodePaths, node_ids: &[String], report: &mut dyn FnMut
             &mut Acls {
                 report,
                 owner: None,
+                left: Vec::new(),
             },
             &mut WinProfiles,
         )
@@ -2163,6 +2243,8 @@ fn masks_of(access: Access) -> nerve_sandbox::acl::Masks {
 struct Acls<'a> {
     report: &'a mut dyn FnMut(&str),
     owner: Option<&'a crate::service::Account>,
+    /// What the last change left out ([`Folders::left_out`]).
+    left: Vec<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -2289,15 +2371,25 @@ impl Folders for Acls<'_> {
         };
         // The object changed, as its handle names it: the path may lead
         // elsewhere by now.
+        // A file or folder below that neither the owner nor the command
+        // account may change (an administrator's, moved in) is left as it
+        // is: the rest gets the change, and the sync says which it left.
+        let mut left = Vec::new();
         let id = paced(self.report, doing, path, &Instant::now, |progress| {
             let below = appcontainer::Below {
                 links: Some(&mut check),
                 progress,
                 maker: maker.as_ref().map(|t| t.raw()),
+                left_out: Some(&mut |p: &Path| left.push(p.to_path_buf())),
             };
             appcontainer::set_below(path, container, masks, own, whole, expect, below)
-        })?;
-        Ok(id.map(|i| i.to_string()))
+        });
+        self.left = left;
+        Ok(id?.map(|i| i.to_string()))
+    }
+
+    fn left_out(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.left)
     }
 }
 
@@ -2311,6 +2403,7 @@ fn windows_sync(paths: &NodePaths, want: &[Grant], report: &mut dyn FnMut(&str))
         &mut Acls {
             report,
             owner: None,
+            left: Vec::new(),
         },
         &mut WinProfiles,
     )
@@ -2960,6 +3053,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         }
     }
@@ -3700,6 +3794,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             ..g.clone()
         }
     }
@@ -3756,6 +3851,11 @@ mod tests {
         /// every folder below (`whole`).
         changes: Vec<(PathBuf, bool)>,
         next: usize,
+        /// Below a granted path, what another account owns: a change there
+        /// leaves it out ([`Folders::left_out`]).
+        owned: Vec<(PathBuf, PathBuf)>,
+        /// What the last change left out.
+        left: Vec<PathBuf>,
     }
 
     impl Fake {
@@ -3815,6 +3915,7 @@ mod tests {
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    left_out: Vec::new(),
                     closed_at: None,
                 })
                 .collect();
@@ -4083,8 +4184,67 @@ mod tests {
                 self.on.push((id.clone(), container.into(), a));
             }
             self.pass_to_files(path, links);
+            self.left = self
+                .owned
+                .iter()
+                .filter(|(at, _)| at == path)
+                .map(|(_, p)| p.clone())
+                .collect();
             Ok(Some(id))
         }
+        fn left_out(&mut self) -> Vec<PathBuf> {
+            std::mem::take(&mut self.left)
+        }
+    }
+
+    /// A file below a granted folder that another account owns (an
+    /// administrator moved it in) is left out: the grant is on for the
+    /// rest with no error, so other folders' changes go on, and the file is
+    /// said at every sync until a Sync folders walks there again and finds
+    /// it fixed (#213 W3-2). A grant taken off with such a file below stays
+    /// stale and is tried again, with what to do (#213 W2-5).
+    #[test]
+    fn what_another_account_owns_is_left_out_and_said() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/a");
+        f.make("/w/b");
+        f.owned.push(("/w/a".into(), "/w/a/adm.txt".into()));
+        let (a, b) = (grant("c1", "/w/a", "rwx"), grant("c1", "/w/b", "r"));
+        let s = sync(&file, std::slice::from_ref(&a), &mut f);
+        assert!(s.errors.is_empty() && s.stale.is_empty(), "{s:?}");
+        assert_eq!(s.left_out, [Path::new("/w/a/adm.txt")]);
+        assert_eq!(s.report(0).left_out, ["/w/a/adm.txt"]);
+        assert_eq!(f.all(), std::slice::from_ref(&a));
+        // Another folder's change goes on, and the file is still said.
+        let s = sync(&file, &[a.clone(), b.clone()], &mut f);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(f.all(), [a.clone(), b.clone()]);
+        assert_eq!(s.left_out, [Path::new("/w/a/adm.txt")]);
+        // Taken over, and walked again: no longer said.
+        f.owned.clear();
+        walk_every(&file).unwrap();
+        let s = sync(&file, &[a.clone(), b.clone()], &mut f);
+        assert!(s.left_out.is_empty() && s.errors.is_empty(), "{s:?}");
+
+        // Taken off with such a file below: stale, with what to do.
+        f.owned.push(("/w/b".into(), "/w/b/adm.ps1".into()));
+        let s = sync(&file, std::slice::from_ref(&a), &mut f);
+        assert_eq!(
+            s.stale.iter().map(plain).collect::<Vec<_>>(),
+            std::slice::from_ref(&b)
+        );
+        assert!(
+            s.errors[0].contains("another account owns /w/b/adm.ps1")
+                && s.errors[0].contains("take it over or delete it, then Sync folders"),
+            "{s:?}"
+        );
+        assert_eq!(recorded(&file), [a.clone(), b.clone()]);
+        f.owned.clear();
+        let s = sync(&file, std::slice::from_ref(&a), &mut f);
+        assert!(s.stale.is_empty() && s.errors.is_empty(), "{s:?}");
+        assert_eq!(recorded(&file), [a]);
     }
 
     /// Folders added get their grant, one removed loses it, a changed flag
@@ -6375,6 +6535,7 @@ mod tests {
                 id: None,
                 unfinished: false,
                 toward: Vec::new(),
+                left_out: Vec::new(),
                 closed_at: None,
             }),
             "{want:?}"
@@ -6394,6 +6555,7 @@ mod tests {
                 id: None,
                 unfinished: false,
                 toward: Vec::new(),
+                left_out: Vec::new(),
                 closed_at: None,
             }]
         );
@@ -6946,6 +7108,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         let sorted = |mut v: Vec<Grant>| {
@@ -7017,6 +7180,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         let sorted = |mut v: Vec<Grant>| {
@@ -7180,6 +7344,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         }];
         let s = windows_sync(&paths, &want, &mut |_| {});
@@ -7502,6 +7667,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         }];
         let s = windows_sync(&paths, &want, &mut |_| {});

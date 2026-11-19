@@ -2142,6 +2142,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         let left = Synced {
@@ -2483,6 +2484,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         let synced = Synced {

@@ -26,13 +26,14 @@ impl Ctl {
         }
         self.command(vec!["status".into()], None, |c, answer| {
             c.asking_service.set(false);
-            if let Ok(v) = answer.map(|v| v["service"].clone()) {
-                let state = v["state"].as_str().unwrap_or("none").to_string();
-                c.with_store(|s| {
-                    s.set_service_state(state.into());
-                    s.set_service_enabled(v["enabled"] == true);
-                });
-            }
+            // A failed answer leaves the state unknown, not as it was: a
+            // stopped service shown as running offers no Start.
+            let v = answer.map(|v| v["service"].clone()).unwrap_or_default();
+            let state = v["state"].as_str().unwrap_or("").to_string();
+            c.with_store(|s| {
+                s.set_service_state(state.into());
+                s.set_service_enabled(v["enabled"] == true);
+            });
         });
     }
 

@@ -115,10 +115,16 @@ impl Ctl {
             .with_perm(|p| p.get_folders().iter().map(|f| f.path.to_string()).collect())
             .unwrap_or_default();
         let (stale, errors) = if account == run {
-            (
-                stale,
-                view::grant_errors_for(&errors, &folders, &nerve_node::paths::home_dir()),
-            )
+            let mut errors =
+                view::grant_errors_for(&errors, &folders, &nerve_node::paths::home_dir());
+            // What another account owns in a granted folder, which the
+            // commands do not reach (Windows).
+            errors.extend(
+                texts(&st["folder_access"]["left_out"])
+                    .iter()
+                    .map(|p| nerve_node::grants::left_out_line(p)),
+            );
+            (stale, errors)
         } else {
             (Vec::new(), Vec::new())
         };

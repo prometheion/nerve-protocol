@@ -380,7 +380,11 @@ changes when it starts; the first-run steps start it at their end.
 **Panic** locks the running node at once and ends every link and command.
 When the node does not take the lock, the app stops the service, says that
 the links ended only once it has stopped, and saves the lock for its next
-start.
+start. With the service stopped already, **Panic** saves the lock and
+**Unlock** saves the unlock with the administrator's rights (an owner's
+change goes to the pipe a stopped service does not have), and **Unlock**
+then starts the service. A status the app cannot read leaves the
+Overview's cards unknown or stopped, never as they were.
 
 ## The window
 

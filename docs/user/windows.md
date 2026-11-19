@@ -85,6 +85,13 @@ The watch costs:
 - An external disk that holds a granted folder cannot be removed safely.
   A stick or card is not watched.
 
+A file another account owns, such as one an administrator moved in, keeps
+its own permissions: the node cannot change them, so commands do not reach
+it, and the rest of the folder gets its access all the same. **Permissions ›
+Folders** names such a file. Take it over (its **Properties › Security ›
+Advanced**, Owner) or move it out, then **Sync folders**. When a grant goes
+(a folder or a pairing removed), such a file keeps it until you do the same.
+
 ## A capability's argument
 
 A word `{field}` of a [capability of your own](capabilities.md) is one whole

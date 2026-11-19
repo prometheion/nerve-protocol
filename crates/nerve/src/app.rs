@@ -772,10 +772,15 @@ impl Ctl {
         // centers: they are not known, not none (so no first-run steps, and
         // the pages keep the centers they have).
         let answer = match answer {
-            Ok(v) if v["unread"].is_string() => Err(format!(
-                "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
-                v["unread"].as_str().unwrap_or_default()
-            )),
+            Ok(v) if v["unread"].is_string() => {
+                // The node card says it is stopped, not what it said last.
+                let (stopped, _) = view::status(&v, now_ms());
+                self.with_store(|s| s.set_status(stopped));
+                Err(format!(
+                    "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
+                    v["unread"].as_str().unwrap_or_default()
+                ))
+            }
             other => other,
         };
         match answer {
@@ -1145,8 +1150,23 @@ impl Ctl {
     /// once the node took the lock or stopped.
     fn lock(self: &Rc<Self>, lock: bool) {
         if !lock {
-            let said = "Unlocked: the node links and works again.";
-            self.change("node", vec!["unlock".into()], said.into());
+            self.unlock();
+            return;
+        }
+        // A stopped service has no node to take the lock: it is saved for
+        // its start, with the administrator's rights.
+        if self.service.get()
+            && self.with_store(|s| s.get_service_state()).as_deref() == Some("stopped")
+        {
+            self.with_store(|s| s.set_busy("node".into()));
+            self.command_with_rights(vec!["panic".into()], None, |c, saved| {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                match saved {
+                    Ok(_) => c.toast(view::PANIC_WHILE_STOPPED, Tone::Warn),
+                    Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
+                }
+                c.refresh_status();
+            });
             return;
         }
         self.with_store(|s| s.set_busy("node".into()));
@@ -1157,6 +1177,59 @@ impl Ctl {
                 Err(e) if c.service.get() => c.stop_for_panic(e),
                 Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
             }
+            c.refresh_status();
+        });
+    }
+
+    /// Unlock. The node takes it at once; a stopped installed service takes
+    /// no change of its owner, so the app saves it with the administrator's
+    /// rights and starts the service: the node links and works again.
+    fn unlock(self: &Rc<Self>) {
+        const SAID: &str = "Unlocked: the node links and works again.";
+        self.with_store(|s| s.set_busy("node".into()));
+        self.command(vec!["unlock".into()], None, |c, answer| match answer {
+            Ok(v) if !(c.service.get() && waits_for_start(&v)) => {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                c.done(&v, SAID);
+                c.refresh_status();
+            }
+            Ok(_) => c.start_unlocked(),
+            Err(_) if c.service.get() => {
+                c.command_with_rights(vec!["unlock".into()], None, |c, saved| match saved {
+                    Ok(_) => c.start_unlocked(),
+                    Err(e) => {
+                        c.with_store(|s| s.set_busy(SharedString::new()));
+                        c.toast(format!("Not unlocked: {e}"), Tone::Danger);
+                        c.refresh_status();
+                    }
+                });
+            }
+            Err(e) => {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                c.toast(e, Tone::Danger);
+                c.refresh_status();
+            }
+        });
+    }
+
+    /// The unlock is saved for the stopped service's start: it starts now.
+    fn start_unlocked(self: &Rc<Self>) {
+        let start = vec!["service".into(), "start".into()];
+        self.command(start, None, |c, started| {
+            c.with_store(|s| s.set_busy(SharedString::new()));
+            match started {
+                Ok(_) => c.toast(
+                    "Unlocked: the service started, and the node links and works again.",
+                    Tone::Ok,
+                ),
+                Err(e) => c.toast(
+                    format!(
+                        "Unlocked, but the service did not start: {e}. Start it on the Overview."
+                    ),
+                    Tone::Warn,
+                ),
+            }
+            c.refresh_service();
             c.refresh_status();
         });
     }

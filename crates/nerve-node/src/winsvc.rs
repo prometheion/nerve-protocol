@@ -2077,6 +2077,7 @@ pub(crate) mod tests {
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    left_out: Vec::new(),
                     closed_at: None,
                 })
                 .collect();
