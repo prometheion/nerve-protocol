@@ -1456,10 +1456,13 @@ fn owner_of_install(
         }
     };
     if account.uid == 0 {
-        steps.did(format!(
-            "Warning: root is the owner of the node, as you confirmed: {ROOT_OWNER_MEANS}.{}",
-            granted_note(&settings_granted(&layout.paths))
-        ));
+        // In the words of `status`, whose page closes the install: the
+        // warning is said once there (#213, L3-8: twice, in two wordings).
+        steps.did(format!("Warning: {}", crate::owner::ROOT_OWNER_NOTE));
+        let granted = granted_note(&settings_granted(&layout.paths));
+        if !granted.is_empty() {
+            steps.did(format!("Warning: {}", granted.trim()));
+        }
     } else {
         steps.did(format!(
             "{name} is the owner of the node: `{}` changes its settings and starts and stops it without sudo, and user mode runs commands as {name}",
@@ -1469,16 +1472,15 @@ fn owner_of_install(
     // nerve-run is another account: without Landlock only that keeps it
     // from the owner's files, so it reads in the owner's home what others
     // may, once it may enter the home. With Landlock nothing is said.
+    // One warning of it: the home's where it is open, which `status`
+    // says in the same words, else what a folder given there would leave
+    // (#213, L3-8: both, saying it twice).
     #[cfg(unix)]
     if !sys.landlock() {
-        steps.did(format!(
-            "Warning: {}",
-            crate::account::no_landlock_warning()
-        ));
         let open = crate::account::home_open(&account.home);
-        if let Some(w) = crate::account::home_warning(&account.home, open, &[]) {
-            steps.did(format!("Warning: {w}"));
-        }
+        let w = crate::account::home_warning(&account.home, open, &[])
+            .unwrap_or_else(crate::account::no_landlock_warning);
+        steps.did(format!("Warning: {w}"));
     }
     // A Landlock that does not hold all the node asks for is named, with
     // what it leaves.
@@ -3006,11 +3008,10 @@ pub(crate) mod tests {
             install(&l, &sys, &exe, "alice", &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("alice is the owner of the node"), "{out}");
-            assert_eq!(
-                out.contains(
-                    "this kernel has no Landlock, so the commands of nerve-run run without it"
-                ),
-                !landlock,
+            // The open home is said, and only it: the general warning
+            // would say the same again (#213, L3-8).
+            assert!(
+                !out.contains("this kernel has no Landlock, so the commands of nerve-run"),
                 "{out}"
             );
             assert_eq!(
@@ -3022,6 +3023,21 @@ pub(crate) mod tests {
                 "{out}"
             );
             assert!(landlock || out.contains("umask 027"), "{out}");
+            // A closed home: what a folder given there would leave open.
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o750)).unwrap();
+            let l = layout(&d.path().join("closed"));
+            let mut out = Vec::new();
+            install(&l, &sys, &exe, "alice", &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(
+                out.contains("this kernel has no Landlock, so the commands of nerve-run"),
+                !landlock,
+                "{out}"
+            );
+            assert!(
+                !out.contains("Without Landlock, nerve-run can read"),
+                "{out}"
+            );
         }
     }
 
@@ -3286,8 +3302,11 @@ pub(crate) mod tests {
             r.unwrap();
             assert!(out.contains(question), "{out}");
             assert!(out.contains(ROOT_OWNER_MEANS), "{out}");
-            assert!(
-                out.contains("Warning: root is the owner of the node, as you confirmed"),
+            // Once, in the words `status` closes the install with (#213,
+            // L3-8).
+            assert_eq!(
+                out.matches(crate::owner::ROOT_OWNER_NOTE).count(),
+                1,
                 "{out}"
             );
             assert!(!out.contains("Warning: no owner"), "{out}");
@@ -3708,7 +3727,7 @@ pub(crate) mod tests {
         r.unwrap();
         assert!(!out.contains("[y/N]"), "{out}");
         assert!(
-            out.contains("Warning: root is the owner of the node, as you confirmed"),
+            out.contains(&format!("Warning: {}", crate::owner::ROOT_OWNER_NOTE)),
             "{out}"
         );
         assert_eq!(owner_of_unit(&l).as_deref(), Some("root"));

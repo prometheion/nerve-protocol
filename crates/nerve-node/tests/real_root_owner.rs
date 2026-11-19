@@ -225,8 +225,11 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let (ok, said) = install_at_a_terminal(&exe, "", "y\n");
     assert!(ok, "{said}");
     assert!(said.contains(question), "{said}");
-    assert!(
-        said.contains("Root is the owner of the node, as you confirmed"),
+    // Said once, in the words of `status` (#213, L3-8).
+    assert_eq!(
+        said.matches("Root is the owner: commands of user mode")
+            .count(),
+        1,
         "{said}"
     );
     assert_eq!(owner_in_unit().as_deref(), Some("root"));

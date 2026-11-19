@@ -200,6 +200,16 @@ pub(super) async fn list(paths: NodePaths, out: &mut dyn Write) -> Result<(), St
         return Ok(());
     }
     let now = crate::now_ms();
+    // The running node's link to each center, as `status` says it (#213,
+    // L1-7: a connected center read "-"); none while the node does not run.
+    let live = super::status::live_status(&paths).await.ok().flatten();
+    let link_of = |name: &str| {
+        live.as_ref()
+            .and_then(|v| v["centers"].as_array())
+            .and_then(|cs| cs.iter().find(|c| c["name"] == name))
+            .and_then(|c| c["status"].as_str())
+            .map(str::to_string)
+    };
     let mut rows = vec![
         ["NAME", "ADDRESS", "MODE", "SETTINGS", "STATE"]
             .map(String::from)
@@ -211,25 +221,12 @@ pub(super) async fn list(paths: NodePaths, out: &mut dyn Write) -> Result<(), St
         rows[0].push("APPCONTAINER".into());
     }
     for c in &cfg.centers {
-        let mut flags = Vec::new();
-        for (on, f) in [
-            (c.paused, "paused"),
-            (c.revoked, "revoked"),
-            (c.unknown, "unknown"),
-        ] {
-            if on {
-                flags.push(f);
-            }
-        }
         let mut row = vec![
             c.name.clone(),
             c.url.clone(),
             c.policy.mode_at(now).as_str().to_string(),
             enum_str(&c.settings),
-            match flags.is_empty() {
-                true => "-".into(),
-                false => flags.join(", "),
-            },
+            center_state(c, link_of(&c.name)),
         ];
         if cfg!(windows) {
             row.push(crate::grants::profile_name(&paths, &c.node_id));
@@ -243,6 +240,25 @@ pub(super) async fn list(paths: NodePaths, out: &mut dyn Write) -> Result<(), St
     p.list(None, rows);
     show(out, &p);
     Ok(())
+}
+
+/// The STATE of `center` for the pairing `c`: what the owner set (paused)
+/// or the center said (revoked, unknown), else the running node's `link`
+/// to it, as `status` says it; `-` while the node does not run.
+fn center_state(c: &nerve_policy::config::CenterEntry, link: Option<String>) -> String {
+    let flags: Vec<&str> = [
+        (c.paused, "paused"),
+        (c.revoked, "revoked"),
+        (c.unknown, "unknown"),
+    ]
+    .into_iter()
+    .filter_map(|(on, f)| on.then_some(f))
+    .collect();
+    match (flags.is_empty(), link) {
+        (true, Some(link)) => link,
+        (true, None) => "-".into(),
+        (false, _) => flags.join(", "),
+    }
 }
 
 /// `center settings on|off`: whether a center may change the node's
@@ -359,6 +375,18 @@ mod tests {
     use crate::cli::tests::{json_of, load, run, setup};
     #[cfg(windows)]
     use nerve_policy::config::Access;
+
+    /// `center` says each pairing's link as `status` does, a connected one
+    /// too (#213, L1-7: it read "-").
+    #[test]
+    fn the_center_list_says_the_link() {
+        let (_d, paths) = setup(&["a"]);
+        let mut c = load(&paths).center("a").unwrap().clone();
+        assert_eq!(center_state(&c, Some("connected".into())), "connected");
+        assert_eq!(center_state(&c, None), "-");
+        c.paused = true;
+        assert_eq!(center_state(&c, Some("connected".into())), "paused");
+    }
 
     #[test]
     fn centers_pause_and_resume_by_the_owner() {
