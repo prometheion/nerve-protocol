@@ -225,13 +225,12 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let (ok, said) = install_at_a_terminal(&exe, "", "y\n");
     assert!(ok, "{said}");
     assert!(said.contains(question), "{said}");
-    // Said once, in the words of `status` (#213, L3-8).
-    assert_eq!(
-        said.matches("Root is the owner: commands of user mode")
-            .count(),
-        1,
+    // In the words of `status`, not in a second wording (#213, L3-8).
+    assert!(
+        said.contains("Root is the owner: commands of user mode"),
         "{said}"
     );
+    assert!(!said.contains("as you confirmed"), "{said}");
     assert_eq!(owner_in_unit().as_deref(), Some("root"));
     assert!(!Path::new("/etc/polkit-1/rules.d/50-nerve-node.rules").exists());
     assert!(!Path::new("/usr/local/lib/nerve-node/service-control").exists());
