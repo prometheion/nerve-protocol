@@ -123,7 +123,8 @@ nerve-node sudo off
 
 `sudo on` asks your password to show that you may run commands as root here.
 On the installed node it needs `sudo` in front. The password stays in
-memory only, so a restart turns sudo off.
+memory only, so a restart turns sudo off. With root as the owner it asks
+none: sudo checks no password of root's.
 
 - Commands on the sudo list run as root, outside the folders. Put on the
   list only what you would run as root yourself

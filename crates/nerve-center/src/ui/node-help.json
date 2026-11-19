@@ -218,8 +218,8 @@
                   "optional": true
                 }
               ],
-              "line": "Restore a backup (stop the node first)",
-              "more": "Put the config and keys of a backup in place of this node's. The node must not run.",
+              "line": "Restore a backup (the owner's restore stops the node; as root, stop it first)",
+              "more": "Put the config and keys of a backup in place of this node's. The owner of the installed node runs it without sudo, and it stops the node and starts it again; as root, stop the node first (`nerve-node service stop`), and start it after.",
               "name": "restore",
               "usage": "nerve-node restore [OPTIONS] <FILE>"
             }
