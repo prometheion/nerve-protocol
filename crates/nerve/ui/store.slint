@@ -497,6 +497,9 @@ export global Prefs {
     // The Relay page. This node as a relay: where it listens, its state,
     // its pin, the nodes it carries and their tunnels now.
     in-out property <string> relay-listen;
+    // Where Windows Firewall keeps other machines off the relay's port,
+    // what to do about it.
+    in-out property <string> relay-firewall;
     in-out property <string> relay-status;
     in-out property <string> relay-pin;
     in-out property <[RelayNodeRow]> relay-nodes;

@@ -98,7 +98,9 @@ A word `{field}` of a [capability of your own](capabilities.md) is one whole
 argument for the program. `cmd`, a `.bat` or `.cmd` file, and PowerShell
 without `-File` read their line again as commands, so a template with
 `{field}` for them is refused. Put the command in a script:
-`powershell -NoProfile -File script.ps1 {field}`.
+`powershell -NoProfile -ExecutionPolicy Bypass -File script.ps1 {field}`.
+Without `-ExecutionPolicy Bypass` a Windows client runs no script at all:
+its default policy allows none.
 
 ## The center as a service
 
@@ -122,7 +124,8 @@ installs no second role beside it. The center's web UI is off:
 **Change the role…** (Settings › This machine, on a node Settings › App)
 backs up, removes the role with its data, and installs the other.
 
-A relay on Windows needs a firewall rule for its port, which you add yourself.
+A relay on Windows needs a firewall rule for its port, which you add yourself
+in Windows Security; the **Relay** page says so while the relay is on.
 
 ## Update and uninstall
 

@@ -150,8 +150,9 @@ nerve-node center                      # shows the grant
 With the grant a center may change its own pairing's mode (up to `user`),
 folders, rules and capability switches, and turn sudo on and off. It may add
 rules with the audit page's buttons, and capabilities of its own: fixed
-commands that run as `nerve-run`. It turns those on itself; one that senses
-or acts waits for your `on`. To stop it changing things, take the grant back.
+commands that run as `nerve-run`. One it adds is off, and its agents do not
+see it, until it turns it on with its switch; one that senses or acts waits
+for your `on`. To stop it changing things, take the grant back.
 That leaves what it changed, still on: `center settings off` names each part
 and the command that shows it
 ([the grant](../dev/settings-and-config.md#without-the-grant)).

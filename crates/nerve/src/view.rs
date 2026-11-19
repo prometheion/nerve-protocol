@@ -815,6 +815,26 @@ pub fn started_after_restore(restored: bool, started: Result<(), &str>) -> Strin
     }
 }
 
+/// What the Relay page says where Windows Firewall keeps other machines off
+/// the relay (`windows`), which listens at `listen`: nothing for one on
+/// loopback, which only this machine reaches anyway.
+pub fn relay_firewall(listen: &str, windows: bool) -> String {
+    let Some((host, port)) = listen.rsplit_once(':') else {
+        return String::new();
+    };
+    let host = host.trim_matches(['[', ']']);
+    let loopback = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+        || host.eq_ignore_ascii_case("localhost");
+    if !windows || loopback {
+        return String::new();
+    }
+    format!(
+        "Windows Firewall keeps other machines off it until you allow TCP port {port}: Windows Security › Firewall & network protection › Advanced settings › Inbound Rules › New Rule…"
+    )
+}
+
 /// What the app says of a panic while the installed service is stopped:
 /// the lock is saved for its start.
 pub const PANIC_WHILE_STOPPED: &str =
@@ -2241,6 +2261,20 @@ mod tests {
             centers[1].mode_detail
         );
         assert_eq!(centers[2].link, "Revoked");
+    }
+
+    /// On Windows the Relay page says that the firewall keeps other
+    /// machines off its port until the owner allows it (#213 W2-7).
+    #[test]
+    fn the_relay_page_names_the_firewall_on_windows() {
+        let said = relay_firewall("0.0.0.0:7490", true);
+        assert!(
+            said.contains("TCP port 7490") && said.contains("Inbound Rules"),
+            "{said}"
+        );
+        assert_eq!(relay_firewall("127.0.0.1:7490", true), "");
+        assert_eq!(relay_firewall("[::1]:7490", true), "");
+        assert_eq!(relay_firewall("0.0.0.0:7490", false), "");
     }
 
     #[test]

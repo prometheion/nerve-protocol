@@ -143,9 +143,15 @@ pub(crate) fn failed(json: bool, e: &str) -> i32 {
         use std::io::Write;
         let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "error": e }));
     }
+    // Named after this program: the app's is `nerve`, also on Windows,
+    // where there is no `nerve-node`.
     eprintln!(
         "{}",
-        nerve_service::out::error("nerve-node", e, nerve_service::out::Style::stderr())
+        nerve_service::out::error(
+            crate::edition::get().program,
+            e,
+            nerve_service::out::Style::stderr()
+        )
     );
     1
 }

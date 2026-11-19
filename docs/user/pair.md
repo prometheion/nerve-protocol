@@ -99,7 +99,9 @@ nerve-node proxy                                      # shows it
 nerve-node proxy off
 ```
 
-The center's pin is still checked inside the proxy's tunnel, so the proxy
+A proxy you set, change or remove reaches the running links at once: the
+node dials them again, and their commands go on. The center's pin is still
+checked inside the proxy's tunnel, so the proxy
 sees only TLS. The login is kept with the node's keys, never in `node.toml`
 (on Windows set it under **Settings › Network**).
 Without `proxy set`, the node uses `HTTPS_PROXY` and `NO_PROXY`. It never

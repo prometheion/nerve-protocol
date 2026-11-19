@@ -621,7 +621,9 @@ nerve-node cap add logs.tail --effect read \
   where `;` and `$(...)` run. So a command whose program is one of these is
   refused when a `{field}` goes into it, whether the owner declares it or a
   center adds it, with the safe form: a script run with `powershell
-  -NoProfile -File script.ps1 {field}` (only PowerShell's own options, then
+  -NoProfile -ExecutionPolicy Bypass -File script.ps1 {field}` (the
+  default execution policy of a Windows client runs no script; only
+  PowerShell's own options, then
   `-File` and a fixed script, before the first `{field}`: any other word
   before `-File` starts the command, and `-File` is then part of its text;
   an option counts from the shortest form Windows PowerShell 5.1 knows

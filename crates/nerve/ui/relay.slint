@@ -385,6 +385,14 @@ export component RelayPage inherits PageFrame {
                                 }
                             }
                             Reveal {
+                                shown: root.on && Prefs.relay-firewall != "";
+                                gap: Space.lg;
+                                Banner {
+                                    tone: Tone.warn;
+                                    text: Prefs.relay-firewall;
+                                }
+                            }
+                            Reveal {
                                 shown: root.on && Prefs.relay-pin != "";
                                 gap: Space.md;
                                 Fact {

@@ -290,6 +290,9 @@ impl Ctl {
                             p.set_proxy_headers(headers.join(", ").into());
                             p.set_proxy_problem(s(&proxy["problem"]).into());
                             p.set_relay_listen(s(&relay["listen"]).into());
+                            p.set_relay_firewall(
+                                view::relay_firewall(&s(&relay["listen"]), cfg!(windows)).into(),
+                            );
                             p.set_relay_status(s(&relay["status"]).into());
                             p.set_relay_pin(s(&relay["pin"]).into());
                             p.set_relay_nodes(ModelRc::new(VecModel::from(view::relay_nodes(
@@ -599,7 +602,10 @@ impl Ctl {
                         p.set_proxy_open(false);
                         p.set_proxy_new_password(SharedString::new());
                     });
-                    c.done(&v, "");
+                    c.done(
+                        &v,
+                        "The proxy is set: the node dials its centers through it now.",
+                    );
                 }
                 Err(e) => {
                     c.with_prefs(|p| p.set_proxy_error(e.into()));
@@ -1311,7 +1317,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
         c.prefs_change(
             vec!["proxy".into(), "off".into()],
             None,
-            "This node reaches its centers directly again.".into(),
+            "This node reaches its centers directly again: it dials them again now.".into(),
         )
     });
     let c = ctl.clone();

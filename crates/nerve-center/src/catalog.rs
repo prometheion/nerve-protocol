@@ -79,6 +79,10 @@ pub struct Reach {
     /// ([`Access::unnamed`]).
     #[serde(skip_serializing_if = "is_zero")]
     pub unnamed: u64,
+    /// The node runs on Windows (its descriptor's platform): the advice
+    /// speaks of its permissions, not of Linux's group bits and kernels.
+    #[serde(skip)]
+    pub windows: bool,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -136,6 +140,7 @@ impl Reach {
             folders,
             more_folders,
             unnamed: a.unnamed,
+            windows: false,
         }
     }
 
@@ -395,12 +400,16 @@ impl Reach {
             );
         }
         if self.folders.iter().any(|f| f.own) {
-            out.push_str(
+            out.push_str(if self.windows {
+                " Its commands run as an account of their own, not as the machine's owner; the \
+                 files they make take the permissions of their folder, which keep the owner's \
+                 access: change no file's permissions unless asked."
+            } else {
                 " Its commands run as an account of their own, not as the machine's owner, \
                  whose access to the files they make goes through the group bits: keep those, \
                  0640 or 0660 for files and 0750 or 0770 for folders, not 0600 or 0700 unless \
-                 asked.",
-            );
+                 asked."
+            });
         }
         // The advice stands outside the framing, so it names no path: the
         // paths are the node's words.
@@ -425,12 +434,15 @@ impl Reach {
                  settings and caches.",
             );
             if commands {
-                out.push_str(
+                out.push_str(if self.windows {
+                    " The sandbox keeps every other pairing's commands from reading and writing \
+                     their files: run no credential cache or key agent in them."
+                } else {
                     " The sandbox keeps every other pairing's commands from reading and writing \
                      their files, though on an older kernel it cannot stop one from emptying a \
                      file, and not out of a socket a program listens on there: run no credential \
-                     cache or key agent in them.",
-                );
+                     cache or key agent in them."
+                });
             }
         }
         if shared {
@@ -554,8 +566,13 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn build(d: &Descriptor) -> Catalog {
+        let windows = d.node.platform == "windows";
         let mut c = Catalog {
-            reach: d.access.as_ref().map(Reach::read),
+            reach: d
+                .access
+                .as_ref()
+                .map(Reach::read)
+                .map(|r| Reach { windows, ..r }),
             ..Catalog::default()
         };
         let note: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::note).map(Into::into);
@@ -1856,6 +1873,27 @@ mod tests {
                  program's settings there unless asked."
             ),
             "{unheld}"
+        );
+        // A Windows node's advice speaks of its permissions, not of group
+        // bits and kernels (#213 W2-10).
+        let mut on_windows = desc("box", vec![]);
+        on_windows.node.platform = "windows".into();
+        let windows = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": true, "folders": [
+                {"path": "/c/work", "access": "rwx"},
+                {"path": "/c/Users/nerve-run/AC/home", "access": "rwx", "own": true}]})),
+            ..on_windows
+        })
+        .reach
+        .unwrap()
+        .advice()
+        .unwrap();
+        for linux in ["group bits", "0640", "kernel", "socket"] {
+            assert!(!windows.contains(linux), "{linux}: {windows}");
+        }
+        assert!(
+            windows.contains("the files they make take the permissions of their folder"),
+            "{windows}"
         );
         // Shared marks only one of the account's own folders.
         assert!(

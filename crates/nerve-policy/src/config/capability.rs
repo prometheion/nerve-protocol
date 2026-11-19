@@ -253,6 +253,13 @@ fn program_named(program: &str, platform: Platform) -> bool {
     }
 }
 
+/// The safe form of a Windows capability whose value `{field}` goes to
+/// PowerShell: a script, run so that it gets each value as one argument and
+/// runs under the default execution policy of a Windows client.
+pub fn script_template(field: &str) -> String {
+    format!("powershell -NoProfile -ExecutionPolicy Bypass -File script.ps1 {{{field}}}")
+}
+
 /// Why `command` would run a value of its placeholders as a command on
 /// Windows, where each program reads its own command line: `cmd` and a
 /// batch file (which Windows runs through `cmd`) read it again as commands,
@@ -274,8 +281,11 @@ fn windows_reread(command: &[String]) -> Option<String> {
         .to_ascii_lowercase();
     let stem = file.strip_suffix(".exe").unwrap_or(&file);
     let field = placeholder(&command[first]).unwrap_or_default();
+    // `-ExecutionPolicy Bypass`: a Windows client runs no script by
+    // default (its policy is Restricted), and the template must work there.
     let safe = format!(
-        "put the command in a script and run it with `powershell -NoProfile -File script.ps1 {{{field}}}`, which gets each value as one argument"
+        "put the command in a script and run it with `{}`, which gets each value as one argument",
+        script_template(field)
     );
     if stem == "cmd" || file.ends_with(".bat") || file.ends_with(".cmd") {
         return Some(format!(
@@ -1108,6 +1118,23 @@ mod tests {
         assert_eq!(crate::config::form::command_words(&line).unwrap(), words);
     }
 
+    /// The safe form a refusal names is itself taken, and runs under a
+    /// Windows client's default execution policy, which runs no script
+    /// (#213 W2-1).
+    #[test]
+    fn the_safe_windows_form_is_taken_and_runs_under_the_default_policy() {
+        let t = script_template("text");
+        assert!(t.contains(" -ExecutionPolicy Bypass -File "), "{t}");
+        let words: Vec<&str> = t.split_whitespace().collect();
+        let mut c = cap(
+            &words,
+            json!({"type": "object", "properties": {"text": {"type": "string"}},
+                   "required": ["text"], "additionalProperties": false}),
+        );
+        c.platform = Platform::Windows;
+        assert!(c.validate(60).is_ok(), "{t}");
+    }
+
     /// On Windows a template whose program reads a value again as commands
     /// is refused, naming the safe form: cmd, a batch file, and PowerShell
     /// without `-File` and a fixed script before the value (`-Command`, its
@@ -1212,7 +1239,7 @@ mod tests {
                 let e = check(command, platform).unwrap_err();
                 assert!(e.contains("on Windows"), "{command:?}: {e}");
                 assert!(
-                    e.ends_with("run it with `powershell -NoProfile -File script.ps1 {text}`, which gets each value as one argument"),
+                    e.ends_with("run it with `powershell -NoProfile -ExecutionPolicy Bypass -File script.ps1 {text}`, which gets each value as one argument"),
                     "{command:?}: {e}"
                 );
             }

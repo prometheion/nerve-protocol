@@ -423,7 +423,11 @@ nerve-node proxy off
 
 The node opens the TLS link to the center inside a `CONNECT` tunnel. The
 center's pin is still checked on that inner link, so the proxy sees only TLS
-records. `center add` pairs through the proxy too.
+records. `center add` pairs through the proxy too. A running link compares
+the node's `[connection]` with the one it was dialled under at every config
+change: when the proxy (or a relay as the proxy) was set, changed or
+removed, it drops and is dialled again through what is set now, and the
+center resumes it with its calls (`link.rs`, `serve`).
 
 Another node can be the proxy: see [relay](#a-relay-as-the-owner-sets-it-up).
 
