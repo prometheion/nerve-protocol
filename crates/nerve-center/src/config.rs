@@ -356,7 +356,7 @@ pub enum Cmd {
     Pair,
     /// Show the paired machines, or turn one off, on, or remove it
     ///
-    /// As the web UI's Overview shows and changes them. A machine that is off keeps its pairing, and the agent cannot use it until it is on again. It asks the running center.
+    /// As the web UI's Nodes page shows and changes them. A machine that is off keeps its pairing, and the agent cannot use it until it is on again. It asks the running center.
     #[command(args_conflicts_with_subcommands = true)]
     Nodes {
         #[command(subcommand)]
@@ -1537,6 +1537,17 @@ mod tests {
         assert!(refuse_state_variable(&flag, true).is_ok());
         assert!(refuse_state_variable(&[], true).is_ok());
         assert!(refuse_state_variable(&var, false).is_ok());
+    }
+
+    /// `nodes`' help names the page that shows and changes the machines
+    /// (#213, L4-9: it named the Overview).
+    #[test]
+    fn the_nodes_help_names_the_nodes_page() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let nodes = cmd.find_subcommand("nodes").unwrap();
+        let help = nodes.get_long_about().unwrap().to_string();
+        assert!(help.contains("the web UI's Nodes page"), "{help}");
     }
 
     /// `caps <machine>` takes its subcommands after the machine, as the

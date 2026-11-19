@@ -12,6 +12,7 @@ import {
   useState,
   type InputHTMLAttributes,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type TextareaHTMLAttributes,
 } from "react";
@@ -397,6 +398,33 @@ export function TextArea({ value, onChange, className, ...rest }: Omit<TextareaH
   return <textarea className={"input " + (className || "")} spellCheck={false} value={value} onChange={(e) => onChange(e.target.value)} {...rest} />;
 }
 
+/** The rows a field of `text` needs to show it whole, from `least` up to
+ * 24: a long line counts as one row for every 60 characters, about what a
+ * row of the details pane holds, and a field of several lines keeps one
+ * empty row to type on. No style is written (the CSP), so the height is
+ * the field's rows. */
+export function rowsFor(text: string, least: number): number {
+  const rows = text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 60)), 0);
+  return Math.min(24, Math.max(least, rows + (least > 1 ? 1 : 0)));
+}
+
+/** A JSON or command field that grows with its text (owner's finding on
+ * pre2: the Arguments and Result fields showed a few short lines). A
+ * one-line field (a command) takes no line break: Enter is not typed. */
+export function GrowArea({ value, onChange, className, oneLine, ...rest }: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange" | "value" | "rows"> & { value: string; onChange: (v: string) => void; oneLine?: boolean }) {
+  return (
+    <textarea
+      className={"input grow-area " + (oneLine ? "one-line " : "") + (className || "")}
+      spellCheck={false}
+      value={value}
+      rows={rowsFor(value, oneLine ? 1 : 4)}
+      onChange={(e) => onChange(oneLine ? e.target.value.replace(/[\r\n]+/g, " ") : e.target.value)}
+      onKeyDown={oneLine ? (e) => e.key === "Enter" && e.preventDefault() : undefined}
+      {...rest}
+    />
+  );
+}
+
 // ---------- The page: its head, the list and the details ----------
 
 export function PageHead({ icon, title, sub, children }: { icon: string; title: ReactNode; sub?: ReactNode; children?: ReactNode }) {
@@ -415,6 +443,99 @@ export function PageHead({ icon, title, sub, children }: { icon: string; title: 
 /** The list on the left and the picked row's details on the right; below
  * 1100 px they take turns, `open` showing the details with Back. A third
  * pane joins from 1800 px. */
+/** The list's share of a Split's two panes, in percent, as the steps the
+ * stylesheet has (`.split[data-w]`): a width the owner dragged to. Each pane
+ * keeps its least width there (`minmax`), the list 260 px and the details
+ * 400 px. */
+export const PANE = { least: 20, most: 76, step: 2, list: 260, details: 400 };
+
+/** Where the width a Split's list was dragged to is kept: per page (and
+ * kind of Split), in this browser only. */
+function paneKey(variant: string): string {
+  const page = (typeof location === "undefined" ? "" : location.hash).replace(/^#/, "").split(/[?/]/)[0];
+  return `nerve.pane.${page || "home"}.${variant || "split"}`;
+}
+
+function storedPane(key: string): number | null {
+  try {
+    const n = Number(localStorage.getItem(key));
+    return n >= PANE.least && n <= PANE.most ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The list's share at `x` (a pointer's place) between the list's left edge
+ * and the details' right edge, on the stylesheet's steps: the drag stops
+ * where a pane would go below its least width (owner, #213). */
+export function paneShare(x: number, left: number, right: number): number {
+  const span = right - left;
+  if (span <= 0) return 50;
+  const step = (n: number, round: (n: number) => number) => round(n / PANE.step) * PANE.step;
+  const least = step(Math.max(PANE.least, (PANE.list / span) * 100), Math.ceil);
+  const most = step(Math.min(PANE.most, 100 - (PANE.details / span) * 100), Math.floor);
+  return Math.min(most, Math.max(least, step(((x - left) / span) * 100, Math.round)));
+}
+
+/** The gap between the list and the details: dragged (or the arrow keys)
+ * it gives the list another width, which the page keeps; a double-click
+ * gives the width back to the page (owner's finding on pre2: the panes
+ * could not be resized). Only where the two stand side by side. */
+function Gutter({ width, setWidth }: { width: number | null; setWidth: (w: number | null) => void }) {
+  // The two panes' edges, as they stand now.
+  const edges = (bar: Element) => {
+    const split = bar.closest(".split");
+    const l = split?.querySelector(":scope > .lcol")?.getBoundingClientRect();
+    const d = split?.querySelector(":scope > .dcol")?.getBoundingClientRect();
+    return l && d ? { l, d } : null;
+  };
+  const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const at = edges(e.currentTarget);
+    if (!at) return;
+    const { l, d } = at;
+    e.preventDefault();
+    const bar = e.currentTarget;
+    bar.setPointerCapture?.(e.pointerId);
+    const move = (m: PointerEvent) => setWidth(paneShare(m.clientX, l.left, d.right));
+    const end = () => {
+      bar.removeEventListener("pointermove", move);
+      bar.removeEventListener("pointerup", end);
+      bar.removeEventListener("pointercancel", end);
+    };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", end);
+  };
+  // Without a width of its own the list has the page's: where the panes
+  // meet now.
+  const now = (bar: Element) => {
+    const at = edges(bar);
+    return width ?? (at ? paneShare(at.l.right, at.l.left, at.d.right) : 40);
+  };
+  return (
+    <div
+      className="gutter"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Width of the list"
+      aria-valuemin={PANE.least}
+      aria-valuemax={PANE.most}
+      aria-valuenow={width ?? undefined}
+      title="Drag to resize; double-click for the page's own width"
+      tabIndex={0}
+      onPointerDown={drag}
+      onDoubleClick={() => setWidth(null)}
+      onKeyDown={(e) => {
+        const by = e.key === "ArrowLeft" ? -PANE.step : e.key === "ArrowRight" ? PANE.step : 0;
+        if (by) {
+          e.preventDefault();
+          setWidth(Math.min(PANE.most, Math.max(PANE.least, now(e.currentTarget) + by)));
+        }
+      }}
+    />
+  );
+}
+
 export function Split({
   list,
   detail,
@@ -432,11 +553,23 @@ export function Split({
   third?: ReactNode;
   nav?: ReactNode;
 }) {
+  const key = paneKey(variant);
+  const [width, setWidthNow] = useState<number | null>(() => storedPane(key));
+  const setWidth = (w: number | null) => {
+    setWidthNow(w);
+    try {
+      if (w === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, String(w));
+    } catch {
+      /* storage blocked: the width lasts until the page is left */
+    }
+  };
   return (
-    <div className={`split ${variant} ${open ? "open" : ""} ${nav ? "three" : ""}`}>
+    <div className={`split ${variant} ${open ? "open" : ""} ${nav ? "three" : ""}`} data-w={width ?? undefined}>
       {nav ? <div className="navpane card">{nav}</div> : null}
       <div className="lcol">{list}</div>
       <div className="dcol">
+        <Gutter width={width} setWidth={setWidth} />
         <Btn kind="ghost" icon="arrow-left" className="back" onClick={onBack}>
           Back to the list
         </Btn>

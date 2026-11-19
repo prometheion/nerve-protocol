@@ -84,10 +84,31 @@ describe("Overview", () => {
     const { el } = await center("overview", { "GET /api/overview": () => d.overview, "POST /api/pair": () => pairing, "POST /api/pair/status": () => ({ open: true }) });
     const card = el.querySelector("[aria-label='Get started']")!;
     expect(text(card)).toContain("1. Pair a machine");
-    expect(text(card)).toContain("2. Give it a folder: nerve-node folder add");
+    // The command once, in its copy box, not in the title too (#213, L4-9).
+    expect(text(card).split("nerve-node folder add").length - 1).toBe(1);
+    expect(text(card)).toContain("2. Give it a folder");
     expect(text(card)).toContain("3. Connect a harness");
+    // Nothing paired is said as such, not "0 of 0".
+    expect(text(el)).not.toContain("0 of 0");
+    expect(text(el)).toContain("None paired yet.");
     await click(button(card, "Pair a machine"));
-    expect(document.querySelector("[role=dialog]")).not.toBeNull();
+    const dialog = document.querySelector("[role=dialog]")!;
+    expect(dialog).not.toBeNull();
+    // One "Then", and the folder line says when it needs --center (L2-11).
+    await settle(4);
+    expect(text(dialog).split("Then").length - 1).toBe(1);
+    expect(text(dialog)).toContain("with --center <name> where it has other centers");
+  });
+
+  it("says on a Windows center where a Windows machine gets its folder", async () => {
+    const d = centerData();
+    d.overview.nodes = [];
+    d.overview.sessions = [];
+    (d.overview.center as { os?: string }).os = "windows";
+    const { el } = await center("overview", { "GET /api/overview": () => d.overview });
+    const card = text(el.querySelector("[aria-label='Get started']")!);
+    expect(card).toContain("on Windows in the Nerve app, Permissions › Folders");
+    expect(card).toContain("Linuxnerve-node folder add ~/project rwx");
   });
 
   it("drops Get started once a machine is paired with a folder and a harness is connected", async () => {

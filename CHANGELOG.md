@@ -35,6 +35,9 @@ and every limit is in
 - The center's and the node's web UIs have the app's layout: a list and the
   picked row's details on every page, adding in the details, removing asked
   in the row ([#232](https://github.com/prometheion/nerve-protocol/issues/232)).
+  The gap between the panes resizes them, kept per page; a form gets the
+  larger share, and its JSON and command fields grow with their text. The
+  panes fold only where they no longer fit.
 - Runs as a service (systemd on Linux, the service `nerve-center` on
   Windows), or started by a harness over stdio; a second center attaches to
   the first.
@@ -230,7 +233,11 @@ and every limit is in
   where the node serves it so. On Windows only the owner's own session gets
   in, and beyond loopback is an administrator's step, also as the setting
   `ui.listen` (`config set`, a changed node.toml or a restore); what the
-  web UI changes is audited as the owner's account.
+  web UI changes is audited as the owner's account. Its texts follow the
+  node's platform (the Nerve app's places on Windows, `nerve-node` on
+  Linux), its Audit says what each settings change did, and its
+  Capabilities page switches every action, a program's and a center's own
+  too.
 
 ### On Windows
 

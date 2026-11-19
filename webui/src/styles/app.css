@@ -228,10 +228,19 @@ textarea.input.tall { min-height: 280px; }
 pre.code { white-space: pre-wrap; margin: 0; max-height: 320px; overflow: auto; }
 
 /* ---------- B: the list and the details ---------- */
-.split { display: grid; gap: var(--space-lg); align-items: start; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
+.split { display: grid; gap: var(--space-lg); align-items: start; grid-template-columns: minmax(0, 1fr); }
 .split > * { min-width: 0; }
 .split > .third, .split > .navpane { display: none; }
 .dcol { position: sticky; top: 16px; }
+/* The gap between the list and the details, which resizes them: a grip
+   in the gap, over the details' left edge, where the two stand side by
+   side. */
+.gutter { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--space-lg)); width: var(--space-lg); cursor: col-resize; touch-action: none; z-index: 1; display: flex; justify-content: center; }
+.gutter::after { content: ""; width: 2px; border-radius: 1px; margin: 8px 0; background: transparent; transition: background var(--motion-base) var(--motion-ease); }
+.gutter:hover::after, .gutter:focus-visible::after { background: var(--border-strong); }
+.gutter:focus-visible { outline: none; }
+textarea.input.grow-area { min-height: 0; }
+textarea.input.grow-area.one-line { resize: none; overflow: hidden; }
 .back { display: none; margin-bottom: var(--space-md); }
 .list { padding-bottom: 6px; overflow: hidden; }
 .list .lead-space { height: 6px; }
@@ -428,32 +437,80 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); p
 /* ---------- Where the window is wide or narrow ---------- */
 @media (min-width: 1100px) {
   .ovtop { grid-template-columns: 1.4fr 1fr; }
-  .split.even { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
-  .split.wide { grid-template-columns: minmax(320px, 480px) minmax(300px, 1fr); }
-  .split.caps { grid-template-columns: minmax(0, 1fr) minmax(300px, 420px); }
 }
-@media (min-width: 1100px) and (max-width: 1799px) {
-  .split { grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); }
-  .split.even { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
-  .split.wide { grid-template-columns: minmax(320px, 480px) minmax(300px, 1fr); }
-  .split.caps { grid-template-columns: minmax(0, 1fr) minmax(300px, 420px); }
-}
-@media (min-width: 1400px) { .split.wide { grid-template-columns: 560px minmax(0, 1fr); } }
-@media (min-width: 1800px) {
-  .split.side3 { grid-template-columns: minmax(300px, 380px) minmax(0, 1fr) 380px; }
-  .split.side3 > .third { display: block; }
-  .split.even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .split.caps.three { grid-template-columns: 200px minmax(0, 1fr) minmax(380px, 460px); }
-  .split.three > .navpane { display: block; }
-  .split.three .lgroup.other, .split.three .lrow.other, .split.three .lnote.other { display: none; }
-}
-@media (max-width: 1099px) {
-  .page { padding-left: 24px; padding-right: 24px; }
-  .split, .split.even, .split.wide, .split.caps, .split.side3 { grid-template-columns: minmax(0, 1fr); }
+/* The list and its details stand side by side wherever both fit at their
+   least widths (the list 260 px, the details 400 px), by the page's own
+   width, not the window's; below, the details take the list's place when a
+   row is picked. The third column (the sessions, the pairing hint) comes in
+   wherever it fits beside them at 300 px, with 440 px for the details (owner, #213: a column folds only
+   when the panes no longer fit). A details pane that holds a form gets the
+   larger share, and a width the owner dragged to (data-w, the list's share
+   in percent; ui.tsx PANE) wins over both; the shares hold as the window
+   changes, and no pane goes below its least width. */
+.page { container: page / inline-size; }
+@container page (max-width: 679px) {
+  .gutter { display: none; }
   .split > .dcol { display: none; position: static; }
   .split.open > .lcol { display: none; }
   .split.open > .dcol { display: block; }
   .back { display: inline-flex; }
+}
+@container page (min-width: 680px) {
+  .split { grid-template-columns: minmax(260px, 320px) minmax(400px, 1fr); }
+  .split.even { grid-template-columns: minmax(260px, 5fr) minmax(400px, 6fr); }
+  .split.wide { grid-template-columns: minmax(260px, 480px) minmax(400px, 1fr); }
+  .split.caps { grid-template-columns: minmax(260px, 1fr) minmax(400px, 420px); }
+  .split:not([data-w]):has(> .dcol > form.detail) { grid-template-columns: minmax(260px, 2fr) minmax(400px, 3fr); }
+  .split[data-w] { grid-template-columns: minmax(260px, var(--lw)) minmax(400px, var(--dw)); }
+  .split[data-w="20"] { --lw: 20fr; --dw: 80fr; }
+  .split[data-w="22"] { --lw: 22fr; --dw: 78fr; }
+  .split[data-w="24"] { --lw: 24fr; --dw: 76fr; }
+  .split[data-w="26"] { --lw: 26fr; --dw: 74fr; }
+  .split[data-w="28"] { --lw: 28fr; --dw: 72fr; }
+  .split[data-w="30"] { --lw: 30fr; --dw: 70fr; }
+  .split[data-w="32"] { --lw: 32fr; --dw: 68fr; }
+  .split[data-w="34"] { --lw: 34fr; --dw: 66fr; }
+  .split[data-w="36"] { --lw: 36fr; --dw: 64fr; }
+  .split[data-w="38"] { --lw: 38fr; --dw: 62fr; }
+  .split[data-w="40"] { --lw: 40fr; --dw: 60fr; }
+  .split[data-w="42"] { --lw: 42fr; --dw: 58fr; }
+  .split[data-w="44"] { --lw: 44fr; --dw: 56fr; }
+  .split[data-w="46"] { --lw: 46fr; --dw: 54fr; }
+  .split[data-w="48"] { --lw: 48fr; --dw: 52fr; }
+  .split[data-w="50"] { --lw: 50fr; --dw: 50fr; }
+  .split[data-w="52"] { --lw: 52fr; --dw: 48fr; }
+  .split[data-w="54"] { --lw: 54fr; --dw: 46fr; }
+  .split[data-w="56"] { --lw: 56fr; --dw: 44fr; }
+  .split[data-w="58"] { --lw: 58fr; --dw: 42fr; }
+  .split[data-w="60"] { --lw: 60fr; --dw: 40fr; }
+  .split[data-w="62"] { --lw: 62fr; --dw: 38fr; }
+  .split[data-w="64"] { --lw: 64fr; --dw: 36fr; }
+  .split[data-w="66"] { --lw: 66fr; --dw: 34fr; }
+  .split[data-w="68"] { --lw: 68fr; --dw: 32fr; }
+  .split[data-w="70"] { --lw: 70fr; --dw: 30fr; }
+  .split[data-w="72"] { --lw: 72fr; --dw: 28fr; }
+  .split[data-w="74"] { --lw: 74fr; --dw: 26fr; }
+  .split[data-w="76"] { --lw: 76fr; --dw: 24fr; }
+}
+@container page (min-width: 1040px) {
+  .split.side3 { grid-template-columns: minmax(260px, 380px) minmax(440px, 1fr) minmax(300px, 380px); }
+  .split.side3 > .third { display: block; }
+  .split.side3:not([data-w]):has(> .dcol > form.detail) { grid-template-columns: minmax(260px, 2fr) minmax(440px, 3fr) minmax(300px, 380px); }
+  .split.side3[data-w] { grid-template-columns: minmax(260px, var(--lw)) minmax(440px, var(--dw)) minmax(300px, 380px); }
+  .split.caps.three { grid-template-columns: 200px minmax(260px, 1fr) minmax(400px, 460px); }
+  .split.three > .navpane { display: block; }
+  .split.three .lgroup.other, .split.three .lrow.other, .split.three .lnote.other { display: none; }
+  .split.caps.three:not([data-w]):has(> .dcol > form.detail) { grid-template-columns: 200px minmax(260px, 2fr) minmax(400px, 3fr); }
+  .split.three[data-w] { grid-template-columns: 200px minmax(260px, var(--lw)) minmax(400px, var(--dw)); }
+}
+@container page (min-width: 1150px) {
+  .split.wide { grid-template-columns: minmax(260px, 560px) minmax(400px, 1fr); }
+}
+@container page (min-width: 1500px) {
+  .split.even { grid-template-columns: minmax(260px, 1fr) minmax(400px, 1fr); }
+}
+@media (max-width: 1099px) {
+  .page { padding-left: 24px; padding-right: 24px; }
   .psplit { grid-template-columns: minmax(0, 1fr); gap: var(--space-md); }
   .psplit .pnav { display: none; }
   .psplit .pseg { display: block; }

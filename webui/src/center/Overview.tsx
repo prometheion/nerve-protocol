@@ -8,7 +8,7 @@ import { when } from "../format";
 import { Banner, Btn, CopyRow, Empty, Icon, ListCard, PageHead, Split, Tile } from "../ui";
 import { useCenter } from "./App";
 import { SessionRows } from "./Harnesses";
-import { FOLDER_STEP } from "./lines";
+import { FOLDER_STEP, centerOnWindows } from "./lines";
 import { NodeDetail, NodeRows, PairedBanner } from "./Nodes";
 import type { Overview } from "./types";
 
@@ -19,8 +19,11 @@ export function GetStarted({ o, pair }: { o: Overview; pair: () => void }) {
   const folder = o.nodes.some((n) => (n.folders || 0) > 0 || n.folders === null);
   const harness = o.sessions.length > 0;
   if (paired && folder && harness) return null;
-  // Where every machine runs Windows, the folder is given in the Nerve app.
+  // Where every machine runs Windows, the folder is given in the Nerve app;
+  // where one may (a Windows center, or a Windows machine among them), the
+  // step says so beside the Linux command (#213, W1-F13).
   const windows = o.nodes.length > 0 && o.nodes.every((n) => n.platform === "windows");
+  const someWindows = o.nodes.some((n) => n.platform === "windows") || (!o.nodes.length && centerOnWindows(o));
   const step = (done: boolean, text: string, action?: React.ReactNode) => (
     <div className="step">
       <Tile icon={done ? "ok" : "info"} tone={done ? "ok" : "neutral"} size="sm" />
@@ -39,7 +42,11 @@ export function GetStarted({ o, pair }: { o: Overview; pair: () => void }) {
       {step(paired, "1. Pair a machine", <Btn kind="primary" icon="plus" onClick={pair}>Pair a machine</Btn>)}
       {windows
         ? step(folder, "2. Give it a folder: in the Nerve app on that machine, Permissions › Folders")
-        : step(folder, `2. Give it a folder: ${FOLDER_STEP}`, <CopyRow value={FOLDER_STEP} />)}
+        : step(
+            folder,
+            someWindows ? "2. Give it a folder (on Windows in the Nerve app, Permissions › Folders)" : "2. Give it a folder",
+            <CopyRow label={someWindows ? "Linux" : undefined} value={FOLDER_STEP} />,
+          )}
       {step(harness, "3. Connect a harness", <a className="btn ghost sm" href="#harnesses">How</a>)}
     </section>
   );
@@ -88,7 +95,7 @@ export function OverviewPage() {
           <div className="grow">
             <b>Machines</b>
             <div className="meta">
-              {online} of {ov.nodes.length} online. A new one pairs with a code for one machine.
+              {ov.nodes.length ? `${online} of ${ov.nodes.length} online.` : "None paired yet."} A new one pairs with a code for one machine.
             </div>
           </div>
           <Btn kind="primary" size="" icon="plus" onClick={pair}>
@@ -108,7 +115,7 @@ export function OverviewPage() {
       <div className="card strip">
         <span className="fact">
           <Icon name="server" />
-          Nodes <b>{online} of {ov.nodes.length} online</b>
+          Nodes <b>{ov.nodes.length ? `${online} of ${ov.nodes.length} online` : "none paired"}</b>
         </span>
         <span className="fact">
           <Icon name="activity" />

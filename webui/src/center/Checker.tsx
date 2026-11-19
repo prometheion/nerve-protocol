@@ -17,6 +17,7 @@ import {
   Empty,
   Field,
   FormCard,
+  GrowArea,
   Icon,
   LRow,
   ListCard,
@@ -30,7 +31,6 @@ import {
   Seg,
   Split,
   Switch,
-  TextArea,
   TextInput,
   ask,
   failed,
@@ -833,7 +833,7 @@ function ModelDetail({ ctx }: { ctx: Ctx }) {
           <Picker label="Which calls the model sees" items={SCOPES} value={f.scope} onPick={put("scope")} />
           {m.fail_closed ? failSwitch : null}
           <Field label="Question (the command text is never put here; it goes only in the state sent to the model)">
-            <TextArea value={f.instructions} onChange={put("instructions")} rows={4} />
+            <GrowArea value={f.instructions} onChange={put("instructions")} />
           </Field>
           <div className="form-row">
             <Field label="When true (dangerous)">

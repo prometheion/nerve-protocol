@@ -2,7 +2,7 @@
 import { act, useState } from "react";
 import { expect, it, vi } from "vitest";
 import { button, click, key, render, text, type } from "./test/dom";
-import { Asks, Btn, LRow, ListCard, Overlay, Picker, RemoveAsk, Seg, Split, ask } from "./ui";
+import { Asks, Btn, GrowArea, LRow, ListCard, Overlay, Picker, RemoveAsk, Seg, Split, ask, paneShare, rowsFor } from "./ui";
 
 it("asks before a removal, in place, and removes only on yes", async () => {
   const gone = vi.fn(async () => {});
@@ -141,4 +141,67 @@ it("shows what an action that failed says, and is busy while it runs", async () 
   done();
   await click(button(el, "Fail"));
   expect(text(t)).toContain("the center refused");
+});
+
+// The panes of a Split are resized by their gap, the width is kept per page
+// in this browser, and a double-click gives the page its own width back
+// (owner's finding on pre2: the panes could not be resized).
+it("resizes the list by its gap, keeps the width per page, and resets it on a double-click", async () => {
+  location.hash = "capabilities";
+  // A store of this test's own: the test runner's Node has no localStorage.
+  const kept = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => kept.get(k) ?? null,
+    setItem: (k: string, v: string) => kept.set(k, v),
+    removeItem: (k: string) => kept.delete(k),
+  });
+  const pane = () => <Split variant="caps" open={false} onBack={() => {}} list={<ListCard>list</ListCard>} detail={<p>details</p>} />;
+  let el = await render(pane());
+  const split = () => el.querySelector(".split")!;
+  const gutter = () => el.querySelector("[role=separator]")!;
+  expect(split().hasAttribute("data-w")).toBe(false);
+  // The panes measure nothing here, so they meet at half; a step to the
+  // right widens the list.
+  await key(gutter(), "ArrowRight");
+  expect(split().getAttribute("data-w")).toBe("52");
+  expect(kept.get("nerve.pane.capabilities.caps")).toBe("52");
+  // Another page has its own.
+  location.hash = "audit";
+  el = await render(pane());
+  expect(split().hasAttribute("data-w")).toBe(false);
+  location.hash = "capabilities";
+  el = await render(pane());
+  expect(split().getAttribute("data-w")).toBe("52");
+  await act(async () => {
+    gutter().dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  });
+  expect(split().hasAttribute("data-w")).toBe(false);
+  expect(kept.has("nerve.pane.capabilities.caps")).toBe(false);
+  vi.unstubAllGlobals();
+});
+
+it("takes a dragged width on the stylesheet's steps, and stops at each pane's least width", () => {
+  expect(paneShare(450, 100, 1100)).toBe(36);
+  expect(paneShare(451, 100, 1100)).toBe(36);
+  // The list keeps 260 px of 1000, the details 400 px.
+  expect(paneShare(110, 100, 1100)).toBe(26);
+  expect(paneShare(1090, 100, 1100)).toBe(60);
+  // On a wide page the steps' own bounds hold.
+  expect(paneShare(0, 0, 3000)).toBe(20);
+  expect(paneShare(3000, 0, 3000)).toBe(76);
+});
+
+// JSON and command fields grow with their text (owner's finding on pre2:
+// the Arguments and Result fields showed a few short lines).
+it("grows a field with its text, and keeps a command on one line", async () => {
+  expect(rowsFor("", 4)).toBe(4);
+  expect(rowsFor('{\n  "type": "object",\n  "properties": {\n    "path": {"type": "string"}\n  }\n}', 4)).toBe(7);
+  expect(rowsFor("x".repeat(150), 1)).toBe(3);
+  expect(rowsFor("x\n".repeat(100), 4)).toBe(24);
+  let said = "";
+  const el = await render(<GrowArea oneLine value="" onChange={(v) => (said = v)} aria-label="Command" />);
+  const area = el.querySelector("textarea")!;
+  expect(area.getAttribute("rows")).toBe("1");
+  await type(area, "tail -n 20\n-- {path}");
+  expect(said).toBe("tail -n 20 -- {path}");
 });

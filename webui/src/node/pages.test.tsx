@@ -24,6 +24,35 @@ describe("Overview", () => {
   });
 });
 
+describe("Overview, Settings and Permissions on each platform", () => {
+  it("give Linux the commands, and Windows the Nerve app's places", async () => {
+    for (const os of ["linux", "windows"]) {
+      const d = nodeData();
+      Object.assign(d.overview, { os, owner_full_rights: true });
+      d.ui.tokens[0].made = "2026-11-18T12:13:57Z";
+      (d.settings.machine as { shell: string | null }).shell = null;
+      const routes = { "GET /api/overview": () => d.overview, "GET /api/ui": () => d.ui, "GET /api/settings": () => d.settings };
+      const win = os === "windows";
+      let { el } = await node("overview", routes);
+      expect(text(el).includes("nerve-node service restart"), os).toBe(!win);
+      expect(text(el)).not.toContain("systemctl");
+      expect(text(el).includes("Root is the owner"), os).toBe(!win);
+      expect(text(el).includes("The owner is an administrator"), os).toBe(win);
+      ({ el } = await node("settings", routes));
+      await click(allByText(el, /^(Root's|Administrator's) settings/, ".lrow")[0]);
+      const detail = () => text(el.querySelector(".dcol")!);
+      expect(detail().includes("Root's settings"), os).toBe(!win);
+      expect(detail().includes("sudo nerve-node"), os).toBe(!win);
+      expect(detail().includes("machine.sudo_path"), os).toBe(!win);
+      expect(detail()).toContain(win ? "PowerShell (the default)" : "/bin/sh (the default)");
+      await click(allByText(el, /^Web UI/, ".lrow")[0]);
+      expect(detail()).not.toContain("2026-11-18T12:13:57Z");
+      ({ el } = await node("permissions", routes));
+      expect(text(el).includes("starting at /"), os).toBe(!win);
+    }
+  });
+});
+
 describe("Overview, locked", () => {
   it("unlocks the node without asking", async () => {
     const d = nodeData();
@@ -292,6 +321,30 @@ describe("Capabilities", () => {
 });
 
 describe("Audit", () => {
+  it("says what a settings change, an install and a restore did", async () => {
+    const d = nodeData();
+    const at = Date.now() - 5 * 60_000;
+    (d.audit.entries as unknown[]).push(
+      { ts: at, kind: "settings", version: 104, by: "local", user: "root", changes: [{ key: "center.home.folders", old: ["/srv/a"], new: [] }] },
+      { ts: at + 1, kind: "node", event: "install", steps: ["made the user nerve", "started the service"] },
+      { ts: at + 2, kind: "config", event: "restored", file: "/etc/nerve/node.toml", reason: "from a backup" },
+    );
+    const { el } = await node("audit", { "GET /api/audit": () => d.audit });
+    expect(allByText(el, /^entry/, ".lrow")).toHaveLength(0);
+    await click(allByText(el, /settings v104/, ".lrow")[0]);
+    const detail = () => text(el.querySelector(".dcol")!);
+    expect(detail()).toContain('center.home.folders: ["/srv/a"] → []');
+    expect(text(allByText(el, /settings v104/, ".lrow")[0])).toContain("by local (root)");
+    await click(allByText(el, /^install/, ".lrow")[0]);
+    expect(detail()).toContain("started the service");
+    await click(allByText(el, /config restored/, ".lrow")[0]);
+    expect(detail()).toContain("from a backup");
+    // The search finds them by what they say.
+    await type(el.querySelector("input[type=search]"), "folders");
+    expect(allByText(el, /settings v104/, ".lrow")).toHaveLength(1);
+    expect(allByText(el, /^install/, ".lrow")).toHaveLength(0);
+  });
+
   it("shows the rule as it will be stored before it adds it", async () => {
     const { el, f } = await node("audit", { "POST /api/audit/rule": () => ({}) });
     await click(allByText(el, /git push --force/, ".lrow")[0]);

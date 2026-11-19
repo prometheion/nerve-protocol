@@ -251,8 +251,10 @@ export function PairOverlay({ onClose, onPaired }: { onClose: () => void; onPair
             <Icon name="wait" />
             The code works for one machine until {when(p.expires_ms)}.
           </p>
-          <span className="meta">Then give it a folder on that machine:</span>
-          <CopyRow label="Then" value={folderStep(null).copy!} />
+          {/* On a machine with other centers the command needs the one
+              it is for (#213, L2-11). */}
+          <span className="meta">Then give it a folder on that machine, with --center &lt;name&gt; where it has other centers:</span>
+          <CopyRow label="Folder" value={folderStep(null).copy!} />
           {p.pin ? null : <p className="faint">Plain HTTP on loopback, no certificate pin.</p>}
         </>
       )}

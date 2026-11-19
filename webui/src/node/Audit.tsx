@@ -11,10 +11,46 @@ import type { Json } from "./types";
 type Entry = Json;
 
 const refusedOf = (e: Entry) => e.decision === "forbidden" || e.event === "refused";
-const whatOf = (e: Entry) => [e.cap, e.action].filter(Boolean).join(".") || e.event || "entry";
+
+const text = (v: unknown) => (v === null || v === undefined ? "not set" : typeof v === "string" ? v : JSON.stringify(v));
+
+/** What an entry is about, its line and, for the details, its lines, as
+ * `nerve-node audit` says them: a call, or a change of the settings, the
+ * node, its config file, a key or the audit itself, and a relay's tunnel
+ * (#213, L4-1: those were blank "entry" rows). */
+export function describe(e: Entry): { what: string; line: string; lines: string[] } {
+  const by = (who?: string, user?: string) => `by ${who || "?"}${user ? ` (${user})` : ""}`;
+  switch (e.kind) {
+    case "settings":
+      return {
+        what: `settings v${e.version}`,
+        line: by(e.by, e.user),
+        lines: (e.changes || []).map((c: Json) => `${c.key}: ${text(c.old)} → ${text(c.new)}`),
+      };
+    case "node":
+      return { what: e.event || "node", line: (e.steps || []).join("; "), lines: [...(e.steps || []), ...(e.error ? [`failed: ${e.error}`] : [])] };
+    case "config":
+      return { what: `config ${e.event || ""}`.trim(), line: e.reason || e.file || "", lines: [e.file, e.reason].filter(Boolean) };
+    case "audit":
+      return { what: `audit ${e.event || ""}`.trim(), line: by(e.user), lines: [] };
+    case "key":
+      return { what: `key ${e.event || ""}`.trim(), line: e.detail || "", lines: e.detail ? [e.detail] : [] };
+    case "relay":
+      return {
+        what: `relay ${e.node || ""}`.trim(),
+        line: `to ${e.center} from ${e.from}: ${e.reason || ""}`,
+        lines: [`to center ${e.center}, from ${e.from}`, `ended: ${e.reason || ""}`, `${e.up || 0} bytes up, ${e.down || 0} down`],
+      };
+    default:
+      return { what: [e.cap, e.action].filter(Boolean).join(".") || e.event || e.kind || "entry", line: e.target || "", lines: [] };
+  }
+}
+
+const whatOf = (e: Entry) => describe(e).what;
 
 function EntryDetail({ e }: { e: Entry }) {
   const refused = refusedOf(e);
+  const d = describe(e);
   // What a button stores and where, as the node makes it (not as it is
   // shown above).
   const add = (kind: "allow" | "wildcard" | "deny") => async () => {
@@ -37,7 +73,7 @@ function EntryDetail({ e }: { e: Entry }) {
       tile={refused ? "danger" : "ok"}
       mono
       title={whatOf(e)}
-      pills={<Pill tone={refused ? "danger" : "ok"}>{refused ? "Refused" : e.decision === "allowed" ? "Allowed" : e.event || e.decision || "entry"}</Pill>}
+      pills={<Pill tone={refused ? "danger" : "ok"}>{refused ? "Refused" : e.decision === "allowed" ? "Allowed" : e.kind || e.event || e.decision || "entry"}</Pill>}
       actions={
         <span className="faint" title={e.ts ? when(e.ts) : ""}>
           {e.center ? `${e.center} · ` : ""}
@@ -50,7 +86,20 @@ function EntryDetail({ e }: { e: Entry }) {
           <code className="target">{e.rule_preview || e.target}</code>
         </DSec>
       ) : null}
-      {e.reason ? <p className="meta">{e.reason}</p> : null}
+      {e.reason && !e.kind ? <p className="meta">{e.reason}</p> : null}
+      {e.kind && d.lines.length ? (
+        <DSec title={e.kind === "settings" ? "What changed" : "Details"}>
+          <div className="stack tight">
+            {d.lines.map((l, i) => (
+              <code key={i} className="target">
+                {l}
+              </code>
+            ))}
+          </div>
+        </DSec>
+      ) : e.kind && d.line ? (
+        <p className="meta">{d.line}</p>
+      ) : null}
       {e.rule_preview && e.center ? (
         <DSec title="A rule for next time">
           <div className="acts-row">
@@ -72,7 +121,10 @@ export function AuditPage() {
   const [open, setOpen] = useState(false);
   const audit = usePoll(() => api<{ entries: Entry[] }>("GET", `/api/audit${denied ? "?denied=1" : ""}`), [denied, live], live ? 2000 : 0);
   const t = q.trim().toLowerCase();
-  const pass = (e: Entry) => (!denied || refusedOf(e)) && (!t || `${whatOf(e)} ${e.target || ""} ${e.reason || ""} ${e.center || ""}`.toLowerCase().includes(t));
+  const pass = (e: Entry) => {
+    const d = describe(e);
+    return (!denied || refusedOf(e)) && (!t || `${d.what} ${e.target || ""} ${e.reason || ""} ${e.center || ""} ${d.line} ${d.lines.join(" ")}`.toLowerCase().includes(t));
+  };
   const all: Entry[] = audit.data ? audit.data.entries.slice().reverse() : [];
   const list = all.filter(pass);
   // An entry has no id; its time, center, call and target name it, and a
@@ -161,7 +213,7 @@ export function AuditPage() {
                     <Icon name={refusedOf(x) ? "ban" : "ok"} />
                   </span>
                   <span className="mono">{whatOf(x)}</span>
-                  <span className="mono cut faint grow">{x.target || x.center || ""}</span>
+                  <span className="mono cut faint grow">{x.target || describe(x).line || x.center || ""}</span>
                   <span className="side-text" title={x.ts ? when(x.ts) : ""}>
                     {x.ts ? ago(x.ts).replace(" ago", "") : ""}
                   </span>
