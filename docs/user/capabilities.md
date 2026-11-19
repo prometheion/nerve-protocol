@@ -50,6 +50,15 @@ form. On Windows a template whose program is `cmd`, a `.bat` file or
 PowerShell without `-File` is refused
 ([Windows](windows.md#a-capabilitys-argument)).
 
+A center with the settings grant adds one from its side, on its
+Capabilities page or in its terminal, with the same template, and it is
+used [as any other](#when-a-center-may-use-one):
+
+```sh
+sudo nerve-center caps lab add backup.date --command "date -u +%Y" --summary "The year."
+sudo nerve-center caps lab rm backup.date
+```
+
 It runs as `nerve-run`, from the calling pairing's home, held like that
 pairing's commands. A node run by hand offers none
 ([the account](../dev/capabilities.md#the-account-it-runs-as)).

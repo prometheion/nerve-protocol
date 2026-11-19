@@ -882,6 +882,17 @@ fn the_owners_commands_ask_the_running_center_with_the_web_ui_off() {
     let gone = owner(&["nodes", "rm", "nope"], Some(&state));
     assert!(!gone.status.success());
     assert!(String::from_utf8_lossy(&gone.stderr).contains("no machine named nope"));
+    // `status` says where the running center is, not what it was given:
+    // its web UI is off, whatever --ui says (#213, L2-7), and where the
+    // machines reach it (L1-2).
+    let status = said(&["status", "--ui", "127.0.0.1:7480"]);
+    assert!(status.contains("\n  Web UI       off\n"), "{status}");
+    assert!(
+        status.contains("\n  Harnesses    the one that starts it (stdio)\n"),
+        "{status}"
+    );
+    assert!(status.contains("\n  Public URL   "), "{status}");
+    assert!(!status.contains("7480"), "{status}");
     drop(center.stdin.take());
     assert!(wait(&mut center, Duration::from_secs(10)));
 }
@@ -1023,6 +1034,15 @@ fn every_function_of_the_pages_has_its_command() {
     let key = said(&["key", "rotate"]);
     assert!(key.contains(" · new center key\n"), "{key}");
     assert!(key.contains("\n  Pin "), "{key}");
+    // The next step names this center's folder, not the installed one's
+    // (#213, L2-6).
+    assert!(
+        key.contains(&format!(
+            "nerve-center key finish --state-dir {}",
+            state.display()
+        )),
+        "{key}"
+    );
     assert!(said(&["key", "finish"]).contains("the old key no longer works"));
     // A machine's commands name it; none is paired here.
     for args in [

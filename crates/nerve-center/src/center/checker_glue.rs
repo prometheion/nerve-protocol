@@ -884,6 +884,32 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
 pub const SUDO_LIST_OWNER_ONLY: &str =
     "only the machine's owner puts a command on the sudo list, on the machine itself";
 
+/// Why an allow rule of a machine does not let the sudo command `command`
+/// run, and what its owner does instead, for a machine of `platform`; None
+/// for a command that is not a sudo one. A sudo command runs only when the
+/// machine's sudo list names it, which its owner alone adds to, and an
+/// allow rule never covers it: `audit allow` wrote one and said it was
+/// added (#213, L2-2). The line is the one the web UI's Audit row shows
+/// (webui/src/center/lines.ts `sudoRuleLine`): inside single quotes a word
+/// reads the same in POSIX shells and in fish unless it holds a quote, a
+/// backslash or a control character.
+pub fn sudo_allow_refusal(platform: &str, command: &str) -> Option<String> {
+    nerve_policy::decide::sudo_command(command)?;
+    let lead = "an allow rule does not let a sudo command run: only the machine's owner puts it on the sudo list";
+    Some(if platform == "windows" {
+        format!("{lead}, in the Nerve app on that machine, Permissions, Sudo")
+    } else if command.contains(|c: char| c == '\'' || c == '\\' || c.is_control()) {
+        format!(
+            "{lead}, on that machine: nerve-node rule add allow --action exec.run --exact 'COMMAND', the command quoted for the shell"
+        )
+    } else {
+        format!(
+            "{lead}, on that machine (with --center <name> where it has several centers): nerve-node rule add allow --action exec.run --exact '{}'",
+            command.trim()
+        )
+    })
+}
+
 /// The list and the rule an audit button means: the entry's `cap`, `action`
 /// and `target`, the list (`allow` or `deny`; never `sudo`),
 /// whether it is the wildcard form, and the argument it pins with its value

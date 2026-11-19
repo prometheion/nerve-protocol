@@ -470,8 +470,15 @@ pub(crate) async fn audit(
 
 // ---- key ----
 
-/// `key rotate` and `key finish`.
-pub(crate) async fn key(ask: &Ask<'_>, cmd: KeyCmd) -> Result<Page, String> {
+/// `key rotate` and `key finish`; `command` names an owner's command for
+/// this center as it is typed here (crate::owner_calls::commands): a center
+/// run by hand needs its folder, the installed one sudo (#213, L2-6: a bare
+/// `key finish` ended the installed center's grace).
+pub(crate) async fn key(
+    ask: &Ask<'_>,
+    cmd: KeyCmd,
+    command: &dyn Fn(&str) -> String,
+) -> Result<Page, String> {
     match cmd {
         KeyCmd::Rotate => {
             let v = ask.post("/api/center/key/rotate", json!({})).await?;
@@ -480,7 +487,7 @@ pub(crate) async fn key(ask: &Ask<'_>, cmd: KeyCmd) -> Result<Page, String> {
                 p.row("Pin", pin);
             }
             p.note("The paired machines take the new key while the old one still works. The pin is shown only now.");
-            p.next("End the old key's grace", "nerve-center key finish");
+            p.next("End the old key's grace", command("key finish"));
             Ok(p)
         }
         KeyCmd::Finish => {
@@ -543,10 +550,19 @@ pub(crate) async fn caps(ask: &Ask<'_>, name: &str, cmd: Option<&CapsCmd>) -> Re
             effect,
             command,
             summary,
+            params,
+            result,
+            timeout,
         }) => {
+            let params = match params.as_deref() {
+                Some("-") => from_stdin(true)?,
+                other => other.unwrap_or_default().to_string(),
+            };
+            let timeout = timeout.map(|t| t.to_string()).unwrap_or_default();
             let form = json!({"name": cap.trim(), "summary": summary.trim(), "effect": effect,
-                              "command": command.trim(), "params": "", "result": "",
-                              "timeout": "", "platform": "any"});
+                              "command": command.trim(), "params": params,
+                              "result": result.as_deref().unwrap_or_default(),
+                              "timeout": timeout, "platform": "any"});
             ask.post(
                 "/api/caps/save",
                 json!({"id": id, "form": form, "adding": true}),

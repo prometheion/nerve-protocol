@@ -162,13 +162,17 @@ Nerve center 0.1.0 · running as a service
 
   Web UI        http://127.0.0.1:7480
   Harnesses     http://127.0.0.1:7481/mcp
+  Public URL    https://lab.example.org:7443
   Machines      none paired yet
   Owner token   nrv_owner_…
 
 Next  Owner token:  sudo nerve-center owner-token
 ```
 
-The owner token logs in to the web UI.
+The owner token logs in to the web UI. Pairing links name the public URL,
+so the other machines must reach it: where it is a bare host name, a
+warning says so, and `sudo nerve-center set public-url https://<address>:7443`
+names an address they reach.
 
 `--name`, `--public-url`, `--listen`, `--ui` and `--mcp` go into its
 settings file, `/etc/nerve-center/center.env`, and

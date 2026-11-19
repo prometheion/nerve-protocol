@@ -386,7 +386,8 @@ pub enum Cmd {
     /// Show a machine's capabilities, or add or remove one
     ///
     /// As the web UI's Capabilities page: what the machine offers, and the ones this center added. The machine checks a new one and may refuse it. It asks the running center.
-    #[command(args_conflicts_with_subcommands = true)]
+    // The machine comes first and a subcommand may follow it, so the two do
+    // not conflict: `caps lab add …` (#213, L2-1).
     Caps {
         /// The machine's name, as `nodes` shows it.
         name: String,
@@ -685,6 +686,17 @@ pub enum CapsCmd {
         /// One line the agent reads about it.
         #[arg(long)]
         summary: String,
+        /// JSON Schema of its arguments; `-` reads it from stdin
+        ///
+        /// The JSON Schema of its arguments, an object: a word of the command written `{field}` is the call's argument `field`. `-` reads it from stdin.
+        #[arg(long, value_name = "JSON")]
+        params: Option<String>,
+        /// What it returns: a JSON Schema the printed JSON must fit (text if left out)
+        #[arg(long, value_name = "JSON")]
+        result: Option<String>,
+        /// How long it may run, in seconds (the machine's default if left out).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Remove a capability this center added.
     Rm {
@@ -1525,6 +1537,63 @@ mod tests {
         assert!(refuse_state_variable(&flag, true).is_ok());
         assert!(refuse_state_variable(&[], true).is_ok());
         assert!(refuse_state_variable(&var, false).is_ok());
+    }
+
+    /// `caps <machine>` takes its subcommands after the machine, as the
+    /// guide gives them (#213, L2-1: every one of them was refused).
+    #[test]
+    fn caps_takes_a_subcommand_after_the_machine() {
+        let caps = |args: &[&str]| {
+            let argv = ["nerve-center", "caps"].iter().chain(args).copied();
+            match Args::try_parse_from(argv).map_err(|e| e.to_string())?.cmd {
+                Some(Cmd::Caps { name, cmd }) => Ok((name, cmd)),
+                other => Err(format!("{other:?}")),
+            }
+        };
+        assert_eq!(caps(&["lab"]).unwrap(), ("lab".into(), None));
+        assert_eq!(
+            caps(&["lab", "list"]).unwrap(),
+            ("lab".into(), Some(CapsCmd::List))
+        );
+        assert_eq!(
+            caps(&["lab", "rm", "backup.date"]).unwrap().1,
+            Some(CapsCmd::Rm {
+                cap: "backup.date".into()
+            })
+        );
+        let (name, add) = caps(&[
+            "lab",
+            "add",
+            "logs.tail",
+            "--effect",
+            "read",
+            "--command",
+            "tail -n 20 -- {path}",
+            "--summary",
+            "The log's end.",
+            "--params",
+            "-",
+            "--timeout",
+            "30",
+        ])
+        .unwrap();
+        assert_eq!(name, "lab");
+        let Some(CapsCmd::Add {
+            cap,
+            command,
+            params,
+            timeout,
+            ..
+        }) = add
+        else {
+            panic!("{add:?}")
+        };
+        assert_eq!(
+            (cap.as_str(), command.as_str(), params.as_deref(), timeout),
+            ("logs.tail", "tail -n 20 -- {path}", Some("-"), Some(30))
+        );
+        // The machine is still needed.
+        assert!(caps(&["add", "x", "--command", "c", "--summary", "s"]).is_err());
     }
 
     /// An elevated `install` takes its settings from the flags only.

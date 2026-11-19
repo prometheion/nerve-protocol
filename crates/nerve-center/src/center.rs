@@ -46,7 +46,7 @@ mod sessions;
 mod stats;
 
 pub use calls::{CallError, Opened, Ran};
-pub use checker_glue::{CHECKER_STALE, audit_rule};
+pub use checker_glue::{CHECKER_STALE, audit_rule, sudo_allow_refusal};
 pub use node_settings::settings_write;
 
 pub const IDENTITY_FILE: &str = "tls.pem";
