@@ -185,6 +185,26 @@ describe("Audit", () => {
     expect(text(el)).toContain("This machine did not give this center the settings grant.");
   });
 
+  it("says which line is the checker's, and counts no call twice", async () => {
+    const d = centerData();
+    const at = Date.now() - 60_000;
+    const call = { ts: at, node: "dev", node_id: "n-dev", cap: "exec", action: "run", target: "ls -la" };
+    d.audit.decisions = [
+      { ...call, decision: "allowed", by: "action checker", checker: { layer: "model", detail: "score 0.02", scope: "global" } },
+      { ...call, decision: "allowed" },
+      { ...call, ts: at + 1, target: "rm -rf /", decision: "forbidden", code: "forbidden", by: "action checker", checker: { layer: "blocklist", detail: "rm -rf", scope: "global" } },
+    ] as never;
+    const { el } = await center("audit", { "GET /api/audit": () => d.audit });
+    expect(text(el)).toContain("All3");
+    expect(text(el)).toContain("Allowed1");
+    expect(text(el)).toContain("Refused1");
+    await click(allByText(el, /rm -rf/, ".lrow")[0]);
+    expect(text(el.querySelector(".dcol")!)).toContain("forbidden by action checker");
+    expect(text(el.querySelector(".dcol")!)).not.toContain("[forbidden]");
+    await click(allByText(el, /ls -la/, ".lrow").at(-1)!);
+    expect(text(el.querySelector(".dcol")!)).toContain("passed the action checker");
+  });
+
   it("lets a refusal of the model become a rule that skips it, and sends a blocklist refusal to the checker", async () => {
     const { el, f } = await center("audit", { "POST /api/checker/allow": () => ({ rule: "exec.run:rm -rf build/" }) });
     await click(allByText(el, /rm -rf build/, ".lrow")[0]);
@@ -318,6 +338,19 @@ describe("Action checker", () => {
     await click(button(document.querySelector("[role=dialog]")!, "Install and turn on"));
     await settle(6);
     expect(f.to("POST", "/api/checker/install")[0].body).toEqual({ gpu: false, model: "d1-2b" });
+    expect(f.to("POST", "/api/checker")[0].body).toMatchObject({ config: { model_on: true } });
+  });
+
+  it("turns the model on during an install without offering another", async () => {
+    const d = centerData();
+    d.checker.config.model_on = false;
+    d.checker.installed = false;
+    d.checker.install = { phase: "downloading", llama: { done: 1, total: 2 }, model: { done: 0, total: 9 }, gpu: false, model_id: "d1-2b" } as never;
+    const { el, f } = await center("checker", { "GET /api/checker": () => d.checker, "POST /api/checker": () => ({}) });
+    await click(el.querySelectorAll(".strip [role=switch]")[1]);
+    await settle(6);
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+    expect(f.to("POST", "/api/checker/install")).toHaveLength(0);
     expect(f.to("POST", "/api/checker")[0].body).toMatchObject({ config: { model_on: true } });
   });
 });

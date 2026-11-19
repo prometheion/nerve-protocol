@@ -250,6 +250,39 @@ describe("Capabilities", () => {
     expect(el.querySelector(".ask")).toBeNull();
   });
 
+  it("switches every action cap lists, a program's and a center's own too", async () => {
+    const d = nodeData();
+    d.caps.programs = [{ name: "lamp", exe: "/opt/lamp/lamp", attached: true } as never];
+    const rows = d.caps.capabilities as Record<string, unknown>[];
+    rows.push(
+      { name: "settings.write", effect: "write", source: "built-in", centers: { home: "granted" } },
+      { name: "logs.tail", effect: "read", source: "config", summary: "The log's end.", centers: { home: "on" }, now: { home: "on" } },
+      { name: "lamp.set", effect: "actuate", source: "program lamp", summary: "Sets the lamp.", centers: { home: "default" }, now: { home: "off" } },
+      { name: "lamp.level", effect: "read", kind: "state", source: "program lamp", centers: { home: "default" } },
+      { name: "lamp.dim", source: "program lamp", broken: "params: not an object", centers: { home: "default" } },
+      { name: "backup.date", effect: "execute", source: "center home", centers: { home: "default" } },
+      { name: "other.thing", effect: "read", source: "center lab", centers: { lab: "default" } },
+    );
+    const { el, f } = await node("capabilities", { "GET /api/caps": () => d.caps, "POST /api/caps/set": () => ({}) });
+    const row = (name: RegExp) => allByText(el, name, ".lrow")[0];
+    // A program's action has its switch, and goes on for this center.
+    await click(button(row(/^lamp\.set/), "On"));
+    expect(f.to("POST", "/api/caps/set")[0].body).toEqual({ center: "home", cap: "lamp.set", setting: "on" });
+    expect(row(/^logs\.tail/).querySelector(".seg")).not.toBeNull();
+    expect(row(/^backup\.date/).querySelector(".seg")).not.toBeNull();
+    expect(text(row(/^lamp\.level/))).toContain("read state");
+    // A left-out one says why and has no switch.
+    expect(text(row(/^lamp\.dim/))).toContain("left out: params: not an object");
+    expect(row(/^lamp\.dim/).querySelector(".seg")).toBeNull();
+    // Not what another center added, nor the settings grant.
+    expect(allByText(el, /^other\.thing/, ".lrow")).toHaveLength(0);
+    expect(allByText(el, /^settings\.write/, ".lrow")).toHaveLength(0);
+    // The program says it is attached, and what it offers.
+    await click(allByText(el, /^lamp/, ".lrow").at(-1)!);
+    expect(text(el.querySelector(".dcol")!)).toContain("lamp.set");
+    expect(text(allByText(el, /^lamp/, ".lrow").at(-1)!)).toContain("attached");
+  });
+
   it("switches an action for the chosen center in its row", async () => {
     const { el, f } = await node("capabilities", { "POST /api/caps/set": () => ({}) });
     const row = allByText(el, /^fs\.read/, ".lrow")[0];

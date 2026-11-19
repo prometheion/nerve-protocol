@@ -57,6 +57,16 @@ impl Layer {
             Layer::Model => "model",
         }
     }
+
+    /// The layer as the Action checker page and the guide name it, for the
+    /// log: "allow rule" is the node's word for something else (#213, L4-7).
+    pub fn words(self) -> &'static str {
+        match self {
+            Layer::Blocklist => "blocklist",
+            Layer::AllowRule => "Skip the model rule",
+            Layer::Model => "decision model",
+        }
+    }
 }
 
 /// What the checker decided about a call.

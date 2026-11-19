@@ -38,7 +38,13 @@ neither disabled nor offline: such a call is `unavailable` before the checker
 runs, so it costs no model call, a down model failing closed does not turn it
 into `forbidden`, and the checker audits nothing for it. Every center decision
 carries a `by: "action checker"` and a `checker: {layer, scope, detail}` in the
-audit feed, and a line in the log.
+audit feed, and a line in the log. An allowed call is then decided by its
+machine too, in an entry of its own: the checker's reads "passed the action
+checker" on the Audit page and in `nerve-center audit`, and the Allowed filter
+counts only the machine's. The supervisor of the local model writes to the log
+when the server ends, cannot start or runs again (once per cause, not at every
+retry), and when the model is on with none installed: the page's red banner
+sends the owner there.
 
 ## The blocklist matcher
 
@@ -1191,7 +1197,7 @@ quality in one line:
 
 | Model | Size | Memory | Licence | Speed on a desktop CPU, and quality |
 |---|---|---|---|---|
-| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 s on 2 vCPUs). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
+| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 to 10 s on 2 vCPUs: 10 s on a shared 2-vCPU VM in #213). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
 | **Kev-4B** (ggml-org) | 3.0 GB | about 6 GB, up to 13 GB for a very long call | Apache-2.0 | Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refuses about 1.5 % of ordinary work, but about 5 s per call (15 s on 2 vCPUs) |
 
 Pick d1-2B when the checker should stay quick on a CPU, Kev-4B when catching

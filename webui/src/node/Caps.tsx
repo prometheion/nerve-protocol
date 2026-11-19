@@ -1,8 +1,10 @@
 // Capabilities: what the chosen center may use on this machine. Each
 // capability and each of its actions has its On, Off or Hidden switch for
-// that center in its row (none chosen: the mode decides); then the
-// capabilities of your own and the programs you allow, each added or
-// changed in the details pane.
+// that center in its row (none chosen: the mode decides): the built-in
+// ones, your own, the programs' and those the center added, as `nerve-node
+// cap` lists them, a left-out one with its reason (#213, L2-3: only the
+// built-in ones had switches); then the capabilities of your own and the
+// programs you allow, each added or changed in the details pane.
 import { useState } from "react";
 import { ApiError, api } from "../api";
 import { usePoll } from "../frame";
@@ -11,17 +13,37 @@ import { AddRow, Banner, Btn, DSec, Detail, Dot, Field, FormCard, LGroup, LRow, 
 import { useNode } from "./App";
 import { CenterTabs } from "./CenterTabs";
 
-type Row = { name: string; effect: string; source: string; summary?: string; kind?: string; centers?: Record<string, string>; now?: Record<string, string>; left_out?: string };
+type Row = { name: string; effect?: string; source: string; summary?: string; kind?: string; centers?: Record<string, string>; now?: Record<string, string>; left_out?: string; broken?: string };
 type Listing = {
   center?: string;
   known?: Record<string, string[]>;
   caps?: Record<string, string>;
   config?: { name: string; summary?: string; effect?: string; form: CapFormValue }[];
-  programs?: { name: string; exe?: string; attached?: boolean; running?: boolean }[];
+  programs?: { name: string; exe?: string; attached?: boolean | null; running?: boolean }[];
   capabilities?: Row[];
 };
 
 const SWITCH = ["on", "off", "hidden"].map((v) => ({ value: v, label: v[0].toUpperCase() + v.slice(1) }));
+
+/** The capabilities a center's switches cover, from the rows `cap` lists,
+ * each with its rows in order: not `settings`, which its grant governs, and
+ * not what another center added, which only that one is offered. */
+export function switchGroups(rows: Row[], center: string): { cap: string; source: string; rows: Row[] }[] {
+  const groups: { cap: string; source: string; rows: Row[] }[] = [];
+  for (const r of rows) {
+    const set = r.centers ? r.centers[center] : undefined;
+    if (set === "granted" || set === "not granted") continue;
+    if (r.source.startsWith("center ") && r.source !== `center ${center}`) continue;
+    const cap = r.name.split(".")[0];
+    const g = groups.find((x) => x.cap === cap && x.source === r.source);
+    if (g) g.rows.push(r);
+    else groups.push({ cap, source: r.source, rows: [r] });
+  }
+  return groups;
+}
+
+/** Why `cap` left a row out, if it did. */
+const leftOut = (r?: Row) => (r ? r.left_out || r.broken : undefined);
 
 const effectTone = (e?: string): Tone => (e === "sense" || e === "actuate" ? "warn" : e === "execute" ? "accent" : "");
 
@@ -106,9 +128,9 @@ function CapsOf({ center }: { center: string | null }) {
   const v = caps.data;
   if (!v) return caps.error ? <Banner tone="danger">{caps.error.message}</Banner> : <Loading />;
   // The switches are a center's: none without one.
-  const known = center ? v.known || {} : {};
   const setting = v.caps || {};
   const rows = v.capabilities || [];
+  const groups = center ? switchGroups(rows, center) : [];
   const own = v.config || [];
   const programs = v.programs || [];
   const rowOf = (name: string) => rows.find((r) => r.name === name);
@@ -118,8 +140,7 @@ function CapsOf({ center }: { center: string | null }) {
     setOpen(true);
   };
   const usable = (r?: Row) => (r && r.now && center ? r.now[center] === "on" : undefined);
-  const groups = Object.entries(known);
-  const first = groups.length ? `c:${groups[0][0]}` : own.length ? `o:${own[0].name}` : null;
+  const first = groups.length ? `c:${groups[0].cap}` : own.length ? `o:${own[0].name}` : null;
   const current = form ? (form.adding ? `new-${form.kind}` : `o:${form.v.name}`) : sel ?? first;
   let detail;
   if (form) {
@@ -179,6 +200,7 @@ function CapsOf({ center }: { center: string | null }) {
     ) : null;
   } else if (current && current.startsWith("p:")) {
     const p = programs.find((x) => `p:${x.name}` === current);
+    const programRows = (name: string) => rows.filter((r) => r.source === `program ${name}`);
     detail = p ? (
       <Detail
         key={current}
@@ -201,6 +223,21 @@ function CapsOf({ center }: { center: string | null }) {
         <DSec>
           <code className="code mono">{p.exe || ""}</code>
         </DSec>
+        <DSec title="What it offers">
+          {programRows(p.name).length ? (
+            <div className="kv">
+              {programRows(p.name).map((r) => (
+                <span key={r.name} className="contents">
+                  <span className="k mono">{r.name}</span>
+                  <span>{leftOut(r) ? `left out: ${leftOut(r)}` : [r.effect, r.kind].filter(Boolean).join(" ")}</span>
+                  <span />
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="meta">{p.attached ? "Nothing." : "It shows once the program runs and attaches."}</p>
+          )}
+        </DSec>
       </Detail>
     ) : null;
   } else if (current) {
@@ -208,6 +245,8 @@ function CapsOf({ center }: { center: string | null }) {
     const name = current.slice(2);
     const r = rowOf(name);
     const on = usable(r);
+    const g = groups.find((x) => x.cap === name);
+    const why = leftOut(r);
     detail = (
       <Detail
         compact
@@ -215,17 +254,21 @@ function CapsOf({ center }: { center: string | null }) {
         title={name}
         pills={
           <>
-            {r ? <Pill tone={effectTone(r.effect)}>{r.effect}</Pill> : null}
-            {r ? <span className="faint">{r.source}</span> : <span className="faint">{(known[name] || []).length} actions</span>}
+            {r && r.effect ? <Pill tone={effectTone(r.effect)}>{r.effect}</Pill> : null}
+            {r ? <span className="faint">{r.source}</span> : g ? <span className="faint">{g.source} · {g.rows.length} actions</span> : null}
           </>
         }
         actions={on === undefined ? null : <Pill tone={on ? "ok" : ""} dot>{on ? "Usable now" : "Not now"}</Pill>}
       >
         {r && r.summary ? <p className="lead">{r.summary}</p> : null}
-        <DSec title={`For ${center}`}>
-          <CapSwitch center={center!} cap={name} value={setting[name] || null} reload={caps.reload} />
-          <span className="faint">{setting[name] ? `Set: ${setting[name]}.` : "None chosen: its mode decides."}</span>
-        </DSec>
+        {why ? (
+          <Banner tone="warn">Left out: {why}</Banner>
+        ) : (
+          <DSec title={`For ${center}`}>
+            <CapSwitch center={center!} cap={name} value={setting[name] || null} reload={caps.reload} />
+            <span className="faint">{setting[name] ? `Set: ${setting[name]}.` : "None chosen: its mode decides."}</span>
+          </DSec>
+        )}
         {r && r.centers && Object.keys(r.centers).length > 1 ? (
           <DSec title="Other centers">
             <div className="kv">
@@ -253,31 +296,30 @@ function CapsOf({ center }: { center: string | null }) {
         <ListCard className="capl">
           {center ? <p className="lnote top">The switches are for {center}. None chosen: its mode decides.</p> : <p className="lnote top">The switches come with a paired center.</p>}
           {center && !groups.length ? <p className="lnote">Nothing to switch.</p> : null}
-          {groups.map(([cap, actions]) => (
-            <div key={cap}>
+          {groups.map(({ cap, source, rows: actions }) => (
+            <div key={`${source}:${cap}`}>
               <LRow className="cap" current={current === `c:${cap}`} onPick={() => pick(`c:${cap}`)}>
                 <span className="cn">
                   <b className="mono">{cap}</b>
-                  <Pill>built-in</Pill>
+                  <Pill>{source}</Pill>
                 </span>
-                <span className="cd">{(actions || []).join(", ")}</span>
+                <span className="cd">{actions.map((r) => r.name.slice(cap.length + 1)).join(", ")}</span>
                 <CapSwitch center={center!} cap={cap} value={setting[cap] || null} reload={caps.reload} />
               </LRow>
-              {(actions || []).map((a) => {
-                const name = `${cap}.${a}`;
-                const r = rowOf(name);
+              {actions.map((r) => {
                 const on = usable(r);
+                const why = leftOut(r);
                 return (
-                  <LRow key={name} className="cap sub" current={current === `a:${name}`} onPick={() => pick(`a:${name}`)}>
+                  <LRow key={r.name} className="cap sub" current={current === `a:${r.name}`} onPick={() => pick(`a:${r.name}`)}>
                     <span className="cn">
-                      <span className="mono cut">{name}</span>
-                      {r ? <Pill tone={effectTone(r.effect)}>{r.effect}</Pill> : null}
+                      <span className="mono cut">{r.name}</span>
+                      {r.effect ? <Pill tone={effectTone(r.effect)}>{r.kind ? `${r.effect} ${r.kind}` : r.effect}</Pill> : null}
                     </span>
-                    <span className="cd" title={r?.summary}>
-                      {r?.summary || ""}
+                    <span className="cd" title={why || r.summary}>
+                      {why ? `left out: ${why}` : r.summary || ""}
                     </span>
-                    {on === undefined ? null : <Dot tone={on ? "ok" : ""} />}
-                    <CapSwitch center={center!} cap={name} value={setting[name] || null} reload={caps.reload} />
+                    {on === undefined || why ? null : <Dot tone={on ? "ok" : ""} />}
+                    {why ? null : <CapSwitch center={center!} cap={r.name} value={setting[r.name] || null} reload={caps.reload} />}
                   </LRow>
                 );
               })}
@@ -306,6 +348,7 @@ function CapsOf({ center }: { center: string | null }) {
             <LRow key={p.name} className="cap" current={current === `p:${p.name}`} onPick={() => pick(`p:${p.name}`)}>
               <span className="cn">
                 <span className="mono cut">{p.name}</span>
+                {p.attached == null ? null : <Pill tone={p.attached ? "ok" : ""}>{p.attached ? "attached" : "not attached"}</Pill>}
               </span>
               <span className="cd mono">{p.exe || ""}</span>
             </LRow>

@@ -90,7 +90,8 @@ impl Center {
         // the check below and the start.
         let held = lock(&self.files_held);
         let installed = checker::install::installed(&self.dir, cfg.model.local_model);
-        let want = cfg.model_wanted() && cfg.model.source == ModelSource::Local && installed;
+        let wanted = cfg.model_wanted() && cfg.model.source == ModelSource::Local;
+        let want = wanted && installed;
         // An install is swapping the files (or Remove deleting them): start
         // nothing from them now. The install rebuilds when it is done, and
         // the empty signature makes that start the server.
@@ -102,6 +103,8 @@ impl Center {
                 "gpu={}|model={:?}",
                 cfg.model.local_gpu, cfg.model.local_model
             )
+        } else if wanted {
+            "not installed".to_string()
         } else {
             String::new()
         };
@@ -128,6 +131,10 @@ impl Center {
                         checker::install::on_gpu(cfg.model.local_gpu, checker::install::cpu_only()),
                         cfg.model.timeout_ms,
                         checker::install::model_pin(cfg.model.local_model),
+                        {
+                            let log = self.log.clone();
+                            Arc::new(move |level, text: String| log.record(level, None, &text))
+                        },
                     )
                 }) {
                 Ok(srv) => {
@@ -167,6 +174,20 @@ impl Center {
                     &format!("the action checker cannot start its local model: {e}"),
                 ),
             }
+        } else if wanted {
+            // On with nothing to run: the page's banner says so, and sends
+            // the owner to the log (#213, L4-2).
+            self.log.record(
+                Level::Warn,
+                None,
+                &format!(
+                    "the action checker's decision model is on, but no local model is installed: every call it checks is refused until one runs ({})",
+                    match self.checker_installing() {
+                        true => "it runs once the install is done",
+                        false => "install it on the Action checker page or with `nerve-center checker model install`",
+                    }
+                ),
+            );
         }
         *lock(&self.local_sig) = sig;
     }
@@ -257,6 +278,16 @@ impl Center {
     /// The one-click install's current state.
     pub fn checker_install_status(&self) -> checker::install::Status {
         lock(&self.install).clone()
+    }
+
+    /// Whether the one-click install runs now.
+    pub fn checker_installing(&self) -> bool {
+        matches!(
+            lock(&self.install).phase,
+            checker::install::Phase::Downloading
+                | checker::install::Phase::Unpacking
+                | checker::install::Phase::Verifying
+        )
     }
 
     /// Starts the one-click install of llama.cpp and the chosen model on the
@@ -650,7 +681,7 @@ impl Center {
                 "the action checker {verb} {}.{} by its {} {} ({detail})",
                 route.cap,
                 route.action,
-                layer.as_str(),
+                layer.words(),
                 match scope {
                     Scope::Global => "for every node",
                     Scope::Node => "for this node",
@@ -1784,6 +1815,60 @@ mod tests {
         c.rebuild_checker();
         until("the model to be ready", || local_ready(&c)).await;
         c
+    }
+
+    /// The log messages of `c` that hold `text`.
+    fn logged(c: &Center, text: &str) -> Vec<String> {
+        let v = c.log_json(&nerve_transport::log::Query {
+            limit: 200,
+            ..Default::default()
+        });
+        v["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["msg"].as_str())
+            .filter(|m| m.contains(text))
+            .map(String::from)
+            .collect()
+    }
+
+    /// The model switched on with none installed says so in the log, once,
+    /// where the page's banner sends the owner (#213, L4-2); a model that
+    /// ended says it there too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_log_says_why_the_decision_model_does_not_run() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = open(dir.path(), None);
+            c.update(|s| {
+                s.checker.model_on = true;
+                s.checker.model.source = ModelSource::Local;
+            });
+            c.rebuild_checker();
+            c.rebuild_checker();
+            let said = logged(&c, "no local model is installed");
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert!(said[0].contains("checker model install"), "{said:?}");
+            install_fake_build(dir.path());
+            c.rebuild_checker();
+            until("the model to be ready", || local_ready(&c)).await;
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            let killed = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status()
+                .unwrap();
+            assert!(killed.success());
+            until("the log to say it ended", || {
+                !logged(&c, "the action checker's local model ended").is_empty()
+            })
+            .await;
+        })
+        .await
+        .expect("the test did not finish within 60 s");
     }
 
     /// A local model that ended on a call keeps its endpoint while it starts

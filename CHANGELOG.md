@@ -54,8 +54,10 @@ and every limit is in
 - Everything the web UI and the app do for the center is a command too:
   `sessions [end]`, `checker` (its switches, the blocklist and the rules that
   skip the model with add, edit, on, off and rm, the decision model, a
-  machine's own switches), `caps <machine> [add|rm]`, `stats`, `audit` (and
-  `allow|deny|skip <id>`), `key rotate|finish`, `config` (name, retention,
+  machine's own switches), `caps <machine> [add|rm|list]` (`add` with
+  `--params`), `stats`, `audit` (and `allow|deny|skip <id>`; an allow of a
+  sudo command adds no rule and gives the line to run on the machine),
+  `key rotate|finish`, `config` (name, retention,
   pairing time, log level) and `nodes rename|settings|sudo`. `audit` gives
   each decision an id that stays the same while new ones come in, and
   `nodes settings` prints a file (with the version it was read at) that
@@ -66,7 +68,11 @@ and every limit is in
   the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
-  fails closed by default.
+  fails closed by default. The log says why the model does not run, and
+  `nerve-center checker` warns while it is on and not running.
+- `nerve-center status` shows where a running center is, also one run by
+  hand, and the public URL pairing links name, with a warning for a bare
+  host name.
 - Backup and restore, and a rotation of its key that the machines follow.
 
 ### Machines and pairing

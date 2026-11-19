@@ -156,7 +156,7 @@ pub const MODELS: [ModelPin; 2] = [
         // 240-token call (review round 4 of #178), which 15,500 fits; 1.3
         // times at 8,070 in the evaluation's peak run.
         read_growth: 12_000.0,
-        summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
+        summary: "Faster: about 2 s per call on a desktop CPU, 5 to 10 s on 2 vCPUs, where a timeout of 30 s suits it better. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,

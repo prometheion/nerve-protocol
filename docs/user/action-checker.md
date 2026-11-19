@@ -59,7 +59,9 @@ Turn it on with one of two sources:
 
 Check that a model's licence suits you: d1-2B is under the LFM Open License,
 Kev-4B under Apache-2.0. On a small machine, raise the timeout or use an
-endpoint ([measured](../dev/action-checker.md#the-evaluation)).
+endpoint: on 2 vCPUs d1-2B takes 5 to 10 s a call, so give it 30 s
+(`nerve-center checker model set timeout-ms 30000`,
+[measured](../dev/action-checker.md#the-evaluation)).
 
 The settings are under **Advanced**: which calls the model sees (by default
 every execute, write and actuate call), the threshold, the timeout, and what
