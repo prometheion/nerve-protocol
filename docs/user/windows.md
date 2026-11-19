@@ -109,7 +109,8 @@ installs the center as the service `nerve-center`, which runs the app's
 program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
 `C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
 the node port (7443) of the center's service. Its last step shows what it
-did, the owner token among it. Keep the token in your password manager.
+did, and the owner token with a **Copy** button. Keep the token in your
+password manager.
 **Nerve** in the Start menu then opens the center's pages, which ask for
 the token ([the center in the app](center.md#in-the-app)). Any program of
 yours can read the open app's memory: run the harness under another

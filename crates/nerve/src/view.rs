@@ -35,6 +35,10 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 /// app's node.
 pub const ALSO_CENTER: &str = "Also a center, installed in the terminal. The app leaves it as it is: its own program updates it.";
 
+/// The Overview's warning when the node on Windows has no working copy of
+/// the owner's password.
+pub const OWNER_PASSWORD_MISSING: &str = "Your Windows password is not stored, or no longer works: commands as you, and the folders' permissions, wait for it. Settings › General › Account for commands takes it.";
+
 /// The Overview's warning when the folder grants did not all go as the
 /// owner set them (`status`'s `folder_access`): the details are on
 /// Permissions, Folders.
@@ -156,6 +160,11 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         } else if any("left_out") {
             warnings.push(FOLDERS_LEFT_OUT.into());
         }
+    }
+    // A Windows node without a working password of the owner's: commands
+    // as the owner and the folder grants stop (#213 W1-F3).
+    if owner_password_missing(v) {
+        warnings.push(OWNER_PASSWORD_MISSING.into());
     }
     // An owner with the machine's full rights is said whether the node runs
     // or not: what runs as the owner runs as root, or as an administrator
@@ -2314,6 +2323,17 @@ mod tests {
         let (st, _) = status(&v, NOW);
         let w: Vec<SharedString> = st.warnings.iter().collect();
         assert_eq!(w, [SharedString::from(ALSO_CENTER)]);
+        // A Windows node without a working password of the owner's (#213
+        // W1-F3).
+        for state in ["missing", "stale"] {
+            let v = json!({"daemon": "running", "locked": false, "centers": [],
+                "owner_password": state});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(OWNER_PASSWORD_MISSING)], "{state}");
+        }
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "owner_password": "stored"});
+        assert_eq!(status(&v, NOW).0.warnings.row_count(), 0);
         // Folders whose grants did not go as set, or that hold a file of
         // another account, are said on the Overview too (#213 W2-5, W3-2).
         for (grants, want) in [

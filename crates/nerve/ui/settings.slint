@@ -288,9 +288,13 @@ export component SettingsPage inherits PageFrame {
                                 shown: Install.windows;
                                 gap: Space.sm;
                                 Text {
-                                    text: "User mode, allowlist mode as you and sudo run commands as "
+                                    // What the node says of the stored password, not what the
+                                    // install meant to store (#213 W1-F3).
+                                    text: Perm.owner-password-missing
+                                        ? "No working Windows password of yours is stored: user mode, allowlist mode as you and sudo run no command, and folder mode cannot change your folders' permissions. Enter it below."
+                                        : "User mode, allowlist mode as you and sudo run commands as "
                                         + (Prefs.account != "" ? Prefs.account : Install.account)
-                                        + ", with your Windows password, which the install stored. Folder mode needs it too: the node changes your folders' permissions as you.";
+                                        + ", with your Windows password, which the node keeps. Folder mode needs it too: the node changes your folders' permissions as you.";
                                     color: Theme.text;
                                     font-size: Type.small;
                                     wrap: word-wrap;

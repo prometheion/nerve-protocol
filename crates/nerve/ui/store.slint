@@ -635,6 +635,9 @@ export global Install {
     // whether this one is newer.
     in-out property <string> version;
     in-out property <string> installed-version;
+    // The owner token the center's install made, shown with Copy on its
+    // last step.
+    in-out property <string> center-token;
     in-out property <bool> newer;
     // The node is installed as a service already, without the app.
     in-out property <bool> node-only;

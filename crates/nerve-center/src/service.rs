@@ -250,8 +250,8 @@ WantedBy=multi-user.target
         };
         let (set, restart) = match self.windows() {
             true => (
-                "`nerve-center set <name> <value>` in an administrator's terminal",
-                "`Restart-Service nerve-center` in an administrator's PowerShell".to_string(),
+                "The Nerve app's Settings › This machine",
+                "Settings › This machine › Restart in the Nerve app".to_string(),
             ),
             false => (
                 "`sudo nerve-center set <name> <value>`",
@@ -680,11 +680,28 @@ fn status_page_of(
             layout.settings().display()
         ));
     }
+    // On Windows the app does all of it: no step there is a command for a
+    // terminal (#213 W1-F1).
+    let windows = layout.windows();
     if unreadable {
-        p.next("See it all", admin("status"));
+        p.next(
+            "See it all",
+            if windows {
+                "the center's pages in the Nerve app".to_string()
+            } else {
+                admin("status")
+            },
+        );
     }
     if service.as_ref().is_some_and(|s| !s.active) {
-        p.next("Start it", admin("service start"));
+        p.next(
+            "Start it",
+            if windows {
+                "Overview › Start in the Nerve app".to_string()
+            } else {
+                admin("service start")
+            },
+        );
     }
     // The commands for this center from where they are run.
     let installed_dir = match installed {
@@ -703,11 +720,17 @@ fn status_page_of(
     };
     // A machine is paired with the running center.
     if none_paired && (runs == Some(true) || service.as_ref().is_some_and(|s| s.active)) {
-        p.next("Pair a machine", command("pair"));
+        p.next(
+            "Pair a machine",
+            if windows {
+                "Nodes › Pair a machine in the Nerve app".to_string()
+            } else {
+                command("pair")
+            },
+        );
     }
-    p.next("Owner token", command("owner-token"));
-    if installed && layout.windows() {
-        p.note("Run these commands in an administrator's terminal.");
+    if !windows {
+        p.next("Owner token", command("owner-token"));
     }
     p
 }
@@ -3374,6 +3397,36 @@ Next  Change one:  sudo nerve-center set <name> <value>
         assert!(
             has_next(&on, "Pair a machine: sudo nerve-center pair"),
             "{on}"
+        );
+    }
+
+    /// On Windows the page the app shows after the center's install sends
+    /// no one to a terminal: its next steps are the app's (#213 W1-F1).
+    #[test]
+    fn the_windows_page_names_the_app_not_a_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let l = Layout {
+            unit: PathBuf::new(),
+            ..layout(d.path())
+        };
+        assert!(l.windows());
+        let page = done_page(&l, "", Some("nrv_owner_x"), Some("1.2.0"), true).render(Style::PLAIN);
+        assert!(
+            !page.contains("terminal") && !page.contains("nerve-center "),
+            "{page}"
+        );
+        assert!(
+            has_next(
+                &page,
+                "Pair a machine: Nodes › Pair a machine in the Nerve app"
+            ),
+            "{page}"
+        );
+        assert!(page.contains("  Owner token   nrv_owner_x\n"), "{page}");
+        let file = l.settings_text("tok", &[]);
+        assert!(
+            !file.contains("terminal") && !file.contains("PowerShell"),
+            "{file}"
         );
     }
 

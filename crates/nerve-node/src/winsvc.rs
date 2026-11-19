@@ -1103,12 +1103,20 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
     })();
     match r {
         Ok(step) => steps.did(step),
-        Err(e) => steps.did(format!(
-            "{}: {e}; {}",
-            crate::account::NO_COMMANDS_AS_YOU,
-            crate::account::NO_ACCOUNT_INSTALL
-        )),
+        Err(e) => steps.did(no_commands_as_you(&e)),
     }
+}
+
+/// The install's line for an owner whose password does not do (`e`): why,
+/// and where the app takes it, once (#213 W1-F2).
+pub fn no_commands_as_you(e: &str) -> String {
+    use crate::account::{
+        BLANK_PASSWORD, BLANK_PASSWORD_WHY, NO_ACCOUNT_INSTALL, NO_COMMANDS_AS_YOU,
+    };
+    if e == BLANK_PASSWORD {
+        return format!("{NO_COMMANDS_AS_YOU}: {BLANK_PASSWORD_WHY}, then {NO_ACCOUNT_INSTALL}");
+    }
+    format!("{NO_COMMANDS_AS_YOU}: {e}; {NO_ACCOUNT_INSTALL}")
 }
 
 /// Deletes the owner's password under its old name ([`OLD_OWNER_SECRET_FILE`])
@@ -2710,6 +2718,11 @@ pub(crate) mod tests {
             save_owner_password(&l.paths, &sys, "").unwrap_err(),
             BLANK_PASSWORD
         );
+        // At install it says where the app takes it, once (#213 W1-F2).
+        let line = no_commands_as_you(BLANK_PASSWORD);
+        assert_eq!(line.matches("Settings › General").count(), 1, "{line}");
+        assert!(!line.contains("here"), "{line}");
+        assert!(line.contains("an account without a password"), "{line}");
     }
 
     /// An owner of a domain or of Microsoft Entra ID is refused by its SID,

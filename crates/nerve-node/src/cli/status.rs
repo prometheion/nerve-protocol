@@ -145,6 +145,10 @@ fn owner_row(owner: Option<&str>, full: bool, p: &mut Page) {
 
 /// What `status` says when the service runs an older program than the
 /// installed one (nerve_service::stale).
+/// What `status` warns of where the node on Windows has no working copy of
+/// the owner's password.
+pub const OWNER_PASSWORD_MISSING: &str = "No working Windows password of the owner is stored: commands as the owner, and the folders' permissions, wait for it (the app's Settings › General › Account for commands takes it).";
+
 pub const OLDER_PROGRAM: &str = "The service still runs the program it started with, older than the installed one: `nerve-node service restart` starts the new one.";
 
 /// What `status` shows of the node, from `status --json`'s `v` (a running
@@ -214,6 +218,10 @@ fn status_page(v: &Value) -> Page {
     }
     for l in grant_lines(&v["folder_access"]) {
         p.warn(l);
+    }
+    // A Windows node without a working password of the owner's (#213 W1-F3).
+    if matches!(v["owner_password"].as_str(), Some("missing" | "stale")) {
+        p.warn(OWNER_PASSWORD_MISSING);
     }
     let mut centers = Vec::new();
     for c in v["centers"].as_array().into_iter().flatten() {
@@ -368,6 +376,18 @@ mod tests {
     /// The status page of `v` as plain text.
     fn text(v: &Value) -> String {
         status_page(v).render(Style::PLAIN)
+    }
+
+    /// A Windows node without a working password of the owner's says so
+    /// (#213 W1-F3).
+    #[test]
+    fn a_missing_owner_password_is_said() {
+        for state in ["missing", "stale"] {
+            let v = json!({"daemon": "running", "owner_password": state});
+            assert!(text(&v).contains("No working Windows password"), "{v}");
+        }
+        let v = json!({"daemon": "running", "owner_password": "stored"});
+        assert!(!text(&v).contains("No working Windows password"));
     }
 
     /// `status` of a running node: as whom each pairing runs and whether

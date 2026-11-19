@@ -1131,8 +1131,8 @@ mod tests {
         assert!(out.contains(&format!("  Owner token   {owner}\n")), "{out}");
         let file = std::fs::read_to_string(l.settings()).unwrap();
         assert!(file.contains("NERVE_CENTER_HARNESS_TOKEN=nrv_"), "{file}");
-        // Windows texts in the file the owner edits.
-        assert!(file.contains("Restart-Service nerve-center"), "{file}");
+        // Windows texts in the file the owner edits: the app's places.
+        assert!(file.contains("Settings › This machine › Restart"), "{file}");
         assert!(!file.contains("systemctl"), "{file}");
         assert_eq!(
             std::fs::read_to_string(&l.bin).unwrap(),

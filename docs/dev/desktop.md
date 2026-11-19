@@ -706,7 +706,10 @@ Windows needs no other program for the app itself. What it uses:
 
 - An owner account with a password: Windows logs no program on to an account
   without one, so `user` mode, `allowlist` mode with `--as-owner` and sudo
-  run nothing as an owner without a password, and the app says so. The
+  run nothing as an owner without a password, and the app says so: the
+  installer installs with the field left empty and says why under it and
+  on its last step, and while no working password is stored Settings ›
+  General, the Overview and `status` say so. The
   node also changes the owner's folder grants as the owner: without the
   password a folder you add gives the commands of `folder` and of `allowlist`
   mode as `nerve-run` no access, and one you remove or close stops the
