@@ -45,9 +45,13 @@ covers.
 | `lamp.set:room=office` | a call of `lamp.set` with that argument |
 
 A wildcard covers plain commands only. A line with shell characters
-(`; & | $ ( ) < > { } ' "`), or one that starts another shell (`sh`,
-`bash`, `eval`), needs a rule that names the whole line. So `git *` does not
-allow `git x; rm -rf ~` ([what a wildcard covers](../dev/policy-engine.md#what-a-wildcard-covers)).
+(`` ; & | $ ` ( ) < > @ { } % ' " # , \ ``), or one
+that starts another shell (`sh`, `bash`, `eval`), needs a rule that names the
+whole line. So `git *` does not allow `git x; rm -rf ~` ([what a wildcard
+covers](../dev/policy-engine.md#what-a-wildcard-covers)). On Windows a path
+with `\` needs a rule of its own: write it with `/` (`Get-ChildItem C:/work`),
+which PowerShell takes too. Rules match case as written: `Get-Date` does not
+cover `get-date`.
 
 ## Rules for files and other actions
 

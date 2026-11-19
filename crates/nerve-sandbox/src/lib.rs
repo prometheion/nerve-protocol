@@ -117,6 +117,8 @@ pub struct ShimSpec {
 /// when a command names a cmdlet, so `New-PSDrive`, `Get-Content` and
 /// `Out-File` were "not recognized" (#105, #106). After the import they are
 /// there; other modules still load on their own where that works.
+///
+/// It ends with a line break, so the command is the second line.
 pub const POWERSHELL_START: &str = concat!(
     r"Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; ",
     r"$null = New-PSDrive -Name Work -PSProvider FileSystem ",
@@ -208,6 +210,9 @@ pub const POWERSHELL_START: &str = concat!(
     r"$PSCmdlet.MyInvocation.ExpectingInput 2>&1 | ",
     r"ForEach-Object { if ($_ -is [Management.Automation.ErrorRecord]) { $PSCmdlet.WriteError($_) } ",
     r"else { $_ } } } }; ",
+    // The command starts a line of its own: PowerShell's error positions
+    // then show its own text and columns, not this start's (#213 W3-9).
+    "\n",
 );
 
 /// The AppContainer a Windows command runs in. Its SID is derived from the
@@ -1448,6 +1453,11 @@ pub mod acl {
     /// git trusts the repositories the command reaches, as on Linux: they
     /// are the owner's, given to it, and git refuses another account's
     /// otherwise ("dubious ownership").
+    ///
+    /// PowerShell keeps its module analysis cache in `ac` too: in a
+    /// container Windows gives it no local application data folder, and
+    /// without a path of its own it wrote the cache into the working folder,
+    /// the owner's project (#213 W3-8).
     pub fn container_home(ac: &std::path::Path) -> Vec<(String, String)> {
         // Windows paths, also where the tests run elsewhere.
         let text = format!("{}\\home", ac.display());
@@ -1462,6 +1472,10 @@ pub mod acl {
             ("HOMEDRIVE".into(), drive),
             ("HOMEPATH".into(), path),
             ("APPDATA".into(), format!("{text}\\AppData\\Roaming")),
+            (
+                "PSModuleAnalysisCachePath".into(),
+                format!("{}\\ModuleAnalysisCache", ac.display()),
+            ),
             ("GIT_CONFIG_COUNT".into(), "1".into()),
             ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
             ("GIT_CONFIG_VALUE_0".into(), "*".into()),
@@ -4825,6 +4839,10 @@ mod tests {
         assert_eq!(get("TEMP"), [r"C:\Users\nerve-run\AppData\Local\Temp"]);
         assert_eq!(get("GIT_CONFIG_KEY_0"), ["safe.directory"]);
         assert_eq!(get("GIT_CONFIG_VALUE_0"), ["*"]);
+        assert_eq!(
+            get("PSModuleAnalysisCachePath"),
+            [r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC\ModuleAnalysisCache"]
+        );
         // The node's variables the owner passes on (`machine.command_env`)
         // do not move the home, also where they name it: it is in the
         // environment once.

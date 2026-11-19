@@ -81,9 +81,10 @@ decides.
 mode. In `allowlist` mode as `nerve-run` they are the sandbox the allowed
 commands run in, and the allow rules decide what runs.
 
-- A folder with `none` is closed to file calls. A command started in the
-  folder around it still reaches it
-  ([folders](../dev/policy-engine.md#folders-and-rights)).
+- A folder with `none` is closed to file calls. On Linux a command started
+  in the folder around it still reaches it
+  ([folders](../dev/policy-engine.md#folders-and-rights)); on Windows the
+  pairing's commands are closed out of it too.
 - On the installed node, a file call in `folder` mode may also read what
   every account may read, such as `/etc` and most of `/usr`. It never reads
   what is closed to other accounts

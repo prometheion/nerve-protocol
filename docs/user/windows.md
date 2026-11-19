@@ -173,6 +173,8 @@ These are in [safety](safety.md#windows) too.
   the network until you turn it off.
 - Pipes, RPC and COM servers open to every AppContainer are open to the
   commands: a program that offers itself so can act for them, as you.
+- A command can write entries into the Event Viewer under the name
+  `nerve-node`. The node's audit log, not the Event Viewer, is its record.
 - Work started through WMI, the task scheduler or a service runs outside the
   command's job: a stop and the limits do not reach it.
 - Sudo commands run as you with your administrator rights, outside the

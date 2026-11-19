@@ -1055,21 +1055,31 @@ container and `nerve-run` may open.
   pipe a program of yours made with the default security were refused. The
   RPC endpoint mapper (`epmapper`) and a pipe made open to all AppContainers
   were opened. So a program of yours that makes a pipe open to all
-  AppContainers can be talked to. Not checked: other local endpoints (COM
-  servers, ALPC ports).
+  AppContainers can be talked to.
+- **COM and ALPC.** Checked (pre2 test round): in-process COM objects are
+  made (`Scripting.FileSystemObject`, `WScript.Shell`, `MSXML2`), but their
+  calls into services are refused (`Shell.Application`, the firewall's
+  `HNetCfg`, WMI's `SWbemLocator`, 0x80070005), and out-of-process servers
+  are refused at activation (`MMC20.Application`, `ShellWindows`,
+  `Microsoft.Update.Session`). Listing `\RPC Control` is refused, but by
+  name a command connects to about half of the ALPC ports there, among them
+  `epmapper`, `lsasspirpc`, `eventlog` and `ntsvcs`. Through `eventlog` a
+  command can write an entry into the Application log under any source,
+  `nerve-node` too: the Event Viewer's entries of that source are not proof
+  that the node wrote them. The node's audit log is its record. Reading the
+  event logs is refused.
 - **The clipboard and your windows.** The command has a window station and
-  desktop of its own (code). Checked: reading the clipboard fails. Not
-  checked against a signed-in desktop with something on its clipboard: the
-  test session had no desktop.
-- **Credentials.** Not checked: the Credential Manager, since the test
-  session could not use it. The container has none of the capabilities for
-  your sign-in credentials or certificates (code), so it should not reach
-  network shares as you; not checked. With the node's keys in the
+  desktop of its own (code). Checked against a signed-in desktop with text
+  on its clipboard: opening `WinSta0` and its `Default` desktop is refused,
+  no window of the desktop is found, and the clipboard gives nothing.
+- **Credentials.** Checked: the Credential Manager refuses the container
+  every call (enumerate, write, read: error 5). The container has none of
+  the capabilities for your sign-in credentials or certificates (code), and
+  shares on this machine were not reachable as you (checked). With the node's keys in the
   Credential Manager (`machine.secret_storage = keyring`), they are in that of
   `nerve`, which commands of `nerve-run`, another account, do not reach.
   Checked: a blob protected with DPAPI for the machine can be opened by the
-  command. A blob for your user could not be made in the test session, so
-  that is not checked. The node's own keys are files in folders that get no
+  command; one protected for your user cannot. The node's own keys are files in folders that get no
   grant (code).
 - **The token.** Checked: low integrity level, no privileges but
   `SeChangeNotifyPrivilege` and `SeIncreaseWorkingSetPrivilege`, and

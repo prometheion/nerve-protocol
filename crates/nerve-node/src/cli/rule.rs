@@ -319,16 +319,25 @@ fn wildcard_start(line: &str) -> Option<&str> {
 
 /// What a rule made of `command` covers, said after `rule add` when the
 /// command has a wildcard: `rm *` is every `rm`, not the files in a folder.
-fn wildcard_note(list: List, command: &str) -> Option<String> {
+/// On Windows (`windows`) it adds that a `\` in a path makes a line a
+/// wildcard does not cover.
+fn wildcard_note(list: List, command: &str, windows: bool) -> Option<String> {
     let start = wildcard_start(command)?;
     let verb = match list {
         List::Deny => "forbids",
         List::Allow | List::Sudo => "allows",
     };
-    Some(if start.split_whitespace().count() == 1 {
+    let covers = if start.split_whitespace().count() == 1 {
         format!("it {verb} every `{start}` command")
     } else {
         format!("it {verb} every command that starts with `{start}`")
+    };
+    Some(if windows {
+        format!(
+            "{covers} with plain words after it; a path with `\\` needs a rule of its own, or `/` in the path"
+        )
+    } else {
+        covers
     })
 }
 
@@ -439,7 +448,7 @@ pub(super) async fn rule_cmd(
             if !exact
                 && arg.is_none()
                 && action.as_deref().is_none_or(|a| a == "exec.run")
-                && let Some(covers) = wildcard_note(list, &command)
+                && let Some(covers) = wildcard_note(list, &command, cfg!(windows))
             {
                 let _ = writeln!(out, "{covers}");
             }
@@ -1507,5 +1516,18 @@ mod tests {
             "{out}"
         );
         assert!(policy().allow.contains(&"exec.run:git add *".to_string()));
+    }
+
+    /// On Windows the note says that a path with `\` needs a rule of its
+    /// own (#213 W3-5).
+    #[test]
+    fn the_wildcard_note_names_a_windows_path() {
+        let note = wildcard_note(List::Allow, "Get-ChildItem *", true).unwrap();
+        assert_eq!(
+            note,
+            "it allows every `Get-ChildItem` command with plain words after it; a path with `\\` needs a rule of its own, or `/` in the path"
+        );
+        let linux = wildcard_note(List::Allow, "git *", false).unwrap();
+        assert_eq!(linux, "it allows every `git` command");
     }
 }

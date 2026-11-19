@@ -118,6 +118,17 @@ fn grant_lines_on(g: &Value, windows: bool) -> Vec<String> {
     lines
 }
 
+/// What `folder add … none` notes: on Linux a command started in the folder
+/// around it still reaches it; on Windows the pairing's container is
+/// closed out of it too (`windows`).
+fn none_note(windows: bool) -> &'static str {
+    if windows {
+        "note: the folder grants nothing: it closes it to file calls and to the pairing's commands (`folder rm` removes it)"
+    } else {
+        "note: the folder grants nothing: it closes it to file calls; a command run in the folder around it still reaches it (`nerve-node folder rm` removes it)"
+    }
+}
+
 /// `folder add`, and the folder step of `setup`.
 /// What `folder.add` is asked: a page's request that a panic overtook (its
 /// count of locks is no longer the node's) adds nothing.
@@ -218,11 +229,7 @@ pub(super) async fn add_folder(
         format!("{name}: folder {stored} {}", access.to_chmod()),
     );
     if access.is_none() {
-        w(
-            out,
-            "note: the folder grants nothing: it closes it to file calls; a command run in the folder around it still reaches it (`nerve-node folder rm` removes it)"
-                .into(),
-        );
+        w(out, none_note(cfg!(windows)).into());
     }
     if !recorded {
         w(
@@ -696,11 +703,13 @@ mod tests {
         let out = run(&paths, &["folder", "add", inner.to_str().unwrap(), "none"]).unwrap();
         assert!(out.contains("the folder grants nothing"), "{out}");
         // Its limit is said where it is made, and in the first line of its
-        // help (round 1, security 3).
+        // help (round 1, security 3); on Windows the container is closed
+        // out of it too (#213 W3-4).
+        assert!(out.contains(none_note(cfg!(windows))), "{out}");
         assert!(
-            out.contains("a command run in the folder around it still reaches it"),
-            "{out}"
+            none_note(false).contains("a command run in the folder around it still reaches it")
         );
+        assert!(none_note(true).contains("to the pairing's commands"));
         let add = Cli::command();
         let add = add
             .find_subcommand("folder")
