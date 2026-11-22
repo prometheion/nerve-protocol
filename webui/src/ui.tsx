@@ -16,6 +16,7 @@ import {
   type ReactNode,
   type TextareaHTMLAttributes,
 } from "react";
+import { createPortal } from "react-dom";
 import { ApiError } from "./api";
 import { ICONS } from "./icons";
 
@@ -440,9 +441,6 @@ export function PageHead({ icon, title, sub, children }: { icon: string; title: 
   );
 }
 
-/** The list on the left and the picked row's details on the right; below
- * 1100 px they take turns, `open` showing the details with Back. A third
- * pane joins from 1800 px. */
 /** The list's share of a Split's two panes, in percent, as the steps the
  * stylesheet has (`.split[data-w]`): a width the owner dragged to. Each pane
  * keeps its least width there (`minmax`), the list 260 px and the details
@@ -536,6 +534,10 @@ function Gutter({ width, setWidth }: { width: number | null; setWidth: (w: numbe
   );
 }
 
+/** The list on the left and the picked row's details on the right, side by
+ * side where the page is 680 px wide or more; narrower they take turns,
+ * `open` showing the details with Back. A third pane (`third`, or the
+ * section column `nav`) joins from 1040 px (app.css). */
 export function Split({
   list,
   detail,
@@ -773,7 +775,9 @@ export function RemoveAsk({
 }
 
 /** A small window over the page: Esc, the cross, Cancel or a click on the
- * scrim closes it. */
+ * scrim closes it. It is drawn in the document's body, not where it is
+ * used: the page is a size container (app.css `.page`), which would hold a
+ * fixed scrim to the page instead of the window (#213, review). */
 export function Overlay({ title, sub, onClose, children, foot, first }: { title: string; sub?: ReactNode; onClose: () => void; children?: ReactNode; foot?: ReactNode; first?: string }) {
   const box = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -796,7 +800,7 @@ export function Overlay({ title, sub, onClose, children, foot, first }: { title:
       before?.focus?.();
     };
   }, []);
-  return (
+  return createPortal(
     <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={id} ref={box}>
         <div className="dh">
@@ -809,7 +813,8 @@ export function Overlay({ title, sub, onClose, children, foot, first }: { title:
         {children ? <div className="db">{children}</div> : null}
         {foot ? <div className="df">{foot}</div> : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

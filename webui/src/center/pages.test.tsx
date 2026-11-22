@@ -196,6 +196,9 @@ describe("Audit", () => {
   it("gives the exact sudo rule to paste, and none where no shell reads it the same", () => {
     expect(sudoRuleLine("sudo apt update *")).toBe("nerve-node rule add allow --action exec.run --exact 'sudo apt update *'");
     for (const odd of ["sudo echo 'x'", "sudo a\\b", "sudo a\nrm -rf /", "sudo a\rb", "sudo a\u0000b", "sudo a\tb"]) expect(sudoRuleLine(odd)).toBeNull();
+    // A mark that shows as nothing, or turns the text around, shows another
+    // command than the line puts on the list (#213, review).
+    for (const odd of ["sudo ls \u202e/tmp", "sudo a\u200bb", "sudo a\u2066b", "sudo a\ufeffb", "sudo a\u2028b"]) expect(sudoRuleLine(odd)).toBeNull();
   });
 
   it("disables the machine's rules without its settings grant and says why", async () => {

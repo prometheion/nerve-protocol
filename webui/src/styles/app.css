@@ -503,11 +503,13 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); p
   .split.caps.three:not([data-w]):has(> .dcol > form.detail) { grid-template-columns: 200px minmax(260px, 2fr) minmax(400px, 3fr); }
   .split.three[data-w] { grid-template-columns: 200px minmax(260px, var(--lw)) minmax(400px, var(--dw)); }
 }
+/* A width the owner dragged to keeps winning on wider pages: these come
+   after the [data-w] rules, at their weight (#213, review). */
 @container page (min-width: 1150px) {
-  .split.wide { grid-template-columns: minmax(260px, 560px) minmax(400px, 1fr); }
+  .split.wide:not([data-w]) { grid-template-columns: minmax(260px, 560px) minmax(400px, 1fr); }
 }
 @container page (min-width: 1500px) {
-  .split.even { grid-template-columns: minmax(260px, 1fr) minmax(400px, 1fr); }
+  .split.even:not([data-w]) { grid-template-columns: minmax(260px, 1fr) minmax(400px, 1fr); }
 }
 @media (max-width: 1099px) {
   .page { padding-left: 24px; padding-right: 24px; }

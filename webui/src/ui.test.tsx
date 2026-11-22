@@ -86,6 +86,21 @@ it("closes an overlay with Esc", async () => {
   expect(close).toHaveBeenCalled();
 });
 
+// The page is a size container, which holds a fixed scrim inside it: the
+// window over the page belongs to the document's body (#213, review).
+it("draws an overlay over the window, not inside the page", async () => {
+  await render(
+    <main className="page">
+      <Overlay title="Pair a machine" onClose={() => {}}>
+        x
+      </Overlay>
+    </main>,
+  );
+  const scrim = document.querySelector(".scrim");
+  expect(scrim?.parentElement).toBe(document.body);
+  expect(scrim?.closest(".page")).toBeNull();
+});
+
 it("puts the focus in an overlay's field, not on its Close", async () => {
   await render(
     <Overlay title="Rename" onClose={() => {}} foot={<Btn kind="primary">Rename</Btn>}>

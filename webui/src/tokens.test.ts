@@ -75,4 +75,30 @@ describe("the design tokens", () => {
     expect(three).toBeGreaterThanOrEqual(260 + 440 + 300 + 2 * gap);
     expect(app).toContain("minmax(260px, var(--lw)) minmax(400px, var(--dw))");
   });
+
+  // A width the owner dragged to (data-w) wins at every page width: each
+  // rule that sets a Split's columns without minding data-w is followed, in
+  // its own block, by a data-w rule of the same Split at least as weighty
+  // (owner, #213: the shares hold as the window changes).
+  it("let a dragged width win on every page width", () => {
+    const blocks = Array.from(app.matchAll(/@container page \(min-width: \d+px\) \{\n([\s\S]*?)\n\}/g), (m) => m[1]);
+    expect(blocks.length).toBeGreaterThanOrEqual(3);
+    const weight = (sel: string) => (sel.replace(/:not\([^)]*\)/g, "").match(/[.[]/g) || []).length;
+    const classes = (sel: string) => new Set(sel.replace(/:not\([^)]*\)|:has\(.*\)|\[[^\]]*\]/g, "").split(".").filter(Boolean));
+    let checked = 0;
+    for (const b of blocks) {
+      const rules = Array.from(b.matchAll(/^\s*([^{\n]+?) \{([^}]*)\}/gm), (m) => ({ sel: m[1], body: m[2] })).filter(
+        (r) => r.sel.startsWith(".split") && r.body.includes("grid-template-columns"),
+      );
+      rules.forEach((r, i) => {
+        if (r.sel.includes("[data-w")) return;
+        checked++;
+        const later = rules.slice(i + 1).filter((l) => /\[data-w\]/.test(l.sel.replace(/:not\(\[data-w\]\)/g, "")));
+        const own = classes(r.sel);
+        const wins = later.some((l) => [...classes(l.sel)].every((c) => own.has(c)) && weight(l.sel) >= weight(r.sel));
+        expect(wins, `${r.sel} sets its columns over a dragged width`).toBe(true);
+      });
+    }
+    expect(checked).toBeGreaterThanOrEqual(5);
+  });
 });
