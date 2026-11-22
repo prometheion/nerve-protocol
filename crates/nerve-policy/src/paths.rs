@@ -316,10 +316,17 @@ pub fn depth(path: &Path) -> usize {
 /// appended as is. A missing rest may not contain `..`, and a dangling symlink is
 /// refused, since either could point anywhere once created.
 pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
-    resolve_by(path, &canonical, &|p| fs::symlink_metadata(p).map(drop))
+    #[cfg(windows)]
+    let vet = |p: &Path| no_remote_link(p, &link_target);
+    #[cfg(not(windows))]
+    let vet = |_: &Path| Ok(());
+    resolve_by(path, &vet, &canonical, &|p| {
+        fs::symlink_metadata(p).map(drop)
+    })
 }
 
-/// [`resolve`] with the file system behind `canonical` and `look` (whether
+/// [`resolve`] with the file system behind `vet` (the check of the links on
+/// the way that [`canonical`] makes first), `canonical` and `look` (whether
 /// anything, a link too, is at a path). The part that exists is found from
 /// the end of the path back: an account may be refused a look at a folder
 /// on the way and still reach the folders inside it (a pairing's container
@@ -327,12 +334,16 @@ pub fn resolve(path: &Path) -> Result<PathBuf, PathError> {
 /// so a look from the root would stop at the first such folder.
 fn resolve_by(
     path: &Path,
+    vet: &dyn Fn(&Path) -> io::Result<()>,
     canonical: &dyn Fn(&Path) -> io::Result<PathBuf>,
     look: &dyn Fn(&Path) -> io::Result<()>,
 ) -> Result<PathBuf, PathError> {
     if !path.is_absolute() {
         return Err(PathError::Relative);
     }
+    // Before anything opens a part of it: Windows follows the links on the
+    // way of a path it opens, and would connect to a share one names.
+    vet(path).map_err(PathError::Io)?;
     let comps: Vec<Component> = path.components().collect();
     // The root (and on Windows the drive) always exists.
     let roots = comps
@@ -554,29 +565,33 @@ fn remote_link_by(
     Ok(None)
 }
 
+/// Refuses a path whose links lead to another machine, found before anything
+/// follows them, and one the thread cannot look at to its end unless it acts
+/// as another account ([`Acting`]).
+#[cfg(any(windows, test))]
+fn no_remote_link(
+    p: &Path,
+    target: &dyn Fn(&Path) -> io::Result<Option<PathBuf>>,
+) -> io::Result<()> {
+    match remote_link_here(p, target) {
+        Ok(None) => Ok(()),
+        Ok(Some(link)) => Err(io::Error::other(format!(
+            "{} is a link to another machine, which is not followed",
+            link.display()
+        ))),
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("{} cannot be looked at to its end: {e}", p.display()),
+        )),
+    }
+}
+
 /// `realpath`, on Windows without the `\\?\` prefix so resolved paths compare with
 /// configured ones. A path whose links lead to another machine is refused
-/// before anything follows them, and so is one the thread cannot look at to
-/// its end unless it acts as another account ([`Acting`]).
+/// before anything follows them ([`no_remote_link`]).
 fn canonical(p: &Path) -> io::Result<PathBuf> {
     #[cfg(windows)]
-    {
-        match remote_link_here(p, &link_target) {
-            Ok(None) => {}
-            Ok(Some(link)) => {
-                return Err(io::Error::other(format!(
-                    "{} is a link to another machine, which is not followed",
-                    link.display()
-                )));
-            }
-            Err(e) => {
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("{} cannot be looked at to its end: {e}", p.display()),
-                ));
-            }
-        }
-    }
+    no_remote_link(p, &link_target)?;
     let c = match fs::canonicalize(p) {
         Ok(c) => c,
         #[cfg(windows)]
@@ -770,14 +785,14 @@ mod tests {
             ("/t/project", "/t/project"),
         ] {
             assert_eq!(
-                resolve_by(Path::new(path), &canonical, &look).unwrap(),
+                resolve_by(Path::new(path), &|_| Ok(()), &canonical, &look).unwrap(),
                 Path::new(want),
                 "{path}"
             );
         }
         // A path below the folder it may not look at stays refused.
         assert!(matches!(
-            resolve_by(Path::new("/t/other/x"), &canonical, &look),
+            resolve_by(Path::new("/t/other/x"), &|_| Ok(()), &canonical, &look),
             Err(PathError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied
         ));
         // A long missing rest is not searched component by component.
@@ -789,6 +804,7 @@ mod tests {
         let long = format!("/t/project/new{}", "/a".repeat(2000));
         let got = resolve_by(
             Path::new(&long),
+            &|_| Ok(()),
             &|p| {
                 calls.set(calls.get() + 1);
                 canonical(p)
@@ -798,6 +814,60 @@ mod tests {
         .unwrap();
         assert_eq!(got, Path::new(&long));
         assert!(calls.get() < 10, "{} calls", calls.get());
+    }
+
+    /// The links on the way are judged before anything opens a part of the
+    /// path: a link to another machine is refused with no look at or below
+    /// it, and a thread that acts as no one is refused a path it cannot look
+    /// at to its end before any look past that part. One that acts as an
+    /// account still reaches a folder below a parent it may not look at.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_links_on_the_way_are_judged_before_the_path_is_opened() {
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let missing = || io::Error::from(io::ErrorKind::NotFound);
+        let target = |p: &Path| match p.to_str().unwrap() {
+            "/x/link" => Ok(Some(PathBuf::from(r"\\nas\data"))),
+            "/t" => Err(denied()),
+            "/" | "/x" | "/t/project" => Ok(None),
+            _ => Err(missing()),
+        };
+        let opened = std::cell::RefCell::new(Vec::<PathBuf>::new());
+        let canonical = |p: &Path| {
+            opened.borrow_mut().push(p.to_path_buf());
+            match p.to_str().unwrap() {
+                "/" | "/x" | "/t/project" => Ok(p.to_path_buf()),
+                "/t" | "/x/link" => Err(denied()),
+                _ => Err(missing()),
+            }
+        };
+        let look = |p: &Path| {
+            opened.borrow_mut().push(p.to_path_buf());
+            match p.to_str().unwrap() {
+                "/" | "/x" | "/x/link" | "/t/project" => Ok(()),
+                "/t" => Err(denied()),
+                _ => Err(missing()),
+            }
+        };
+        let vet = |p: &Path| no_remote_link(p, &target);
+        let go = |p: &str| resolve_by(Path::new(p), &vet, &canonical, &look);
+
+        let e = go("/x/link/y").unwrap_err().to_string();
+        assert!(e.contains("another machine"), "{e}");
+        let past = |at: &str| opened.borrow().iter().any(|p| p.starts_with(at));
+        assert!(!past("/x/link"), "{:?}", opened.borrow());
+
+        assert!(matches!(
+            go("/t/project/new.txt"),
+            Err(PathError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert!(!past("/t/project"), "{:?}", opened.borrow());
+
+        let _acting = Acting::begin();
+        assert_eq!(
+            go("/t/project/new.txt").unwrap(),
+            Path::new("/t/project/new.txt")
+        );
     }
 
     #[test]
