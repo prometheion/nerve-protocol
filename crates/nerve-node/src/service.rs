@@ -1766,9 +1766,16 @@ fn uninstall_steps(
     if purge {
         // The centers are not told: the keys go, so the pairings cannot
         // come back, and each center keeps the machine as offline until
-        // its owner removes it there (#213, L1-3).
+        // its owner removes it there (#213, L1-3). One that revoked the
+        // machine, or no longer knows it, lists it no more.
         let centers: Vec<String> = crate::secrets::stated_config(&layout.paths)
-            .map(|c| c.centers.iter().map(|e| e.name.clone()).collect())
+            .map(|c| {
+                c.centers
+                    .iter()
+                    .filter(|e| !e.revoked && !e.unknown)
+                    .map(|e| e.name.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         for dir in folders {
             if dir.exists() {
@@ -4425,6 +4432,13 @@ pub(crate) mod tests {
         )
         .unwrap();
         cfg.centers.push(crate::cli::tests::entry("lab"));
+        // One revoked the machine, one no longer knows it: neither lists it.
+        let mut gone = crate::cli::tests::entry("old");
+        gone.revoked = true;
+        cfg.centers.push(gone);
+        let mut gone = crate::cli::tests::entry("lost");
+        gone.unknown = true;
+        cfg.centers.push(gone);
         std::fs::write(l.paths.config_file(), cfg.to_toml()).unwrap();
         let mut out = Vec::new();
         uninstall(&l, &sys, true, &mut out).unwrap();

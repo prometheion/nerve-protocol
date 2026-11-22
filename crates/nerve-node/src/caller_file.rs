@@ -405,7 +405,7 @@ mod linux {
 
     /// The passphrase in the file at `path`, read now as the user who asked
     /// (root where nobody else did), as the backup file is, with sudo's
-    /// second try in root's and the node's folders: the command then runs
+    /// second try as the owner of its folder: the command then runs
     /// as the node's user, who may not read a private file of root's (#213,
     /// L3-3), and whoever asked through the app's broker reads through it no
     /// file they may not read themselves.

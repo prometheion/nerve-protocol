@@ -173,8 +173,17 @@ impl Acl {
 
     /// Sets the named entry for `uid` to `perm`, or takes it off. The mask
     /// grows to let the entry's rights through, and goes once no named entry
-    /// is left: it never narrows what the others had.
+    /// is left: it never narrows what the others had. Nor does it widen the
+    /// group's: its entry is first cut to what the mask let through, as a
+    /// file made `0600` below a default ACL has the group's rights in its
+    /// entry and none in its mask, and without the mask the entry would
+    /// count whole (#213, review of L1-5).
     pub fn set_user(&mut self, uid: u32, perm: Option<u16>) {
+        if let Some(m) = self.get(MASK) {
+            for e in self.0.iter_mut().filter(|e| e.tag == GROUP_OBJ) {
+                e.perm &= m;
+            }
+        }
         self.0.retain(|e| !(e.tag == USER && e.id == uid));
         if let Some(p) = perm {
             self.0.push(Entry {
@@ -686,9 +695,13 @@ fn drop_owners(o: &Opened, owner: u32, heir: u32, keep: Own) -> std::io::Result<
             continue;
         };
         let before = acl.clone();
-        acl.set_user(heir, None);
+        // The owner's own entry, which it had above (`keep`), stays, also
+        // where the owner is the heir, as it is at `uninstall`.
         if !keep.entry {
             acl.set_user(owner, None);
+        }
+        if heir != owner || !keep.entry {
+            acl.set_user(heir, None);
         }
         if acl == before {
             continue;
@@ -1504,6 +1517,21 @@ mod tests {
         assert!(Acl::parse(&[1, 0, 0, 0]).is_err());
     }
 
+    /// Taking the last named entry off, or growing the mask, gives the group
+    /// no right the mask held back: a file made `0600` below a default ACL
+    /// stays private (#213, review of L1-5).
+    #[test]
+    fn the_group_gets_nothing_the_mask_held_back() {
+        let mut a = Acl::of_mode(0o650);
+        a.set_user(7, Some(R | W | X));
+        a.0.iter_mut().find(|e| e.tag == MASK).unwrap().perm = 0;
+        a.set_user(8, Some(R));
+        assert_eq!(a.get(GROUP_OBJ), Some(0));
+        a.set_user(7, None);
+        a.set_user(8, None);
+        assert_eq!(a, Acl::of_mode(0o600));
+    }
+
     /// The mask never narrows what the others had: it only grows for the
     /// entry set.
     #[test]
@@ -2192,6 +2220,7 @@ mod tests {
     /// namespace of its own, to own files as other accounts.
     #[test]
     fn what_nerve_run_made_keeps_no_entry_after_uninstall() {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if !in_a_namespace("what_nerve_run_made_keeps_no_entry_after_uninstall") {
             return;
         }
@@ -2199,6 +2228,8 @@ mod tests {
         let root = std::fs::canonicalize(d.path()).unwrap();
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
+        // The group may read the folder: its default ACL gives that on.
+        std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o755)).unwrap();
         let file = root.join("acl.json");
         assert!(
             sync(&file, &[grant(&work, "rw")], who(), &none)
@@ -2206,14 +2237,36 @@ mod tests {
                 .is_empty()
         );
         // As if nerve-run made them: they take the folder's default entries.
+        // A private file and folder get no group rights in their mask,
+        // although the group's entry (from the folder's mode) has some.
         let made = work.join("made");
         std::fs::create_dir(&made).unwrap();
         std::fs::write(made.join("f"), "f").unwrap();
         std::fs::write(work.join("g"), "g").unwrap();
-        let all = [made.clone(), made.join("f"), work.join("g")];
+        let secret = work.join("secret");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&secret)
+            .unwrap();
+        let closed = work.join("closed");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&closed)
+            .unwrap();
+        let all = [
+            made.clone(),
+            made.join("f"),
+            work.join("g"),
+            secret.clone(),
+            closed.clone(),
+        ];
         for p in &all {
-            assert_eq!(rights(p, uid()), Some(R | W | X), "{p:?}");
             std::os::unix::fs::lchown(p, Some(RUN), Some(RUN)).unwrap();
+        }
+        for p in &all[..3] {
+            assert_eq!(rights(p, uid()), Some(R | W | X), "{p:?}");
         }
         let r = remove_all(&file, &|_| (uid(), gid()));
         assert!(r.errors.is_empty() && r.stale.is_empty(), "{r:?}");
@@ -2222,6 +2275,41 @@ mod tests {
             assert_eq!(acl_of(p, ACCESS), None, "{p:?}");
             assert_eq!(acl_of(p, DEFAULT), None, "{p:?}");
         }
+        // Taking the entries off widened nothing (#213, review of L1-5).
+        assert_eq!(mode(&secret), 0o600);
+        assert_eq!(mode(&closed), 0o700);
+    }
+
+    /// A named default entry the owner had for itself above stays on what
+    /// nerve-run made, though the owner is its heir at `uninstall` (#213,
+    /// review of L1-5).
+    #[test]
+    fn the_owner_s_own_entry_stays_on_what_nerve_run_made() {
+        if !in_a_namespace("the_owner_s_own_entry_stays_on_what_nerve_run_made") {
+            return;
+        }
+        let Some(d) = tree() else { return };
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut own = Acl::of_mode(0o755);
+        own.set_user(uid(), Some(R | W | X));
+        set(&c_path(&work).unwrap(), DEFAULT, &own).unwrap();
+        let file = root.join("acl.json");
+        assert!(
+            sync(&file, &[grant(&work, "rw")], who(), &none)
+                .errors
+                .is_empty()
+        );
+        let made = work.join("made");
+        std::fs::create_dir(&made).unwrap();
+        std::os::unix::fs::lchown(&made, Some(RUN), Some(RUN)).unwrap();
+        let r = remove_all(&file, &|_| (uid(), gid()));
+        assert!(r.errors.is_empty() && r.stale.is_empty(), "{r:?}");
+        assert_eq!(std::fs::metadata(&made).unwrap().uid(), uid());
+        let d = acl_of(&made, DEFAULT).expect("its default ACL");
+        assert_eq!(d.user(uid()), Some(R | W | X), "{d:?}");
+        assert_eq!(d.user(RUN), None, "{d:?}");
     }
 
     /// A grant that failed (a folder below it closed) stays failed in the
