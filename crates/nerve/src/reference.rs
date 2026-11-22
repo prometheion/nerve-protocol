@@ -679,13 +679,12 @@ mod tests {
         let all = commands(&nerve_node::cli::help());
         for c in &all {
             assert!(!c.line.contains('`') && !c.more.contains('`'), "{}", c.name);
+            // Its line is more than its commands' names, however joined.
+            let bare = |t: &str| t.replace([',', ';', ' '], "");
+            let names: String = c.verbs.iter().map(|v| bare(&v.name)).collect();
             assert_ne!(
-                c.line,
-                c.verbs
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                bare(&c.line),
+                names,
                 "{} shows only its commands' names",
                 c.name
             );
