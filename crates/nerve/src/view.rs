@@ -2299,9 +2299,8 @@ mod tests {
     /// never goes empty, and a number past the groups is the first (#213).
     #[test]
     fn the_picked_capabilities_group_survives_a_provider_leaving() {
-        let unit = |name: &str, source: &str| {
-            json!({"name": name, "source": source, "effect": "read"})
-        };
+        let unit =
+            |name: &str, source: &str| json!({"name": name, "source": source, "effect": "read"});
         let with = cap_rows(
             &json!({"capabilities": [
                 unit("fs.read", "built-in"),
@@ -2318,7 +2317,10 @@ mod tests {
             "lab",
         );
         let number = |rows: &[CapRow], name: &str| {
-            rows.iter().find(|r| !r.action && r.name == name).unwrap().group
+            rows.iter()
+                .find(|r| !r.action && r.name == name)
+                .unwrap()
+                .group
         };
         // `desk` was picked and left: the first group, not a stranger.
         assert_eq!(keep_group(&with, number(&with, "desk"), &without), 0);
