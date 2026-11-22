@@ -1128,6 +1128,51 @@ mod tests {
         }
     }
 
+    /// A release whose program is the installed one is not downloaded; the
+    /// program still brings the files it has (#213 W1-F12).
+    #[tokio::test]
+    async fn the_installed_program_of_the_release_is_not_downloaded() {
+        use nerve_transport::http::{Response, read_request};
+        let sys = Fake::new("svc", "Svc", "/var/lib/svc");
+        let at = installed(&sys);
+        let files = files_text(&[("unit", Some("new unit".into()))]);
+        let have = format!("svc 1.0.0\n{files}\n");
+        write_file(&at.bin, have.as_bytes(), 0o755).unwrap();
+        let sums = format!(
+            "{}  svc-x86_64-linux\n",
+            nerve_transport::keys::sha256_hex(have.as_bytes())
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = listener.accept().await {
+                let req = read_request(&mut io, 0).await.unwrap();
+                let r = match req.path.as_str() {
+                    "/r/SHA256SUMS" => Response::text(200, &sums),
+                    _ => Response::text(404, "no"),
+                };
+                let _ = r.write(&mut io).await;
+            }
+        });
+        let release = format!("http://127.0.0.1:{port}/r");
+        let p = Program {
+            release: &release,
+            asset: Ok("svc-x86_64-linux".into()),
+            ..program(&at)
+        };
+        let mut out = Vec::new();
+        let mut steps = Steps::new(&mut out);
+        let r = update(&p, &sys, None, &|| sys.started(), &mut steps).await;
+        assert_eq!(r, Ok(true), "{:?}", steps.done);
+        assert!(
+            steps.done.iter().any(|d| d.contains("was not downloaded")),
+            "{:?}",
+            steps.done
+        );
+        assert_eq!(read(&at.unit).as_deref(), Some("new unit"));
+        assert_eq!(read(&at.bin).as_deref(), Some(&have[..]));
+    }
+
     #[tokio::test]
     async fn the_download_follows_five_redirects_and_no_more() {
         use nerve_transport::http::{Response, read_request};
