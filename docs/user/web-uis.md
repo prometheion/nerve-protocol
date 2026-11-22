@@ -123,7 +123,9 @@ web UI off ([the center in the app](center.md#in-the-app)).
 
 A page is a list and the details of the row you pick: side by side in a wide
 window, and in a narrow one the list first, then the details with **Back to
-the list**. The up and down keys move through a list. Adding something opens
+the list**. Drag the divider between two panes to give one more room; the
+app keeps the widths per page, and a double-click on the divider resets them.
+The up and down keys move through a list. Adding something opens
 a form where it belongs, and removing asks in the row (**Remove?**, then
 **Cancel** or **Remove**). The Log's search reads the newest lines on the
 page; **Show more** reads further back.
