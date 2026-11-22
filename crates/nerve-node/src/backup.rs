@@ -135,13 +135,16 @@ pub fn backup(
 /// the owner and read it anywhere: such a center's agent could take the
 /// file and try passphrases at leisure (#213 W4-4).
 pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Option<PathBuf>)> {
-    readable_on(cfg, file, cfg!(windows), crate::now_ms())
+    let home = crate::paths::home_dir();
+    readable_on(cfg, file, &home, cfg!(windows), crate::now_ms())
 }
 
-/// [`readable_by`] on Windows (`windows`) or elsewhere, at `now_ms`.
+/// [`readable_by`] on Windows (`windows`) or elsewhere, at `now_ms`, with
+/// `home` as the folders' `~`.
 fn readable_on(
     cfg: &NodeConfig,
     file: &Path,
+    home: &Path,
     windows: bool,
     now_ms: u64,
 ) -> Option<(String, Option<PathBuf>)> {
@@ -156,7 +159,7 @@ fn readable_on(
             .folders
             .iter()
             .filter(|f| reads(&f.access))
-            .map(|f| PathBuf::from(&f.path))
+            .filter_map(|f| nerve_policy::protected::expand(home, &f.path))
             .find(|f| nerve_policy::paths::within(file, f))
             .map(|f| (c.name.clone(), Some(f)))
     })
@@ -1342,7 +1345,7 @@ mod tests {
         let mut cfg = NodeConfig::default();
         cfg.centers.push(lab);
         let on = |cfg: &NodeConfig, file: &str, windows: bool| {
-            readable_on(cfg, Path::new(file), windows, 0)
+            readable_on(cfg, Path::new(file), Path::new("/home/alex"), windows, 0)
         };
         assert_eq!(
             on(&cfg, "/home/alex/project/sub/n.backup", false),
@@ -1358,6 +1361,21 @@ mod tests {
         );
         let warn = readable_warning("lab", Some(Path::new("/home/alex/project")));
         assert!(warn.contains("lab's commands may read"), "{warn}");
+        // A folder written from the home, and the home itself.
+        let mut tilde = cfg.clone();
+        tilde.centers[0].policy.folders = vec![nerve_policy::config::Folder {
+            path: "~/notes".into(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+        }];
+        assert_eq!(
+            on(&tilde, "/home/alex/notes/n.backup", false),
+            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/notes"))))
+        );
+        tilde.centers[0].policy.folders[0].path = "~".into();
+        assert_eq!(
+            on(&tilde, "/home/alex/Documents/n.backup", false),
+            Some(("lab".to_string(), Some(PathBuf::from("/home/alex"))))
+        );
         // Commands that run as the owner read it anywhere.
         cfg.centers[0].policy.mode = nerve_policy::config::Mode::User;
         assert_eq!(
