@@ -439,10 +439,14 @@ account of the commands into `node.toml` (`machine.user`), which this version
 refuses, and the file is signed with a key the installer does not hold. So
 the install and the update refuse before they change anything when
 `node.toml` holds that key (`winsvc::check_not_from_0_0_6`), and say to
-uninstall with **Delete the data** and pair again. The update needs it too:
-the installer opened over 0.0.6 finds a node and offers **Update**, not
-**Install**. The 0.0.6 app's **Update** finds that the new program
-does not start and puts the old one back. 0.0.6 also named its owners in the
+uninstall with **Delete the data** and pair again. The installer opened over
+a node whose service runs another program (0.0.6, a pre-release's
+`nerve-node-desktop.exe`) skips the role step and offers the node's
+**Install** (`install::first_step`), which takes the node over and removes the
+program the service ran before (`winsvc::install_steps`), or refuses 0.0.6.
+The 0.0.6 app's **Update** changes nothing: the latest release has no
+`nerve-node-desktop` file, and a 0.1.0 file is not its program. 0.0.6 also
+named its owners in the
 registry value `Owners`, which this version does not read.
 
 **Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
@@ -459,8 +463,12 @@ administrators only. A later install takes them up again.
 own file at once: it moves it aside, and Windows deletes it at its next
 start. Where Windows still holds the profile of `nerve` or `nerve-run`
 (Windows Search can, and a loaded registry of `nerve-run` stays loaded after
-its service stopped until Windows restarts), the uninstall says where to
-remove it after a restart.
+its service stopped until Windows restarts), the uninstall says so. The
+next install or uninstall removes the profiles of those accounts that are
+gone and that Windows no longer holds: the profile list's entries whose
+account Windows cannot name and whose folder has the account's name
+(`nerve_service::win::profiles`). The center's install and uninstall do the
+same for `C:\Windows\ServiceProfiles\nerve-center`.
 
 ## The center as a Windows service
 

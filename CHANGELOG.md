@@ -11,8 +11,8 @@ package) and Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
 0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
 (Apps & features), install 0.1.0, and pair the node again. The installer
-refuses to install or update over 0.0.6, whose settings 0.1.0 cannot read,
-and the app's **Update** of 0.0.6 puts the old program back.
+refuses to install over 0.0.6, whose settings 0.1.0 cannot read, and the
+0.0.6 app's **Update** changes nothing.
 
 From 0.1.0 on, the wire protocol, the files the node and the center keep,
 the backup file and `--json` output change only with a migration
@@ -156,8 +156,10 @@ and every limit is in
 - `update --pre` takes the newest release, a pre-release too, and
   `update --tag <tag>` one release, for the center and the node; the same
   version from another release is taken (a pre-release, then its release).
-  The desktop app's **Settings › App › Pre-releases** does it there, on Linux
-  and Windows.
+  The desktop app's **Settings › App › Pre-releases** does it there (on a
+  center **Settings › This machine**), on Linux and Windows. A release older
+  than the installed program is not downloaded, and the app says when
+  nothing is newer.
 - `uninstall` keeps the data, or deletes it with `--purge` (**Delete the
   data** in the app).
 
@@ -204,6 +206,10 @@ and every limit is in
   Settings › App) offers a backup first, names the machines that still trust
   this one, removes the old role whole with its data, then opens the
   installer for the other role.
+- A backup is saved to your Documents by default, takes the keys in the
+  keyring unless you leave them out, and warns when its file lies in a
+  folder a center's commands may read. After a reinstall the first-run
+  steps offer **Restore a backup…**.
 - `nerve-center --json backup -` and `restore -` hand the sealed backup over
   the answer and the input, with `--passphrase-file -`. The app's restore
   takes another center's backup where **It is another center's backup** is
@@ -243,6 +249,10 @@ and every limit is in
   (`cmd`, a `.bat` file, PowerShell without `-File`) is refused.
 - The center's firewall rules name its service, not its program, and
   `uninstall` removes the web UI's and MCP's rules that `set` printed too.
+- The installer takes a node of an earlier program (a pre-release's) over
+  and removes that program. A profile folder of the services' accounts that
+  Windows held at an uninstall goes at the next install or uninstall.
+- A new owner's install deletes the former owner's stored password.
 - The node's and the center's listeners hold their ports alone
   (`SO_EXCLUSIVEADDRUSE`): no other program can bind them while they listen.
 

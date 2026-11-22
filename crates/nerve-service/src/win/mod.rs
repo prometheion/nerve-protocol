@@ -12,7 +12,8 @@
 //! folders come from Windows, not from the environment ([`folders`]), and
 //! the center's install puts its folder on the machine's `Path`
 //! ([`machine_path`]); a file is told from another by its volume and index
-//! ([`file`]). What
+//! ([`file`]). The profile folders of their accounts that Windows held at
+//! an uninstall go at a later install or uninstall ([`profiles`]). What
 //! is plain logic is compiled and tested on every platform.
 
 #[cfg(windows)]
@@ -33,6 +34,7 @@ pub mod pipe;
 #[cfg(windows)]
 pub mod process;
 pub mod procs;
+pub mod profiles;
 #[cfg(windows)]
 pub mod restricted;
 #[cfg(windows)]

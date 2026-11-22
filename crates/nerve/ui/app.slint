@@ -241,7 +241,8 @@ component Sidebar inherits Rectangle {
         NavItem {
             icon: @image-url("icons/info.svg");
             text: "About";
-            selected: Store.about-open;
+            // A dialog over the page, not a page: the page's item stays the
+            // one marked (#213 W4-9).
             clicked => {
                 Store.about-open = true;
             }

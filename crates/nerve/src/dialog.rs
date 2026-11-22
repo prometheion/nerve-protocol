@@ -48,10 +48,12 @@ pub fn show(c: Choose) -> Result<Option<PathBuf>, String> {
         Choose::Folder => d.set_title("A folder for the center").pick_folder(),
         Choose::SaveBackup => d
             .set_title("Back up the node")
+            .set_directory(own_folder())
             .set_file_name("nerve-node.backup")
             .save_file(),
         Choose::SaveCenterBackup => d
             .set_title("Back up the center")
+            .set_directory(own_folder())
             .set_file_name("nerve-center.backup")
             .save_file(),
         Choose::SaveLog => d
@@ -62,6 +64,27 @@ pub fn show(c: Choose) -> Result<Option<PathBuf>, String> {
         Choose::Program => d.set_title("The new nerve").pick_file(),
         Choose::Provider => d.set_title("A program to allow as a provider").pick_file(),
     })
+}
+
+/// Where a backup's save dialog opens: the Documents folder of the one
+/// who runs the app, else the home. Without it Windows opens the folder
+/// picked last, which may be the folder a center was just given (#213
+/// W4-4).
+fn own_folder() -> PathBuf {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    backup_folder(&home, |p| p.is_dir())
+}
+
+/// [`own_folder`] in `home`, where `is_dir` says which folders are there.
+fn backup_folder(home: &std::path::Path, is_dir: impl Fn(&std::path::Path) -> bool) -> PathBuf {
+    let documents = home.join("Documents");
+    if is_dir(&documents) {
+        documents
+    } else {
+        home.to_path_buf()
+    }
 }
 
 /// [`show`] in `exe` started as [`ARG`]: the path it printed, `None` when
@@ -170,5 +193,22 @@ mod tests {
             assert_eq!(ALL.iter().filter(|o| name(**o) == name(c)).count(), 1);
         }
         assert_eq!(main(&["nothing".into()]), 2);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    /// A backup is saved to Documents where there is one, else to the
+    /// home, never to the folder Windows picked last (#213 W4-4).
+    #[test]
+    fn a_backup_is_saved_in_a_folder_of_one_s_own() {
+        let home = std::path::Path::new("/home/alex");
+        assert_eq!(
+            backup_folder(home, |_| true),
+            PathBuf::from("/home/alex/Documents")
+        );
+        assert_eq!(backup_folder(home, |_| false), PathBuf::from("/home/alex"));
     }
 }

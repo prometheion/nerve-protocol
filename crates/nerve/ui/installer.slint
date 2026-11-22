@@ -159,7 +159,8 @@ export component UninstallChoice {
             icon: @image-url("icons/trash.svg");
             title: "Delete the data";
             text: Install.action == "uninstall-center" ? "Keys, pairings and tokens go. Every node must pair again."
-                : "Keys, pairings and the audit log go. A center must pair again.";
+                : Install.windows ? "Keys, pairings, your stored Windows password and the audit log go. A center must pair again, unless you restore a backup."
+                : "Keys, pairings and the audit log go. A center must pair again, unless you restore a backup.";
             selected: Install.purge;
             clicked => {
                 Install.purge = true;

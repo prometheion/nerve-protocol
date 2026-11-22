@@ -224,9 +224,26 @@ fn the_app_drives_the_cli_end_to_end() {
         store.get_toast()
     );
     // Where root is the owner, giving the grant says that the center can
-    // make itself root (#151).
+    // make itself root (#151), and asks first (#213 W2-11).
+    store.invoke_center_grant("home".into(), false);
+    assert!(!store.get_confirm_open());
+    // Set after the status that change read again.
     window.global::<Perm>().set_owner_is_root(true);
     store.invoke_center_grant("home".into(), true);
+    assert!(store.get_confirm_open());
+    assert!(
+        store
+            .get_confirm_text()
+            .contains("its commands would then run as root"),
+        "{}",
+        store.get_confirm_text()
+    );
+    assert_eq!(
+        config(&paths).centers[0].settings,
+        nerve_policy::config::SettingsGrant::Off,
+        "the grant before the answer"
+    );
+    store.invoke_confirm_accepted();
     assert!(
         store
             .get_toast()
@@ -1335,8 +1352,12 @@ fn the_app_drives_the_cli_end_to_end() {
     let backup = root.join("node.backup");
     let file = backup.clone();
     ctl.set_chooser(Arc::new(move |_| Ok(Some(file.clone()))));
+    prefs.set_backup_keyring(false);
     prefs.invoke_backup_choose();
     assert!(prefs.get_backup_open());
+    // The keys in the keyring go into the file unless the owner leaves
+    // them out (#213 W4-5).
+    assert!(prefs.get_backup_keyring());
     prefs.set_backup_pass("correct horse battery".into());
     prefs.set_backup_pass2("correct horse battery".into());
     prefs.invoke_backup_confirm();
@@ -1400,6 +1421,8 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_setup_start();
     assert!(store.get_setup_open());
     assert_eq!((store.get_setup_step(), store.get_pair_step()), (0, 0));
+    // The mode step starts at the mode a new pairing has (#213 W2-8).
+    assert_eq!(store.get_setup_mode(), "folder");
     store.invoke_setup_back();
     assert_eq!(store.get_setup_step(), 0, "the first step has no back");
     store.set_pair_link(second.link().render().into());
@@ -1514,6 +1537,22 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(store.get_pair_step(), 1, "{}", store.get_pair_error());
     assert_eq!(store.get_pair_preview().center, third.url.to_string());
     store.set_pair_open(false);
+    // While the first-run steps ask for a center, the link goes into
+    // their own pairing step, with no second dialog over them (#213 W2-9).
+    // Instead of a new pairing, the first step restores a backup (#213
+    // W4-7).
+    store.invoke_setup_start();
+    store.invoke_setup_restore();
+    assert!(!store.get_setup_open());
+    assert!(prefs.get_restore_open());
+    prefs.set_restore_open(false);
+    store.invoke_setup_start();
+    ctl.open_link(third.link().render());
+    assert!(!store.get_pair_open());
+    assert!(store.get_setup_open());
+    assert_eq!(store.get_pair_step(), 1, "{}", store.get_pair_error());
+    assert_eq!(store.get_pair_preview().center, third.url.to_string());
+    store.set_setup_open(false);
 
     // An installed node: the app says why it needs the rights, then runs
     // every command through the broker (here as this user), the ones that

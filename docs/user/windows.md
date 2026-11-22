@@ -33,7 +33,14 @@ administrator (UAC). You become the node's owner. It installs:
 - **Nerve** in the Start menu, `nerve://` links, and an entry in Apps & features.
 
 Then the first-run steps pair your first center, choose its mode and its
-network, and in folder mode give it a first folder.
+network, and in folder mode give it a first folder. After a reinstall,
+**Restore a backup…** there brings your pairings back instead.
+
+A password you leave empty is not stored: Windows logs no program on to an
+account without one. Commands that run as you wait until you give your
+account a password and enter it under **Settings › General › Account for
+commands**. Installed over an earlier node of another program (a
+pre-release), the install takes it over and removes the old program.
 
 `nerve-x86_64-windows.exe --silent` installs the node without a window
 or a question, for scripts. The app asks for your password later, where it
@@ -130,23 +137,25 @@ in Windows Security; the **Relay** page says so while the relay is on.
 
 ## Update and uninstall
 
-Update the center first, then the nodes. **Settings › App › Update…** checks
-the download against `SHA256SUMS`; if the new program does not start, the
-old one comes back. **Pre-releases** beside it makes Update take test
-builds too.
+Update the center first, then the nodes. **Settings › App › Update…** (on a
+center **Settings › This machine › Update**) checks the download against
+`SHA256SUMS`; if the new program does not start, the old one comes back.
+**Pre-releases** beside it makes Update take test builds too. When no newer
+version is there, it says so and changes nothing.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. On a center, Apps & features or
 **Settings › This machine › Uninstall…** removes the center and the app. The quiet uninstall of Apps & features
 keeps it. The data holds your stored Windows password too, open to the
 administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
-`nerve-run` that Windows still holds goes after a restart; the uninstall
-says where.
+`nerve-run` that Windows still holds (it keeps what the node's Credential
+Manager held, sealed for that account) goes at Nerve's next install or
+uninstall after a restart of Windows; the uninstall says where.
 
 **From 0.0.6:** uninstall it with **Delete the data** (Apps & features),
 install this version, and pair the node again. The installer refuses to
-install or update over 0.0.6, whose settings it cannot read, and the app's
-**Update** of 0.0.6 puts the old program back.
+install over 0.0.6, whose settings it cannot read, and the 0.0.6 app's
+**Update** finds no program it can take: both change nothing.
 
 ## The node's web UI
 

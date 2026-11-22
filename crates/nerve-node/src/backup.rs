@@ -16,7 +16,7 @@
 //! they name the center, the file or the keyring entry.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nerve_policy::audit::AuditLog;
 use nerve_policy::config::{SecretStorage, Sudo, valid_center_name};
@@ -65,6 +65,9 @@ pub struct BackupReport {
     pub saved: Vec<String>,
     /// What was not taken, and why.
     pub left_out: Vec<LeftOut>,
+    /// A center whose commands may read the file, and its folder that holds
+    /// it ([`readable_by`]).
+    pub readable_by: Option<(String, PathBuf)>,
 }
 
 /// A key a backup did not take.
@@ -120,10 +123,34 @@ pub fn backup(
     opts: &BackupOpts,
 ) -> Result<BackupReport, String> {
     pass.check_new()?;
-    let (contents, report) = collect(paths, cfg, opts.include_keyring)?;
+    let (contents, mut report) = collect(paths, cfg, opts.include_keyring)?;
     let bytes = backup::seal_with(&contents, pass, opts.rounds)?;
     crate::caller_file::write(file, &bytes, opts.overwrite)?;
+    report.readable_by = readable_by(cfg, file);
     Ok(report)
+}
+
+/// The first center whose commands may read `file`, a backup, with the
+/// folder of its that holds it: there a center's agent could take the file
+/// and try passphrases at leisure (#213 W4-4).
+pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, PathBuf)> {
+    cfg.centers.iter().find_map(|c| {
+        c.policy
+            .folders
+            .iter()
+            .filter(|f| f.access.read)
+            .map(|f| PathBuf::from(&f.path))
+            .find(|f| nerve_policy::paths::within(file, f))
+            .map(|f| (c.name.clone(), f))
+    })
+}
+
+/// The warning of [`readable_by`].
+pub fn readable_warning(center: &str, folder: &Path) -> String {
+    format!(
+        "Warning: the file is in {}, which {center}'s commands may read; keep it in a folder of your own",
+        folder.display()
+    )
 }
 
 /// What a key is read as: its text, still in the keyring, or not there.
@@ -1132,6 +1159,9 @@ pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn std::io::Write)
     for s in &r.left_out {
         let _ = writeln!(out, "  left out: {s}");
     }
+    if let Some((center, folder)) = &r.readable_by {
+        let _ = writeln!(out, "{}", readable_warning(center, folder));
+    }
     let _ = writeln!(
         out,
         "The file is encrypted with your passphrase. Keep both; nobody can recover the file without it."
@@ -1151,6 +1181,9 @@ pub fn backup_data(r: &BackupReport, file: &Path) -> serde_json::Value {
         "centers": r.centers,
         "saved": r.saved,
         "left_out": left_out,
+        "readable_by": r.readable_by.as_ref().map(|(center, folder)| {
+            serde_json::json!({"center": center, "folder": folder.display().to_string()})
+        }),
     })
 }
 
@@ -1263,6 +1296,35 @@ mod tests {
             policy: Default::default(),
             capabilities: Vec::new(),
         }
+    }
+
+    /// A backup file in a folder a center's commands may read is found, so
+    /// that the backup warns of it; one beside it is not (#213 W4-4).
+    #[test]
+    fn a_backup_in_a_center_s_folder_is_found() {
+        let key = NodeKey::generate().unwrap();
+        let mut lab = entry("lab", &key);
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: "/home/alex/project".into(),
+            access: nerve_policy::config::Access::parse("r").unwrap(),
+        });
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: "/home/alex/none".into(),
+            access: nerve_policy::config::Access::NONE,
+        });
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(lab);
+        assert_eq!(
+            readable_by(&cfg, Path::new("/home/alex/project/sub/n.backup")),
+            Some(("lab".to_string(), PathBuf::from("/home/alex/project")))
+        );
+        assert_eq!(readable_by(&cfg, Path::new("/home/alex/n.backup")), None);
+        assert_eq!(
+            readable_by(&cfg, Path::new("/home/alex/none/n.backup")),
+            None
+        );
+        let warn = readable_warning("lab", Path::new("/home/alex/project"));
+        assert!(warn.contains("lab's commands may read"), "{warn}");
     }
 
     /// After a rotation the key no longer hashes to the node id; the key the

@@ -111,7 +111,7 @@ web UI off ([the center in the app](center.md#in-the-app)).
 
 | Page | Does |
 |---|---|
-| **Overview** | Status, the service (Start, Stop, Restart), **Panic** and **Unlock** |
+| **Overview** | Status, the service (Stop and Restart, Start while it is stopped), **Panic** and **Unlock** |
 | **Centers** | Pair from a link, pause, the settings grant, a new key, remove |
 | **Relay** | Connect through a relay, or be one |
 | **Permissions** | Mode, the network, folders, allow, deny and sudo rules, sudo off |
@@ -119,7 +119,7 @@ web UI off ([the center in the app](center.md#in-the-app)).
 | **Audit** | What the node allowed and refused, with **Allow** and **Deny** buttons |
 | **Log** | The node's log, with a search and problems only |
 | **Settings** | Name, keys, log level, backup, update and uninstall |
-| **Help** | The keys, and the command reference |
+| **Help** | Tasks and where they are done, the keys, and the command reference |
 
 A page is a list and the details of the row you pick: side by side in a wide
 window, and in a narrow one the list first, then the details with **Back to

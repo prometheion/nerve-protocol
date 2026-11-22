@@ -174,7 +174,17 @@ pub async fn update(
         }
         None => {
             let asset = p.asset.clone()?;
-            let b = fetch_release(p.release, &asset).await?;
+            let installed = sys
+                .version_of(p.bin)
+                .ok()
+                .and_then(|s| Version::parse_of(program, &s));
+            if let Some(why) = crate::older_release(p.release, program, installed) {
+                steps.did(why);
+                return Ok(false);
+            }
+            let b = fetch_release(p.release, &asset)
+                .await
+                .map_err(|e| crate::no_program_in(e, p.release, &asset))?;
             steps.did(format!(
                 "downloaded {asset} from {} and checked it against its SHA256SUMS",
                 p.release

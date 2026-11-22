@@ -2399,7 +2399,10 @@ export component RemoveAsk {
     callback ask();
     callback cancel();
     callback confirmed();
-    HorizontalLayout {
+    // Never narrower than its buttons: a long title beside it took their
+    // room, and they read "Ca" and "Re" (#213 W2-13).
+    min-width: row.preferred-width;
+    row := HorizontalLayout {
         spacing: Space.xs;
         alignment: end;
         if !root.asking: Button {

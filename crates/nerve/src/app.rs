@@ -95,6 +95,9 @@ enum Pending {
     Clear(bool),
     /// `cap rm` of a capability of node.toml.
     CapRemove(String),
+    /// The settings grant for a center, where the owner is root or an
+    /// administrator.
+    Grant(String),
 }
 
 /// What a command that keeps answering gave, until the window takes it.
@@ -335,7 +338,14 @@ impl Ctl {
             motion_source: Cell::new(
                 (exec == Exec::Threads).then_some(crate::motion::reduced_here as MotionSource),
             ),
-            reference: crate::reference::commands(&nerve_node::cli::help()),
+            reference: {
+                let all = crate::reference::commands(&nerve_node::cli::help());
+                if cfg!(windows) {
+                    crate::reference::for_windows(all)
+                } else {
+                    all
+                }
+            },
             ref_opened: RefCell::default(),
             relay_address: RefCell::new(String::new()),
             hub: hub::HubState::default(),
@@ -788,8 +798,14 @@ impl Ctl {
                 let (status, centers) = view::status(&v, now_ms());
                 let names: Vec<String> = centers.iter().map(|c| c.name.to_string()).collect();
                 let first = self.status.borrow().is_null();
+                let attached = !first && view::providers_changed(&self.status.borrow(), &v);
                 *self.centers.borrow_mut() = names.clone();
                 *self.status.borrow_mut() = v;
+                // A provider that attached or left changes the Capabilities
+                // page while it is open (#213 W2-13).
+                if attached && self.with_store(|s| s.get_page()) == Some(Page::Capabilities) {
+                    self.caps_load();
+                }
                 self.with_store(|s| {
                     s.set_status(status);
                     s.set_centers(ModelRc::new(VecModel::from(centers)));
@@ -836,7 +852,19 @@ impl Ctl {
             self.connect_read(&link);
             return;
         }
-        self.pair_start();
+        // The first-run steps' own first step pairs a center: the link goes
+        // there, not into a second dialog over it (#213 W2-9).
+        let in_steps = self
+            .with_store(|s| s.get_setup_open() && s.get_setup_step() == 0)
+            .unwrap_or(false);
+        if in_steps {
+            self.with_store(|s| {
+                s.set_pair_step(0);
+                s.set_pair_error(SharedString::new());
+            });
+        } else {
+            self.pair_start();
+        }
         self.with_store(|s| s.set_pair_link(link.as_str().into()));
         self.pair(&link, "", false);
     }
@@ -968,6 +996,20 @@ impl Ctl {
     fn center_grant(self: &Rc<Self>, name: &str, on: bool) {
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
         let admin = self.with_perm(|p| p.get_owner_is_admin()).unwrap_or(false);
+        // What the grant gives where the owner holds every right is asked
+        // before, not said after (#213 W2-11).
+        if on && (root || admin) {
+            return self.confirm(
+                Pending::Grant(name.to_string()),
+                format!("Let {name} change settings?"),
+                view::settings_grant_ask(name, root),
+                "Allow",
+            );
+        }
+        self.grant(name, on, root, admin);
+    }
+
+    fn grant(self: &Rc<Self>, name: &str, on: bool, root: bool, admin: bool) {
         let said = view::settings_grant_said(name, on, root, admin);
         let value = if on { "on" } else { "off" };
         let args = vec![
@@ -1045,6 +1087,10 @@ impl Ctl {
             return;
         };
         match p {
+            Pending::Grant(name) => {
+                let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
+                self.grant(&name, true, root, !root);
+            }
             Pending::Unpair(name) => {
                 let args = vec!["center".into(), "rm".into(), "--".into(), name.clone()];
                 self.change(&name, args, format!("Unpaired {name}."));
@@ -1564,6 +1610,7 @@ fn dress(window: &AppWindow) {
     #[cfg(windows)]
     {
         use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
         use slint::winit_030::winit::platform::windows::{IconExtWindows, WindowExtWindows};
         use slint::winit_030::winit::window::Icon;
         window.window().with_winit_window(|w| {
@@ -1574,10 +1621,60 @@ fn dress(window: &AppWindow) {
             if let Ok(icon) = Icon::from_resource(1, None) {
                 w.set_window_icon(Some(icon));
             }
+            // Within the screen and above the taskbar, smaller where the
+            // screen is (#213 W1-F5).
+            let (Ok(at), Some(work)) = (w.outer_position(), work_area()) else {
+                return;
+            };
+            let (outer, inner) = (w.outer_size(), w.inner_size());
+            let (to, size) = fit_in(work, (at.x, at.y), (outer.width, outer.height));
+            if size != (outer.width, outer.height) {
+                let _ = w.request_inner_size(PhysicalSize::new(
+                    inner.width - (outer.width - size.0),
+                    inner.height - (outer.height - size.1),
+                ));
+            }
+            if to != (at.x, at.y) {
+                w.set_outer_position(PhysicalPosition::new(to.0, to.1));
+            }
         });
     }
     #[cfg(not(windows))]
     let _ = window;
+}
+
+/// The primary screen's work area (the screen without the taskbar): left,
+/// top, right and bottom, in physical pixels.
+#[cfg(windows)]
+fn work_area() -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: a RECT for the call to fill.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut r).cast(), 0) };
+    (ok != 0).then_some((r.left, r.top, r.right, r.bottom))
+}
+
+/// Where a window of `size` (its frame included) at `at` goes so that it
+/// lies in the work area `work` (left, top, right, bottom): moved in, and
+/// smaller where the area is. On a 1280x800 screen the installer opened
+/// with its buttons under the taskbar (#213 W1-F5).
+pub fn fit_in(
+    work: (i32, i32, i32, i32),
+    at: (i32, i32),
+    size: (u32, u32),
+) -> ((i32, i32), (u32, u32)) {
+    let (left, top, right, bottom) = work;
+    let w = size.0.min((right - left).max(0) as u32);
+    let h = size.1.min((bottom - top).max(0) as u32);
+    let x = at.0.clamp(left, right - w as i32);
+    let y = at.1.clamp(top, bottom - h as i32);
+    ((x, y), (w, h))
 }
 
 /// Brings `window` to the front: a later start of the app asked for it.
@@ -1622,5 +1719,27 @@ mod tests {
         let said = locked_said(&replaced);
         assert!(said.starts_with(LOCKED), "{said}");
         assert!(said.contains("replaced by the lock"), "{said}");
+    }
+
+    /// A window that would reach under the taskbar or off the screen is
+    /// moved in, and made smaller where the screen is (#213 W1-F5).
+    #[test]
+    fn a_window_fits_in_the_work_area() {
+        // 1280x800 with a 48 px taskbar.
+        let work = (0, 0, 1280, 752);
+        // The installer at y 187: moved up, its size kept.
+        assert_eq!(
+            fit_in(work, (260, 187), (776, 739)),
+            ((260, 13), (776, 739))
+        );
+        // The center's window off the right edge.
+        assert_eq!(
+            fit_in(work, (138, 161), (1196, 739)),
+            ((84, 13), (1196, 739))
+        );
+        // Taller than the work area: as tall as it is.
+        assert_eq!(fit_in(work, (0, 0), (900, 900)), ((0, 0), (900, 752)));
+        // One that fits stays.
+        assert_eq!(fit_in(work, (10, 10), (500, 500)), ((10, 10), (500, 500)));
     }
 }

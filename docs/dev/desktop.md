@@ -250,8 +250,11 @@ install makes (on Windows each pairing's in an AppContainer of its own), and
 When it is done, **Open Nerve** opens the app. Its first-run steps pair the
 first center, choose its mode and whether its commands may use the network,
 and in folder mode give it a first folder, as `nerve-node setup` asks; **Back**
-goes to the step before, **Skip** past one. The downloaded file is no longer
-needed.
+goes to the step before, **Skip** past one, and **Not now** on the first step
+ends the steps. **Restore a backup…** there ends them too and restores a
+backup, which brings the pairings back after a reinstall. The mode step starts at the mode a new pairing has, folder mode.
+A pairing link opened while the first step is open fills that step, with no
+second dialog over it. The downloaded file is no longer needed.
 
 On Windows `nerve.exe --silent` installs the node without a window and
 without a question, for scripts; the app asks for your Windows password

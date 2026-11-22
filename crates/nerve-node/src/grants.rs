@@ -2265,14 +2265,26 @@ pub(crate) fn act_as(
 ) -> io::Result<Option<crate::win_user::FsAs>> {
     owner
         .map(|o| {
-            crate::win_user::FsAs::new(o).map_err(|e| {
-                io::Error::other(format!(
-                    "the node changes the permissions of your folders as {}, and cannot log on as {0} ({e}); save your Windows password again under Settings, General, Account for commands",
-                    o.name
-                ))
-            })
+            crate::win_user::FsAs::new(o).map_err(|e| io::Error::other(cannot_act_as(&o.name, &e)))
         })
         .transpose()
+}
+
+/// Why the folders' permissions cannot be changed as the owner `name`: the
+/// logon's error `e`, and where the app takes the password, once (#213
+/// W1-F9: the hint was said twice).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn cannot_act_as(name: &str, e: &str) -> String {
+    let again = crate::account::NO_ACCOUNT_INSTALL;
+    if e.contains(again) {
+        format!(
+            "the node changes the permissions of your folders as {name}, and cannot log on as {name}: {e}"
+        )
+    } else {
+        format!(
+            "the node changes the permissions of your folders as {name}, and cannot log on as {name} ({e}); {again}"
+        )
+    }
 }
 
 /// Refuses `path` where its links lead to another machine
@@ -3044,6 +3056,21 @@ fn listed_on(
 mod tests {
     use super::*;
     use nerve_sandbox::acl::untouched;
+
+    /// The logon's error that says where the app takes the password is not
+    /// followed by the same hint again (#213 W1-F9).
+    #[test]
+    fn the_owner_s_logon_error_gives_the_hint_once() {
+        let again = crate::account::NO_ACCOUNT_INSTALL;
+        let said = cannot_act_as(
+            "Piggidragon",
+            &format!("the stored password is Max Müller's, not Piggidragon's; {again}"),
+        );
+        assert_eq!(said.matches(again).count(), 1, "{said}");
+        assert!(said.contains("Max Müller's"), "{said}");
+        let said = cannot_act_as("Piggidragon", "Zugriff verweigert");
+        assert!(said.ends_with(again), "{said}");
+    }
 
     fn grant(container: &str, path: &str, access: &str) -> Grant {
         Grant {

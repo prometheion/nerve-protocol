@@ -9,7 +9,7 @@
 
 import { Theme, Type, Space, Radius, Size, Tone, Shape } from "theme.slint";
 import { Load, CapRow, DeclaredRow, ProgramRow } from "data.slint";
-import { Store, Caps } from "store.slint";
+import { Store, Caps, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState,
     Segmented, Picker, TextField, Icon, Reveal, Fold, Code, Field, TextArea, StatusDot, Split,
@@ -223,7 +223,7 @@ component ProgramForm inherits PaneForm {
                 horizontal-stretch: 1;
                 text <=> Caps.program-exe;
                 mono: true;
-                placeholder: "/usr/bin/the-program";
+                placeholder: Perm.windows ? "C:\\Program Files\\Tool\\tool.exe" : "/usr/bin/the-program";
                 label: "Program";
                 accepted => {
                     Caps.program-allow();
@@ -247,7 +247,10 @@ component UnitItem inherits ListItem {
     label: root.unit.name;
     HorizontalLayout {
         spacing: Space.sm;
-        width: root.wide ? 210px : self.preferred-width;
+        // Wide, a column of its own; else it takes the room the switch does
+        // not need, so the switch keeps its own width (#213 W4-9).
+        min-width: root.wide ? 210px : 0px;
+        max-width: root.wide ? 210px : 100000px;
         horizontal-stretch: root.wide ? 0 : 1;
         Text {
             text: root.unit.name;
@@ -298,8 +301,10 @@ component UnitItem inherits ListItem {
     }
     if root.unit.switchable: VerticalLayout {
         alignment: center;
+        horizontal-stretch: 0;
         Segmented {
             small: true;
+            max-width: self.preferred-width;
             label: "Switch of " + root.unit.name;
             options: ["On", "Off", "Hidden"];
             current: root.unit.setting;

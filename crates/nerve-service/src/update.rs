@@ -118,6 +118,37 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// Why `update` needs no download, where the release at `base` (its tag,
+/// `…/releases/download/<tag>`, names its version: `v0.0.8`,
+/// `pre2-v0.1.0`) is older than the `installed` version of `program`; a
+/// release of the same version is a new build of it (a pre-release), and is
+/// downloaded. `None` where either is not known: the latest release's
+/// files name no tag (#213 W1-F12).
+pub fn older_release(base: &str, program: &str, installed: Option<Version>) -> Option<String> {
+    let tag = base.rsplit_once("/releases/download/")?.1;
+    let numbers = tag.rsplit_once('v').map_or(tag, |(_, v)| v);
+    let release = Version::parse_of(program, &format!("{program} {numbers}"))?;
+    let installed = installed?;
+    (release < installed).then(|| {
+        format!(
+            "the release {tag} is {program} {release}, older than the installed {installed}; nothing to update"
+        )
+    })
+}
+
+/// The error of a release whose `SHA256SUMS` lists no `asset` (`e`), where
+/// it is the latest release at `base`: it is not for this program yet (an
+/// older one, or one without this platform's file), which the
+/// pre-releases may have (#213 W1-F4).
+pub fn no_program_in(e: String, base: &str, asset: &str) -> String {
+    if base.ends_with(LATEST) && e.contains("SHA256SUMS lists no") {
+        return format!(
+            "the latest release has no {asset}, so there is no newer one for this machine: nothing changed (Pre-releases takes test builds too)"
+        );
+    }
+    e
+}
+
 /// The installed program `update` replaces.
 pub struct Program<'a> {
     /// Its name: the first word of its `--version`.
@@ -261,7 +292,19 @@ pub async fn update(
         }
         None => {
             let asset = p.asset.clone()?;
-            let b = fetch_release(p.release, &asset).await?;
+            let installed = sys
+                .version_of(p.bin, &account)
+                .ok()
+                .and_then(|s| Version::parse_of(name, &s));
+            if p.placed.is_none()
+                && let Some(why) = older_release(p.release, name, installed)
+            {
+                steps.did(why);
+                return Ok(false);
+            }
+            let b = fetch_release(p.release, &asset)
+                .await
+                .map_err(|e| no_program_in(e, p.release, &asset))?;
             steps.did(format!(
                 "downloaded {asset} from {} and checked it against its SHA256SUMS",
                 p.release
@@ -1081,5 +1124,50 @@ mod tests {
         assert!(Version::parse_of("svc", "other 1.2.3").is_none());
         assert!(Version::parse_of("svc", "svc 1.2").is_none());
         assert!(Version::parse_of("svc", "svc 0.0.9") < Version::parse_of("svc", "svc 0.0.10"));
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    /// A release older than the installed program is not downloaded; one
+    /// of the same version (another build) and the latest, whose files
+    /// name no tag, are (#213 W1-F12).
+    #[test]
+    fn an_older_release_is_not_downloaded() {
+        let base = |tag: &str| format!("https://github.com/o/r/releases/download/{tag}");
+        let installed = Version::parse_of("nerve", "nerve 0.1.0");
+        let why = older_release(&base("v0.0.8"), "nerve", installed).unwrap();
+        assert_eq!(
+            why,
+            "the release v0.0.8 is nerve 0.0.8, older than the installed 0.1.0; nothing to update"
+        );
+        assert!(older_release(&base("pre2-v0.1.0"), "nerve", installed).is_none());
+        assert!(older_release(&base("v0.2.0"), "nerve", installed).is_none());
+        assert!(
+            older_release(
+                "https://github.com/o/r/releases/latest/download",
+                "nerve",
+                installed
+            )
+            .is_none()
+        );
+        assert!(older_release(&base("v0.0.8"), "nerve", None).is_none());
+    }
+
+    /// The latest release without this machine's program says that there
+    /// is no newer one, not only what its SHA256SUMS lacks (#213 W1-F4).
+    #[test]
+    fn the_latest_release_without_the_program_says_so() {
+        let e = "the release's SHA256SUMS lists no nerve-x86_64-windows.exe".to_string();
+        let latest = "https://github.com/o/r/releases/latest/download";
+        let said = no_program_in(e.clone(), latest, "nerve-x86_64-windows.exe");
+        assert!(
+            said.contains("no newer one") && said.contains("Pre-releases"),
+            "{said}"
+        );
+        let tagged = "https://github.com/o/r/releases/download/v0.2.0";
+        assert_eq!(no_program_in(e.clone(), tagged, "x"), e);
     }
 }

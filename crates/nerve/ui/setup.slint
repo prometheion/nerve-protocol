@@ -223,6 +223,15 @@ export component SetupDialog inherits Dialog {
             Rectangle {
                 horizontal-stretch: 1;
             }
+            // A reinstall brings its pairings back from a backup (#213 W4-7).
+            if Store.setup-step == 0 && Store.pair-step == 0: Button {
+                text: "Restore a backup…";
+                kind: ButtonKind.ghost;
+                enabled: !Store.setup-busy && !Store.pair-busy;
+                clicked => {
+                    Store.setup-restore();
+                }
+            }
             // Back from the pairing's confirmation to its link, and from a
             // later step to the one before.
             if Store.setup-step > 0 || Store.pair-step == 1: Button {

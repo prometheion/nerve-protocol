@@ -128,17 +128,18 @@ fn a_node_without_its_privilege_says_where_in_the_app_to_start_it() {
     }
 }
 
-/// The advice for a profile folder Windows kept names the folder to delete
-/// in Explorer first: the User Profiles dialog lists every deleted account's
-/// profile as Account Unknown, so it says how to tell this one by its date.
+/// A profile folder Windows kept at an uninstall goes at Nerve's next
+/// install or uninstall: the text says that, and what the folder holds,
+/// instead of sending the owner to delete it by hand (#213 W1-F10, W4-6).
 #[test]
-fn a_kept_profile_is_found_by_its_folder_or_its_date() {
+fn a_kept_profile_goes_at_the_next_install() {
     let lines: Vec<_> = texts(include_str!("../src/win_host.rs"))
         .into_iter()
-        .filter(|(_, t)| t.contains("Account Unknown"))
+        .filter(|(_, t)| t.contains("Windows still holds the profile folder"))
         .collect();
     assert_eq!(lines.len(), 1, "{lines:?}");
     let text = &lines[0].1;
-    assert!(text.contains("in Explorer"), "{text}");
-    assert!(text.contains("date of this uninstall"), "{text}");
+    assert!(text.contains("next install or uninstall"), "{text}");
+    assert!(text.contains("Credential Manager"), "{text}");
+    assert!(!text.contains("Account Unknown"), "{text}");
 }

@@ -8,8 +8,8 @@ use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
-    CheckTokenMembership, CreateWellKnownSid, LookupAccountNameW, PSID, SECURITY_MAX_SID_SIZE,
-    SID_NAME_USE, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
+    CheckTokenMembership, CreateWellKnownSid, LookupAccountNameW, LookupAccountSidW, PSID,
+    SECURITY_MAX_SID_SIZE, SID_NAME_USE, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
 };
 
 fn last() -> io::Error {
@@ -111,6 +111,36 @@ pub fn sid_of_qualified(qualified: &str) -> Result<Vec<u8>, String> {
     let real = unsafe { windows_sys::Win32::Security::GetLengthSid(sid.as_ptr() as PSID) };
     sid.truncate((real as usize).min(len as usize));
     Ok(sid)
+}
+
+/// The name of the account or group `sid` on this machine, as
+/// `DOMAIN\name`; `None` where Windows knows none (a deleted account).
+pub fn name_of(sid: &[u8]) -> Option<String> {
+    let mut name = vec![0u16; 256];
+    let mut domain = vec![0u16; 256];
+    let (mut n, mut d) = (name.len() as u32, domain.len() as u32);
+    let mut kind: SID_NAME_USE = 0;
+    // SAFETY: a valid SID and two buffers of the sizes given.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid.as_ptr() as PSID,
+            name.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: LookupAccountSidW wrote two NUL-terminated strings.
+    let (name, domain) = unsafe { (from_wide(name.as_ptr()), from_wide(domain.as_ptr())) };
+    Some(match domain.is_empty() {
+        true => name,
+        false => format!("{domain}\\{name}"),
+    })
 }
 
 /// A SID as text, `S-1-5-…`.

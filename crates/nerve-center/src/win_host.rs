@@ -35,6 +35,10 @@ impl WinSystem for WinHost {
         nerve_service::win::sid::is_admin()
     }
 
+    fn sweep_profiles(&self) -> Vec<std::path::PathBuf> {
+        nerve_service::win::profiles::sweep(&[SERVICE_NAME])
+    }
+
     fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
         nerve_service::win::dacl::private_folder(dir, sddl)
     }

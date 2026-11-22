@@ -476,8 +476,8 @@ pub fn commands(h: &nerve_node::cli::Help) -> Vec<Card> {
                         .collect();
                     Command {
                         name: v.name.clone(),
-                        about: v.about.clone(),
-                        more: v.more.clone(),
+                        about: plain(&v.about),
+                        more: plain(&v.more),
                         usage: v.usage.clone(),
                         args,
                         example,
@@ -485,27 +485,46 @@ pub fn commands(h: &nerve_node::cli::Help) -> Vec<Card> {
                     }
                 })
                 .collect();
-            // A card of one command says that command's line.
+            // A card of one command says that command's line; one of more
+            // says theirs, not only their names (#213 W4-2).
             let line = match (&c.about, verbs.as_slice()) {
-                (l, _) if !l.is_empty() => l.clone(),
+                (l, _) if !l.is_empty() => plain(l),
                 (_, [one]) => one.about.clone(),
                 _ => verbs
                     .iter()
-                    .map(|v| v.name.as_str())
+                    .map(|v| v.about.trim_end_matches('.'))
                     .collect::<Vec<_>>()
-                    .join(", "),
+                    .join("; "),
             };
             out.push(Card {
                 topic: topic(&s.name),
                 name: c.name.clone(),
                 line,
-                more: c.more.clone(),
+                more: plain(&c.more),
                 doc: c.doc.clone(),
                 verbs,
             });
         }
     }
     out
+}
+
+/// The CLI's help text without its Markdown backticks, which the app shows
+/// as they are.
+fn plain(text: &str) -> String {
+    text.replace('`', "")
+}
+
+/// The reference as the app on Windows shows it: the place in the app,
+/// without the command lines, as there is nothing to type there (#213
+/// W4-2).
+pub fn for_windows(mut cards: Vec<Card>) -> Vec<Card> {
+    for v in cards.iter_mut().flat_map(|c| c.verbs.iter_mut()) {
+        v.example.clear();
+        v.usage.clear();
+        v.args.clear();
+    }
+    cards
 }
 
 /// The key of a command's fold of its arguments, apart from its card's.
@@ -649,6 +668,41 @@ mod tests {
                 example.starts_with(&format!("nerve-node {c}"))
                     || example.starts_with(&format!("sudo nerve-node {c}")),
                 "`{c}`: {example}"
+            );
+        }
+    }
+
+    /// On Windows a command shows its place in the app and what it does,
+    /// with no command line; nowhere does a line show Markdown (#213 W4-2).
+    #[test]
+    fn the_windows_reference_has_no_command_lines() {
+        let all = commands(&nerve_node::cli::help());
+        for c in &all {
+            assert!(!c.line.contains('`') && !c.more.contains('`'), "{}", c.name);
+            assert_ne!(
+                c.line,
+                c.verbs
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "{} shows only its commands' names",
+                c.name
+            );
+            for v in &c.verbs {
+                assert!(
+                    !v.about.contains('`') && !v.more.contains('`'),
+                    "{}",
+                    v.name
+                );
+            }
+        }
+        let windows = for_windows(all);
+        for v in windows.iter().flat_map(|c| &c.verbs) {
+            assert!(
+                v.example.is_empty() && v.usage.is_empty() && v.args.is_empty(),
+                "{}",
+                v.name
             );
         }
     }

@@ -155,13 +155,14 @@ export component PairDialog inherits Dialog {
                     alignment: start;
                     padding-top: 2px;
                     Icon {
-                        source: @image-url("icons/shield.svg");
+                        source: @image-url("icons/folder.svg");
                         colorize: Theme.ok;
                         size: 14px;
                     }
                 }
+                // A new pairing is in folder mode (#213 W2-8).
                 Text {
-                    text: "Allowlist mode: nothing allowed yet.";
+                    text: "Folder mode: no folder of yours yet.";
                     color: Theme.text-muted;
                     font-size: Type.small;
                     wrap: word-wrap;
@@ -290,6 +291,7 @@ export component AboutDialog inherits Dialog {
         }
         Text {
             text: Hub.shown ? "Its pages use the center's own API, with the checks of its web UI."
+                : Install.windows ? "Every action runs the node's own commands, with their checks and audit records."
                 : "Every action runs nerve-node, with its checks and audit records.";
             color: Theme.text-muted;
             font-size: Type.small;
@@ -645,7 +647,7 @@ export component BackupDialog inherits Dialog {
     }
     CheckBox {
         text: "Include the keys in the system keyring";
-        detail: "Without it, they stay out of the file.";
+        detail: "Without it, the node's keys and the proxy's login stay out of the file, and a restore pairs no center.";
         checked: Prefs.backup-keyring;
         toggled(on) => {
             Prefs.backup-keyring = on;
@@ -790,8 +792,8 @@ export component ElevateDialog inherits Dialog {
 
 // Settings: update the app and the node, from the latest release or a file.
 export component UpdateDialog inherits Dialog {
-    title: Install.step == "done" ? "Nerve is updated to " + Install.installed-version : "Update Nerve";
-    subtitle: Install.step == "done" ? (Install.installed-version == Install.version ? "Nerve was up to date." : "The service runs it. Restart Nerve to use it here too.")
+    title: Install.step == "done" ? (Install.unchanged ? "Nerve is up to date" : "Nerve is updated to " + Install.installed-version) : "Update Nerve";
+    subtitle: Install.step == "done" ? (Install.unchanged ? "No newer version: nothing changed." : "The service runs it. Restart Nerve to use it here too.")
         : Install.step == "working" ? ""
         : "Version " + Install.version + " is installed. Settings, keys and the audit log stay.";
     card-width: 560px;
@@ -803,8 +805,10 @@ export component UpdateDialog inherits Dialog {
     enter => {
         if (Install.step == "choose" && (Install.source == 0 || Install.file != "")) {
             Install.update();
-        } else if (Install.step == "done") {
+        } else if (Install.step == "done" && !Install.unchanged) {
             Install.open-app();
+        } else if (Install.step == "done") {
+            Install.update-open = false;
         }
     }
     VerticalLayout {
@@ -849,13 +853,13 @@ export component UpdateDialog inherits Dialog {
                 DidList { }
                 DialogButtons {
                     Button {
-                        text: "Later";
-                        kind: ButtonKind.ghost;
+                        text: Install.unchanged ? "Close" : "Later";
+                        kind: Install.unchanged ? ButtonKind.primary : ButtonKind.ghost;
                         clicked => {
                             Install.update-open = false;
                         }
                     }
-                    Button {
+                    if !Install.unchanged: Button {
                         text: "Restart Nerve";
                         icon: @image-url("icons/refresh.svg");
                         kind: ButtonKind.primary;
@@ -922,6 +926,17 @@ export component UninstallDialog inherits Dialog {
                             Install.uninstall-open = false;
                             Install.can-forget = false;
                             Install.forget = false;
+                        }
+                    }
+                    // A backup restores the pairings after a new install
+                    // (#213 W4-6).
+                    if Install.purge: Button {
+                        text: "Back up first…";
+                        icon: @image-url("icons/archive.svg");
+                        kind: ButtonKind.ghost;
+                        clicked => {
+                            Install.uninstall-open = false;
+                            Prefs.backup-choose();
                         }
                     }
                     Button {

@@ -135,6 +135,12 @@ pub fn install_input(windows: bool, node_only: bool, password: &str) -> Option<S
     (windows && !node_only).then(|| format!("{password}\n"))
 }
 
+/// Whether an update's steps (`did`) say it found nothing newer and changed
+/// nothing (nerve_service::update's `Ok(false)`).
+pub fn nothing_updated(did: &[String]) -> bool {
+    did.iter().any(|l| l.ends_with("; nothing to update"))
+}
+
 /// Takes the owner token the center's install shows (its line
 /// `Owner token  <token>`) out of `did`, to show it apart with a Copy
 /// button (#213 W1-F6).
@@ -160,7 +166,9 @@ fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
 /// (Linux), Nerve installed already as a node, a center installed here, or
 /// what this machine becomes (the role is read from the installed
 /// services). The app's program without a role's service, as a package
-/// leaves it, is not installed yet.
+/// leaves it, is not installed yet. A node whose service runs another
+/// program (on Windows a pre-release's `nerve-node-desktop.exe`, or 0.0.6)
+/// is a node: its install takes it over, and no role is asked (#213 W1-F8).
 pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) -> &'static str {
     if node_only {
         "welcome"
@@ -168,6 +176,8 @@ pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) ->
         "installed"
     } else if roles.center {
         "center"
+    } else if roles.node {
+        "welcome"
     } else {
         "role"
     }
@@ -375,6 +385,7 @@ impl Ctl {
             i.set_did(ModelRc::default());
             i.set_warnings(ModelRc::default());
             i.set_center_token(SharedString::new());
+            i.set_unchanged(false);
         });
         self.with_rights(&args.clone(), move |c, runner| {
             c.with_install(|i| i.set_step("working".into()));
@@ -385,11 +396,13 @@ impl Ctl {
                     Ok(v) => {
                         let (mut did, warn) = steps(&v);
                         let token = take_owner_token(&mut did).unwrap_or_default();
+                        let unchanged = nothing_updated(&did);
                         c.with_install(|i| {
                             i.set_password(SharedString::new());
                             i.set_did(shared(did));
                             i.set_warnings(shared(warn));
                             i.set_center_token(token.into());
+                            i.set_unchanged(unchanged);
                         });
                         c.command(vec!["status".into()], None, |c, v| {
                             let version = v
@@ -747,6 +760,10 @@ mod tests {
         assert_eq!(first_step(false, false, center), "center");
         assert_eq!(first_step(true, false, node), "installed");
         assert_eq!(first_step(false, true, node), "welcome");
+        // A node whose service runs another program (a pre-release's
+        // nerve-node-desktop.exe on Windows) is taken over by the node's
+        // install, with no role asked (#213 W1-F8).
+        assert_eq!(first_step(false, false, node), "welcome");
         // The app's program without a node's service: from its package
         // before its first start, or the program of the center role.
         assert_eq!(first_step(true, false, none), "role");
@@ -835,6 +852,20 @@ mod tests {
         for line in did.iter().chain(&warn) {
             assert!(!line.contains('`'), "{line}");
         }
+    }
+
+    /// An update that found nothing newer is said as such, not as an
+    /// update to the same version (#213 W1-F12).
+    #[test]
+    fn an_update_with_nothing_newer_is_told_apart() {
+        let did = |l: &str| vec!["downloaded x".to_string(), l.to_string()];
+        assert!(nothing_updated(&did(
+            "the installed program is that one already; nothing to update"
+        )));
+        assert!(nothing_updated(&did(
+            "the release v0.0.8 is nerve 0.0.8, older than the installed 0.1.0; nothing to update"
+        )));
+        assert!(!nothing_updated(&did("the service runs nerve 0.1.1")));
     }
 
     /// On Windows an empty password goes as an empty line, which the

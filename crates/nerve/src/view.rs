@@ -76,6 +76,26 @@ pub fn settings_grant_said(name: &str, on: bool, root: bool, admin: bool) -> Str
     }
 }
 
+/// What the settings grant gives `name` where the owner is root (`root`)
+/// or an administrator, asked before it is given (#213 W2-11).
+pub fn settings_grant_ask(name: &str, root: bool) -> String {
+    if root {
+        format!(
+            "Root is the owner of this node, so {name} could set its own mode to user, and its commands would then run as root."
+        )
+    } else {
+        format!(
+            "The owner of this node is an administrator, so {name} could set its own mode to user, and its commands could then take every right on this machine (UAC is no security boundary)."
+        )
+    }
+}
+
+/// Whether the providers attached to the node differ between two answers
+/// of `status --json`.
+pub fn providers_changed(before: &Value, now: &Value) -> bool {
+    before["providers"] != now["providers"]
+}
+
 /// The node's status and its centers, from `status --json`.
 pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
     let running = v["daemon"] == "running";
@@ -683,6 +703,15 @@ pub fn backup_written(said: &Value) -> String {
             text.push_str(&format!("\n{} {said}", sentence(&and_list(&what))));
         }
     }
+    // A center's agent could take a file in its folder and try passphrases
+    // at leisure (#213 W4-4).
+    if let Some(r) = b["readable_by"].as_object() {
+        text.push_str(&format!(
+            "\n\nIt lies in {}, which {}'s commands may read. Move it to a folder of your own.",
+            s(&r["folder"]),
+            s(&r["center"])
+        ));
+    }
     text.push_str("\n\nThe file is sealed with your passphrase. Keep both: without the passphrase nobody can open the file, you included.");
     text
 }
@@ -704,7 +733,7 @@ pub fn relay_token(said: &Value) -> (String, String) {
     let t = &said["token"];
     let node = s(&t["node"]);
     let mut text = format!(
-        "{node} may reach {} through this relay. On {node}, paste this link under Relay, Connect.",
+        "{node} may reach {} through this relay. On {node}, paste this link under Relay, Connect in the Nerve app; a node without the app takes it with nerve-node proxy set -.",
         s(&t["reach"])
     );
     if t["new_pin"] == true {
@@ -729,11 +758,25 @@ pub fn web_ui(said: &Value) -> (String, String, Vec<String>) {
         .flatten()
         .filter_map(|t| t["label"].as_str().map(str::to_string))
         .collect();
-    (
-        s(&ui["listen"]).to_string(),
-        s(&ui["status"]).to_string(),
-        tokens,
-    )
+    let listen = s(&ui["listen"]).to_string();
+    // "listening on <its address>" says nothing the address beside it does
+    // not (#213 W4-9).
+    let status = match s(&ui["status"]) {
+        st if st == format!("listening on {listen}") => "listening".to_string(),
+        st => st.to_string(),
+    };
+    (listen, status, tokens)
+}
+
+/// What the app says once the keys moved: into the system keyring
+/// (`keyring`; on Windows the node's Credential Manager) or into files.
+/// The command itself says only "saved" (#213 W4-9).
+pub fn keys_moved(keyring: bool, windows: bool) -> &'static str {
+    match (keyring, windows) {
+        (true, true) => "The keys are in the node's Credential Manager now.",
+        (true, false) => "The keys are in the system keyring now.",
+        (false, _) => "The keys are in files now.",
+    }
 }
 
 /// A label for a new token of the web UI that `tokens` does not hold yet:
@@ -1962,6 +2005,12 @@ mod tests {
         );
         assert_eq!(tokens, ["first", "app-1"]);
         assert_eq!(super::web_ui_label(&tokens), "app-2");
+        assert_eq!(super::keys_moved(false, true), "The keys are in files now.");
+        assert!(super::keys_moved(true, true).contains("Credential Manager"));
+        // The address is said once (#213 W4-9).
+        let on = serde_json::json!({"ui": {"listen": "127.0.0.1:7470",
+            "status": "listening on 127.0.0.1:7470", "tokens": []}});
+        assert_eq!(super::web_ui(&on).1, "listening");
         // Off.
         let (listen, _, tokens) = super::web_ui(&serde_json::json!({"ui": {"listen": null}}));
         assert!(listen.is_empty() && tokens.is_empty());
@@ -2034,6 +2083,8 @@ mod tests {
             text.contains("paste this link under Relay, Connect"),
             "{text}"
         );
+        // A Linux node without the app takes it in its CLI (#213 W2-12).
+        assert!(text.contains("nerve-node proxy set -"), "{text}");
         assert!(text.contains("The relay is off"), "{text}");
         assert!(!text.contains('`') && !copy.contains('`'), "{text}");
     }
@@ -2175,6 +2226,17 @@ mod tests {
         assert!(started_after_restore(true, Err("x")).contains("did not start again: x"));
     }
 
+    /// A provider that attaches or leaves is seen, an answer without a
+    /// change is not (#213 W2-13).
+    #[test]
+    fn a_provider_that_attaches_is_seen() {
+        let none = json!({"providers": []});
+        let desk = json!({"providers": [{"name": "desk", "capabilities": ["desk.open"]}]});
+        assert!(providers_changed(&none, &desk));
+        assert!(providers_changed(&desk, &none));
+        assert!(!providers_changed(&desk, &desk.clone()));
+    }
+
     /// What a backup wrote, in the app's words: a key the keyring kept
     /// names the dialog's choice, never the CLI's flag.
     #[test]
@@ -2210,6 +2272,15 @@ mod tests {
         );
         assert!(
             text.contains("The node key for a and the node key for b are not in the file"),
+            "{text}"
+        );
+        assert!(!text.contains("commands may read"), "{text}");
+        // A file in a center's folder is warned of (#213 W4-4).
+        let readable = json!({"backup": {"file": "C:\\t\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": "C:\\t"}}});
+        let text = backup_written(&readable);
+        assert!(
+            text.contains("It lies in C:\\t, which lab's commands may read."),
             "{text}"
         );
     }

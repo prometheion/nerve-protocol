@@ -189,6 +189,23 @@ pub fn mine_may_own(sddl: &str) -> bool {
     !sddl.starts_with("O:")
 }
 
+/// An account as a refusal names it: its name with its SID, or the SID
+/// alone where the name is not known (a deleted account). A SID alone did
+/// not tell a person which account it was (#213 W1-F7).
+pub fn named(name: Option<&str>, sid: &str) -> String {
+    match name {
+        Some(n) if !n.is_empty() => format!("{n}, {sid}"),
+        _ => sid.to_string(),
+    }
+}
+
+/// [`named`] for the SID `sid` as this machine names it.
+#[cfg(windows)]
+pub fn who(sid: &[u8]) -> String {
+    let text = crate::win::sid::sid_text(sid).unwrap_or_else(|e| e);
+    named(crate::win::sid::name_of(sid).as_deref(), &text)
+}
+
 /// Why an existing private folder is refused for its owner: `own` when it
 /// is this process's own account (a program of the same person, started
 /// without Run as administrator, made it, an agent's shell command among
@@ -319,7 +336,7 @@ fn make_private(dir: &Path, sddl: &str, lists_needed: bool) -> Result<(), String
             };
         }
         if let Some(owner) = foreign_owner(&f, mine_may_own(sddl)).map_err(|e| at(e.to_string()))? {
-            let who = crate::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
+            let who = who(&owner);
             let own = crate::win::process::user_of(None).is_ok_and(|me| me == owner);
             return Err(at(foreign_text(own, &who)));
         }
@@ -537,7 +554,7 @@ pub fn admins_folder(dir: &Path) -> Result<(), String> {
         return Err(at("it is not there; `nerve-center install` makes it".into()));
     };
     if let Some(owner) = foreign_owner(&f, false).map_err(|e| at(e.to_string()))? {
-        let who = crate::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
+        let who = who(&owner);
         return Err(at(format!(
             "another account ({who}) owns it, so the service does not take it as its own"
         )));
@@ -826,6 +843,12 @@ mod tests {
     fn a_folder_of_one_s_own_is_not_another_account_s() {
         assert!(foreign_text(true, "S-1-5-21-1").contains("Run as administrator"));
         assert!(!foreign_text(true, "S-1-5-21-1").contains("another account"));
+        // The account by its name where it has one (#213 W1-F7).
+        assert_eq!(
+            named(Some("DESKTOP\\nrvstd"), "S-1-5-21-1"),
+            "DESKTOP\\nrvstd, S-1-5-21-1"
+        );
+        assert_eq!(named(None, "S-1-5-21-1"), "S-1-5-21-1");
         let other = foreign_text(false, "S-1-5-21-1");
         assert!(other.contains("another account (S-1-5-21-1)"), "{other}");
     }

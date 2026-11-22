@@ -157,6 +157,12 @@ pub trait WinSystem {
     /// Removes the account, its rights and its profile; what Windows
     /// keeps of the profile until it restarts, said.
     fn remove_account(&self, name: &str) -> Result<Option<String>, String>;
+    /// Removes the profile folders of earlier `nerve` and `nerve-run`
+    /// accounts that Windows held at their uninstall and holds no more;
+    /// the folders removed (nerve_service::win::profiles).
+    fn sweep_profiles(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// Makes `dir` when it is missing, with the DACL `sddl` (and the owner
     /// it names) from its first moment, or gives the folder there that
     /// DACL; one another account owns is refused, as is a link in its place
@@ -892,6 +898,7 @@ fn install_steps(
             "stopped the service {SERVICE_NAME} to install over it"
         ));
     }
+    swept_profiles(sys, steps);
     let password = new_password();
     match sys.account(USER)? {
         Some(a) if a.comment == USER_MARK => {
@@ -942,6 +949,10 @@ fn install_steps(
     let run_password = run_account(layout, sys, steps)?;
     owner_account(layout, sys, steps);
     forget_old_owner_password(&layout.paths, steps);
+    // The program the service ran until now, where it is another one beside
+    // this (a pre-release's nerve-node-desktop.exe): read before the service
+    // is registered with this one.
+    let former = sys.program_of(SERVICE_NAME);
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -960,6 +971,7 @@ fn install_steps(
         steps.did(format!("put the program at {}", layout.bin.display()));
     }
     put_parts(layout, steps)?;
+    remove_former_program(layout, sys, former.as_deref(), steps)?;
     // What an update or an uninstall left behind when it ran from the
     // program it replaced or removed, or moved aside because the Event Log
     // held it: a name of [`ASIDE`].
@@ -982,6 +994,61 @@ fn install_steps(
     sys.start()?;
     sys.wait_running(layout)?;
     steps.did(format!("the service {SERVICE_NAME} runs"));
+    Ok(())
+}
+
+/// Removes what an earlier uninstall left of its accounts' profiles,
+/// which Windows held until its restart, and says which (#213 W1-F10).
+fn swept_profiles(sys: &dyn WinSystem, steps: &mut Steps) {
+    let gone = sys.sweep_profiles();
+    if !gone.is_empty() {
+        let list: Vec<String> = gone.iter().map(|p| p.display().to_string()).collect();
+        steps.did(format!(
+            "removed the profile folders an earlier uninstall left: {}",
+            list.join(", ")
+        ));
+    }
+}
+
+/// Removes `former`, the program the node's service ran before this
+/// install, where it is another file in the program's folder (an earlier
+/// program of another name), that the center's service does not run: the
+/// service runs this one now, and nothing else would remove it (#213 W1-F8).
+fn remove_former_program(
+    layout: &Layout,
+    sys: &dyn WinSystem,
+    former: Option<&Path>,
+    steps: &mut Steps,
+) -> Result<(), String> {
+    let Some(former) = former else {
+        return Ok(());
+    };
+    let beside = former.parent().is_some_and(|dir| {
+        layout
+            .bin
+            .parent()
+            .is_some_and(|bin_dir| nerve_service::role::same_program(dir, bin_dir))
+    });
+    let center = sys
+        .program_of(nerve_service::role::Role::Center.service())
+        .is_some_and(|p| nerve_service::role::same_program(&p, former));
+    if !beside || center || nerve_service::role::same_program(former, &layout.bin) {
+        return Ok(());
+    }
+    if !former.exists() {
+        return Ok(());
+    }
+    if sys.remove_program(former)? {
+        steps.did(format!(
+            "removed {}, the program the service ran before",
+            former.display()
+        ));
+    } else {
+        steps.did(format!(
+            "removed {}, the program the service ran before; Windows holds it, so Windows deletes the file at its next start",
+            former.display()
+        ));
+    }
     Ok(())
 }
 
@@ -1052,15 +1119,24 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
         let (sid, name) = sys
             .owner_sid()
             .ok_or("this account has no SID the node can name")?;
-        let a = usable_owner(sys, &sid, &name)?;
-        let own = p.own();
         let file = p.config_dir.join(OWNER_SECRET_FILE);
         let stored = std::fs::read(&file)
             .ok()
             .and_then(|b| sys.unprotect(&b).ok())
-            .and_then(|b| Secret::read(&b).ok())
-            .filter(|s| s.sid == sid)
-            .map(|s| s.password);
+            .and_then(|b| Secret::read(&b).ok());
+        // Another owner's password is of no use to this one, whose install
+        // replaces the owner: it goes, whether this owner's password then
+        // works or not (#213 W1-F9).
+        if let Some(former) = stored.as_ref().filter(|s| s.sid != sid) {
+            let _ = std::fs::remove_file(&file);
+            steps.did(format!(
+                "deleted the stored password of {}, the former owner",
+                former.name
+            ));
+        }
+        let stored = stored.filter(|s| s.sid == sid).map(|s| s.password);
+        let a = usable_owner(sys, &sid, &name)?;
+        let own = p.own();
         let (reach, asked) = match stored.map(|pw| sys.check_logon(&a.name, &pw, &own)) {
             Some(Ok(reach)) => (reach, None),
             _ => {
@@ -1305,6 +1381,7 @@ fn uninstall_steps(
             None => {}
         }
     }
+    swept_profiles(sys, steps);
     // The app's program serves the center here too: the program and the
     // app's entries are the center's now, and stay.
     if sys
@@ -1681,6 +1758,9 @@ pub(crate) mod tests {
         pub(crate) hive_open: Cell<bool>,
         /// The other services registered, with the program each starts.
         others: RefCell<Vec<(String, PathBuf)>>,
+        /// The profile folders an earlier uninstall left, which Windows
+        /// holds no more.
+        left_profiles: RefCell<Vec<PathBuf>>,
     }
 
     impl Fake {
@@ -1717,6 +1797,7 @@ pub(crate) mod tests {
                 profile_service: Cell::new(None),
                 hive_open: Cell::new(false),
                 others: RefCell::new(Vec::new()),
+                left_profiles: RefCell::new(Vec::new()),
             }
         }
 
@@ -2022,7 +2103,14 @@ pub(crate) mod tests {
             self.installer.borrow().clone()
         }
 
+        fn sweep_profiles(&self) -> Vec<PathBuf> {
+            std::mem::take(&mut *self.left_profiles.borrow_mut())
+        }
+
         fn program_of(&self, name: &str) -> Option<PathBuf> {
+            if name == SERVICE_NAME && self.service.get().is_some() {
+                return self.program.borrow().clone();
+            }
             let others = self.others.borrow();
             others
                 .iter()
@@ -3848,9 +3936,11 @@ pub(crate) mod tests {
     }
 
     /// Windows has no node alone to take over (#176): the app's install
-    /// leaves a `nerve-node.exe` beside it as it is, and says nothing of it.
+    /// over a node whose service ran another program beside it (a
+    /// pre-release's `nerve-node-desktop.exe`) runs the app's program, and
+    /// removes the one the service ran before (#213 W1-F8).
     #[test]
-    fn the_app_takes_no_node_alone_over() {
+    fn the_app_s_install_removes_the_program_the_service_ran_before() {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let node = installed(d.path(), &sys, "1.0.0").bin;
@@ -3866,11 +3956,75 @@ pub(crate) mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(!out.contains("installed alone"), "{out}");
         assert!(!out.contains("CLI edition"), "{out}");
-        assert_eq!(
-            std::fs::read_to_string(&node).unwrap(),
-            "nerve-node 1.0.0\n"
+        assert!(!node.exists(), "{out}");
+        assert!(
+            out.contains(&format!(
+                "removed {}, the program the service ran before",
+                node.display()
+            )),
+            "{out}"
         );
         assert_eq!(*sys.program.borrow(), Some(l.bin.clone()));
+        // Installed again over itself: nothing else goes.
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("the program the service ran before"), "{out}");
+        assert!(l.bin.exists());
+    }
+
+    /// The profile folders an earlier uninstall left (Windows held them until
+    /// its restart) go at the next install, and are said (#213 W1-F10).
+    #[test]
+    fn the_profiles_an_uninstall_left_go_at_the_next_install() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let left = PathBuf::from("C:/Users/nerve.DESKTOP-1.040");
+        sys.left_profiles.borrow_mut().push(left.clone());
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        sys.types("alice's");
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!(
+                "removed the profile folders an earlier uninstall left: {}",
+                left.display()
+            )),
+            "{out}"
+        );
+        // And at an uninstall.
+        sys.left_profiles.borrow_mut().push(left.clone());
+        let mut out = Vec::new();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("an earlier uninstall left"), "{out}");
+    }
+
+    /// Another owner who installs over the data of a former one does not
+    /// leave the former owner's stored password, even where the new
+    /// owner's password does not work (#213 W1-F9).
+    #[test]
+    fn a_new_owner_s_install_deletes_the_former_owner_s_password() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        assert!(stored(&sys, &l, OWNER_SECRET_FILE).is_some());
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()));
+        sys.types("wrong");
+        let exe = l.bin.clone();
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("deleted the stored password of alice, the former owner"),
+            "{out}"
+        );
+        assert!(out.contains("no commands as you"), "{out}");
+        assert!(!l.paths.config_dir.join(OWNER_SECRET_FILE).exists());
     }
 
     /// The installer opened over a node of 0.0.6 offers Update: the update

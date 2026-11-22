@@ -167,6 +167,9 @@ export global Store {
     callback setup-back();
     // The steps closed before their end (× or Escape).
     callback setup-close();
+    // Instead of a new pairing, a backup of this node brings its pairings
+    // back (a reinstall).
+    callback setup-restore();
 }
 
 // The Permissions page: what one center may do.
@@ -488,6 +491,8 @@ export global Prefs {
     in-out property <string> ui-listen;
     in-out property <string> ui-status;
     in-out property <[string]> ui-tokens;
+    // The label of the next token; empty: app-1, app-2, …
+    in-out property <string> ui-token-label;
     callback ui-on();
     callback ui-off();
     callback ui-token-add();
@@ -638,6 +643,8 @@ export global Install {
     // The owner token the center's install made, shown with Copy on its
     // last step.
     in-out property <string> center-token;
+    // The update found nothing newer and changed nothing.
+    in-out property <bool> unchanged;
     in-out property <bool> newer;
     // The node is installed as a service already, without the app.
     in-out property <bool> node-only;

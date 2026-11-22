@@ -406,10 +406,14 @@ impl WinSystem for WinHost {
         };
         Ok(held.then(|| {
             format!(
-                "Windows still holds the profile folder {} of {name} (SID {text}); after a restart of Windows, delete that folder in Explorer; if it will not go, delete it under System Properties › Advanced › User Profiles › Settings, where it shows as Account Unknown with the date of this uninstall (other rows of Account Unknown belong to other deleted accounts: leave them)",
+                "Windows still holds the profile folder {} of {name} (SID {text}), with what its Credential Manager kept, sealed for that account: Nerve's next install or uninstall after a restart of Windows removes it",
                 profile.map_or_else(|| "?".into(), |p| p.display().to_string())
             )
         }))
+    }
+
+    fn sweep_profiles(&self) -> Vec<PathBuf> {
+        nerve_service::win::profiles::sweep(&[USER, crate::account::RUN_USER])
     }
 
     fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
@@ -432,7 +436,7 @@ impl WinSystem for WinHost {
         match nerve_service::win::dacl::foreign_below(dir, allowed)? {
             None => Ok(()),
             Some((path, owner)) => {
-                let who = nerve_service::win::sid::sid_text(&owner).unwrap_or_else(|e| e);
+                let who = nerve_service::win::dacl::who(&owner);
                 Err(format!(
                     "{}: another account ({who}) owns it, and could open it again; delete it, then install again",
                     path.display()
