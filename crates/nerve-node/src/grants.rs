@@ -2265,7 +2265,8 @@ pub(crate) fn act_as(
 ) -> io::Result<Option<crate::win_user::FsAs>> {
     owner
         .map(|o| {
-            crate::win_user::FsAs::new(o).map_err(|e| io::Error::other(cannot_act_as(&o.name, &e)))
+            crate::win_user::FsAs::new(o)
+                .map_err(|e| io::Error::other(cannot_act_as(&o.name, &e.to_string())))
         })
         .transpose()
 }
