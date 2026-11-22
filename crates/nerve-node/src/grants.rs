@@ -1634,7 +1634,18 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                                     }
                                     kept.push(g);
                                 }
-                                keep_replaced(w, &mut out, &mut kept, true);
+                                // Stale whatever the record says: a narrower
+                                // grant inside a wider one is recorded with
+                                // its own flags, while what was left out
+                                // still has the wider one's.
+                                for o in replaced.iter().filter(|o| o.same_place(w)) {
+                                    let o = o.heading(Some(w.access));
+                                    if w.access != Access::NONE || o.states().any(|a| a != w.access)
+                                    {
+                                        out.stale.push(o.clone());
+                                    }
+                                    kept.push(o);
+                                }
                                 continue;
                             }
                             if let Some(i) = index(w) {
@@ -4367,21 +4378,23 @@ mod tests {
         assert_eq!(recorded(&file), std::slice::from_ref(&narrow));
 
         // Closed inside it: unclosed. A narrower grant inside a wider one:
-        // stale.
+        // stale. Both on every sync until the files are taken over.
         sync(&file, std::slice::from_ref(&wide), &mut f);
         let (closed, low) = (grant("c1", "/w/a/sub", ""), grant("c1", "/w/a/low", "r"));
-        let s = sync(&file, &[wide.clone(), closed.clone(), low.clone()], &mut f);
-        assert_eq!(
-            s.unclosed.iter().map(plain).collect::<Vec<_>>(),
-            std::slice::from_ref(&closed),
-            "{s:?}"
-        );
-        assert_eq!(
-            s.stale.iter().map(plain).collect::<Vec<_>>(),
-            std::slice::from_ref(&low),
-            "{s:?}"
-        );
-        assert!(s.refusal("c1").is_some());
+        for _ in 0..3 {
+            let s = sync(&file, &[wide.clone(), closed.clone(), low.clone()], &mut f);
+            assert_eq!(
+                s.unclosed.iter().map(plain).collect::<Vec<_>>(),
+                std::slice::from_ref(&closed),
+                "{s:?}"
+            );
+            assert_eq!(
+                s.stale.iter().map(plain).collect::<Vec<_>>(),
+                std::slice::from_ref(&low),
+                "{s:?}"
+            );
+            assert!(s.refusal("c1").is_some());
+        }
         f.owned.clear();
         let s = sync(&file, &[wide.clone(), closed.clone(), low.clone()], &mut f);
         assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
