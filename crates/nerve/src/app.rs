@@ -1674,11 +1674,15 @@ fn dress(window: &AppWindow) {
                 w.set_window_icon(Some(icon));
             }
             // Within the screen and above the taskbar, smaller where the
-            // screen is (#213 W1-F5).
-            let (Ok(at), Some(work)) = (w.outer_position(), work_area()) else {
+            // screen is (#213 W1-F5): the screen Windows opened it on.
+            let Ok(at) = w.outer_position() else {
                 return;
             };
             let (outer, inner) = (w.outer_size(), w.inner_size());
+            let screens = screens(w);
+            let Some(work) = work_of(&screens, (at.x, at.y), (outer.width, outer.height)) else {
+                return;
+            };
             let (to, size) = fit_in(work, (at.x, at.y), (outer.width, outer.height));
             if size != (outer.width, outer.height) {
                 let _ = w.request_inner_size(PhysicalSize::new(
@@ -1695,32 +1699,52 @@ fn dress(window: &AppWindow) {
     let _ = window;
 }
 
-/// The primary screen's work area (the screen without the taskbar): left,
-/// top, right and bottom, in physical pixels.
+/// A screen's area: left, top, right and bottom, in physical pixels.
+pub type Area = (i32, i32, i32, i32);
+
+/// Each screen's whole area and work area (the screen without the taskbar).
 #[cfg(windows)]
-fn work_area() -> Option<(i32, i32, i32, i32)> {
+fn screens(w: &slint::winit_030::winit::window::Window) -> Vec<(Area, Area)> {
+    use slint::winit_030::winit::platform::windows::MonitorHandleExtWindows;
     use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
-    let mut r = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    let area = |r: RECT| (r.left, r.top, r.right, r.bottom);
+    w.available_monitors()
+        .filter_map(|m| {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: a MONITORINFO with its size set, for the call to fill.
+            let ok = unsafe { GetMonitorInfoW(m.hmonitor() as _, &raw mut info) };
+            (ok != 0).then(|| (area(info.rcMonitor), area(info.rcWork)))
+        })
+        .collect()
+}
+
+/// The work area of the screen in `screens` (whole area, work area) that
+/// holds the middle of a window of `size` at `at`, else of the screen
+/// nearest to it. Windows opens a window on the screen it was started
+/// from, also one left of or above the main screen, where it stays.
+pub fn work_of(screens: &[(Area, Area)], at: (i32, i32), size: (u32, u32)) -> Option<Area> {
+    let (x, y) = (at.0 + size.0 as i32 / 2, at.1 + size.1 as i32 / 2);
+    // How far the middle lies from a screen; 0 inside it.
+    let off = |(left, top, right, bottom): Area| {
+        let dx = i64::from((left - x).max(x - (right - 1)).max(0));
+        let dy = i64::from((top - y).max(y - (bottom - 1)).max(0));
+        dx * dx + dy * dy
     };
-    // SAFETY: a RECT for the call to fill.
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut r).cast(), 0) };
-    (ok != 0).then_some((r.left, r.top, r.right, r.bottom))
+    screens
+        .iter()
+        .min_by_key(|(whole, _)| off(*whole))
+        .map(|(_, work)| *work)
 }
 
 /// Where a window of `size` (its frame included) at `at` goes so that it
 /// lies in the work area `work` (left, top, right, bottom): moved in, and
 /// smaller where the area is. On a 1280x800 screen the installer opened
 /// with its buttons under the taskbar (#213 W1-F5).
-pub fn fit_in(
-    work: (i32, i32, i32, i32),
-    at: (i32, i32),
-    size: (u32, u32),
-) -> ((i32, i32), (u32, u32)) {
+pub fn fit_in(work: Area, at: (i32, i32), size: (u32, u32)) -> ((i32, i32), (u32, u32)) {
     let (left, top, right, bottom) = work;
     let w = size.0.min((right - left).max(0) as u32);
     let h = size.1.min((bottom - top).max(0) as u32);
@@ -1793,5 +1817,20 @@ mod tests {
         assert_eq!(fit_in(work, (0, 0), (900, 900)), ((0, 0), (900, 752)));
         // One that fits stays.
         assert_eq!(fit_in(work, (10, 10), (500, 500)), ((10, 10), (500, 500)));
+    }
+
+    /// A window is fitted into the screen it is on, also one left of the
+    /// main screen, and one off every screen into the nearest.
+    #[test]
+    fn a_window_stays_on_its_own_screen() {
+        let main = ((0, 0, 1920, 1080), (0, 0, 1920, 1032));
+        let left = ((-1280, 0, 0, 800), (-1280, 0, 0, 752));
+        let screens = [main, left];
+        assert_eq!(work_of(&screens, (100, 100), (800, 600)), Some(main.1));
+        assert_eq!(work_of(&screens, (-1100, 100), (800, 600)), Some(left.1));
+        // Mostly on the left screen.
+        assert_eq!(work_of(&screens, (-700, 100), (800, 600)), Some(left.1));
+        assert_eq!(work_of(&screens, (-3000, 2000), (800, 600)), Some(left.1));
+        assert_eq!(work_of(&[], (0, 0), (800, 600)), None);
     }
 }
