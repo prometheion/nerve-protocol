@@ -1393,18 +1393,20 @@ mod tests {
     /// that the backup warns of it; one beside it is not (#213 W4-4).
     #[test]
     fn a_backup_in_a_center_s_folder_is_found() {
+        // Absolute on this machine: a drive on Windows, where a path from `/` is not.
+        let p = |s: &str| format!("{}{s}", if cfg!(windows) { "C:" } else { "" });
         let key = NodeKey::generate().unwrap();
         let mut lab = entry("lab", &key);
         lab.policy.folders.push(nerve_policy::config::Folder {
-            path: "/home/alex/project".into(),
+            path: p("/home/alex/project"),
             access: nerve_policy::config::Access::parse("r").unwrap(),
         });
         lab.policy.folders.push(nerve_policy::config::Folder {
-            path: "/home/alex/none".into(),
+            path: p("/home/alex/none"),
             access: nerve_policy::config::Access::NONE,
         });
         lab.policy.folders.push(nerve_policy::config::Folder {
-            path: "/home/alex/tools".into(),
+            path: p("/home/alex/tools"),
             access: nerve_policy::config::Access::parse("x").unwrap(),
         });
         let mut cfg = NodeConfig::default();
@@ -1413,30 +1415,30 @@ mod tests {
             readable_on(
                 cfg,
                 &[PathBuf::from(file)],
-                Path::new("/home/alex"),
+                Path::new(&p("/home/alex")),
                 windows,
                 0,
             )
         };
         assert_eq!(
-            on(&cfg, "/home/alex/project/sub/n.backup", false),
+            on(&cfg, &p("/home/alex/project/sub/n.backup"), false),
             Some((
                 "lab".to_string(),
-                Reach::Folder(PathBuf::from("/home/alex/project"))
+                Reach::Folder(PathBuf::from(p("/home/alex/project")))
             ))
         );
-        assert_eq!(on(&cfg, "/home/alex/n.backup", false), None);
-        assert_eq!(on(&cfg, "/home/alex/none/n.backup", false), None);
+        assert_eq!(on(&cfg, &p("/home/alex/n.backup"), false), None);
+        assert_eq!(on(&cfg, &p("/home/alex/none/n.backup"), false), None);
         // On Windows running a file reads it too.
-        assert_eq!(on(&cfg, "/home/alex/tools/n.backup", false), None);
+        assert_eq!(on(&cfg, &p("/home/alex/tools/n.backup"), false), None);
         assert_eq!(
-            on(&cfg, "/home/alex/tools/n.backup", true),
+            on(&cfg, &p("/home/alex/tools/n.backup"), true),
             Some((
                 "lab".to_string(),
-                Reach::Folder(PathBuf::from("/home/alex/tools"))
+                Reach::Folder(PathBuf::from(p("/home/alex/tools")))
             ))
         );
-        let warn = readable_warning("lab", &Reach::Folder("/home/alex/project".into()));
+        let warn = readable_warning("lab", &Reach::Folder(p("/home/alex/project").into()));
         assert!(warn.contains("lab's commands may read"), "{warn}");
         // A folder written from the home, and the home itself.
         let mut tilde = cfg.clone();
@@ -1445,34 +1447,34 @@ mod tests {
             access: nerve_policy::config::Access::parse("rw").unwrap(),
         }];
         assert_eq!(
-            on(&tilde, "/home/alex/notes/n.backup", false),
+            on(&tilde, &p("/home/alex/notes/n.backup"), false),
             Some((
                 "lab".to_string(),
-                Reach::Folder(PathBuf::from("/home/alex/notes"))
+                Reach::Folder(PathBuf::from(p("/home/alex/notes")))
             ))
         );
         tilde.centers[0].policy.folders[0].path = "~".into();
         assert_eq!(
-            on(&tilde, "/home/alex/Documents/n.backup", false),
+            on(&tilde, &p("/home/alex/Documents/n.backup"), false),
             Some((
                 "lab".to_string(),
-                Reach::Folder(PathBuf::from("/home/alex"))
+                Reach::Folder(PathBuf::from(p("/home/alex")))
             ))
         );
         // Commands that run as the owner read it anywhere.
         cfg.centers[0].policy.mode = nerve_policy::config::Mode::User;
         assert_eq!(
-            on(&cfg, "/home/alex/n.backup", false),
+            on(&cfg, &p("/home/alex/n.backup"), false),
             Some(("lab".to_string(), Reach::Owner))
         );
         let warn = readable_warning("lab", &Reach::Owner);
         assert!(warn.contains("lab's commands run as you"), "{warn}");
         // With the settings grant it can switch to that mode itself.
         cfg.centers[0].policy.mode = nerve_policy::config::Mode::Folder;
-        assert_eq!(on(&cfg, "/home/alex/n.backup", false), None);
+        assert_eq!(on(&cfg, &p("/home/alex/n.backup"), false), None);
         cfg.centers[0].settings = nerve_policy::config::SettingsGrant::Write;
         assert_eq!(
-            on(&cfg, "/home/alex/n.backup", false),
+            on(&cfg, &p("/home/alex/n.backup"), false),
             Some(("lab".to_string(), Reach::Settings))
         );
         let warn = readable_warning("lab", &Reach::Settings);

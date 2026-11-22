@@ -219,7 +219,7 @@ export component HubOverviewPage inherits PageFrame {
         shown: Hub.state != "";
         gap: Space.xl;
         HorizontalLayout {
-            spacing: Shape.wide ? Space.lg : 0px;
+            spacing: Shape.roomy ? Space.lg : 0px;
             Rectangle {
                 horizontal-stretch: 1.4;
                 border-radius: Radius.lg;
@@ -278,12 +278,12 @@ export component HubOverviewPage inherits PageFrame {
             }
             // Beside it on a wide window: nothing of it counts while not.
             Rectangle {
-                visible: Shape.wide;
-                horizontal-stretch: Shape.wide ? 1 : 0;
-                max-width: Shape.wide ? 100000px : 0px;
+                visible: Shape.roomy;
+                horizontal-stretch: Shape.roomy ? 1 : 0;
+                max-width: Shape.roomy ? 100000px : 0px;
                 min-width: 0px;
                 min-height: 0px;
-                preferred-height: Shape.wide ? beside.preferred-height : 0px;
+                preferred-height: Shape.roomy ? beside.preferred-height : 0px;
                 beside := HubServiceCard {
                     height: parent.height;
                 }
@@ -291,7 +291,7 @@ export component HubOverviewPage inherits PageFrame {
         }
     }
     Reveal {
-        shown: Hub.state != "" && !Shape.wide;
+        shown: Hub.state != "" && !Shape.roomy;
         gap: Space.lg;
         HubServiceCard { }
     }

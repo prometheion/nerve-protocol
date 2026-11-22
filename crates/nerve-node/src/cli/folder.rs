@@ -1165,11 +1165,22 @@ mod tests {
             &mut out,
         );
         let out = String::from_utf8(out).unwrap();
+        // The node's own words for a grant it could not take off: Windows names the folder first.
+        let stale = match cfg!(windows) {
+            true => {
+                "/home/alice/old keeps access it should have lost; the commands of the pairing it was for do not run until it is off"
+            }
+            false => {
+                "nerve-run keeps its access to /home/alice/old, which it should have lost; no command of nerve-run runs until it is taken off"
+            }
+        };
         assert_eq!(
             out,
-            "warning: nerve-run keeps its access to /home/alice/old, which it should have lost; no command of nerve-run runs until it is taken off: /home/alice/old: Permission denied (os error 13)\n\
-             warning: nerve-run did not get every folder: /home/alice/older: not this one\n\
-             warning: nerve-run did not get every folder: /home/alice/new: Operation not supported\n"
+            format!(
+                "warning: {stale}: /home/alice/old: Permission denied (os error 13)\n\
+                 warning: nerve-run did not get every folder: /home/alice/older: not this one\n\
+                 warning: nerve-run did not get every folder: /home/alice/new: Operation not supported\n"
+            )
         );
         let mut out = Vec::new();
         tell_grants_of(&json!({"stale": [], "errors": []}), &mut out);

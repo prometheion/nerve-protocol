@@ -422,6 +422,23 @@ mod tests {
             ],
         });
         let t = text(&v);
+        // A grant the node could not take off, in its own words: Windows names the folder first.
+        let stale = |p: &str, why: &str| match cfg!(windows) {
+            true => format!(
+                "         {p} keeps access it should have lost; the commands of the pairing it was for do not run until it is off: {why}\n"
+            ),
+            false => format!(
+                "         nerve-run keeps its access to {p}, which it should have lost; no command of nerve-run runs until it is taken off: {why}\n"
+            ),
+        };
+        let gone = stale(
+            "/home/alice/gone",
+            "/home/alice/gone/x: Permission denied (os error 13)",
+        );
+        let acl = stale(
+            "/var/lib/nerve/state/acl.json",
+            "/var/lib/nerve/state/acl.json: expected value at line 1",
+        );
         for want in [
             "  Owner       alice\n",
             "  Confined    landlock abi 6\n",
@@ -432,8 +449,8 @@ mod tests {
             "    b   connected   folder mode · as nerve-run\n",
             "    c   connected   user mode · as alice\n",
             "    d   connected   folder mode\n",
-            "         nerve-run keeps its access to /home/alice/gone, which it should have lost; no command of nerve-run runs until it is taken off: /home/alice/gone/x: Permission denied (os error 13)\n",
-            "         nerve-run keeps its access to /var/lib/nerve/state/acl.json, which it should have lost; no command of nerve-run runs until it is taken off: /var/lib/nerve/state/acl.json: expected value at line 1\n",
+            gone.as_str(),
+            acl.as_str(),
             "         nerve-run did not get every folder: /home/alice/usb: its file system does not support POSIX ACLs\n",
         ] {
             assert!(t.contains(want), "{want}\n{t}");
