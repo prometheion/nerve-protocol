@@ -6763,7 +6763,7 @@ mod tests {
             assert!(POWERSHELL_START.contains(cmd), "{cmd}");
         }
         assert!(!POWERSHELL_START.contains('"'));
-        assert!(POWERSHELL_START.ends_with("; "));
+        assert!(POWERSHELL_START.ends_with("\n"));
         // The core modules first: a container may not load them on its own.
         assert!(POWERSHELL_START.starts_with(
             "Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; "

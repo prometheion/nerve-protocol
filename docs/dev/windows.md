@@ -476,6 +476,9 @@ As on Linux, the center runs as a service of its own, so an agent's shell
 command, which runs as you or as the node's account, cannot read its owner
 token or its TLS key.
 
+The open app holds the owner token in its memory, which any program of yours
+can read: run the harness under another account.
+
 What follows is the `nerve-center.exe` built from source, which the release
 does not have. The app's center (**A center** in its installer, or
 `nerve.exe __center install`) does the same with the app's own program: it
