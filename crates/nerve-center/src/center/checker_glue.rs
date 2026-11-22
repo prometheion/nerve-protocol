@@ -1921,6 +1921,7 @@ mod tests {
     /// With on error allow, the log does not say the calls are refused
     /// while no local model is installed: they pass unjudged (#213,
     /// review).
+    #[cfg(unix)]
     #[test]
     fn the_log_says_the_calls_pass_where_on_error_is_allow() {
         let dir = tempfile::tempdir().unwrap();
