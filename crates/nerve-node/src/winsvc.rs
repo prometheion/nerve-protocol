@@ -807,6 +807,25 @@ fn new_password() -> String {
     format!("Nn1-{}", nerve_transport::keys::random_token(28))
 }
 
+/// Windows' refusal of a password for its policy (NERR_PasswordTooShort).
+const PASSWORD_POLICY: &str = "(os error 2245)";
+
+/// `set` with a [`new_password`], and with another while Windows refuses one
+/// for its policy, three tries in all: a CI runner refused one of these once
+/// for no reason the next one had (#243). The password that was taken.
+fn with_new_password(mut set: impl FnMut(&str) -> Result<(), String>) -> Result<String, String> {
+    let mut refused = String::new();
+    for _ in 0..3 {
+        let password = new_password();
+        match set(&password) {
+            Ok(()) => return Ok(password),
+            Err(e) if e.contains(PASSWORD_POLICY) => refused = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(refused)
+}
+
 /// The program's name without `.exe`: `nerve-node`, or the desktop app's.
 /// The start of the name a program gets when it moves aside, held by
 /// Windows, until it goes at the next start ([`WinSystem::remove_program`]).
@@ -899,13 +918,13 @@ fn install_steps(
         ));
     }
     swept_profiles(sys, steps);
-    let password = new_password();
-    match sys.account(USER)? {
+    let password = match sys.account(USER)? {
         Some(a) if a.comment == USER_MARK => {
-            sys.reset_account(USER, &password, Kind::Node)?;
+            let password = with_new_password(|p| sys.reset_account(USER, p, Kind::Node))?;
             steps.did(format!(
                 "the user {USER} is there already; it has a new password"
             ));
+            password
         }
         Some(_) => {
             return Err(format!(
@@ -913,14 +932,15 @@ fn install_steps(
             ));
         }
         None => {
-            sys.add_account(USER, &password, Kind::Node)?;
+            let password = with_new_password(|p| sys.add_account(USER, p, Kind::Node))?;
             sys.account(USER)?
                 .ok_or_else(|| format!("Windows made no user {USER}"))?;
             steps.did(format!(
                 "made the user {USER}, which may log on as a service only"
             ));
+            password
         }
-    }
+    };
     // The folder above first: what is made in it after is made in a folder
     // only the administrators and nerve may write.
     let node = sys
@@ -1058,13 +1078,13 @@ fn remove_former_program(
 /// the install did not make, or that can open the node's folders or the
 /// owner's registry, is refused. Its password, for [`PROFILE_SERVICE`].
 fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<String, String> {
-    let password = new_password();
-    match sys.account(RUN_USER)? {
+    let password = match sys.account(RUN_USER)? {
         Some(a) if a.comment == RUN_MARK => {
-            sys.reset_account(RUN_USER, &password, Kind::Commands)?;
+            let password = with_new_password(|p| sys.reset_account(RUN_USER, p, Kind::Commands))?;
             steps.did(format!(
                 "the user {RUN_USER} is there already; it has a new password"
             ));
+            password
         }
         Some(_) => {
             return Err(format!(
@@ -1072,14 +1092,15 @@ fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
             ));
         }
         None => {
-            sys.add_account(RUN_USER, &password, Kind::Commands)?;
+            let password = with_new_password(|p| sys.add_account(RUN_USER, p, Kind::Commands))?;
             sys.account(RUN_USER)?
                 .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
             steps.did(format!(
                 "made the user {RUN_USER}, which commands from centers run as: no administrator, and it may log on only as a batch job and as a service"
             ));
+            password
         }
-    }
+    };
     let run = sys
         .account(RUN_USER)?
         .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
@@ -1719,6 +1740,8 @@ pub(crate) mod tests {
         stages: Cell<bool>,
         /// The service does not stop.
         stop_fails: Cell<bool>,
+        /// How many of the next passwords Windows refuses for its policy.
+        policy_refuses: Cell<u32>,
         pub(crate) calls: RefCell<Vec<String>>,
         /// `None`: not registered; else whether it runs.
         service: Cell<Option<bool>>,
@@ -1778,6 +1801,7 @@ pub(crate) mod tests {
                 vault_fails: RefCell::new(false),
                 stages: Cell::new(false),
                 stop_fails: Cell::new(false),
+                policy_refuses: Cell::new(0),
                 calls: RefCell::new(Vec::new()),
                 service: Cell::new(None),
                 starts: Cell::new(true),
@@ -1811,6 +1835,18 @@ pub(crate) mod tests {
 
         pub(crate) fn types(&self, password: &str) {
             self.typed.borrow_mut().push(password.into());
+        }
+
+        /// A password refused for the policy, while [`Fake::policy_refuses`] counts down.
+        fn policy(&self, name: &str) -> Result<(), String> {
+            let n = self.policy_refuses.get();
+            if n == 0 {
+                return Ok(());
+            }
+            self.policy_refuses.set(n - 1);
+            Err(format!(
+                "cannot give {name} a new password: The password does not meet the password policy requirements. (os error 2245)"
+            ))
         }
 
         /// `name` logs on with `password` from now on.
@@ -1859,6 +1895,7 @@ pub(crate) mod tests {
         }
         fn add_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String> {
             assert!(password.len() >= 16);
+            self.policy(name)?;
             self.call(format!("add {name}"));
             let (uid, mark) = match kind {
                 Kind::Node => (1010, USER_MARK),
@@ -1869,6 +1906,7 @@ pub(crate) mod tests {
             Ok(())
         }
         fn reset_account(&self, name: &str, password: &str, _: Kind) -> Result<(), String> {
+            self.policy(name)?;
             self.call(format!("reset {name}"));
             self.knows(name, password);
             Ok(())
@@ -2513,6 +2551,37 @@ pub(crate) mod tests {
         install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
         assert!(sys.calls().iter().any(|c| c == "stop"));
         assert!(crate::secrets::vault::staged_all(&l.paths));
+    }
+
+    /// A password Windows refuses for its policy is tried again with
+    /// another, for a new account and an existing one alike (a CI runner
+    /// refused one once, #243); three refusals in a row stop the install.
+    #[test]
+    fn a_password_refused_for_the_policy_is_tried_again_with_another() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        sys.types("alice's");
+        sys.policy_refuses.set(1);
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+        // Over it: nerve-run's reset is refused twice, and the third goes.
+        sys.policy_refuses.set(2);
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("the user nerve-run is there already; it has a new password"),
+            "{out}"
+        );
+        // The password that was taken is the one nerve-run logs on with: its profile was made with it.
+        let (_, kept) = stored(&sys, &l, RUN_SECRET_FILE).unwrap();
+        assert!(sys.logs_on(RUN_USER, &kept).is_ok());
+        sys.policy_refuses.set(3);
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("(os error 2245)"), "{e}");
     }
 
     #[test]
