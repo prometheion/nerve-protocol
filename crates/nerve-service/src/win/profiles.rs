@@ -26,6 +26,19 @@ pub fn named_for(path: &Path, names: &[&str]) -> bool {
     })
 }
 
+/// Whether the account with the SID text `sid` is one Nerve could have made:
+/// a local account of the machine whose SID is `machine` (`S-1-5-21-a-b-c`,
+/// then one number), or a service's virtual account (`S-1-5-80-…`). A
+/// domain account's profile is never ours, even if its folder is named so.
+pub fn made_here(sid: &str, machine: &str) -> bool {
+    if sid.starts_with("S-1-5-80-") {
+        return true;
+    }
+    sid.strip_prefix(machine)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rid| !rid.is_empty() && rid.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Removes the profiles of the accounts that are gone whose folders
 /// [`named_for`] `names`; the folders it removed. One Windows still holds
 /// stays for a later call.
@@ -82,7 +95,18 @@ pub fn sweep(names: &[&str]) -> Vec<PathBuf> {
     // SAFETY: the key opened above, closed once.
     unsafe { RegCloseKey(key) };
     let mut removed = Vec::new();
+    // The computer's own name gives the machine's SID. Without it nothing is known to be ours.
+    let Some(machine) = std::env::var("COMPUTERNAME")
+        .ok()
+        .and_then(|c| crate::win::sid::sid_of_qualified(&c).ok())
+        .and_then(|b| crate::win::sid::sid_text(&b).ok())
+    else {
+        return removed;
+    };
     for sid in sids {
+        if !made_here(&sid, &machine) {
+            continue;
+        }
         let sub = wide(format!("{LIST}\\{sid}"));
         let value = wide("ProfileImagePath");
         let mut buf = vec![0u16; 1024];
@@ -107,7 +131,7 @@ pub fn sweep(names: &[&str]) -> Vec<PathBuf> {
         if !named_for(&path, names) {
             continue;
         }
-        // Only an account that is gone: Windows names every account there is.
+        // Only an account Windows says is gone, not one it failed to look up.
         let mut bin: PSID = std::ptr::null_mut();
         // SAFETY: a NUL-terminated SID string; the SID is freed with
         // LocalFree.
@@ -119,7 +143,7 @@ pub fn sweep(names: &[&str]) -> Vec<PathBuf> {
             let len = windows_sys::Win32::Security::GetLengthSid(bin) as usize;
             let bytes = std::slice::from_raw_parts(bin as *const u8, len).to_vec();
             LocalFree(bin.cast());
-            crate::win::sid::name_of(&bytes).is_none()
+            crate::win::sid::is_unmapped(&bytes)
         };
         if !gone {
             continue;
@@ -136,6 +160,19 @@ pub fn sweep(names: &[&str]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the machine's own accounts and the services' virtual ones are
+    /// swept; a domain account of the same name is not.
+    #[test]
+    fn only_accounts_made_here_are_swept() {
+        let machine = "S-1-5-21-111-222-333";
+        assert!(made_here("S-1-5-21-111-222-333-1004", machine));
+        assert!(made_here("S-1-5-80-1-2-3-4-5", machine));
+        assert!(!made_here("S-1-5-21-999-888-777-1104", machine));
+        assert!(!made_here("S-1-5-21-111-222-333", machine));
+        assert!(!made_here("S-1-5-21-111-222-333-1004-5", machine));
+        assert!(!made_here("S-1-12-1-1-2-3-4", machine));
+    }
 
     /// The folders Windows names after the services' accounts are found,
     /// and no other account's.

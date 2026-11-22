@@ -143,6 +143,30 @@ pub fn name_of(sid: &[u8]) -> Option<String> {
     })
 }
 
+/// Whether Windows says `sid` belongs to no account (`ERROR_NONE_MAPPED`):
+/// any other failure (a domain controller out of reach) says nothing.
+pub fn is_unmapped(sid: &[u8]) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_NONE_MAPPED, GetLastError};
+    let mut name = vec![0u16; 256];
+    let mut domain = vec![0u16; 256];
+    let (mut n, mut d) = (name.len() as u32, domain.len() as u32);
+    let mut kind: SID_NAME_USE = 0;
+    // SAFETY: a valid SID and two buffers of the sizes given.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid.as_ptr() as PSID,
+            name.as_mut_ptr(),
+            &mut n,
+            domain.as_mut_ptr(),
+            &mut d,
+            &mut kind,
+        )
+    };
+    // SAFETY: reads the thread's last error right after the call.
+    ok == 0 && unsafe { GetLastError() } == ERROR_NONE_MAPPED
+}
+
 /// A SID as text, `S-1-5-…`.
 pub fn sid_text(sid: &[u8]) -> Result<String, String> {
     let mut text: *mut u16 = std::ptr::null_mut();

@@ -730,6 +730,10 @@ pub fn backup_written(said: &Value) -> String {
                 "\n\nIt lies in {folder}, which {}'s commands may read. Move it to a folder of your own.",
                 s(&r["center"])
             ),
+            None if r.get("settings").and_then(Value::as_bool) == Some(true) => format!(
+                "\n\n{} may switch itself to user mode and then read it. Move it off this machine.",
+                s(&r["center"])
+            ),
             None => format!(
                 "\n\n{}'s commands run as you, so they may read it. Move it off this machine.",
                 s(&r["center"])
@@ -2329,6 +2333,13 @@ mod tests {
         );
         let as_you = json!({"backup": {"file": "C:\\n.backup", "centers": ["lab"], "saved": [],
             "left_out": [], "readable_by": {"center": "lab", "folder": null}}});
+        let by_settings = json!({"backup": {"file": "C:\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": null, "settings": true}}});
+        let text = backup_written(&by_settings);
+        assert!(
+            text.contains("lab may switch itself to user mode and then read it."),
+            "{text}"
+        );
         let text = backup_written(&as_you);
         assert!(
             text.contains(

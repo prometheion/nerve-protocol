@@ -366,6 +366,25 @@ impl Synced {
     }
 }
 
+/// How many left-out paths a grant keeps and tells. A pairing's commands
+/// can make any number of objects the walk cannot reach, and the list is
+/// stored, sent and logged on every sync.
+const LEFT_CAP: usize = 20;
+
+/// The first [`LEFT_CAP`] of `left` and, where there are more, one entry
+/// that counts the rest.
+fn cap_left(mut left: Vec<PathBuf>) -> Vec<PathBuf> {
+    if left.len() > LEFT_CAP {
+        let more = left.len() - LEFT_CAP;
+        left.truncate(LEFT_CAP);
+        left.push(PathBuf::from(format!("{MORE_LEFT} {more} more")));
+    }
+    left
+}
+
+/// The start of the entry [`cap_left`] ends a list with.
+const MORE_LEFT: &str = "\u{2026} and";
+
 /// The error of a grant taken off `path` except for what is `left` below
 /// it, which another account owns: it keeps the grant until the owner
 /// takes it over or deletes it.
@@ -393,6 +412,11 @@ fn not_narrowed(path: &Path, left: &[PathBuf]) -> String {
 /// What the owner is told of `path`, a file or folder in a granted folder
 /// that the grant could not reach ([`Report::left_out`]).
 pub fn left_out_line(path: &str) -> String {
+    if path.starts_with(MORE_LEFT) {
+        return format!(
+            "{path}: other accounts own them, so they keep the permissions they had; take them over or move them out, then Sync folders"
+        );
+    }
     format!(
         "{path}: another account owns it, so it keeps the permissions it had; take it over or move it out, then Sync folders"
     )
@@ -1383,7 +1407,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                     match folders.set(&old.path, &old.container, None, false, links, false, id) {
                         Ok(_) => {
                             changed = true;
-                            let left_out = folders.left_out();
+                            let left_out = cap_left(folders.left_out());
                             if left_out.is_empty() {
                                 out.removed += 1;
                             } else {
@@ -1444,7 +1468,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                 match folders.set(&now, &old.container, None, false, links, false, id) {
                     Ok(_) => {
                         changed = true;
-                        let left_out = folders.left_out();
+                        let left_out = cap_left(folders.left_out());
                         if left_out.is_empty() {
                             out.removed += 1;
                         } else {
@@ -1614,7 +1638,7 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                         expect.as_deref(),
                     ) {
                         Ok(id) => {
-                            let left_out = folders.left_out();
+                            let left_out = cap_left(folders.left_out());
                             // What the walk left out keeps the entries it
                             // had, also those of flags this change takes
                             // away: it is not done, and the commands stop
@@ -4408,6 +4432,51 @@ mod tests {
         );
         assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
         assert_eq!(s.left_out, [Path::new("/w/a/low/key.txt")]);
+    }
+
+    /// A pairing's commands can make any number of objects the walk cannot
+    /// reach: the record, the report and the error keep a few paths and
+    /// count the rest, and a narrowing is still stale.
+    #[test]
+    fn the_list_of_what_a_walk_left_out_is_bounded() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/a");
+        let wide = grant("c1", "/w/a", "rwx");
+        sync(&file, std::slice::from_ref(&wide), &mut f);
+        for i in 0..(LEFT_CAP + 30) {
+            f.owned.push(("/w/a".into(), format!("/w/a/f{i}").into()));
+        }
+        let narrow = grant("c1", "/w/a", "r");
+        let s = sync(&file, std::slice::from_ref(&narrow), &mut f);
+        assert!(s.refusal("c1").is_some(), "{s:?}");
+        assert!(s.errors[0].contains("and 30 more"), "{:?}", s.errors);
+        assert!(
+            !s.errors[0].contains(&format!("f{LEFT_CAP},")),
+            "{:?}",
+            s.errors
+        );
+        let r = read_record(&file).unwrap();
+        assert!(r.iter().all(|g| g.unfinished), "{r:?}");
+
+        // Widened past them: done, and what is said stays at the cap.
+        let wider = grant("c1", "/w/a", "rwx");
+        let mut g = Fake::default();
+        g.make("/w/a");
+        let d2 = tempfile::tempdir().unwrap();
+        let file2 = d2.path().join("grants.json");
+        sync(&file2, &[grant("c1", "/w/a", "r")], &mut g);
+        for i in 0..(LEFT_CAP + 30) {
+            g.owned.push(("/w/a".into(), format!("/w/a/f{i}").into()));
+        }
+        let s = sync(&file2, std::slice::from_ref(&wider), &mut g);
+        assert!(s.errors.is_empty(), "{s:?}");
+        assert_eq!(s.left_out.len(), LEFT_CAP + 1, "{s:?}");
+        let line = left_out_line(&s.left_out[LEFT_CAP].display().to_string());
+        assert!(line.contains("and 30 more") && line.contains("other accounts own them"));
+        let r = read_record(&file2).unwrap();
+        assert!(r.iter().all(|g| g.left_out.len() <= LEFT_CAP + 1), "{r:?}");
     }
 
     /// Folders added get their grant, one removed loses it, a changed flag

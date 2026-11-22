@@ -65,9 +65,8 @@ pub struct BackupReport {
     pub saved: Vec<String>,
     /// What was not taken, and why.
     pub left_out: Vec<LeftOut>,
-    /// A center whose commands may read the file, and its folder that holds
-    /// it, `None` where they run as the owner ([`readable_by`]).
-    pub readable_by: Option<(String, Option<PathBuf>)>,
+    /// A center whose commands may read the file, and how ([`readable_by`]).
+    pub readable_by: Option<(String, Reach)>,
 }
 
 /// A key a backup did not take.
@@ -130,13 +129,25 @@ pub fn backup(
     Ok(report)
 }
 
-/// The first center whose commands may read `file`, a backup, with the
-/// folder of its that holds it, or `None` for one whose commands run as
-/// the owner and read it anywhere: such a center's agent could take the
-/// file and try passphrases at leisure (#213 W4-4).
-pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Option<PathBuf>)> {
+/// How a center's commands may read a backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// The file lies in this folder of the center's.
+    Folder(PathBuf),
+    /// The commands run as the owner and read it anywhere.
+    Owner,
+    /// The center may switch itself to a mode that does, or add the
+    /// folder, with the settings grant.
+    Settings,
+}
+
+/// The first center whose commands may read `file`, a backup, and how: such
+/// a center's agent could take the file and try passphrases at leisure
+/// (#213 W4-4). A relative `file` is judged by the folder it names.
+pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Reach)> {
     let home = crate::paths::home_dir();
-    readable_on(cfg, file, &home, cfg!(windows), crate::now_ms())
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    readable_on(cfg, &file, &home, cfg!(windows), crate::now_ms())
 }
 
 /// [`readable_by`] on Windows (`windows`) or elsewhere, at `now_ms`, with
@@ -147,13 +158,13 @@ fn readable_on(
     home: &Path,
     windows: bool,
     now_ms: u64,
-) -> Option<(String, Option<PathBuf>)> {
+) -> Option<(String, Reach)> {
     // Writing reads too; on Windows running does, as a script's
     // interpreter opens the file (`nerve_sandbox::acl::masks`).
     let reads = |a: &nerve_policy::config::Access| a.read || a.write || (windows && a.execute);
     cfg.centers.iter().find_map(|c| {
         if c.policy.runs_as_owner(now_ms) {
-            return Some((c.name.clone(), None));
+            return Some((c.name.clone(), Reach::Owner));
         }
         c.policy
             .folders
@@ -161,19 +172,28 @@ fn readable_on(
             .filter(|f| reads(&f.access))
             .filter_map(|f| nerve_policy::protected::expand(home, &f.path))
             .find(|f| nerve_policy::paths::within(file, f))
-            .map(|f| (c.name.clone(), Some(f)))
+            .map(|f| (c.name.clone(), Reach::Folder(f)))
+            // With the settings grant its agent sets its own mode and
+            // folders.
+            .or_else(|| {
+                (c.settings == nerve_policy::config::SettingsGrant::Write)
+                    .then(|| (c.name.clone(), Reach::Settings))
+            })
     })
 }
 
 /// The warning of [`readable_by`].
-pub fn readable_warning(center: &str, folder: Option<&Path>) -> String {
-    match folder {
-        Some(folder) => format!(
+pub fn readable_warning(center: &str, reach: &Reach) -> String {
+    match reach {
+        Reach::Folder(folder) => format!(
             "Warning: the file is in {}, which {center}'s commands may read; keep it in a folder of your own",
             folder.display()
         ),
-        None => format!(
+        Reach::Owner => format!(
             "Warning: {center}'s commands run as you, so they may read the file; move it off this machine"
+        ),
+        Reach::Settings => format!(
+            "Warning: {center} may switch itself to user mode and then read the file; move it off this machine"
         ),
     }
 }
@@ -1184,8 +1204,8 @@ pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn std::io::Write)
     for s in &r.left_out {
         let _ = writeln!(out, "  left out: {s}");
     }
-    if let Some((center, folder)) = &r.readable_by {
-        let _ = writeln!(out, "{}", readable_warning(center, folder.as_deref()));
+    if let Some((center, reach)) = &r.readable_by {
+        let _ = writeln!(out, "{}", readable_warning(center, reach));
     }
     let _ = writeln!(
         out,
@@ -1206,9 +1226,10 @@ pub fn backup_data(r: &BackupReport, file: &Path) -> serde_json::Value {
         "centers": r.centers,
         "saved": r.saved,
         "left_out": left_out,
-        "readable_by": r.readable_by.as_ref().map(|(center, folder)| {
-            let folder = folder.as_ref().map(|f| f.display().to_string());
-            serde_json::json!({"center": center, "folder": folder})
+        "readable_by": r.readable_by.as_ref().map(|(center, reach)| match reach {
+            Reach::Folder(f) => serde_json::json!({"center": center, "folder": f.display().to_string()}),
+            Reach::Owner => serde_json::json!({"center": center, "folder": null}),
+            Reach::Settings => serde_json::json!({"center": center, "folder": null, "settings": true}),
         }),
     })
 }
@@ -1349,7 +1370,10 @@ mod tests {
         };
         assert_eq!(
             on(&cfg, "/home/alex/project/sub/n.backup", false),
-            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/project"))))
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from("/home/alex/project"))
+            ))
         );
         assert_eq!(on(&cfg, "/home/alex/n.backup", false), None);
         assert_eq!(on(&cfg, "/home/alex/none/n.backup", false), None);
@@ -1357,9 +1381,12 @@ mod tests {
         assert_eq!(on(&cfg, "/home/alex/tools/n.backup", false), None);
         assert_eq!(
             on(&cfg, "/home/alex/tools/n.backup", true),
-            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/tools"))))
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from("/home/alex/tools"))
+            ))
         );
-        let warn = readable_warning("lab", Some(Path::new("/home/alex/project")));
+        let warn = readable_warning("lab", &Reach::Folder("/home/alex/project".into()));
         assert!(warn.contains("lab's commands may read"), "{warn}");
         // A folder written from the home, and the home itself.
         let mut tilde = cfg.clone();
@@ -1369,21 +1396,51 @@ mod tests {
         }];
         assert_eq!(
             on(&tilde, "/home/alex/notes/n.backup", false),
-            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/notes"))))
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from("/home/alex/notes"))
+            ))
         );
         tilde.centers[0].policy.folders[0].path = "~".into();
         assert_eq!(
             on(&tilde, "/home/alex/Documents/n.backup", false),
-            Some(("lab".to_string(), Some(PathBuf::from("/home/alex"))))
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from("/home/alex"))
+            ))
         );
         // Commands that run as the owner read it anywhere.
         cfg.centers[0].policy.mode = nerve_policy::config::Mode::User;
         assert_eq!(
             on(&cfg, "/home/alex/n.backup", false),
-            Some(("lab".to_string(), None))
+            Some(("lab".to_string(), Reach::Owner))
         );
-        let warn = readable_warning("lab", None);
+        let warn = readable_warning("lab", &Reach::Owner);
         assert!(warn.contains("lab's commands run as you"), "{warn}");
+        // With the settings grant it can switch to that mode itself.
+        cfg.centers[0].policy.mode = nerve_policy::config::Mode::Folder;
+        assert_eq!(on(&cfg, "/home/alex/n.backup", false), None);
+        cfg.centers[0].settings = nerve_policy::config::SettingsGrant::Write;
+        assert_eq!(
+            on(&cfg, "/home/alex/n.backup", false),
+            Some(("lab".to_string(), Reach::Settings))
+        );
+        let warn = readable_warning("lab", &Reach::Settings);
+        assert!(
+            warn.contains("lab may switch itself to user mode"),
+            "{warn}"
+        );
+        // A file named from the current folder is judged by where it is.
+        let here = std::env::current_dir().unwrap();
+        cfg.centers[0].settings = nerve_policy::config::SettingsGrant::Off;
+        cfg.centers[0].policy.folders = vec![nerve_policy::config::Folder {
+            path: here.display().to_string(),
+            access: nerve_policy::config::Access::parse("r").unwrap(),
+        }];
+        assert_eq!(
+            readable_by(&cfg, Path::new("n.backup")),
+            Some(("lab".to_string(), Reach::Folder(here)))
+        );
     }
 
     /// After a rotation the key no longer hashes to the node id; the key the
