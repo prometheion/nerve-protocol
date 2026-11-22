@@ -505,7 +505,7 @@ pub enum RuleCmd {
     },
     /// Take a rule off its list, as `rule` shows it
     ///
-    /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it.
+    /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it, `--action` too.
     #[command(override_usage = "nerve-node rule rm [OPTIONS] [LIST] <ENTRY>")]
     Rm {
         /// The list, needed only when the entry is on two; then the entry
@@ -513,6 +513,17 @@ pub enum RuleCmd {
         /// The list (`allow`, `deny` or `sudo`), needed only when the entry is on two; then the entry.
         #[arg(value_name = "ENTRY", required = true, num_args = 1..=2)]
         words: Vec<String>,
+        /// The rule `rule add --action` made of the entry
+        ///
+        /// The entry is the path or target of a rule `rule add` made with this action, as in `rule rm '/srv/data/*' --action fs.read`.
+        #[arg(long, value_name = "CAP.ACTION")]
+        action: Option<String>,
+        /// With --action: the --arg the rule was made with
+        #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
+        arg: Option<String>,
+        /// With --action: the --exact the rule was made with
+        #[arg(long, requires = "action")]
+        exact: bool,
         #[command(flatten)]
         center: CenterArg,
     },

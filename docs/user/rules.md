@@ -59,6 +59,7 @@ argument of the call.
 nerve-node rule add allow /srv/data/report.txt --action fs.read
 nerve-node rule add deny '/srv/data/*' --action fs.write
 nerve-node rule add deny '' --action lamp.set --arg room=bedroom
+nerve-node rule rm '/srv/data/*' --action fs.write   # as it was added
 ```
 
 `--exact` takes the text as it is, a `*` at its end too. Rules on an
