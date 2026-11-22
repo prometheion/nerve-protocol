@@ -613,6 +613,15 @@ enum Undo<'a> {
     Staged(String),
 }
 
+/// Why a restore into the system keyring cannot go on where none answers,
+/// and what does: `--secret-storage file` keeps the keys in files here
+/// (docs/user/backup.md). `e` is the keyring's own error.
+pub fn no_keyring_here(e: &str) -> String {
+    format!(
+        "the keys go into the system keyring, and none answers here: restore with `--secret-storage file`, which keeps them in files on this machine ({e})"
+    )
+}
+
 /// Puts the backup's config and keys in place of the node at `paths`.
 ///
 /// Takes [`KeysLock`] for its whole run: a node that runs holds it, and a
@@ -628,7 +637,8 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
             if cfg!(windows) {
                 "Stop on the app's Overview"
             } else {
-                "`nerve-node` is a service: stop the service; otherwise end `nerve-node run`"
+                // The command, not only the word (#213, L3-4).
+                "`nerve-node service stop` for the installed node, and `nerve-node service start` after the restore; otherwise end `nerve-node run`"
             }
         )
     })?;
@@ -662,6 +672,16 @@ pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<Rest
     let mut cfg = b.cfg.clone();
     let to = opts.secret_storage.unwrap_or(cfg.machine.secret_storage);
     cfg.machine.secret_storage = to;
+    // Keys for the keyring where none answers: said before anything is
+    // written, with the way out, not as the keyring's own error halfway
+    // (#213, L3-2). The installed node on Windows keeps what goes into its
+    // service's vault for its next start, so a stopped service is no reason.
+    if to == SecretStorage::Keyring
+        && !secrets::vault::through_service(paths)
+        && let Err(e) = secrets::get(paths, to, Key::Config)
+    {
+        return Err(no_keyring_here(&e));
+    }
     let mut report = RestoreReport {
         centers: cfg.centers.iter().map(|c| c.name.clone()).collect(),
         ..RestoreReport::default()
@@ -1780,6 +1800,11 @@ mod tests {
         secrets::store::set_unreachable(false);
         assert!(!err.contains(&key_text(&from, SecretStorage::Keyring, "home")));
         assert!(!to.config_file().exists() && !to.key_file("home").exists());
+        // It says the way out (#213, L3-2: the keyring's own error alone).
+        assert!(
+            err.starts_with("the keys go into the system keyring, and none answers here: restore with `--secret-storage file`"),
+            "{err}"
+        );
     }
 
     /// The installed node on Windows, stopped for the restore: what goes
@@ -1919,6 +1944,12 @@ mod tests {
         assert!(err.contains("runs on these folders"), "{err}");
         // Windows has no node run by hand to end: its advice is the app's Stop.
         assert_eq!(err.contains("`nerve-node run`"), !cfg!(windows), "{err}");
+        // Elsewhere it names the command that stops the service (#213, L3-4).
+        assert_eq!(
+            err.contains("`nerve-node service stop`"),
+            !cfg!(windows),
+            "{err}"
+        );
         assert_eq!(
             err.contains("Stop on the app's Overview"),
             cfg!(windows),

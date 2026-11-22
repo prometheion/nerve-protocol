@@ -26,7 +26,9 @@ The machine shows as online in the web UI. With the desktop app, paste the
 link under **Centers › Pair a center** instead; on Windows, open the link and
 Nerve shows it there. `sudo nerve-node install` and `nerve-node setup` ask for
 the link too. `center add --name lab` gives the center another name here, and
-`--yes` pairs without asking.
+`--yes` pairs without asking. The machine's own name, the host name unless
+you set `node.name`, must be free on the center: where another machine has
+it, `nerve-node config set node.name <name>` and pair again.
 
 A new pairing is in `folder` mode, with no folder of yours, and the center
 may not change settings. Give it a folder next:
@@ -64,6 +66,9 @@ nerve-node mode folder --center lab
 | The center | **Remove** at the machine on **Nodes** | Ends the link; the node shows `revoked` until `center rm` |
 
 To pair again, remove the old pairing on both sides, then make a new link.
+`uninstall --purge` deletes the node's keys without telling its centers:
+remove the machine there too (**Nodes**, or `nerve-node center rm` before
+the purge).
 
 ## Rotate the machine's key
 

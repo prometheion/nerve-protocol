@@ -25,7 +25,13 @@ use std::path::{Path, PathBuf};
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum Job {
     Read(PathBuf),
-    Write { path: PathBuf, overwrite: bool },
+    Write {
+        path: PathBuf,
+        overwrite: bool,
+    },
+    /// The first line of a passphrase file, as `--passphrase-file` takes
+    /// it ([`passphrase`]).
+    Passphrase(PathBuf),
 }
 
 #[cfg(target_os = "linux")]
@@ -175,6 +181,10 @@ mod linux {
     fn open(job: &Job, bytes: &[u8]) -> Result<Vec<u8>, String> {
         match job {
             Job::Read(path) => nerve_transport::backup::read_file(path),
+            Job::Passphrase(path) => {
+                crate::prompt::passphrase(Some(path), &mut std::io::sink(), false)
+                    .map(|p| p.text().as_bytes().to_vec())
+            }
             Job::Write { path, overwrite } => {
                 nerve_transport::backup::write_file(path, bytes, *overwrite).map(|()| Vec::new())
             }
@@ -202,7 +212,7 @@ mod linux {
             drop(answer_in);
             let mut out = answer_out;
             let (path, write) = match job {
-                Job::Read(p) => (p, false),
+                Job::Read(p) | Job::Passphrase(p) => (p, false),
                 Job::Write { path, .. } => (path, true),
             };
             let tried = match become_user(uid, gid) {
@@ -271,7 +281,7 @@ mod linux {
             return Some(open(job, &bytes));
         };
         let path = match job {
-            Job::Read(p) => p,
+            Job::Read(p) | Job::Passphrase(p) => p,
             Job::Write { path, .. } => path,
         };
         Some(match try_as(c.uid, c.gid, job, &bytes, true) {
@@ -346,7 +356,7 @@ mod linux {
         let caller = caller()?;
         let (mut answer_in, answer_out) = pipe()?;
         let (bytes_in, bytes_out) = match &job {
-            Job::Read(_) => (None, None),
+            Job::Read(_) | Job::Passphrase(_) => (None, None),
             Job::Write { .. } => {
                 let (i, o) = pipe()?;
                 (Some(i), Some(o))
@@ -376,7 +386,7 @@ mod linux {
         drop(answer_out);
         drop(bytes_in);
         let kept = match job {
-            Job::Read(path) => {
+            Job::Read(path) | Job::Passphrase(path) => {
                 let bytes = receive(&mut answer_in);
                 wait(pid);
                 Kept::Read { path, bytes }
@@ -391,6 +401,18 @@ mod linux {
         };
         *nerve_transport::sync::lock(&KEPT) = Some(kept);
         Ok(())
+    }
+
+    /// The passphrase in the file at `path`, read now as the user who asked
+    /// (root where nobody else did), as the backup file is, with sudo's
+    /// second try as the owner of its folder: the command then runs
+    /// as the node's user, who may not read a private file of root's (#213,
+    /// L3-3), and whoever asked through the app's broker reads through it no
+    /// file they may not read themselves.
+    pub fn passphrase(path: &Path) -> Result<String, String> {
+        let job = Job::Passphrase(path.to_path_buf());
+        let bytes = for_caller(caller()?, &job, None).unwrap_or_else(|| open(&job, &[]))?;
+        String::from_utf8(bytes).map_err(|_| format!("{} is no text", path.display()))
     }
 
     /// What [`prepare`] read of `path`, once; `None` when it read nothing
@@ -490,6 +512,40 @@ pub fn prepare(job: Job) -> Result<(), String> {
     {
         let _ = job;
         Ok(())
+    }
+}
+
+/// The passphrase `--passphrase-file` named, read by
+/// [`prepare_passphrase`] before the command became the node's user.
+static PASSPHRASE: std::sync::Mutex<Option<(PathBuf, Result<String, String>)>> =
+    std::sync::Mutex::new(None);
+
+/// Reads the passphrase file at `path` as the user who asked, before `main`
+/// makes the command the node's user, as [`prepare`] opens the backup.
+/// Called while the process has one thread.
+pub fn prepare_passphrase(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let read = linux::passphrase(path);
+        *nerve_transport::sync::lock(&PASSPHRASE) = Some((path.to_path_buf(), read));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = path;
+    Ok(())
+}
+
+/// The passphrase of the file at `path` as [`prepare_passphrase`] read it,
+/// once; `None` where it read none (the command reads it itself).
+pub fn prepared_passphrase(
+    path: &Path,
+) -> Option<Result<nerve_transport::backup::Passphrase, String>> {
+    let mut kept = nerve_transport::sync::lock(&PASSPHRASE);
+    match kept.take() {
+        Some((p, read)) if p == path => Some(read.map(nerve_transport::backup::Passphrase::new)),
+        other => {
+            *kept = other;
+            None
+        }
     }
 }
 

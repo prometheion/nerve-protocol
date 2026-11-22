@@ -1,7 +1,7 @@
 // The form of a capability of your own, the same in both UIs: a name, what
 // it does, the fixed command, its arguments and result as JSON Schemas, its
 // time limit and where it runs. Each field shows what is wrong with it.
-import { Field, Seg, TextArea, TextInput } from "../ui";
+import { Field, GrowArea, Seg, TextInput } from "../ui";
 
 export type CapFormValue = {
   name: string;
@@ -60,13 +60,13 @@ export function CapFields({
         <TextInput value={v.summary} onChange={put("summary")} placeholder="Backs up my notes." />
       </Field>
       <Field label="Command (the program first; a word {field} is the argument field)" error={e("command")}>
-        <TextInput value={v.command} onChange={put("command")} mono placeholder="restic backup /home/you/notes" />
+        <GrowArea oneLine value={v.command} onChange={put("command")} placeholder="restic backup /home/you/notes" aria-label="Command" />
       </Field>
       <Field label="Arguments (a JSON Schema; empty for none)" error={e("params")}>
-        <TextArea value={v.params} onChange={put("params")} placeholder={'{"type": "object", "properties": {}}'} />
+        <GrowArea value={v.params} onChange={put("params")} placeholder={'{"type": "object", "properties": {}}'} aria-label="Arguments" />
       </Field>
       <Field label="Result (a JSON Schema the printed JSON fits; empty for the printed text)" error={e("result")}>
-        <TextArea value={v.result} onChange={put("result")} placeholder="empty: the printed text" />
+        <GrowArea value={v.result} onChange={put("result")} placeholder="empty: the printed text" aria-label="Result" />
       </Field>
       <div className="field">
         <span className="label">Where it runs</span>

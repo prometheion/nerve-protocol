@@ -453,11 +453,22 @@ async fn ask_connect(io: &mut BoxIo, proxy: &Proxy, host: &str, port: u16) -> Re
         Ok(httparse::Status::Complete(_)) if resp.code.is_some_and(|c| (200..300).contains(&c)) => {
             Ok(())
         }
-        Ok(httparse::Status::Complete(_)) => Err(format!(
-            "the proxy refused the tunnel to {target}: {} {}",
-            resp.code.unwrap_or(0),
-            resp.reason.unwrap_or("")
-        )),
+        Ok(httparse::Status::Complete(_)) => {
+            let code = resp.code.unwrap_or(0);
+            // What a refused login means here, said: a relay's owner who
+            // revoked the token, or a proxy password that changed (#213,
+            // L2-9: the bare status line).
+            let hint = match code {
+                407 => {
+                    ": it does not take this node's login. For a relay, its owner revoked the token or made a new one: ask for a new link and set it as this node's proxy; for another proxy, set its login again"
+                }
+                _ => "",
+            };
+            Err(format!(
+                "the proxy refused the tunnel to {target}: {code} {}{hint}",
+                resp.reason.unwrap_or("")
+            ))
+        }
         _ => Err("the proxy's answer is not HTTP".into()),
     }
 }
@@ -1056,6 +1067,9 @@ mod tests {
         assert_eq!(&got, b"tunnelled");
         let e = tunnel(&p, "c.example", 443, None).await.err().unwrap();
         assert!(e.contains("407"), "{e}");
+        // A refused login says what to do (#213, L2-9).
+        assert!(e.contains("does not take this node's login"), "{e}");
+        assert!(e.contains("ask for a new link"), "{e}");
         server.await.unwrap();
     }
 }

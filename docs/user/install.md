@@ -162,13 +162,17 @@ Nerve center 0.1.0 · running as a service
 
   Web UI        http://127.0.0.1:7480
   Harnesses     http://127.0.0.1:7481/mcp
+  Public URL    https://lab.example.org:7443
   Machines      none paired yet
   Owner token   nrv_owner_…
 
 Next  Owner token:  sudo nerve-center owner-token
 ```
 
-The owner token logs in to the web UI.
+The owner token logs in to the web UI. Pairing links name the public URL,
+so the other machines must reach it: where it is a bare host name, a
+warning says so, and `sudo nerve-center set public-url https://<address>:7443`
+names an address they reach.
 
 `--name`, `--public-url`, `--listen`, `--ui` and `--mcp` go into its
 settings file, `/etc/nerve-center/center.env`, and
@@ -203,8 +207,9 @@ kernels of these distributions:
 
 ## Update
 
-Update the center first, then the nodes: a node does not link to an older
-center.
+Update the center first, then the nodes: a newer node may use what an older
+center does not know yet. A 0.0.8 center still takes a 0.1.0 node, but that
+is not promised for later versions.
 
 ```sh
 sudo nerve-center update
@@ -215,9 +220,10 @@ sudo nerve-node update
 release's `SHA256SUMS`, and restarts the service. `--from <file>` takes a
 file you checked yourself. `--pre` takes the newest release, a pre-release
 too, and `--tag pre2-v0.1.0` that one release, each checked against its own
-`SHA256SUMS`. An older version is refused; the same version from another
-release (a pre-release, then the release) is taken, and the one you have is
-not downloaded again. `--pre` asks GitHub
+`SHA256SUMS`. An older version is refused, but a plain `update` on a
+pre-release newer than the latest release says there is nothing to update;
+the same version from another release (a pre-release, then the release) is
+taken, and the one you have is not downloaded again. `--pre` asks GitHub
 which release is the newest, which it answers 60 times an hour per machine
 without a login; when it refuses, name the release with `--tag`. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own
@@ -240,7 +246,8 @@ sudo nerve-center uninstall [--purge]
 ```
 
 `uninstall` takes `nerve-run`'s access off your folders and gives you what
-it made there. Kept folders belong to root, and a later `install` takes them
+it made there, with no entry of Nerve's left on it. `--purge` deletes the node's keys without telling its
+centers: it names them, and you remove the machine there (**Nodes**). Kept folders belong to root, and a later `install` takes them
 up again. Where the desktop app took over the node, `nerve-node uninstall`
 removes the app too. The app from a package: **Settings › App › Uninstall…**
 removes the node (as a center, **Settings › This machine › Uninstall…**),

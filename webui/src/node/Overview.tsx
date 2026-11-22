@@ -6,6 +6,7 @@ import { api, keepSession, nav } from "../api";
 import { plural } from "../format";
 import { Banner, Btn, CopyRow, Empty, Icon, ListCard, More, PageHead, Split, Tile, ask, toast } from "../ui";
 import { useNode } from "./App";
+import { onWindows } from "./types";
 import { CenterDetail, CenterRows } from "./Centers";
 
 async function panic() {
@@ -24,6 +25,7 @@ async function panic() {
 
 export function OverviewPage() {
   const { o, status, pair } = useNode();
+  const windows = onWindows(o);
   const [sel, setSel] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const up = o.centers.filter((c) => c.status === "connected").length;
@@ -75,10 +77,12 @@ export function OverviewPage() {
             <Tile icon="server" tone="ok" />
             <div className="grow">
               <b>Service</b>
-              <div className="meta">Starting, stopping and restarting the node is done at the CLI.</div>
+              <div className="meta">
+                {windows ? "Starting, stopping and restarting the node is done in the Nerve app, on its Overview." : "Starting, stopping and restarting the node is done at the CLI, without sudo."}
+              </div>
             </div>
           </div>
-          <CopyRow value="sudo systemctl restart nerve-node" />
+          {windows ? null : <CopyRow value="nerve-node service restart" />}
         </div>
       </div>
       <div className="banners">
@@ -88,12 +92,23 @@ export function OverviewPage() {
           </Banner>
         ) : null}
         {o.owner_full_rights ? (
-          <Banner tone="warn">
-            Root is the owner: user-mode commands run as root, with every right here.
-            <More>
-              <p className="meta">Commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.</p>
-            </More>
-          </Banner>
+          windows ? (
+            <Banner tone="warn">
+              The owner is an administrator: user-mode commands can take its administrator rights here.
+              <More>
+                <p className="meta">
+                  Commands of user mode, and of allowlist mode as the owner, run as that account and can take its administrator rights (UAC is no security boundary). They can do everything on this machine, Nerve and its keys included.
+                </p>
+              </More>
+            </Banner>
+          ) : (
+            <Banner tone="warn">
+              Root is the owner: user-mode commands run as root, with every right here.
+              <More>
+                <p className="meta">Commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.</p>
+              </More>
+            </Banner>
+          )
         ) : null}
         {o.pairings_warning ? <Banner tone="warn">{o.pairings_warning}</Banner> : null}
       </div>

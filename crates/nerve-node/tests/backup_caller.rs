@@ -144,9 +144,6 @@ fn the_backup_file_is_opened_as_the_user_who_asked() {
         By::Root,
         &["config", "set", "node.name", "boxy"],
     ));
-    let pass = root.join("state/pass");
-    std::fs::write(&pass, "correct horse battery\n").unwrap();
-    mode(&pass, 0o600);
     chown(&root.join("config"), NODE);
     chown(&root.join("state"), NODE);
     mode(&root.join("state"), 0o700);
@@ -154,6 +151,12 @@ fn the_backup_file_is_opened_as_the_user_who_asked() {
     // The asker's home: nobody else may open it.
     let home = root.join("home");
     std::fs::create_dir(&home).unwrap();
+    // The passphrase is the asker's too, which the node's user may not
+    // read: it is read as the asker before the command becomes the node's
+    // user (#213, L3-3).
+    let pass = home.join("pass");
+    std::fs::write(&pass, "correct horse battery\n").unwrap();
+    mode(&pass, 0o600);
     chown(&home, asker);
     mode(&home, 0o700);
     let file = home.join("nerve-node.backup");

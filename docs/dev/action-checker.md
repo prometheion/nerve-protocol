@@ -38,7 +38,17 @@ neither disabled nor offline: such a call is `unavailable` before the checker
 runs, so it costs no model call, a down model failing closed does not turn it
 into `forbidden`, and the checker audits nothing for it. Every center decision
 carries a `by: "action checker"` and a `checker: {layer, scope, detail}` in the
-audit feed, and a line in the log.
+audit feed, and a line in the log. An allowed call is then decided by its
+machine too, in an entry of its own: the checker's reads "passed the action
+checker" on the Audit page and in `nerve-center audit`, and the Allowed filter
+counts only the machine's. The supervisor of the local model writes to the log
+when the server ends, cannot start or runs again (once per cause, not at every
+retry), and when the model is on with none installed: the page's red banner
+sends the owner there. Each such line says, by the setting as it is then,
+whether the calls the model checks are refused meanwhile or pass unjudged
+(on error: allow); a server that ended on a call says its restart
+window refuses calls whatever the setting says (`LOST_CALL_NOTE`). "Passed the action checker" is said only for the
+checker's own `by`; a node's own `by` on an allowed call reads "allowed".
 
 ## The blocklist matcher
 
@@ -326,8 +336,10 @@ model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
 d1-2B by default), independent of the device. Each pin carries its repo,
 revision, file, size, SHA-256, licence, the evaluation's default threshold
 and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 35 s: about twice Kev-4B's
-slow calls on 2 vCPUs, 16 to 17 s, where 15 s refused about half of them)
-and the context the
+slow calls on 2 vCPUs, 16 to 17 s, where 15 s refused about half of them;
+a CPU install on a machine with 4 CPUs or fewer takes at least 30 s,
+`install::install_timeout_ms`, as d1-2B took 10 to 10.6 s a call on 2 vCPUs,
+#213) and the context the
 server gets (d1-2B 12,288 tokens, Kev-4B 8,192; see below); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
@@ -1191,7 +1203,7 @@ quality in one line:
 
 | Model | Size | Memory | Licence | Speed on a desktop CPU, and quality |
 |---|---|---|---|---|
-| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 s on 2 vCPUs). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
+| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 to 10 s on 2 vCPUs: 10 s on a shared 2-vCPU VM in #213). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
 | **Kev-4B** (ggml-org) | 3.0 GB | about 6 GB, up to 13 GB for a very long call | Apache-2.0 | Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refuses about 1.5 % of ordinary work, but about 5 s per call (15 s on 2 vCPUs) |
 
 Pick d1-2B when the checker should stay quick on a CPU, Kev-4B when catching

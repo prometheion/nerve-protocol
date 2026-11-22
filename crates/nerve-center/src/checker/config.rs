@@ -352,17 +352,34 @@ impl CheckerConfig {
     /// own default threshold and timeout; a reinstall of the same model keeps
     /// the owner's.
     pub fn local_installed(&mut self, gpu: bool, model: LocalModel) {
+        self.local_installed_on(gpu, model, crate::checker::install::cpus());
+    }
+
+    /// [`Self::local_installed`] on a machine with `cpus` CPUs: a CPU install
+    /// on a small one takes a longer timeout
+    /// (`install::install_timeout_ms`).
+    pub fn local_installed_on(&mut self, gpu: bool, model: LocalModel, cpus: usize) {
         // Take the model's own tuned threshold and timeout when the model
         // changes, or when the source becomes local from an endpoint (the
         // first local install, whose current values are the endpoint's, not
         // this model's). A device switch or a same-model reinstall keeps what
         // the owner set.
         let fresh = self.model.local_model != model || self.model.source != ModelSource::Local;
+        let pin = crate::checker::install::model_pin(model);
+        // A timeout the owner never set (the pin's own, or the one a small
+        // machine's install gave) follows the device this install runs on,
+        // also on the first install of the default model (#213, L4-3).
+        let untouched = [
+            pin.timeout_ms,
+            crate::checker::install::SMALL_MACHINE_TIMEOUT_MS,
+        ]
+        .contains(&self.model.timeout_ms);
         if fresh {
-            let pin = crate::checker::install::model_pin(model);
             self.model.local_model = model;
             self.model.threshold = pin.threshold;
-            self.model.timeout_ms = pin.timeout_ms;
+        }
+        if fresh || untouched {
+            self.model.timeout_ms = crate::checker::install::install_timeout_ms(pin, gpu, cpus);
         }
         // Switch the model on with the first install, the owner's reason to
         // install it. When a node already has it on for itself and the
@@ -1318,18 +1335,18 @@ mod tests {
     #[test]
     fn a_model_switch_takes_that_models_defaults() {
         let mut c = CheckerConfig::default();
-        c.local_installed(false, LocalModel::Kev4b);
+        c.local_installed_on(false, LocalModel::Kev4b, 16);
         assert!(c.model_on);
         assert_eq!(c.model.source, ModelSource::Local);
         assert_eq!(c.model.local_model, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.25);
         assert!(c.model.timeout_ms >= 34_000, "{}", c.model.timeout_ms);
         c.model.threshold = 0.6;
-        c.local_installed(true, LocalModel::Kev4b);
+        c.local_installed_on(true, LocalModel::Kev4b, 16);
         assert_eq!(c.model.threshold, 0.6, "the owner's threshold stays");
         assert!(c.model.local_gpu);
         let d1 = crate::checker::install::model_pin(LocalModel::D1_2b);
-        c.local_installed(false, LocalModel::D1_2b);
+        c.local_installed_on(false, LocalModel::D1_2b, 16);
         assert_eq!(
             (c.model.threshold, c.model.timeout_ms),
             (d1.threshold, d1.timeout_ms)
@@ -1342,11 +1359,41 @@ mod tests {
         e.model.source = ModelSource::Endpoint;
         e.model.threshold = 0.5;
         e.model.timeout_ms = 1000;
-        e.local_installed(false, LocalModel::D1_2b);
+        e.local_installed_on(false, LocalModel::D1_2b, 16);
         assert_eq!(
             (e.model.threshold, e.model.timeout_ms),
             (d1.threshold, d1.timeout_ms)
         );
+    }
+
+    /// A CPU install on a machine with 4 CPUs or fewer gives the model at
+    /// least 30 s, as d1-2B takes about 10 s a call on 2 vCPUs; a GPU install
+    /// and a larger machine keep the model's own (#213, L4-3).
+    #[test]
+    fn a_small_machine_gives_the_model_more_time() {
+        let d1 = crate::checker::install::model_pin(LocalModel::D1_2b);
+        let kev = crate::checker::install::model_pin(LocalModel::Kev4b);
+        let at = |gpu, model, cpus| {
+            let mut c = CheckerConfig::default();
+            c.local_installed_on(gpu, model, cpus);
+            c.model.timeout_ms
+        };
+        assert_eq!(at(false, LocalModel::D1_2b, 2), 30_000);
+        assert_eq!(at(false, LocalModel::D1_2b, 4), 30_000);
+        assert_eq!(at(false, LocalModel::D1_2b, 5), d1.timeout_ms);
+        assert_eq!(at(true, LocalModel::D1_2b, 2), d1.timeout_ms);
+        // Kev-4B's own is longer already.
+        assert_eq!(at(false, LocalModel::Kev4b, 2), kev.timeout_ms);
+        // A reinstall keeps a timeout the owner set.
+        let mut c = CheckerConfig::default();
+        c.local_installed_on(false, LocalModel::D1_2b, 2);
+        c.model.timeout_ms = 20_000;
+        c.local_installed_on(false, LocalModel::D1_2b, 2);
+        assert_eq!(c.model.timeout_ms, 20_000);
+        // A device switch moves a timeout the owner never set.
+        c.model.timeout_ms = 30_000;
+        c.local_installed_on(true, LocalModel::D1_2b, 2);
+        assert_eq!(c.model.timeout_ms, d1.timeout_ms);
     }
 
     /// The config a fresh center starts with, and a stored model section

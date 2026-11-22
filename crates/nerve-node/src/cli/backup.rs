@@ -16,7 +16,7 @@ pub(super) async fn backup(
     // passphrase of its own.
     owner_check(&[&paths]).await?;
     let (cfg, _) = read_config(&paths).await?;
-    let pass = crate::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
+    let pass = passphrase(passphrase_file.as_deref(), out, true)?;
     let opts = crate::backup::BackupOpts {
         include_keyring,
         overwrite,
@@ -26,6 +26,20 @@ pub(super) async fn backup(
     crate::backup::print_backup(&r, &file, out);
     json::also("backup", crate::backup::backup_data(&r, &file));
     Ok(())
+}
+
+/// The passphrase: what root's command read of `--passphrase-file` as the
+/// user who asked before it became the node's user
+/// (crate::caller_file::prepare_passphrase), else asked or read now.
+fn passphrase(
+    file: Option<&Path>,
+    out: &mut dyn Write,
+    confirm: bool,
+) -> Result<nerve_transport::backup::Passphrase, String> {
+    if let Some(read) = file.and_then(crate::caller_file::prepared_passphrase) {
+        return read;
+    }
+    crate::prompt::passphrase(file, out, confirm)
 }
 
 /// `restore`: the node as a backup of it holds it.
@@ -50,7 +64,7 @@ pub(super) async fn restore(
     let storage = secret_storage
         .map(|s| parse_enum::<SecretStorage>(&s, "file or keyring"))
         .transpose()?;
-    let pass = crate::prompt::passphrase(passphrase_file.as_deref(), out, false)?;
+    let pass = passphrase(passphrase_file.as_deref(), out, false)?;
     let parsed = crate::backup::open(&bytes, &pass)?;
     // An owner restores what an owner may change, nothing that
     // picks the account or program commands run as.

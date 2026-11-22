@@ -2450,12 +2450,18 @@ pub async fn run(
     #[cfg(windows)]
     let out_of_memory = memory_hit(held.as_deref(), opts);
     drop(group);
+    #[cfg(windows)]
+    let processes_hit = processes_hit(held.as_deref(), opts);
     // Read before the cgroup goes with what is left in it.
     #[cfg(target_os = "linux")]
     let out_of_memory = cgroup
         .as_ref()
         .filter(|c| c.out_of_memory())
         .map(crate::cgroup::CommandCgroup::memory_mb);
+    #[cfg(target_os = "linux")]
+    let processes_hit = cgroup.as_ref().and_then(|c| c.processes_hit());
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let processes_hit: Option<u32> = None;
     #[cfg(target_os = "linux")]
     drop(cgroup);
     if timed_out {
@@ -2488,11 +2494,22 @@ pub async fn run(
             result["signal"] = name.into();
         }
     }
+    said_limits(&mut result, out_of_memory, processes_hit);
+    Ok(result)
+}
+
+/// What a command's result says of the limits it met: `killed` `memory`
+/// where its memory limit of `out_of_memory` MiB ended it, else `held`
+/// `processes` where it reached its limit of `processes` processes, each
+/// with a `reason` the agent reads.
+fn said_limits(result: &mut Value, out_of_memory: Option<u64>, processes: Option<u32>) {
     if let Some(mb) = out_of_memory {
         result["killed"] = "memory".into();
         result["reason"] = crate::cgroup::memory_reason(mb).into();
+    } else if let Some(n) = processes {
+        result["held"] = "processes".into();
+        result["reason"] = crate::cgroup::processes_reason(n).into();
     }
-    Ok(result)
 }
 
 /// Holds a command's job to the limits it was `granted` (crate::cgroup::
@@ -2525,6 +2542,13 @@ fn hold_to_limits(
 fn memory_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u64> {
     let (_, granted) = opts.limits.as_ref()?;
     job.filter(|j| j.out_of_memory()).map(|_| granted.memory_mb)
+}
+
+/// The limit of processes a command's job refused it more at, if it did.
+#[cfg(windows)]
+fn processes_hit(job: Option<&crate::job::Held>, opts: &RunOptions) -> Option<u32> {
+    let (_, granted) = opts.limits.as_ref()?;
+    job.filter(|j| j.processes_hit()).map(|_| granted.processes)
 }
 
 /// What [`run_as`] starts: the shim, with `shim`'s confinement where there
@@ -2678,6 +2702,7 @@ async fn run_as(
         }
     };
     let out_of_memory = memory_hit(Some(&held), opts);
+    let processes_hit = processes_hit(Some(&held), opts);
     drop(group);
     let code = code.map_err(|e| RpcError::internal(format!("waiting for the command: {e}")))?;
     let mut result = json!({
@@ -2689,10 +2714,7 @@ async fn run_as(
     if call.argv.is_some() {
         result["stdout_truncated"] = out.1.into();
     }
-    if let Some(mb) = out_of_memory {
-        result["killed"] = "memory".into();
-        result["reason"] = crate::cgroup::memory_reason(mb).into();
-    }
+    said_limits(&mut result, out_of_memory, processes_hit);
     Ok(result)
 }
 
@@ -4756,6 +4778,31 @@ mod tests {
 #[cfg(test)]
 mod text_tests {
     use super::*;
+
+    /// A result says the limit a command met, with a reason the agent
+    /// reads: the memory that ended it, else the processes it was refused
+    /// more of (#213, L3-6, W3-6: only the command's own words said that).
+    #[test]
+    fn a_result_says_the_limit_the_command_met() {
+        let said = |memory, processes| {
+            let mut v = serde_json::json!({"exit_code": 1});
+            said_limits(&mut v, memory, processes);
+            v
+        };
+        assert!(said(None, None).get("reason").is_none());
+        let v = said(None, Some(20));
+        assert_eq!(v["held"], "processes", "{v}");
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap()
+                .contains("limit of 20 processes"),
+            "{v}"
+        );
+        let v = said(Some(64), Some(20));
+        assert_eq!(v["killed"], "memory", "{v}");
+        assert!(v.get("held").is_none(), "{v}");
+    }
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)

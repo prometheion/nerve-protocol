@@ -627,7 +627,7 @@ impl ConfigCapability {
 /// a format character (Unicode's category Cf: soft hyphen, zero-width
 /// marks, bidirectional controls, tags and the like), which show as
 /// nothing or change how the text around them shows.
-pub(crate) fn unseen(c: char) -> bool {
+pub fn unseen(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

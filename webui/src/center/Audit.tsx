@@ -180,6 +180,18 @@ function checkerLine(d: Decision): string | null {
   return `${name}${whose}: ${detail}`;
 }
 
+/** Whether the action checker let the call on to its machine: the
+ * machine's own decision is its own line, so this one is no second
+ * decision (#213, L4-6). */
+const passed = (d: Decision) => d.decision === "allowed" && d.by === "action checker";
+
+/** A decision in words: who made it, and its error code where that says
+ * more than the decision (not "forbidden [forbidden]", #213, L4-7). */
+function decisionWords(d: Decision): string {
+  if (passed(d)) return "passed the action checker";
+  return d.decision + (d.by ? ` by ${d.by}` : "") + (d.code && d.code !== d.decision ? ` [${d.code}]` : "");
+}
+
 function DecisionDetail({ d, n }: { d: Decision; n?: Node }) {
   const k = DECISIONS[d.decision] || { icon: "info", tone: "neutral" };
   const byChecker = d.by === "action checker";
@@ -191,7 +203,7 @@ function DecisionDetail({ d, n }: { d: Decision; n?: Node }) {
       tile={k.tone || "neutral"}
       title={`${d.cap}.${d.action}`}
       mono
-      pills={<Pill tone={k.tone}>{d.decision + (d.by ? ` by ${d.by}` : "") + (d.code ? ` [${d.code}]` : "")}</Pill>}
+      pills={<Pill tone={k.tone}>{decisionWords(d)}</Pill>}
       actions={
         <span className="faint" title={when(d.ts)}>
           {d.node} · {ago(d.ts)}
@@ -223,7 +235,7 @@ export function AuditPage() {
   const all = useMemo(() => (audit.data ? audit.data.decisions.slice().reverse() : []), [audit.data]);
   const refused = (d: Decision) => d.decision !== "allowed";
   const pass = (d: Decision) =>
-    (kind === "all" || (kind === "refused") === refused(d)) &&
+    (kind === "all" || (kind === "refused" ? refused(d) : !refused(d) && !passed(d))) &&
     (machine === null || d.node_id === machine) &&
     (!q.trim() || `${d.cap}.${d.action} ${d.target || ""} ${d.checker?.detail || ""}`.toLowerCase().includes(q.trim().toLowerCase()));
   const list = all.filter(pass);
@@ -271,7 +283,7 @@ export function AuditPage() {
               onChange={(v) => setKind(v)}
               options={[
                 { value: "all", label: "All", count: all.length },
-                { value: "allowed", label: "Allowed", count: all.filter((x) => !refused(x)).length },
+                { value: "allowed", label: "Allowed", count: all.filter((x) => !refused(x) && !passed(x)).length },
                 { value: "refused", label: "Refused", count: all.filter(refused).length },
               ]}
             />

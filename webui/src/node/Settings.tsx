@@ -1,12 +1,14 @@
-// Settings: its sections as a list (this machine, root's settings, any
+// Settings: its sections as a list (this machine, root's (on Windows an
+// administrator's) settings, any
 // setting by its name, the web UI and its tokens), the picked one on the
 // right. Every change is one `config set` of the node's CLI.
 import { useState, type ReactNode } from "react";
 import { api } from "../api";
 import { usePoll } from "../frame";
-import { plural } from "../format";
+import { plural, when } from "../format";
 import { Btn, Empty, Field, Icon, LRow, ListCard, Loading, PageHead, Pill, RemoveAsk, Seg, Split, TextInput } from "../ui";
-import type { Json } from "./types";
+import { useNode } from "./App";
+import { onWindows, type Json } from "./types";
 
 const LEVELS = ["error", "warn", "info", "debug"];
 
@@ -54,16 +56,29 @@ function General({ v, set }: { v: Json; set: (k: string, val: string) => Promise
   );
 }
 
-function RootOnly({ v }: { v: Json }) {
+/** What an unset machine setting is: the shell has a default. */
+function unsetText(key: string, windows: boolean): string {
+  if (key === "machine.shell") return windows ? "PowerShell (the default)" : "/bin/sh (the default)";
+  return "not set";
+}
+
+function RootOnly({ v, windows }: { v: Json; windows: boolean }) {
+  // Windows has no sudo program to name, and the node never runs as root
+  // there: only the shell is an administrator's to change.
+  const keys = (v.root_only as string[]).filter((k) => !windows || k === "machine.shell");
   return (
-    <Section icon="lock" title="Root's settings" sub="Changed only as root: sudo nerve-node config set …">
+    <Section
+      icon="lock"
+      title={windows ? "Administrator's settings" : "Root's settings"}
+      sub={windows ? "Changed only by an administrator, in the Nerve app." : "Changed only as root: sudo nerve-node config set …"}
+    >
       <div className="kv">
-        {(v.root_only as string[]).map((k) => {
+        {keys.map((k) => {
           const val = v.machine[k.split(".")[1]];
           return (
             <span key={k} className="contents">
               <code className="mono k">{k}</code>
-              <span>{val === undefined || val === null ? "not set" : String(val)}</span>
+              <span>{val === undefined || val === null ? unsetText(k, windows) : String(val)}</span>
               <span />
             </span>
           );
@@ -73,11 +88,11 @@ function RootOnly({ v }: { v: Json }) {
   );
 }
 
-function Advanced({ v, set, unset }: { v: Json; set: (k: string, val: string) => Promise<void>; unset: (k: string) => Promise<void> }) {
+function Advanced({ v, set, unset, windows }: { v: Json; set: (k: string, val: string) => Promise<void>; unset: (k: string) => Promise<void>; windows: boolean }) {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   return (
-    <Section icon="sliders" title="Any setting" sub="A setting of node.toml by its dotted name, as nerve-node config set takes it.">
+    <Section icon="sliders" title="Any setting" sub={windows ? "A setting of node.toml by its dotted name." : "A setting of node.toml by its dotted name, as nerve-node config set takes it."}>
       <div className="form-row">
         <Field label="Setting">
           <TextInput value={key} onChange={setKey} mono placeholder="limits.max_running" />
@@ -94,17 +109,28 @@ function Advanced({ v, set, unset }: { v: Json; set: (k: string, val: string) =>
           Unset
         </Btn>
       </div>
-      <p className="meta">Backup, restore, update and uninstall are done at the CLI.</p>
+      <p className="meta">{windows ? "Backup, restore, update and uninstall are done in the Nerve app." : "Backup, restore, update and uninstall are done at the CLI."}</p>
       <pre className="code mono">{v.toml}</pre>
     </Section>
   );
 }
 
-function WebUi() {
+/** When a web UI token was made: a local date, as the other pages show
+ * times (the node keeps it as an ISO time). */
+function made(at: string): string {
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? at : when(ms);
+}
+
+function WebUi({ windows }: { windows: boolean }) {
   const ui = usePoll(() => api("GET", "/api/ui"), []);
   const s = ui.data;
   return (
-    <Section icon="globe" title="Web UI" sub="Turning it on or off, its address and new tokens are changed at the CLI: nerve-node ui.">
+    <Section
+      icon="globe"
+      title="Web UI"
+      sub={windows ? "Turning it on or off, its address and new tokens are changed in the Nerve app: Settings, Network, Web UI." : "Turning it on or off, its address and new tokens are changed at the CLI: nerve-node ui."}
+    >
       {!s ? (
         <Loading />
       ) : (
@@ -122,7 +148,7 @@ function WebUi() {
                 <div key={t.label} className="r">
                   <Icon name="key" />
                   <b className="grow">{t.label}</b>
-                  <span className="faint">{t.made ? `Made ${t.made}` : ""}</span>
+                  <span className="faint">{t.made ? `Made ${made(t.made)}` : ""}</span>
                   <RemoveAsk
                     label="Revoke"
                     question={`Revoke ${t.label}? It no longer logs in, and the sessions it opened end, this one too if it did.`}
@@ -135,24 +161,25 @@ function WebUi() {
               ))}
             </div>
           ) : (
-            <Empty icon="key">No token. nerve-node ui token add &lt;label&gt; makes one.</Empty>
+            <Empty icon="key">{windows ? "No token. The Nerve app makes one." : "No token. nerve-node ui token add <label> makes one."}</Empty>
           )}
-          <p className="meta">A new token is made at the CLI.</p>
+          <p className="meta">{windows ? "A new token is made in the Nerve app." : "A new token is made at the CLI."}</p>
         </>
       )}
     </Section>
   );
 }
 
-const SECTIONS: [string, string, string][] = [
+const sections = (windows: boolean): [string, string, string][] => [
   ["general", "This machine", "settings"],
-  ["root", "Root's settings", "lock"],
+  ["root", windows ? "Administrator's settings" : "Root's settings", "lock"],
   ["advanced", "Any setting", "sliders"],
   ["ui", "Web UI", "globe"],
 ];
 
 export function SettingsPage() {
   const settings = usePoll(() => api("GET", "/api/settings"), [], 0);
+  const windows = onWindows(useNode().o);
   const [sec, setSec] = useState("general");
   const [open, setOpen] = useState(false);
   const v = settings.data;
@@ -165,9 +192,16 @@ export function SettingsPage() {
     await settings.reload();
   };
   let detail: ReactNode = <Loading />;
-  if (sec === "ui") detail = <WebUi />;
+  if (sec === "ui") detail = <WebUi windows={windows} />;
   else if (v) {
-    detail = sec === "root" ? <RootOnly v={v} /> : sec === "advanced" ? <Advanced v={v} set={set} unset={unset} /> : <General key={`${v.name}:${v.log_level}`} v={v} set={set} />;
+    detail =
+      sec === "root" ? (
+        <RootOnly v={v} windows={windows} />
+      ) : sec === "advanced" ? (
+        <Advanced v={v} set={set} unset={unset} windows={windows} />
+      ) : (
+        <General key={`${v.name}:${v.log_level}`} v={v} set={set} />
+      );
   }
   return (
     <>
@@ -177,7 +211,7 @@ export function SettingsPage() {
         onBack={() => setOpen(false)}
         list={
           <ListCard className="navpane">
-            {SECTIONS.map(([id, label, icon]) => (
+            {sections(windows).map(([id, label, icon]) => (
               <LRow
                 key={id}
                 current={sec === id}

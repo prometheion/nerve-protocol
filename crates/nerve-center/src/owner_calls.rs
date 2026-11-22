@@ -46,7 +46,7 @@ pub async fn run(
         Cmd::Caps { name, cmd } => crate::pages::caps(&ask, name, cmd.as_ref()).await?,
         Cmd::Stats => crate::pages::stats(&ask).await?,
         Cmd::Audit { last, cmd } => crate::pages::audit(&ask, *last, cmd.as_ref()).await?,
-        Cmd::Key(k) => crate::pages::key(&ask, *k).await?,
+        Cmd::Key(k) => crate::pages::key(&ask, *k, &command).await?,
         Cmd::Config { setting, value } => {
             crate::pages::config(&ask, setting.as_deref(), value.as_deref()).await?
         }

@@ -47,7 +47,9 @@ nerve-node mode allowlist --as-owner   # allowed commands run as you
 
 - `--for` takes hours, at least 1. It does not go with `allowlist`.
 - A timed `user` ends in the mode before it, never `user`. A timed `folder`
-  ends in `allowlist`. `mode` and `status` say where a timer ends.
+  ends in `allowlist`. `mode` and `status` say where a timer ends. At the
+  end the node writes the new mode into its settings, and the log and the
+  audit say so (`settings … by timer`).
 - Setting a mode again without `--for` removes a timer, and without
   `--as-owner` goes back to `nerve-run`.
 

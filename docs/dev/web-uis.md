@@ -30,8 +30,17 @@ and `login.html` (the login of both).
 
 - **Layout.** The pages follow the desktop app's layout B (#231, #232): a
   list on the left and the picked row's details on the right, side by side
-  from a 1100 px window, in turns with **Back to the list** on a smaller one,
-  and a third pane from 1800 px where a page has one. Adding is a form in the
+  wherever both fit at their least widths (the list 260 px, the details
+  400 px; container queries on the page's own width, `app.css`), in turns
+  with **Back to the list** where they do not, and a third pane where a page
+  has one and it fits too (300 px, the details then 440 px). The gap between
+  the list and the details resizes them (`Split`'s `Gutter`): the list's share
+  in steps of 2 % (`data-w`, a rule each in `app.css`, as the CSP allows no
+  style from the page), kept per page in `localStorage`, back to the page's
+  own on a double-click; the drag stops at a pane's least width, and the
+  shares hold as the window changes (owner, #213). A details pane that holds
+  a form gets the larger share by itself, and the JSON and command fields
+  grow with their text (`GrowArea`). Adding is a form in the
   details pane, pairing an overlay, and a removal asks in its row. The shared
   pieces are in `webui/src/ui.tsx` (buttons, switches, the rows of choices,
   fields, the list and its details, the inline question, overlays, the
@@ -178,8 +187,8 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
 #### Overview and Nodes
 
 The Overview shows the center's state, Get started while a new center has
-steps left, alerts, and the machines as a list; from 1800 px the sessions
-stand beside them. **Nodes** lists the machines too, with **Pair a machine**.
+steps left, alerts, and the machines as a list; where there is room the
+sessions stand beside them. **Nodes** lists the machines too, with **Pair a machine**.
 A picked machine's details:
 
 

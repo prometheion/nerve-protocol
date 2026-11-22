@@ -423,8 +423,8 @@ pub fn desktop_entry(bin: &Path) -> String {
 Type=Application
 Version=1.4
 Name=Nerve
-GenericName=Nerve node
-Comment=Decide what your Nerve centers may do on this machine
+GenericName=Agent access control
+Comment=Decide what AI agents may do on your machines, as a Nerve node or center
 Exec={exec} %u
 Icon={PROGRAM}
 Terminal=false
@@ -900,6 +900,9 @@ mod tests {
         assert!(e.contains("\nIcon=nerve\n"));
         let e = desktop_entry(Path::new("/opt/my apps/nerve"));
         assert!(e.contains("\nExec=\"/opt/my apps/nerve\" %u\n"), "{e}");
+        // The app is a node or a center: the menu says so (#213, L1-6).
+        assert!(!e.contains("GenericName=Nerve node"), "{e}");
+        assert!(e.contains("as a Nerve node or center"), "{e}");
     }
 
     #[test]

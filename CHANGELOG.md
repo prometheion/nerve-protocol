@@ -9,7 +9,7 @@ package) and Windows x64. It is a beta, not 1.0.0. A pre-release tester removes
 `nerve-node-desktop` first; the `nerve` package replaces it.
 
 **Update the center first, then the nodes.** A 0.0.8 node still talks to a
-0.1.0 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
+0.1.0 center, and a 0.1.0 node to a 0.0.8 center. On Windows, from 0.0.6: uninstall it with **Delete the data**
 (Apps & features), install 0.1.0, and pair the node again. The installer
 refuses to install over 0.0.6, whose settings 0.1.0 cannot read, and the
 0.0.6 app's **Update** changes nothing.
@@ -35,6 +35,9 @@ and every limit is in
 - The center's and the node's web UIs have the app's layout: a list and the
   picked row's details on every page, adding in the details, removing asked
   in the row ([#232](https://github.com/prometheion/nerve-protocol/issues/232)).
+  The gap between the panes resizes them, kept per page; a form gets the
+  larger share, and its JSON and command fields grow with their text. The
+  panes fold only where they no longer fit.
 - Runs as a service (systemd on Linux, the service `nerve-center` on
   Windows), or started by a harness over stdio; a second center attaches to
   the first.
@@ -54,8 +57,10 @@ and every limit is in
 - Everything the web UI and the app do for the center is a command too:
   `sessions [end]`, `checker` (its switches, the blocklist and the rules that
   skip the model with add, edit, on, off and rm, the decision model, a
-  machine's own switches), `caps <machine> [add|rm]`, `stats`, `audit` (and
-  `allow|deny|skip <id>`), `key rotate|finish`, `config` (name, retention,
+  machine's own switches), `caps <machine> [add|rm|list]` (`add` with
+  `--params`), `stats`, `audit` (and `allow|deny|skip <id>`; an allow of a
+  sudo command adds no rule and gives the line to run on the machine),
+  `key rotate|finish`, `config` (name, retention,
   pairing time, log level) and `nodes rename|settings|sudo`. `audit` gives
   each decision an id that stays the same while new ones come in, and
   `nodes settings` prints a file (with the version it was read at) that
@@ -66,7 +71,12 @@ and every limit is in
   the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
-  fails closed by default.
+  fails closed by default. On the CPU of a machine with 4 CPUs or fewer its
+  install gives it 30 s a call instead of 12. The log says why the model does
+  not run, and `nerve-center checker` warns while it is on and not running.
+- `nerve-center status` shows where a running center is, also one run by
+  hand, and the public URL pairing links name, with a warning for a bare
+  host name.
 - Backup and restore, and a rotation of its key that the machines follow.
 
 ### Machines and pairing
@@ -84,7 +94,8 @@ and every limit is in
 
 - Three modes: `folder` (only the folders you give, with `r`, `w`, `x` or
   none), `allowlist` (only the commands you allow) and `user` (as you);
-  each also for a time (`--for`).
+  each also for a time (`--for`), whose end the settings and the audit
+  record.
 - Allow and deny rules, with a trailing `*` and with conditions on an
   action's arguments (`lamp.set:room=office`).
 - A built-in guard against changing the node by mistake, and protected paths.
@@ -92,7 +103,7 @@ and every limit is in
 - The settings grant, which lets a center change its own settings, and
   `center settings off`, which says what stays.
 - A network switch per center, and limits per command: memory, CPU and
-  processes.
+  processes. A command's result says when the switch or a limit ended it.
 
 ### How the commands are held
 
@@ -156,6 +167,8 @@ and every limit is in
 - `update --pre` takes the newest release, a pre-release too, and
   `update --tag <tag>` one release, for the center and the node; the same
   version from another release is taken (a pre-release, then its release).
+  A plain `update` on a pre-release newer than the latest release has
+  nothing to update.
   The desktop app's **Settings › App › Pre-releases** does it there (on a
   center **Settings › This machine**), on Linux and Windows. A release older
   than the installed program, or whose program is the installed one, is not
@@ -231,7 +244,11 @@ and every limit is in
   where the node serves it so. On Windows only the owner's own session gets
   in, and beyond loopback is an administrator's step, also as the setting
   `ui.listen` (`config set`, a changed node.toml or a restore); what the
-  web UI changes is audited as the owner's account.
+  web UI changes is audited as the owner's account. Its texts follow the
+  node's platform (the Nerve app's places on Windows, `nerve-node` on
+  Linux), its Audit says what each settings change did, and its
+  Capabilities page switches every action, a program's and a center's own
+  too.
 
 ### On Windows
 

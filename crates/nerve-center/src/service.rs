@@ -473,8 +473,22 @@ pub fn status(
         "service",
         serde_json::json!(service.as_ref().map(|s| s.state.clone())),
     );
-    crate::json::also("running", serde_json::json!(crate::attach::runs(state)));
-    let page = status_page(layout, state, installed, file.as_deref(), ui, mcp, service);
+    let runs = crate::attach::runs(state);
+    crate::json::also("running", serde_json::json!(runs));
+    let live = (runs == Some(true))
+        .then(|| live_addresses(state, installed))
+        .flatten();
+    let page = status_page_of(
+        layout,
+        state,
+        installed,
+        file.as_deref(),
+        ui,
+        mcp,
+        runs,
+        service,
+        live.as_ref(),
+    );
     let _ = out.write_all(page.render(Style::stdout()).as_bytes());
     Ok(())
 }
@@ -555,31 +569,72 @@ fn service_state() -> ServiceState {
     }
 }
 
-/// The page of [`status`], with `file` the installed center's settings
-/// where they could be read.
-fn status_page(
-    layout: &Layout,
-    state: &Path,
-    installed: bool,
-    file: Option<&str>,
-    given_ui: &str,
-    given_mcp: &crate::config::McpMode,
-    service: Option<ServiceState>,
-) -> Page {
-    status_page_of(
-        layout,
-        state,
-        installed,
-        file,
-        given_ui,
-        given_mcp,
-        crate::attach::runs(state),
-        service,
-    )
+/// Where a running center says it is reached, as it answers its owner:
+/// what it was started with, not the defaults or what `status` was given
+/// (#213, L2-7: a center run by hand showed the installed one's web UI).
+#[derive(Debug, Clone, Default)]
+struct Live {
+    /// The address pairing links name (`/api/overview`'s `center.url`).
+    public_url: String,
+    /// The web UI's address, or `off` (`/api/center`'s `started.ui`).
+    ui: String,
+    /// The harnesses' URL, or how they reach it (`stdio`, `off`).
+    mcp: String,
 }
 
-/// [`status_page`] with `runs` ([`crate::attach::runs`]) and the
-/// installed `service`'s state given.
+/// [`Live`] of the center running on `state`, asked over its owner channel;
+/// None where it does not answer this account.
+fn live_addresses(state: &Path, installed: bool) -> Option<Live> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    rt.block_on(async {
+        let ask = |path: &'static str| {
+            crate::owner_calls::call(state, installed, "GET", path, serde_json::json!({}))
+        };
+        let overview = ask("/api/overview").await.ok()?;
+        let center = ask("/api/center").await.ok()?;
+        let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+        Some(Live {
+            public_url: s(&overview["center"]["url"]),
+            ui: s(&center["started"]["ui"]),
+            mcp: match s(&overview["mcp"]["url"]) {
+                url if url.is_empty() => s(&overview["mcp"]["mode"]),
+                url => url,
+            },
+        })
+    })
+}
+
+/// A warning for a public URL whose host other machines may not find: a
+/// bare host name, without a domain, that is no address (#213, L1-2: the
+/// default `https://<host name>:7443` made links the Windows VM could not
+/// follow).
+fn bare_host_warning(public_url: &str) -> Option<String> {
+    let host = public_url
+        .split_once("://")
+        .map_or(public_url, |(_, rest)| rest)
+        .split(['/', '?'])
+        .next()?;
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+    let bare = !host.is_empty()
+        && !host.contains(['.', '[', ':'])
+        && !host.eq_ignore_ascii_case("localhost");
+    bare.then(|| {
+        format!(
+            "Pairing links name {public_url}: other machines may not find the bare name {host}. `set public-url https://<address>:<port>` names an address they reach."
+        )
+    })
+}
+
+/// The page of [`status`], with `file` the installed center's settings
+/// where they could be read, `runs` ([`crate::attach::runs`]), the
+/// installed `service`'s state, and what the running center says of its
+/// addresses (`live`), where it answered.
 #[allow(clippy::too_many_arguments)]
 fn status_page_of(
     layout: &Layout,
@@ -590,6 +645,7 @@ fn status_page_of(
     given_mcp: &crate::config::McpMode,
     runs: Option<bool>,
     service: Option<ServiceState>,
+    live: Option<&Live>,
 ) -> Page {
     use crate::config::McpMode;
     let unreadable = runs.is_none() && crate::owner::not_yours(state);
@@ -625,9 +681,12 @@ fn status_page_of(
     // for a center a harness starts (no file) what this command is given.
     let at = |var: &str| file.and_then(|f| setting_in(f, var));
     let web = crate::config::address_url;
-    let ui = match installed {
-        true => at("NERVE_CENTER_UI").unwrap_or_else(|| crate::config::DEFAULT_UI.into()),
-        false => given_ui.to_string(),
+    // A running center says where it is: the file may have changed since
+    // it started, and one run by hand has no file.
+    let ui = match (live, installed) {
+        (Some(l), _) if !l.ui.is_empty() => l.ui.clone(),
+        (_, true) => at("NERVE_CENTER_UI").unwrap_or_else(|| crate::config::DEFAULT_UI.into()),
+        (_, false) => given_ui.to_string(),
     };
     p.row(
         "Web UI",
@@ -636,19 +695,36 @@ fn status_page_of(
             a => web(a),
         },
     );
+    let stdio = || "the one that starts it (stdio)".to_string();
     p.row(
         "Harnesses",
-        match (installed, at("NERVE_CENTER_MCP").as_deref()) {
-            (true, None | Some("http")) => format!("{}/mcp", web(crate::config::MCP_HTTP)),
-            (true, Some("off")) => "off".into(),
-            (true, Some(a)) => format!("{}/mcp", web(a)),
-            (false, _) => match given_mcp {
-                McpMode::Stdio => "the one that starts it (stdio)".into(),
+        match (live, installed, at("NERVE_CENTER_MCP").as_deref()) {
+            (Some(l), ..) if l.mcp == "stdio" => stdio(),
+            (Some(l), ..) if !l.mcp.is_empty() => l.mcp.clone(),
+            (_, true, None | Some("http")) => format!("{}/mcp", web(crate::config::MCP_HTTP)),
+            (_, true, Some("off")) => "off".into(),
+            (_, true, Some(a)) => format!("{}/mcp", web(a)),
+            (_, false, _) => match given_mcp {
+                McpMode::Stdio => stdio(),
                 McpMode::Off => "off".into(),
                 McpMode::Http(a) => format!("{}/mcp", web(a)),
             },
         },
     );
+    // Where the machines reach it: what pairing links name.
+    let public_url = match (live, installed, file) {
+        (Some(l), ..) if !l.public_url.is_empty() => Some(l.public_url.clone()),
+        (_, true, Some(f)) => setting_in(f, "NERVE_CENTER_PUBLIC_URL")
+            .or_else(|| default_of("NERVE_CENTER_PUBLIC_URL", f)),
+        (_, true, None) => default_of("NERVE_CENTER_PUBLIC_URL", ""),
+        _ => None,
+    };
+    if let Some(url) = &public_url {
+        p.row("Public URL", url.clone());
+        if let Some(w) = bare_host_warning(url) {
+            p.warn(w);
+        }
+    }
     let mut none_paired = false;
     p.row(
         "Machines",
@@ -672,7 +748,9 @@ fn status_page_of(
     );
     if !installed {
         p.row("Folder", state.display().to_string());
-        p.note("The web UI and harnesses are as --ui and --mcp give them to this command.");
+        if live.is_none() {
+            p.note("The web UI and harnesses are as --ui and --mcp give them to this command.");
+        }
     }
     if installed && file.is_none() {
         p.note(format!(
@@ -1011,6 +1089,7 @@ pub(crate) fn service_page(layout: &Layout, file: &str, runs: bool) -> Page {
             boot: None,
             older: false,
         }),
+        None,
     )
 }
 
@@ -1157,6 +1236,7 @@ pub(crate) fn done_page(
             boot: started.then_some(true),
             older: false,
         }),
+        None,
     );
     if let Some(v) = version {
         p.set_version(v);
@@ -3220,7 +3300,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             older: false,
         });
         let runs = crate::attach::runs(state);
-        status_page_of(l, state, installed, file, ui, mcp, runs, service).render(Style::PLAIN)
+        status_page_of(l, state, installed, file, ui, mcp, runs, service, None).render(Style::PLAIN)
     }
 
     /// `status` by another account than the center's: its folder says
@@ -3249,6 +3329,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
             "127.0.0.1:7480",
             &McpMode::Stdio,
             crate::attach::runs(&state),
+            None,
             None,
         )
         .render(Style::PLAIN);
@@ -3292,6 +3373,81 @@ Next  Change one:  sudo nerve-center set <name> <value>
                 "{out}"
             );
         }
+    }
+
+    /// A public URL with a bare host name is warned of: other machines may
+    /// not find it, and the default is the machine's name (#213, L1-2).
+    #[test]
+    fn a_public_url_with_a_bare_host_name_is_warned_of() {
+        let w = bare_host_warning("https://lxctest:7443").unwrap();
+        assert!(w.contains("bare name lxctest"), "{w}");
+        assert!(w.contains("set public-url"), "{w}");
+        for fine in [
+            "https://10.10.30.131:7443",
+            "https://lab.example.org:7443",
+            "https://[fd00::1]:7443",
+            "https://localhost:7443",
+        ] {
+            assert_eq!(bare_host_warning(fine), None, "{fine}");
+        }
+    }
+
+    /// A running center says where it is, not the defaults or what the
+    /// command was given: one run by hand showed the installed center's web
+    /// UI (#213, L2-7).
+    #[test]
+    fn the_status_of_a_running_center_is_where_it_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let state = d.path().join("c2");
+        let live = Live {
+            public_url: "https://127.0.0.1:7643".into(),
+            ui: "127.0.0.1:7680".into(),
+            mcp: "http://127.0.0.1:7681/mcp".into(),
+        };
+        let text = status_page_of(
+            &l,
+            &state,
+            false,
+            None,
+            "127.0.0.1:7480",
+            &McpMode::Stdio,
+            Some(true),
+            None,
+            Some(&live),
+        )
+        .render(Style::PLAIN);
+        for want in [
+            "  Web UI       http://127.0.0.1:7680\n",
+            "  Harnesses    http://127.0.0.1:7681/mcp\n",
+            "  Public URL   https://127.0.0.1:7643\n",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        assert!(!text.contains("7480"), "{text}");
+        assert!(!text.contains("as --ui and --mcp give them"), "{text}");
+        let stdio = Live {
+            mcp: "stdio".into(),
+            ui: "off".into(),
+            ..live
+        };
+        let text = status_page_of(
+            &l,
+            &state,
+            false,
+            None,
+            "127.0.0.1:7480",
+            &McpMode::Off,
+            Some(true),
+            None,
+            Some(&stdio),
+        )
+        .render(Style::PLAIN);
+        assert!(
+            text.contains("Harnesses    the one that starts it (stdio)\n"),
+            "{text}"
+        );
+        assert!(text.contains("Web UI       off\n"), "{text}");
     }
 
     /// `status` says whether a center runs from its lock, which every
@@ -3386,7 +3542,16 @@ Next  Change one:  sudo nerve-center set <name> <value>
         );
         let on = done_page(&l, "", None, Some("1.2.0"), true).render(Style::PLAIN);
         assert!(on.starts_with("Nerve center 1.2.0 · "), "{on}");
-        assert!(on.contains("  Web UI      http://127.0.0.1:7480\n"), "{on}");
+        assert!(
+            on.contains("  Web UI       http://127.0.0.1:7480\n"),
+            "{on}"
+        );
+        // Where the machines reach it, which pairing links name (#213, L1-2).
+        let host = crate::center::host_name();
+        assert!(
+            on.contains(&format!("  Public URL   https://{host}:7443\n")),
+            "{on}"
+        );
         assert!(on.contains("/mcp\n"), "{on}");
         assert!(!on.contains("Owner token   "), "{on}");
         assert!(
@@ -3510,13 +3675,20 @@ Next  Change one:  sudo nerve-center set <name> <value>
         // An address on all of them is reached by the machine's name.
         let host = crate::center::host_name();
         assert!(
-            text.contains(&format!("  Web UI      https://{host}:7480\n")),
+            text.contains(&format!("  Web UI       https://{host}:7480\n")),
             "{text}"
         );
         assert!(
-            text.contains(&format!("  Harnesses   https://{host}:7481/mcp\n")),
+            text.contains(&format!("  Harnesses    https://{host}:7481/mcp\n")),
             "{text}"
         );
+        let file = "NERVE_CENTER_PUBLIC_URL=https://10.0.0.5:7443\n";
+        let text = status_text(&l, &state, true, Some(file), "", &McpMode::Stdio);
+        assert!(
+            text.contains("  Public URL   https://10.0.0.5:7443\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Warning"), "{text}");
         assert!(text.contains(" · running as a service\n"), "{text}");
         assert!(
             has_next(&text, "Owner token: sudo nerve-center owner-token"),
@@ -3537,11 +3709,12 @@ Next  Change one:  sudo nerve-center set <name> <value>
                 boot: Some(true),
                 older: false,
             }),
+            None,
         )
         .render(Style::PLAIN);
         assert!(stopped.contains(" · stopped\n"), "{stopped}");
         assert!(
-            stopped.contains("  Service     inactive, starts with the machine\n"),
+            stopped.contains("  Service      inactive, starts with the machine\n"),
             "{stopped}"
         );
         assert!(
@@ -3564,6 +3737,7 @@ Next  Change one:  sudo nerve-center set <name> <value>
                 boot: Some(true),
                 older: true,
             }),
+            None,
         )
         .render(Style::PLAIN);
         assert!(older.contains("older than the installed one"), "{older}");

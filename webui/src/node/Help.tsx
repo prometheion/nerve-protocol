@@ -6,6 +6,8 @@ import { api, guide } from "../api";
 import { usePoll } from "../frame";
 import { CommandReference, Keys, TaskMap, type NodeHelp, type Task } from "../shared/help";
 import { Icon, LRow, LinkBtn, ListCard, Loading, PageHead, Split } from "../ui";
+import { useNode } from "./App";
+import { onWindows } from "./types";
 
 const TASKS: [string, Task[]][] = [
   [
@@ -54,13 +56,24 @@ const SECTIONS: [string, string, string][] = [
 export function HelpPage() {
   // The command list does not change while the node runs: asked once.
   const help = usePoll(() => api<{ node: NodeHelp }>("GET", "/api/help"), [], 0);
+  const windows = onWindows(useNode().o);
   const [sec, setSec] = useState("tasks");
   const [open, setOpen] = useState(false);
   const title = SECTIONS.find((s) => s[0] === sec)!;
   let body: ReactNode = <Loading />;
   if (sec === "tasks") body = <TaskMap groups={TASKS} />;
   else if (sec === "keys") body = <Keys />;
-  else if (help.data) body = <CommandReference h={help.data.node} lead="Every action here runs one of these nerve-node commands, with the same checks and audit records." />;
+  else if (help.data)
+    body = (
+      <CommandReference
+        h={help.data.node}
+        lead={
+          windows
+            ? "Every action here runs one of these commands of the node, with the same checks and audit records. On Windows nothing is typed: the Nerve app does them."
+            : "Every action here runs one of these nerve-node commands, with the same checks and audit records."
+        }
+      />
+    );
   return (
     <>
       <PageHead icon="help" title="Help">

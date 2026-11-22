@@ -240,7 +240,10 @@ nerve-node provider add desk /usr/lib/nerve-desktop/nerve-desktop
 
 The node checks that the program that attaches under that name runs that very
 file. Allowing a name again replaces its program. A center cannot change the
-list. To let a program go:
+list. For a script the running file is its interpreter (`/usr/bin/python3.12`),
+and allowing that would let every script it runs attach under the name: give
+the provider a copy of the interpreter of its own, or build it as a program.
+To let a program go:
 
 ```sh
 nerve-node provider rm desk

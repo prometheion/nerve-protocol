@@ -13,7 +13,9 @@ nerve-node restore ~/nerve-node.bak
 ```
 
 The owner of the installed node needs no `sudo`. There a restore stops the
-node, restores and starts it again; stop a node you run by hand first. On
+node, restores and starts it again. As root (with root as the owner too),
+stop it first with `nerve-node service stop` and start it after with
+`nerve-node service start`; stop a node you run by hand first. On
 Windows, **Settings › Backup** does both. The backup holds `node.toml` with its
 pairings, modes, folders and rules, and the keys in files. Not the audit
 log, the log or the sudo password: a restored node has sudo off.
@@ -61,7 +63,8 @@ every machine paired with it would have to pair again.
 **A node to another machine.**
 
 1. On the old machine, `nerve-node backup file`, then stop the node.
-2. Install the node on the new one, and `nerve-node restore file`.
+2. Install the node on the new one, and `nerve-node restore file`. Where
+   the new machine has no system keyring, add `--secret-storage file`.
 3. Check what belongs to the machine: the folders, the paths of providers
    and of your own capabilities, the relay's address. `nerve-node status`
    shows them.

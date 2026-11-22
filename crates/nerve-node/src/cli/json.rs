@@ -294,9 +294,21 @@ fn keyring_here(paths: &NodePaths) -> Value {
 pub(super) async fn status(paths: &NodePaths) -> Result<Value, String> {
     // The installed service: whether it is there, runs, starts with the
     // machine, and its program's version.
-    let service = service_status(&Layout::system()).unwrap_or(Value::Null);
+    let layout = Layout::system();
+    let service = match service_is_of(paths, &layout.paths, layout.installed()) {
+        true => service_status(&layout).unwrap_or(Value::Null),
+        false => Value::Null,
+    };
     let closed = crate::service::check_access(paths).is_err();
     with_service(node_status(paths).await, service, closed)
+}
+
+/// Whether the installed service is what `status` of the node at `paths`
+/// says: where it is that node's (its folders `installed_paths`), or where
+/// none is installed, which it says. A node run by hand on folders of its
+/// own is not the service (#213, L2-8: it showed the installed one's).
+fn service_is_of(paths: &NodePaths, installed_paths: &NodePaths, installed: bool) -> bool {
+    !installed || paths == installed_paths
 }
 
 /// The node's status with the installed `service` in it. A stopped
@@ -495,6 +507,17 @@ async fn relay(paths: &NodePaths) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node run by hand on folders of its own does not show the installed
+    /// service as its own (#213, L2-8).
+    #[test]
+    fn a_node_by_hand_does_not_show_the_installed_service() {
+        let mine = NodePaths::new("/home/u/nc", "/home/u/ns");
+        let installed = NodePaths::new("/etc/nerve", "/var/lib/nerve/state");
+        assert!(!service_is_of(&mine, &installed, true));
+        assert!(service_is_of(&installed, &installed, true));
+        assert!(service_is_of(&mine, &installed, false));
+    }
 
     /// A command runs with `--json` within [`changed`]'s scope, and only
     /// there does [`active`] say so.

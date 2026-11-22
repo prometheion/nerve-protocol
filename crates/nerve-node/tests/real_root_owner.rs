@@ -225,10 +225,12 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let (ok, said) = install_at_a_terminal(&exe, "", "y\n");
     assert!(ok, "{said}");
     assert!(said.contains(question), "{said}");
+    // In the words of `status`, not in a second wording (#213, L3-8).
     assert!(
-        said.contains("Root is the owner of the node, as you confirmed"),
+        said.contains("Root is the owner: commands of user mode"),
         "{said}"
     );
+    assert!(!said.contains("as you confirmed"), "{said}");
     assert_eq!(owner_in_unit().as_deref(), Some("root"));
     assert!(!Path::new("/etc/polkit-1/rules.d/50-nerve-node.rules").exists());
     assert!(!Path::new("/usr/local/lib/nerve-node/service-control").exists());
@@ -241,6 +243,31 @@ async fn root_is_the_owner_only_when_it_says_so() {
         "{text}"
     );
     assert!(text.contains("user mode · as root"), "{text}");
+    // A passphrase file private to root is read as root, before the
+    // command becomes the node's user (#213, L3-3: "Permission denied").
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let pass = Path::new("/root/nerve-test-pass");
+        let bak = Path::new("/root/nerve-test.bak");
+        let _ = std::fs::remove_file(bak);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(pass)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"correct horse battery staple\n"))
+            .unwrap();
+        let (ok, said) = sh(Command::new(BIN)
+            .args(["backup"])
+            .arg(bak)
+            .arg("--passphrase-file")
+            .arg(pass));
+        let _ = std::fs::remove_file(pass);
+        let _ = std::fs::remove_file(bak);
+        assert!(ok, "{said}");
+        assert!(said.contains("backed up to"), "{said}");
+    }
     // The settings grant gives a center root here, and says so.
     let warning = "Root is the owner of this node, so";
     let (ok, said) = sh(Command::new(BIN).args(["center", "settings", "on"]));

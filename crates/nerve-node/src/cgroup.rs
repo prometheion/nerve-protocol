@@ -89,6 +89,14 @@ pub fn memory_reason(mb: u64) -> String {
     format!("the command went past its memory limit of {mb} MiB and was killed")
 }
 
+/// The text of a command that reached its limit of `n` processes, in its
+/// result: the system refused it more, which the command alone says in its
+/// own words ("Resource temporarily unavailable", on Windows "not enough
+/// quota") (#213, L3-6, W3-6).
+pub fn processes_reason(n: u32) -> String {
+    format!("the command reached its limit of {n} processes: starting more was refused")
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::{Cgroups, CommandCgroup, join};
 
@@ -333,6 +341,7 @@ mod linux {
                 procs: None,
                 memory_mb: limits.memory_mb,
                 memory: self.memory,
+                processes: self.pids.then_some(limits.processes),
             };
             let set = |file: &str, value: String| {
                 put(&cg.dir.join(file), &value)
@@ -374,9 +383,25 @@ mod linux {
         procs: Option<File>,
         memory_mb: u64,
         memory: bool,
+        /// The processes it holds the command to, where it holds them.
+        processes: Option<u32>,
     }
 
     impl CommandCgroup {
+        /// The limit of processes the command reached, if it did: the
+        /// kernel counts each start it refused for it in `pids.events`.
+        pub fn processes_hit(&self) -> Option<u32> {
+            let n = self.processes?;
+            let t = std::fs::read_to_string(self.dir.join("pids.events")).ok()?;
+            let refused = t
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .find(|(k, _)| *k == "max")
+                .and_then(|(_, n)| n.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            (refused > 0).then_some(n)
+        }
+
         /// What the forked child hands [`join`].
         pub fn procs_fd(&self) -> RawFd {
             self.procs.as_ref().map_or(-1, |f| f.as_raw_fd())
@@ -855,6 +880,12 @@ mod linux {
             events("max 9\noom 2\noom_kill 0\noom_group_kill 1\n");
             assert!(cg.out_of_memory());
             assert_eq!(cg.memory_mb(), 16);
+            // A start the process limit refused is counted (#213, L3-6).
+            assert_eq!(cg.processes_hit(), None);
+            std::fs::write(d.join("pids.events"), "max 0\n").unwrap();
+            assert_eq!(cg.processes_hit(), None);
+            std::fs::write(d.join("pids.events"), "max 3\n").unwrap();
+            assert_eq!(cg.processes_hit(), Some(32));
         }
 
         /// Without `cgroup.kill` (Linux before 5.14) each process left is

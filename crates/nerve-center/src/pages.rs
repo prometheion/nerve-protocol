@@ -372,12 +372,14 @@ fn audit_rows(all: &[Value], last: usize) -> Vec<Vec<String>> {
                 nerve_service::out::time(e["ts"].as_u64().unwrap_or(0)),
                 s(&e["node"]).to_string(),
                 format!("{}.{}", s(&e["cap"]), s(&e["action"])),
-                match refused(e) {
-                    true => match s(&e["by"]) {
-                        "" => "refused".to_string(),
-                        by => format!("refused by {by}"),
-                    },
-                    false => "allowed".to_string(),
+                match (refused(e), s(&e["by"])) {
+                    (true, "") => "refused".to_string(),
+                    (true, by) => format!("refused by {by}"),
+                    // The checker let it on to the machine, whose own
+                    // decision is the next line: not a second decision
+                    // (#213, L4-6). Any other `by` is a node's own word.
+                    (false, "action checker") => "passed the action checker".to_string(),
+                    (false, _) => "allowed".to_string(),
                 },
                 s(&e["target"]).to_string(),
             ]
@@ -470,8 +472,15 @@ pub(crate) async fn audit(
 
 // ---- key ----
 
-/// `key rotate` and `key finish`.
-pub(crate) async fn key(ask: &Ask<'_>, cmd: KeyCmd) -> Result<Page, String> {
+/// `key rotate` and `key finish`; `command` names an owner's command for
+/// this center as it is typed here (crate::owner_calls::commands): a center
+/// run by hand needs its folder, the installed one sudo (#213, L2-6: a bare
+/// `key finish` ended the installed center's grace).
+pub(crate) async fn key(
+    ask: &Ask<'_>,
+    cmd: KeyCmd,
+    command: &dyn Fn(&str) -> String,
+) -> Result<Page, String> {
     match cmd {
         KeyCmd::Rotate => {
             let v = ask.post("/api/center/key/rotate", json!({})).await?;
@@ -480,7 +489,7 @@ pub(crate) async fn key(ask: &Ask<'_>, cmd: KeyCmd) -> Result<Page, String> {
                 p.row("Pin", pin);
             }
             p.note("The paired machines take the new key while the old one still works. The pin is shown only now.");
-            p.next("End the old key's grace", "nerve-center key finish");
+            p.next("End the old key's grace", command("key finish"));
             Ok(p)
         }
         KeyCmd::Finish => {
@@ -543,10 +552,19 @@ pub(crate) async fn caps(ask: &Ask<'_>, name: &str, cmd: Option<&CapsCmd>) -> Re
             effect,
             command,
             summary,
+            params,
+            result,
+            timeout,
         }) => {
+            let params = match params.as_deref() {
+                Some("-") => from_stdin(true)?,
+                other => other.unwrap_or_default().to_string(),
+            };
+            let timeout = timeout.map(|t| t.to_string()).unwrap_or_default();
             let form = json!({"name": cap.trim(), "summary": summary.trim(), "effect": effect,
-                              "command": command.trim(), "params": "", "result": "",
-                              "timeout": "", "platform": "any"});
+                              "command": command.trim(), "params": params,
+                              "result": result.as_deref().unwrap_or_default(),
+                              "timeout": timeout, "platform": "any"});
             ask.post(
                 "/api/caps/save",
                 json!({"id": id, "form": form, "adding": true}),
@@ -845,6 +863,20 @@ async fn change_config(ask: &Ask<'_>, cmd: &CheckerCmd) -> Result<String, String
     Ok(format!("{said}; it counts from the next call"))
 }
 
+/// How far the install `install` (the page's `install`) has got: the
+/// share of the bytes of llama.cpp and the model it has.
+fn install_progress(install: &Value) -> String {
+    let n = |part: &str, k: &str| install[part][k].as_u64().unwrap_or(0);
+    let (done, total) = (
+        n("llama", "done") + n("model", "done"),
+        n("llama", "total") + n("model", "total"),
+    );
+    match total {
+        0 => s(&install["phase"]).to_string(),
+        t => format!("{} %", done * 100 / t),
+    }
+}
+
 /// What `checker` shows: the switches, the blocklist and the rules that skip
 /// the model numbered for the commands, the model, and the machines' own
 /// switches.
@@ -874,6 +906,11 @@ fn checker_page(v: &Value, overview: &Value, said: Option<String>) -> Page {
     }
     p.row("Taint marking", word(c["taint_on"] != false));
     let m = &c["model"];
+    let install = &v["install"];
+    let installing = matches!(
+        s(&install["phase"]),
+        "downloading" | "unpacking" | "verifying"
+    );
     let model = match s(&m["source"]) {
         "endpoint" => format!("endpoint {}", s(&m["endpoint_url"])),
         _ => format!(
@@ -884,14 +921,42 @@ fn checker_page(v: &Value, overview: &Value, said: Option<String>) -> Page {
             } else {
                 ""
             },
-            if v["installed"] == true {
-                ""
-            } else {
-                " (not installed)"
+            match (v["installed"] == true, installing) {
+                (true, _) => String::new(),
+                (false, true) => format!(" (installing, {})", install_progress(install)),
+                (false, false) => " (not installed)".to_string(),
             }
         ),
     };
     p.row("Model", model);
+    // On but not running, as the page's red banner says (#213, L4-5: the
+    // terminal turned it on without a word).
+    let runs = v["local"]["phase"] == "ready";
+    if v["model_wanted"] == true && s(&m["source"]) != "endpoint" && !runs {
+        let why = match (v["installed"] == true, installing) {
+            (_, true) => "It runs once the install is done.".to_string(),
+            (false, false) => {
+                "No model is installed: `nerve-center checker model install` installs one."
+                    .to_string()
+            }
+            (true, false) => match s(&v["local"]["message"]) {
+                "" => "It is starting; `nerve-center log --problems` says why if it does not."
+                    .to_string(),
+                why => format!(
+                    "{}.",
+                    nerve_service::out::capital(why.trim_end_matches('.'))
+                ),
+            },
+        };
+        p.warn(match m["fail_closed"] != false {
+            true => format!(
+                "The decision model is on but does not run: every call it checks is refused. {why}"
+            ),
+            false => format!(
+                "The decision model is on but does not run, and on error is allow: its calls pass unjudged. {why}"
+            ),
+        });
+    }
     p.row(
         "Model tuning",
         format!(
@@ -973,6 +1038,87 @@ fn checker_page(v: &Value, overview: &Value, said: Option<String>) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call the action checker let through is two lines, the checker's
+    /// and the machine's, and they say which is which (#213, L4-6).
+    #[test]
+    fn the_audit_says_which_line_is_the_checker_s() {
+        let entries = [
+            json!({"ts": 1, "node": "lab", "cap": "exec", "action": "run", "target": "ls",
+                   "decision": "allowed", "by": "action checker"}),
+            json!({"ts": 1, "node": "lab", "cap": "exec", "action": "run", "target": "ls",
+                   "decision": "allowed"}),
+            json!({"ts": 2, "node": "lab", "cap": "exec", "action": "run", "target": "rm -rf /",
+                   "decision": "forbidden", "by": "action checker"}),
+            // A node's own `by` on its allowed call is no layer of the
+            // center's.
+            json!({"ts": 3, "node": "lab", "cap": "exec", "action": "run", "target": "ls",
+                   "decision": "allowed", "by": "policy"}),
+        ];
+        let said: Vec<String> = audit_rows(&entries, 10)
+            .into_iter()
+            .map(|r| r[4].clone())
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "allowed",
+                "refused by action checker",
+                "allowed",
+                "passed the action checker"
+            ]
+        );
+    }
+
+    /// `checker` says, as the page's banner does, that a model switched on
+    /// but not running refuses every call it checks, and why; it shows an
+    /// install that runs (#213, L4-5).
+    #[test]
+    fn the_checker_page_says_a_model_that_is_on_does_not_run() {
+        let page = |v: Value| {
+            checker_page(&v, &json!({"nodes": []}), None).render(nerve_service::out::Style::PLAIN)
+        };
+        let config = json!({"model_on": true, "model": {"source": "local", "local_model": "d1-2b",
+                            "fail_closed": true}});
+        let installing = page(
+            json!({"config": config, "model_wanted": true, "installed": false,
+            "install": {"phase": "downloading", "llama": {"done": 30, "total": 30},
+                        "model": {"done": 0, "total": 70}}}),
+        );
+        assert!(
+            installing.contains("local d1-2b (installing, 30 %)\n"),
+            "{installing}"
+        );
+        assert!(
+            installing
+                .contains("every call it checks is refused. It runs once the install is done."),
+            "{installing}"
+        );
+        let none = page(
+            json!({"config": config, "model_wanted": true, "installed": false,
+                               "install": {"phase": "idle"}}),
+        );
+        assert!(none.contains("local d1-2b (not installed)\n"), "{none}");
+        assert!(none.contains("checker model install"), "{none}");
+        let failed = page(
+            json!({"config": config, "model_wanted": true, "installed": true,
+            "local": {"phase": "failed", "message": "cannot start /x/llama-server: Permission denied"}}),
+        );
+        assert!(
+            failed.contains("refused. Cannot start /x/llama-server: Permission denied."),
+            "{failed}"
+        );
+        let ready = page(
+            json!({"config": config, "model_wanted": true, "installed": true,
+                                "local": {"phase": "ready"}}),
+        );
+        assert!(!ready.contains("does not run"), "{ready}");
+        let off = page(
+            json!({"config": {"model": {"source": "local"}}, "model_wanted": false,
+                              "installed": false}),
+        );
+        assert!(!off.contains("does not run"), "{off}");
+    }
 
     /// `nodes settings <name>` prints a file that `--from` takes back as it
     /// is, with the version it was read at; a save is over that version, not

@@ -6,6 +6,18 @@ use nerve_transport::sync::lock;
 
 use super::*;
 
+/// What happens to the calls the decision model checks while it does not
+/// run, by its `fail_closed` (on error: refuse or allow), as the checker
+/// page says it: the log is where that page's banner sends the owner.
+fn meanwhile(fail_closed: bool) -> &'static str {
+    match fail_closed {
+        true => "While it does not run, every call it checks is refused.",
+        false => {
+            "While it does not run, its calls pass unjudged, allowed and logged (on error: allow)."
+        }
+    }
+}
+
 /// Why a Save of the Action checker page was refused: the config changed
 /// since the page loaded it.
 pub const CHECKER_STALE: &str = "the action checker's settings changed since this page loaded them (another tab, or an allow rule from the Audit page); reload the page and make the change again";
@@ -89,8 +101,11 @@ impl Center {
         // Held for the whole run, so an install cannot take the files between
         // the check below and the start.
         let held = lock(&self.files_held);
+        self.local_fail_closed
+            .store(cfg.model.fail_closed, Ordering::Relaxed);
         let installed = checker::install::installed(&self.dir, cfg.model.local_model);
-        let want = cfg.model_wanted() && cfg.model.source == ModelSource::Local && installed;
+        let wanted = cfg.model_wanted() && cfg.model.source == ModelSource::Local;
+        let want = wanted && installed;
         // An install is swapping the files (or Remove deleting them): start
         // nothing from them now. The install rebuilds when it is done, and
         // the empty signature makes that start the server.
@@ -102,6 +117,8 @@ impl Center {
                 "gpu={}|model={:?}",
                 cfg.model.local_gpu, cfg.model.local_model
             )
+        } else if wanted {
+            "not installed".to_string()
         } else {
             String::new()
         };
@@ -128,6 +145,29 @@ impl Center {
                         checker::install::on_gpu(cfg.model.local_gpu, checker::install::cpu_only()),
                         cfg.model.timeout_ms,
                         checker::install::model_pin(cfg.model.local_model),
+                        {
+                            // A problem of the server's says what happens to
+                            // the calls meanwhile, by the setting as it is
+                            // when it is said.
+                            let log = self.log.clone();
+                            let closed = self.local_fail_closed.clone();
+                            Arc::new(move |level, text: String| {
+                                let text = match level {
+                                    Level::Warn
+                                        if text.contains(checker::server::LOST_CALL_NOTE) =>
+                                    {
+                                        text
+                                    }
+                                    Level::Warn => format!(
+                                        "{}. {}",
+                                        text.trim_end_matches('.'),
+                                        meanwhile(closed.load(Ordering::Relaxed))
+                                    ),
+                                    _ => text,
+                                };
+                                log.record(level, None, &text)
+                            })
+                        },
                     )
                 }) {
                 Ok(srv) => {
@@ -167,6 +207,21 @@ impl Center {
                     &format!("the action checker cannot start its local model: {e}"),
                 ),
             }
+        } else if wanted {
+            // On with nothing to run: the page's banner says so, and sends
+            // the owner to the log (#213, L4-2).
+            self.log.record(
+                Level::Warn,
+                None,
+                &format!(
+                    "the action checker's decision model is on, but no local model is installed ({}). {}",
+                    match self.checker_installing() {
+                        true => "it runs once the install is done",
+                        false => "install it on the Action checker page or with `nerve-center checker model install`",
+                    },
+                    meanwhile(cfg.model.fail_closed)
+                ),
+            );
         }
         *lock(&self.local_sig) = sig;
     }
@@ -257,6 +312,16 @@ impl Center {
     /// The one-click install's current state.
     pub fn checker_install_status(&self) -> checker::install::Status {
         lock(&self.install).clone()
+    }
+
+    /// Whether the one-click install runs now.
+    pub fn checker_installing(&self) -> bool {
+        matches!(
+            lock(&self.install).phase,
+            checker::install::Phase::Downloading
+                | checker::install::Phase::Unpacking
+                | checker::install::Phase::Verifying
+        )
     }
 
     /// Starts the one-click install of llama.cpp and the chosen model on the
@@ -650,7 +715,7 @@ impl Center {
                 "the action checker {verb} {}.{} by its {} {} ({detail})",
                 route.cap,
                 route.action,
-                layer.as_str(),
+                layer.words(),
                 match scope {
                     Scope::Global => "for every node",
                     Scope::Node => "for this node",
@@ -883,6 +948,35 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
 /// Why no audit button puts a command on a machine's sudo list.
 pub const SUDO_LIST_OWNER_ONLY: &str =
     "only the machine's owner puts a command on the sudo list, on the machine itself";
+
+/// Why an allow rule of a machine does not let the sudo command `command`
+/// run, and what its owner does instead, for a machine of `platform`; None
+/// for a command that is not a sudo one. A sudo command runs only when the
+/// machine's sudo list names it, which its owner alone adds to, and an
+/// allow rule never covers it: `audit allow` wrote one and said it was
+/// added (#213, L2-2). The line is the one the web UI's Audit row shows
+/// (webui/src/center/lines.ts `sudoRuleLine`): inside single quotes a word
+/// reads the same in POSIX shells and in fish unless it holds a quote, a
+/// backslash or a control character, and a format mark (zero-width,
+/// bidirectional) would show another command than the line puts on the
+/// list.
+pub fn sudo_allow_refusal(platform: &str, command: &str) -> Option<String> {
+    nerve_policy::decide::sudo_command(command)?;
+    let lead = "an allow rule does not let a sudo command run: only the machine's owner puts it on the sudo list";
+    Some(if platform == "windows" {
+        format!("{lead}, in the Nerve app on that machine, Permissions, Sudo")
+    } else if command.contains(|c: char| c == '\'' || c == '\\' || nerve_policy::config::unseen(c))
+    {
+        format!(
+            "{lead}, on that machine: nerve-node rule add allow --action exec.run --exact 'COMMAND', the command quoted for the shell"
+        )
+    } else {
+        format!(
+            "{lead}, on that machine (with --center <name> where it has several centers): nerve-node rule add allow --action exec.run --exact '{}'",
+            command.trim()
+        )
+    })
+}
 
 /// The list and the rule an audit button means: the entry's `cap`, `action`
 /// and `target`, the list (`allow` or `deny`; never `sudo`),
@@ -1760,6 +1854,95 @@ mod tests {
         c
     }
 
+    /// The log messages of `c` that hold `text`.
+    #[cfg(unix)]
+    fn logged(c: &Center, text: &str) -> Vec<String> {
+        let v = c.log_json(&nerve_transport::log::Query {
+            limit: 200,
+            ..Default::default()
+        });
+        v["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["msg"].as_str())
+            .filter(|m| m.contains(text))
+            .map(String::from)
+            .collect()
+    }
+
+    /// The model switched on with none installed says so in the log, once,
+    /// where the page's banner sends the owner (#213, L4-2); a model that
+    /// ended says it there too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_log_says_why_the_decision_model_does_not_run() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = open(dir.path(), None);
+            c.update(|s| {
+                s.checker.model_on = true;
+                s.checker.model.source = ModelSource::Local;
+            });
+            c.rebuild_checker();
+            c.rebuild_checker();
+            let said = logged(&c, "no local model is installed");
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert!(said[0].contains("checker model install"), "{said:?}");
+            assert!(
+                said[0].ends_with("While it does not run, every call it checks is refused."),
+                "{said:?}"
+            );
+            install_fake_build(dir.path());
+            c.rebuild_checker();
+            until("the model to be ready", || local_ready(&c)).await;
+            // On error allow, set while it runs: the calls pass meanwhile,
+            // and the log says so (#213, review).
+            c.update(|s| s.checker.model.fail_closed = false);
+            c.rebuild_checker();
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            let killed = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status()
+                .unwrap();
+            assert!(killed.success());
+            until("the log to say it ended", || {
+                !logged(&c, "the action checker's local model ended").is_empty()
+            })
+            .await;
+            let said = logged(&c, "the action checker's local model ended");
+            assert!(
+                said[0].contains("; it starts again.")
+                    && said[0].ends_with("While it does not run, its calls pass unjudged, allowed and logged (on error: allow)."),
+                "{said:?}"
+            );
+        })
+        .await
+        .expect("the test did not finish within 60 s");
+    }
+
+    /// With on error allow, the log does not say the calls are refused
+    /// while no local model is installed: they pass unjudged (#213,
+    /// review).
+    #[cfg(unix)]
+    #[test]
+    fn the_log_says_the_calls_pass_where_on_error_is_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.checker.model_on = true;
+            s.checker.model.source = ModelSource::Local;
+            s.checker.model.fail_closed = false;
+        });
+        c.rebuild_checker();
+        let said = logged(&c, "no local model is installed");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(!said[0].contains("refused"), "{said:?}");
+        assert!(said[0].contains("its calls pass unjudged"), "{said:?}");
+    }
+
     /// A local model that ended on a call keeps its endpoint while it starts
     /// again, so the client refuses the calls of that window; one that is
     /// merely down has none, and allow-and-log applies (review T2 of #178).
@@ -1787,6 +1970,41 @@ mod tests {
             assert!(c.resolved_endpoint(&checker).is_some());
             until("the model to be ready again", || local_ready(&c)).await;
             assert!(!srv.died_on_call());
+        })
+        .await
+        .expect("the test did not finish within 60 s");
+    }
+
+    /// With on error allow, a model that ended on a call says its restart
+    /// window refuses calls, not that they pass (#213, review round 2).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_log_of_a_model_that_ended_on_a_call_says_the_calls_are_refused() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = center_with_a_running_model(dir.path()).await;
+            c.update(|s| s.checker.model.fail_closed = false);
+            c.rebuild_checker();
+            until("the model to be ready", || local_ready(&c)).await;
+            let srv = c.local_model.lock().unwrap().clone().unwrap();
+            srv.endpoint().budget.unwrap().die_on_call();
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            assert!(
+                std::process::Command::new("kill")
+                    .args(["-9", pid.trim()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            until("the end to be logged", || {
+                !logged(&c, "local model ended").is_empty()
+            })
+            .await;
+            let said = logged(&c, "local model ended");
+            assert!(said[0].contains("are refused"), "{said:?}");
+            assert!(!said[0].contains("pass unjudged"), "{said:?}");
         })
         .await
         .expect("the test did not finish within 60 s");

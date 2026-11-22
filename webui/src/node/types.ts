@@ -24,6 +24,8 @@ export type CenterEntry = {
 
 export type Status = {
   locked: boolean;
+  /** The node's platform, `linux` or `windows`. */
+  os?: string;
   owner?: string | null;
   owner_full_rights?: boolean;
   installed?: boolean;
@@ -37,3 +39,8 @@ export type Status = {
 };
 
 export type Json = any;
+
+/** Whether the node runs on Windows, where there is no nerve-node to type
+ * (the Nerve app does what its commands do), no root and no systemctl
+ * (#213, W4-1: the pages gave Linux commands there). */
+export const onWindows = (o?: { os?: string } | null) => !!o && o.os === "windows";

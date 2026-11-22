@@ -152,8 +152,13 @@ impl Center {
             if s.nodes.contains_key(&node_id) || s.node_by_key(&req.public_key).is_some() {
                 return Err("this key is already paired".to_string());
             }
+            // With the way out: the name is the machine's own setting
+            // (#213, L2-10: nothing said what to do).
             if s.node_by_name(&req.name).is_some() {
-                return Err("another node already has this name".to_string());
+                return Err(format!(
+                    "another node already has this name ({}): give this machine another name (its setting node.name: `nerve-node config set node.name <name>`, on Windows in the Nerve app's Settings) and pair it again",
+                    req.name
+                ));
             }
             // `list` and `execute` find a node by its id or its name, so a
             // name is never a node's id: it would point at that node.
@@ -287,6 +292,29 @@ mod tests {
         assert_eq!(c.pairing_status(&code)["open"], true);
         assert_eq!(c.pair(body.as_bytes()).0, 200);
         assert_eq!(Store::load(dir.path()).unwrap().unwrap().nodes.len(), 1);
+    }
+
+    /// A second machine of the same name is refused with what to do about
+    /// it (#213, L2-10).
+    #[test]
+    fn a_name_that_is_taken_says_how_to_give_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let center = open(dir.path(), None);
+        let try_pair = |key: u8| {
+            let code = center.new_pairing()["code"].as_str().unwrap().to_string();
+            let body = json!({"code": code, "name": "lab-pc", "platform": "linux",
+                              "arch": "x86_64", "public_key": msg::hex(&[key; 32])});
+            center.pair(body.to_string().as_bytes())
+        };
+        assert_eq!(try_pair(1).0, 200);
+        let (status, v) = try_pair(2);
+        assert_ne!(status, 200);
+        let e = v.to_string();
+        assert!(
+            e.contains("another node already has this name (lab-pc)"),
+            "{e}"
+        );
+        assert!(e.contains("nerve-node config set node.name"), "{e}");
     }
 
     /// One code is good for one pairing, also when several nodes send it at

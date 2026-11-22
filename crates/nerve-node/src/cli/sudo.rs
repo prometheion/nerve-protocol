@@ -31,8 +31,8 @@ pub(super) async fn sudo_cmd(
         match c {
             SudoCmd::On => {
                 // Fail before asking for the password when nothing can take it.
-                match call(&sock, "status", json!({})).await {
-                    Ok(_) => {}
+                let status = match call(&sock, "status", json!({})).await {
+                    Ok(v) => v,
                     Err(e) if e == NOT_RUNNING => {
                         return Err(
                             "sudo on needs the running daemon: it keeps the password in memory only"
@@ -40,8 +40,20 @@ pub(super) async fn sudo_cmd(
                         );
                     }
                     Err(e) => return Err(e),
-                }
-                let password = read_password(out, "sudo password: ")?;
+                };
+                let password = match asks_password(&status) {
+                    true => read_password(out, "sudo password: ")?,
+                    // sudo asks root for no password, so none is asked: a
+                    // random one stands in, which `sudo -v` takes and no
+                    // output holds (#213, L2-5: any text was taken).
+                    false => {
+                        w(
+                            out,
+                            "root is the owner, and sudo asks root for no password: none is asked",
+                        );
+                        nerve_transport::keys::random_token(24)
+                    }
+                };
                 call(&sock, "sudo.on", json!({"password": password})).await?;
                 w(
                     out,
@@ -102,6 +114,13 @@ pub(super) async fn owner_password(paths: &NodePaths, out: &mut dyn Write) -> Re
     }
 }
 
+/// Whether `sudo on` asks a password, by the running node's `status`: not
+/// where root is the owner, whose password sudo never checks.
+#[cfg(unix)]
+fn asks_password(status: &Value) -> bool {
+    !crate::owner::is_root(status["owner"].as_str())
+}
+
 /// Whether sudo is on: the running node holds the password; one that does
 /// not run holds none.
 pub(super) async fn sudo_is_on(paths: &NodePaths) -> Result<bool, String> {
@@ -155,4 +174,18 @@ pub(super) fn read_password(out: &mut dyn Write, prompt: &str) -> Result<String,
         return Err("no password given".into());
     }
     Ok(password)
+}
+
+#[cfg(test)]
+mod tests {
+    /// With root as the owner `sudo on` asks no password, as sudo checks
+    /// none of root's (#213, L2-5: it asked one and took any text).
+    #[cfg(unix)]
+    #[test]
+    fn sudo_on_asks_no_password_of_root() {
+        use serde_json::json;
+        assert!(!super::asks_password(&json!({"owner": "root"})));
+        assert!(super::asks_password(&json!({"owner": "alice"})));
+        assert!(super::asks_password(&json!({"owner": null})));
+    }
 }

@@ -1311,8 +1311,10 @@ mod tests {
         match nerve_transport::net::reach(&url, Some(&proxy)).await {
             Ok(t) => (200, String::new(), Some(t)),
             Err(e) => {
+                // `… refused the tunnel to TARGET: 407 Proxy …`, a hint
+                // after it.
                 let status = e
-                    .rsplit_once(": ")
+                    .split_once(&format!("{target}: "))
                     .and_then(|(_, r)| r.split(' ').next()?.parse().ok())
                     .unwrap_or(0);
                 (status, e, None)

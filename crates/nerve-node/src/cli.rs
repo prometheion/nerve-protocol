@@ -217,9 +217,9 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
-    /// Restore a backup (stop the node first)
+    /// Restore a backup (the owner's restore stops the node; as root, stop it first)
     ///
-    /// Put the config and keys of a backup in place of this node's. The node must not run.
+    /// Put the config and keys of a backup in place of this node's. The owner of the installed node runs it without sudo, and it stops the node and starts it again; as root, stop the node first (`nerve-node service stop`), and start it after.
     Restore {
         /// The backup file.
         file: PathBuf,
@@ -505,7 +505,7 @@ pub enum RuleCmd {
     },
     /// Take a rule off its list, as `rule` shows it
     ///
-    /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it.
+    /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it, `--action` too.
     #[command(override_usage = "nerve-node rule rm [OPTIONS] [LIST] <ENTRY>")]
     Rm {
         /// The list, needed only when the entry is on two; then the entry
@@ -513,6 +513,17 @@ pub enum RuleCmd {
         /// The list (`allow`, `deny` or `sudo`), needed only when the entry is on two; then the entry.
         #[arg(value_name = "ENTRY", required = true, num_args = 1..=2)]
         words: Vec<String>,
+        /// The rule `rule add --action` made of the entry
+        ///
+        /// The entry is the path or target of a rule `rule add` made with this action, as in `rule rm '/srv/data/*' --action fs.read`.
+        #[arg(long, value_name = "CAP.ACTION")]
+        action: Option<String>,
+        /// With --action: the --arg the rule was made with
+        #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
+        arg: Option<String>,
+        /// With --action: the --exact the rule was made with
+        #[arg(long, requires = "action")]
+        exact: bool,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -535,11 +546,11 @@ pub enum RuleCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum CapCmd {
-    /// Set a capability (`fs`) or one action (`exec.run`) to on, off or hidden.
+    /// Set a capability (`fs`) or one action (`exec.run`) to on, off, hidden or default.
     Set {
         /// The capability (`fs`) or action (`exec.run`).
         cap: String,
-        /// `on`, `off` or `hidden`.
+        /// `on`, `off`, `hidden`, or `default` (none chosen: its mode decides).
         setting: String,
         #[command(flatten)]
         center: CenterArg,
@@ -1226,19 +1237,50 @@ pub fn settle_user(cli: &Cli) -> Result<(), String> {
     // The backup file is the asker's, in the asker's folders: it is opened
     // as the user who ran sudo (crate::caller_file), not as the node's.
     if crate::service::becomes_owner(&paths) {
-        use crate::caller_file::{Job, prepare};
+        use crate::caller_file::{Job, prepare, prepare_passphrase};
         match &cli.cmd {
             Cmd::Backup {
-                file, overwrite, ..
-            } => prepare(Job::Write {
-                path: file.clone(),
-                overwrite: *overwrite,
-            })?,
-            Cmd::Restore { file, .. } => prepare(Job::Read(file.clone()))?,
+                file,
+                overwrite,
+                passphrase_file,
+                ..
+            } => {
+                if let Some(p) = passphrase_file.as_deref().filter(|p| *p != Path::new("-")) {
+                    prepare_passphrase(p)?;
+                }
+                prepare(Job::Write {
+                    path: file.clone(),
+                    overwrite: *overwrite,
+                })?
+            }
+            Cmd::Restore {
+                file,
+                passphrase_file,
+                ..
+            } => {
+                if let Some(p) = passphrase_file.as_deref().filter(|p| *p != Path::new("-")) {
+                    prepare_passphrase(p)?;
+                }
+                prepare(Job::Read(file.clone()))?
+            }
             _ => {}
         }
     }
-    crate::service::become_owner(&paths, matches!(cli.cmd, Cmd::Setup))
+    crate::service::become_owner(&paths, keeps_root(&cli.cmd))
+}
+
+/// Whether root's command keeps root as its saved id when it becomes the
+/// node's user: `setup`, to restart the node once a keyring it installed
+/// answers, and `config set machine.secret_storage keyring`, whose offer
+/// installs one as root (crate::keyring_setup). Without it the offer fell
+/// back to `sudo` as the node's user, which has no password, and waited at
+/// its question for good (#213, L3-1).
+fn keeps_root(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Setup => true,
+        Cmd::Config(c) => config::moves_keys_to_keyring(c),
+        _ => false,
+    }
 }
 
 /// The SID of the app's user, as the desktop app's broker names it on
@@ -1682,6 +1724,27 @@ pub(crate) mod tests {
     use super::*;
     use nerve_policy::config::Access;
 
+    /// Root's `config set machine.secret_storage keyring` keeps root to
+    /// install the keyring it offers, as `setup` does; other commands drop
+    /// it (#213, L3-1: the offer waited at sudo's question for `nerve`).
+    #[test]
+    fn the_keyring_offer_keeps_root() {
+        let keeps = |args: &[&str]| {
+            let argv = ["nerve-node"].iter().chain(args).copied();
+            keeps_root(&Cli::try_parse_from(argv).unwrap().cmd)
+        };
+        assert!(keeps(&["setup"]));
+        assert!(keeps(&[
+            "config",
+            "set",
+            "machine.secret_storage",
+            "keyring"
+        ]));
+        assert!(!keeps(&["config", "set", "machine.secret_storage", "file"]));
+        assert!(!keeps(&["config", "set", "node.name", "keyring"]));
+        assert!(!keeps(&["status"]));
+    }
+
     #[test]
     fn the_invoker_is_who_ran_sudo_or_pkexec() {
         let alice = |uid: u32| (uid == 1000).then(|| "alice".to_string());
@@ -1780,7 +1843,7 @@ pub(crate) mod tests {
         Ok(String::from_utf8(out).unwrap())
     }
 
-    pub(super) fn entry(name: &str) -> nerve_policy::CenterEntry {
+    pub(crate) fn entry(name: &str) -> nerve_policy::CenterEntry {
         nerve_policy::CenterEntry {
             name: name.into(),
             url: "http://127.0.0.1:1".into(),
