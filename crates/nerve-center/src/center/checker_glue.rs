@@ -153,6 +153,11 @@ impl Center {
                             let closed = self.local_fail_closed.clone();
                             Arc::new(move |level, text: String| {
                                 let text = match level {
+                                    Level::Warn
+                                        if text.contains(checker::server::LOST_CALL_NOTE) =>
+                                    {
+                                        text
+                                    }
                                     Level::Warn => format!(
                                         "{}. {}",
                                         text.trim_end_matches('.'),
@@ -1965,6 +1970,41 @@ mod tests {
             assert!(c.resolved_endpoint(&checker).is_some());
             until("the model to be ready again", || local_ready(&c)).await;
             assert!(!srv.died_on_call());
+        })
+        .await
+        .expect("the test did not finish within 60 s");
+    }
+
+    /// With on error allow, a model that ended on a call says its restart
+    /// window refuses calls, not that they pass (#213, review round 2).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_log_of_a_model_that_ended_on_a_call_says_the_calls_are_refused() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = center_with_a_running_model(dir.path()).await;
+            c.update(|s| s.checker.model.fail_closed = false);
+            c.rebuild_checker();
+            until("the model to be ready", || local_ready(&c)).await;
+            let srv = c.local_model.lock().unwrap().clone().unwrap();
+            srv.endpoint().budget.unwrap().die_on_call();
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            assert!(
+                std::process::Command::new("kill")
+                    .args(["-9", pid.trim()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            until("the end to be logged", || {
+                !logged(&c, "local model ended").is_empty()
+            })
+            .await;
+            let said = logged(&c, "local model ended");
+            assert!(said[0].contains("are refused"), "{said:?}");
+            assert!(!said[0].contains("pass unjudged"), "{said:?}");
         })
         .await
         .expect("the test did not finish within 60 s");

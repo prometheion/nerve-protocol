@@ -336,6 +336,11 @@ fn free_port() -> Result<u16, String> {
 /// The command line for a server that listens at a place.
 type ArgsFor = Box<dyn Fn(&Listen) -> Vec<String> + Send>;
 
+/// What the log says of the calls while a model that ended on a call
+/// starts again: they are refused then, whatever `on error` says.
+pub const LOST_CALL_NOTE: &str =
+    "The call it was reading was lost, so the calls until it is ready again are refused.";
+
 /// Runs the server, restarting it with backoff until the task is aborted. A
 /// non-decision model is a reason not to restart. Each process starts with
 /// the budget's speeds forgotten.
@@ -411,10 +416,17 @@ async fn supervise(
                     (Some(how), false) => format!("ended before it was ready ({how})"),
                     (None, _) => lock(&inner).message.clone(),
                 };
+                // A call lost with it is refused until the new process is
+                // ready, also with allow-and-log; the center's log line
+                // then says no more about the calls meanwhile.
+                let lost = match budget.died_on_call() {
+                    true => format!(" {LOST_CALL_NOTE}"),
+                    false => String::new(),
+                };
                 tell(
                     Level::Warn,
                     format!(
-                        "the action checker's local model {what}; it starts again.{}",
+                        "the action checker's local model {what}; it starts again.{lost}{}",
                         last_line()
                     ),
                 );

@@ -33,7 +33,8 @@ const SWITCH = [
 ];
 
 /** The capabilities a center's switches cover, from the rows `cap` lists,
- * each with its rows in order: not `settings`, which its grant governs, and
+ * one group per first word (the node's switch covers every `word.*`, whoever
+ * made them; the sources are joined), each with its rows in order: not `settings`, which its grant governs, and
  * not what another center added, which only that one is offered. */
 export function switchGroups(rows: Row[], center: string): { cap: string; source: string; rows: Row[] }[] {
   const groups: { cap: string; source: string; rows: Row[] }[] = [];
@@ -42,8 +43,11 @@ export function switchGroups(rows: Row[], center: string): { cap: string; source
     if (set === "granted" || set === "not granted") continue;
     if (r.source.startsWith("center ") && r.source !== `center ${center}`) continue;
     const cap = r.name.split(".")[0];
-    const g = groups.find((x) => x.cap === cap && x.source === r.source);
-    if (g) g.rows.push(r);
+    const g = groups.find((x) => x.cap === cap);
+    if (g) {
+      g.rows.push(r);
+      if (!g.source.split(" + ").includes(r.source)) g.source += ` + ${r.source}`;
+    }
     else groups.push({ cap, source: r.source, rows: [r] });
   }
   return groups;

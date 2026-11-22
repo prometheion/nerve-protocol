@@ -2,6 +2,7 @@
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { nav } from "../api";
+import { switchGroups } from "./Caps";
 import { node } from "../test/apps";
 import { nodeData } from "../test/fixtures";
 // The app's Permissions page, which says the same words.
@@ -321,6 +322,16 @@ describe("Capabilities", () => {
     const off = allByText(el, /^fs\.write/, ".lrow")[0];
     await click(button(off, "By mode"));
     expect(f.to("POST", "/api/caps/set")[1].body).toEqual({ center: "home", cap: "fs.write", setting: "default" });
+  });
+});
+
+describe("Capability groups", () => {
+  it("keeps one group for a first word that two sources share (#213, review round 2)", () => {
+    const row = (name: string, source: string) => ({ name, source, centers: {} }) as never;
+    const g = switchGroups([row("backup.date", "config"), row("backup.run", "center home"), row("lamp.set", "config")], "home");
+    expect(g.map((x) => x.cap)).toEqual(["backup", "lamp"]);
+    expect(g[0].rows).toHaveLength(2);
+    expect(g[0].source).toBe("config + center home");
   });
 });
 
