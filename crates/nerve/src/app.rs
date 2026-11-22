@@ -1662,7 +1662,6 @@ fn dress(window: &AppWindow) {
     #[cfg(windows)]
     {
         use slint::winit_030::WinitWindowAccessor;
-        use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
         use slint::winit_030::winit::platform::windows::{IconExtWindows, WindowExtWindows};
         use slint::winit_030::winit::window::Icon;
         window.window().with_winit_window(|w| {
@@ -1673,30 +1672,47 @@ fn dress(window: &AppWindow) {
             if let Ok(icon) = Icon::from_resource(1, None) {
                 w.set_window_icon(Some(icon));
             }
-            // Within the screen and above the taskbar, smaller where the
-            // screen is (#213 W1-F5): the screen Windows opened it on.
-            let Ok(at) = w.outer_position() else {
-                return;
-            };
-            let (outer, inner) = (w.outer_size(), w.inner_size());
-            let screens = screens(w);
-            let Some(work) = work_of(&screens, (at.x, at.y), (outer.width, outer.height)) else {
-                return;
-            };
-            let (to, size) = fit_in(work, (at.x, at.y), (outer.width, outer.height));
-            if size != (outer.width, outer.height) {
-                let _ = w.request_inner_size(PhysicalSize::new(
-                    inner.width - (outer.width - size.0),
-                    inner.height - (outer.height - size.1),
-                ));
-            }
-            if to != (at.x, at.y) {
-                w.set_outer_position(PhysicalPosition::new(to.0, to.1));
-            }
+            fit_window(w);
         });
+        // Slint sets the window's size and Windows its place once the event
+        // loop runs, after the fit above: it is put right again a moment
+        // later, as the app's window opened off the screen otherwise.
+        for ms in [150, 600, 1500] {
+            let weak = window.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(ms), move || {
+                if let Some(window) = weak.upgrade() {
+                    window.window().with_winit_window(fit_window);
+                }
+            });
+        }
     }
     #[cfg(not(windows))]
     let _ = window;
+}
+
+/// Puts the window within the screen and above the taskbar, smaller where
+/// the screen is (#213 W1-F5): the screen Windows opened it on.
+#[cfg(windows)]
+fn fit_window(w: &slint::winit_030::winit::window::Window) {
+    use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
+    let Ok(at) = w.outer_position() else {
+        return;
+    };
+    let (outer, inner) = (w.outer_size(), w.inner_size());
+    let screens = screens(w);
+    let Some(work) = work_of(&screens, (at.x, at.y), (outer.width, outer.height)) else {
+        return;
+    };
+    let (to, size) = fit_in(work, (at.x, at.y), (outer.width, outer.height));
+    if size != (outer.width, outer.height) {
+        let _ = w.request_inner_size(PhysicalSize::new(
+            inner.width - (outer.width - size.0),
+            inner.height - (outer.height - size.1),
+        ));
+    }
+    if to != (at.x, at.y) {
+        w.set_outer_position(PhysicalPosition::new(to.0, to.1));
+    }
 }
 
 /// A screen's area: left, top, right and bottom, in physical pixels.
