@@ -158,8 +158,8 @@ and every limit is in
   version from another release is taken (a pre-release, then its release).
   The desktop app's **Settings › App › Pre-releases** does it there (on a
   center **Settings › This machine**), on Linux and Windows. A release older
-  than the installed program is not downloaded, and the app says when
-  nothing is newer.
+  than the installed program, or whose program is the installed one, is not
+  downloaded, and the app says when nothing is newer.
 - `uninstall` keeps the data, or deletes it with `--purge` (**Delete the
   data** in the app).
 

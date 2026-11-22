@@ -422,6 +422,12 @@ per page in its settings file (`panes`), so they stay over a restart and a
 resize (the `Panes` global in `ui/theme.slint`; `Split` says the page's width
 there, its panes their least widths and defaults).
 
+On Windows a window (the app's and the installer's) opens within the work
+area, the screen without the taskbar, of the screen Windows opened it on, a
+screen left of or above the main one too, and is made smaller where that
+screen is (`app::dress`: `work_of` picks the screen that holds the window's
+middle, `fit_in` moves it in).
+
 Where the section column of Capabilities folds, its sections become a switch
 above the list, so each is still one click away. A capability's command, its
 arguments and its result grow with their text (the command stays one line,
