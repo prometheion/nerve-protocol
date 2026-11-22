@@ -336,8 +336,10 @@ model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
 d1-2B by default), independent of the device. Each pin carries its repo,
 revision, file, size, SHA-256, licence, the evaluation's default threshold
 and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 35 s: about twice Kev-4B's
-slow calls on 2 vCPUs, 16 to 17 s, where 15 s refused about half of them)
-and the context the
+slow calls on 2 vCPUs, 16 to 17 s, where 15 s refused about half of them;
+a CPU install on a machine with 4 CPUs or fewer takes at least 30 s,
+`install::install_timeout_ms`, as d1-2B took 10 to 10.6 s a call on 2 vCPUs,
+#213) and the context the
 server gets (d1-2B 12,288 tokens, Kev-4B 8,192; see below); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the

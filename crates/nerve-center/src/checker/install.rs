@@ -156,7 +156,7 @@ pub const MODELS: [ModelPin; 2] = [
         // 240-token call (review round 4 of #178), which 15,500 fits; 1.3
         // times at 8,070 in the evaluation's peak run.
         read_growth: 12_000.0,
-        summary: "Faster: about 2 s per call on a desktop CPU, 5 to 10 s on 2 vCPUs, where a timeout of 30 s suits it better. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
+        summary: "Faster: about 2 s per call on a desktop CPU, 5 to 10 s on 2 vCPUs, where an install gives it 30 s. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -183,6 +183,30 @@ pub const MODELS: [ModelPin; 2] = [
         summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and about 6 GB of memory, up to 13 GB for a call with long arguments.",
     },
 ];
+
+/// A machine with this many CPUs or fewer is small for a local model.
+pub const SMALL_MACHINE_CPUS: usize = 4;
+
+/// The timeout a CPU install on a small machine takes at least: d1-2B took
+/// 10 to 10.6 s a call on 2 vCPUs, against its 12 s (#213, L4-3; owner,
+/// 2026-11-22).
+pub const SMALL_MACHINE_TIMEOUT_MS: u64 = 30_000;
+
+/// The timeout an install of `pin` on this machine starts with: the pin's
+/// own, and at least [`SMALL_MACHINE_TIMEOUT_MS`] on the CPU of a machine
+/// with [`SMALL_MACHINE_CPUS`] or fewer.
+pub fn install_timeout_ms(pin: &ModelPin, gpu: bool, cpus: usize) -> u64 {
+    if !gpu && cpus <= SMALL_MACHINE_CPUS {
+        pin.timeout_ms.max(SMALL_MACHINE_TIMEOUT_MS)
+    } else {
+        pin.timeout_ms
+    }
+}
+
+/// How many CPUs this machine gives the center.
+pub fn cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
 
 /// The pin of `model`.
 pub fn model_pin(model: LocalModel) -> &'static ModelPin {

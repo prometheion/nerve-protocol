@@ -71,8 +71,9 @@ and every limit is in
   the app's **Settings › This machine › Web UI** turns it on.
 - The action checker: a blocklist of dangerous commands and paths, allow
   rules, and a local decision model (d1-2B, on the CPU or a Vulkan GPU) that
-  fails closed by default. The log says why the model does not run, and
-  `nerve-center checker` warns while it is on and not running.
+  fails closed by default. On the CPU of a machine with 4 CPUs or fewer its
+  install gives it 30 s a call instead of 12. The log says why the model does
+  not run, and `nerve-center checker` warns while it is on and not running.
 - `nerve-center status` shows where a running center is, also one run by
   hand, and the public URL pairing links name, with a warning for a bare
   host name.
