@@ -128,8 +128,7 @@ the 20 seconds; keep it below your harness's own timeout for a tool call
 
 Set `--public-url` when nodes reach the center under another name than its
 host name, such as a DNS name, an address or a forwarded port. `status` shows
-it as Public URL, and warns when it is a bare host name other machines may
-not find.
+it, and warns of a bare host name.
 `NERVE_CENTER_HARNESS_TOKEN` adds a fixed harness token, for a harness a
 script sets up; `--harness-token` does too, but shows it in the process
 list. `nerve-center --help`

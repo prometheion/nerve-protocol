@@ -404,19 +404,14 @@ mod linux {
     }
 
     /// The passphrase in the file at `path`, read now as the user who asked
-    /// (root where nobody else did), as the backup file is: the command
-    /// then runs as the node's user, who may not read a private file of
-    /// root's (#213, L3-3), and whoever asked through sudo or the app's
-    /// broker reads through it no file they may not read themselves.
+    /// (root where nobody else did), as the backup file is, with sudo's
+    /// second try in root's and the node's folders: the command then runs
+    /// as the node's user, who may not read a private file of root's (#213,
+    /// L3-3), and whoever asked through the app's broker reads through it no
+    /// file they may not read themselves.
     pub fn passphrase(path: &Path) -> Result<String, String> {
         let job = Job::Passphrase(path.to_path_buf());
-        let bytes = match caller()? {
-            None => open(&job, &[])?,
-            Some(c) => match try_as(c.uid, c.gid, &job, &[], true) {
-                Tried::Done(r) => r?,
-                Tried::Refused(e) => return Err(e),
-            },
-        };
+        let bytes = for_caller(caller()?, &job, None).unwrap_or_else(|| open(&job, &[]))?;
         String::from_utf8(bytes).map_err(|_| format!("{} is no text", path.display()))
     }
 
