@@ -220,8 +220,10 @@ sudo nerve-node update
 release's `SHA256SUMS`, and restarts the service. `--from <file>` takes a
 file you checked yourself. `--pre` takes the newest release, a pre-release
 too, and `--tag pre2-v0.1.0` that one release, each checked against its own
-`SHA256SUMS`. An older version is refused; the same version from another
-release (a pre-release, then the release) is taken. `--pre` asks GitHub
+`SHA256SUMS`. An older version is refused, but a plain `update` on a
+pre-release newer than the latest release says there is nothing to update;
+the same version from another release (a pre-release, then the release) is
+taken. `--pre` asks GitHub
 which release is the newest, which it answers 60 times an hour per machine
 without a login; when it refuses, name the release with `--tag`. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own
