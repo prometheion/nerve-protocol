@@ -18,7 +18,7 @@ use nerve_transport::files::Format;
 use crate::paths::within;
 
 mod capability;
-pub(crate) use capability::unseen;
+pub use capability::unseen;
 pub mod form;
 pub use capability::{
     BUILT_IN, CENTER_ADDED, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,

@@ -159,6 +159,10 @@ pub struct Inner {
     /// source is local; kept across unrelated rebuilds, keyed by `local_sig`.
     local_model: Mutex<Option<Arc<LocalServer>>>,
     local_sig: Mutex<String>,
+    /// The checker's `model.fail_closed` as it is now: the local model's log
+    /// lines say by it what happens to the calls while the model does not
+    /// run, and it changes without a restart of the model.
+    local_fail_closed: Arc<AtomicBool>,
     /// The one-click install's progress (llama.cpp and the model download).
     install: checker::install::Shared,
     /// The running install's task and cancel flag, so Remove can end it and
@@ -496,6 +500,7 @@ impl Center {
             checker: Mutex::new(Arc::new(Checker::build(CheckerConfig::default(), None))),
             local_model: Mutex::new(None),
             local_sig: Mutex::new(String::new()),
+            local_fail_closed: Arc::new(AtomicBool::new(true)),
             install: Arc::new(Mutex::new(checker::install::Status::default())),
             install_task: Mutex::new(None),
             install_from: Mutex::new(Arc::new(checker::install::Sources::real())),

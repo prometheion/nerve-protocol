@@ -63,7 +63,8 @@ const OUTPUT_KEEP: usize = 20;
 /// Where the supervisor says what happened to the server: the center's log.
 /// The checker page's banner sends the owner there, and `nerve-center log
 /// --problems` is where the terminal looks (#213, L4-2: the log said nothing
-/// of a server that ended or could not start).
+/// of a server that ended or could not start). The center adds to a warning
+/// what happens to the calls meanwhile, which its settings decide.
 pub type Say = Arc<dyn Fn(Level, String) + Send + Sync>;
 
 #[derive(Debug, Default)]
@@ -413,7 +414,7 @@ async fn supervise(
                 tell(
                     Level::Warn,
                     format!(
-                        "the action checker's local model {what}; it starts again, and until it runs every call it checks is refused.{}",
+                        "the action checker's local model {what}; it starts again.{}",
                         last_line()
                     ),
                 );
@@ -421,7 +422,7 @@ async fn supervise(
             RunEnd::StartFailed(e) => tell(
                 Level::Warn,
                 format!(
-                    "the action checker cannot start its local model: cannot start {}: {e}; it tries again, and until it runs every call it checks is refused",
+                    "the action checker cannot start its local model: cannot start {}: {e}; it tries again",
                     program.display()
                 ),
             ),
@@ -1534,10 +1535,7 @@ mod tests {
             texts[0].starts_with("the action checker's local model ended ("),
             "{texts:#?}"
         );
-        assert!(
-            texts[0].contains("every call it checks is refused"),
-            "{texts:#?}"
-        );
+        assert!(texts[0].contains("; it starts again."), "{texts:#?}");
         assert_eq!(heard[1].0, Level::Warn);
         assert!(texts[1].contains("Permission denied"), "{texts:#?}");
         assert!(texts[1].contains(&bin.display().to_string()), "{texts:#?}");

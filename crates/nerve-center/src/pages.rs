@@ -375,11 +375,11 @@ fn audit_rows(all: &[Value], last: usize) -> Vec<Vec<String>> {
                 match (refused(e), s(&e["by"])) {
                     (true, "") => "refused".to_string(),
                     (true, by) => format!("refused by {by}"),
-                    (false, "") => "allowed".to_string(),
                     // The checker let it on to the machine, whose own
                     // decision is the next line: not a second decision
-                    // (#213, L4-6).
-                    (false, by) => format!("passed the {by}"),
+                    // (#213, L4-6). Any other `by` is a node's own word.
+                    (false, "action checker") => "passed the action checker".to_string(),
+                    (false, _) => "allowed".to_string(),
                 },
                 s(&e["target"]).to_string(),
             ]
@@ -1042,6 +1042,10 @@ mod tests {
                    "decision": "allowed"}),
             json!({"ts": 2, "node": "lab", "cap": "exec", "action": "run", "target": "rm -rf /",
                    "decision": "forbidden", "by": "action checker"}),
+            // A node's own `by` on its allowed call is no layer of the
+            // center's.
+            json!({"ts": 3, "node": "lab", "cap": "exec", "action": "run", "target": "ls",
+                   "decision": "allowed", "by": "policy"}),
         ];
         let said: Vec<String> = audit_rows(&entries, 10)
             .into_iter()
@@ -1050,6 +1054,7 @@ mod tests {
         assert_eq!(
             said,
             [
+                "allowed",
                 "refused by action checker",
                 "allowed",
                 "passed the action checker"

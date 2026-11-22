@@ -44,7 +44,10 @@ checker" on the Audit page and in `nerve-center audit`, and the Allowed filter
 counts only the machine's. The supervisor of the local model writes to the log
 when the server ends, cannot start or runs again (once per cause, not at every
 retry), and when the model is on with none installed: the page's red banner
-sends the owner there.
+sends the owner there. Each such line says, by the setting as it is then,
+whether the calls the model checks are refused meanwhile or pass unjudged
+(on error: allow). "Passed the action checker" is said only for the
+checker's own `by`; a node's own `by` on an allowed call reads "allowed".
 
 ## The blocklist matcher
 

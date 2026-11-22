@@ -1784,6 +1784,17 @@ mod tests {
             "exec.run:sudo whoami"
         );
         assert_eq!(sudo_allow_refusal("linux", "ls -la"), None);
+        // Nor one whose marks show it otherwise than it is: zero-width and
+        // bidirectional marks (#213, review).
+        for odd in [
+            "sudo ls \u{202e}/tmp",
+            "sudo a\u{200b}b",
+            "sudo a\u{2066}b",
+            "sudo a\u{feff}b",
+        ] {
+            let e = sudo_allow_refusal("linux", odd).unwrap();
+            assert!(e.contains("'COMMAND'"), "{odd:?}: {e}");
+        }
     }
 
     /// The relative luminance of `#rrggbb`, as WCAG defines it.
