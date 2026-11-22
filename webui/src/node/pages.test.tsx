@@ -2,6 +2,7 @@
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { nav } from "../api";
+import { switchGroups } from "./Caps";
 import { node } from "../test/apps";
 import { nodeData } from "../test/fixtures";
 // The app's Permissions page, which says the same words.
@@ -21,6 +22,35 @@ describe("Overview", () => {
     await settle(4);
     expect(f.to("POST", "/api/panic")).toHaveLength(1);
     expect(out).toHaveBeenCalled();
+  });
+});
+
+describe("Overview, Settings and Permissions on each platform", () => {
+  it("give Linux the commands, and Windows the Nerve app's places", async () => {
+    for (const os of ["linux", "windows"]) {
+      const d = nodeData();
+      Object.assign(d.overview, { os, owner_full_rights: true });
+      d.ui.tokens[0].made = "2026-11-18T12:13:57Z";
+      (d.settings.machine as { shell: string | null }).shell = null;
+      const routes = { "GET /api/overview": () => d.overview, "GET /api/ui": () => d.ui, "GET /api/settings": () => d.settings };
+      const win = os === "windows";
+      let { el } = await node("overview", routes);
+      expect(text(el).includes("nerve-node service restart"), os).toBe(!win);
+      expect(text(el)).not.toContain("systemctl");
+      expect(text(el).includes("Root is the owner"), os).toBe(!win);
+      expect(text(el).includes("The owner is an administrator"), os).toBe(win);
+      ({ el } = await node("settings", routes));
+      await click(allByText(el, /^(Root's|Administrator's) settings/, ".lrow")[0]);
+      const detail = () => text(el.querySelector(".dcol")!);
+      expect(detail().includes("Root's settings"), os).toBe(!win);
+      expect(detail().includes("sudo nerve-node"), os).toBe(!win);
+      expect(detail().includes("machine.sudo_path"), os).toBe(!win);
+      expect(detail()).toContain(win ? "PowerShell (the default)" : "/bin/sh (the default)");
+      await click(allByText(el, /^Web UI/, ".lrow")[0]);
+      expect(detail()).not.toContain("2026-11-18T12:13:57Z");
+      ({ el } = await node("permissions", routes));
+      expect(text(el).includes("starting at /"), os).toBe(!win);
+    }
   });
 });
 
@@ -250,15 +280,86 @@ describe("Capabilities", () => {
     expect(el.querySelector(".ask")).toBeNull();
   });
 
+  it("switches every action cap lists, a program's and a center's own too", async () => {
+    const d = nodeData();
+    d.caps.programs = [{ name: "lamp", exe: "/opt/lamp/lamp", attached: true } as never];
+    const rows = d.caps.capabilities as Record<string, unknown>[];
+    rows.push(
+      { name: "settings.write", effect: "write", source: "built-in", centers: { home: "granted" } },
+      { name: "logs.tail", effect: "read", source: "config", summary: "The log's end.", centers: { home: "on" }, now: { home: "on" } },
+      { name: "lamp.set", effect: "actuate", source: "program lamp", summary: "Sets the lamp.", centers: { home: "default" }, now: { home: "off" } },
+      { name: "lamp.level", effect: "read", kind: "state", source: "program lamp", centers: { home: "default" } },
+      { name: "lamp.dim", source: "program lamp", broken: "params: not an object", centers: { home: "default" } },
+      { name: "backup.date", effect: "execute", source: "center home", centers: { home: "default" } },
+      { name: "other.thing", effect: "read", source: "center lab", centers: { lab: "default" } },
+    );
+    const { el, f } = await node("capabilities", { "GET /api/caps": () => d.caps, "POST /api/caps/set": () => ({}) });
+    const row = (name: RegExp) => allByText(el, name, ".lrow")[0];
+    // A program's action has its switch, and goes on for this center.
+    await click(button(row(/^lamp\.set/), "On"));
+    expect(f.to("POST", "/api/caps/set")[0].body).toEqual({ center: "home", cap: "lamp.set", setting: "on" });
+    expect(row(/^logs\.tail/).querySelector(".seg")).not.toBeNull();
+    expect(row(/^backup\.date/).querySelector(".seg")).not.toBeNull();
+    expect(text(row(/^lamp\.level/))).toContain("read state");
+    // A left-out one says why and has no switch.
+    expect(text(row(/^lamp\.dim/))).toContain("left out: params: not an object");
+    expect(row(/^lamp\.dim/).querySelector(".seg")).toBeNull();
+    // Not what another center added, nor the settings grant.
+    expect(allByText(el, /^other\.thing/, ".lrow")).toHaveLength(0);
+    expect(allByText(el, /^settings\.write/, ".lrow")).toHaveLength(0);
+    // The program says it is attached, and what it offers.
+    await click(allByText(el, /^lamp/, ".lrow").at(-1)!);
+    expect(text(el.querySelector(".dcol")!)).toContain("lamp.set");
+    expect(text(allByText(el, /^lamp/, ".lrow").at(-1)!)).toContain("attached");
+  });
+
   it("switches an action for the chosen center in its row", async () => {
     const { el, f } = await node("capabilities", { "POST /api/caps/set": () => ({}) });
     const row = allByText(el, /^fs\.read/, ".lrow")[0];
     await click(button(row, "Hidden"));
     expect(f.to("POST", "/api/caps/set")[0].body).toEqual({ center: "home", cap: "fs.read", setting: "hidden" });
+    // Back to none chosen: its mode decides (#213, L2-4).
+    const off = allByText(el, /^fs\.write/, ".lrow")[0];
+    await click(button(off, "By mode"));
+    expect(f.to("POST", "/api/caps/set")[1].body).toEqual({ center: "home", cap: "fs.write", setting: "default" });
+  });
+});
+
+describe("Capability groups", () => {
+  it("keeps one group for a first word that two sources share (#213, review round 2)", () => {
+    const row = (name: string, source: string) => ({ name, source, centers: {} }) as never;
+    const g = switchGroups([row("backup.date", "config"), row("backup.run", "center home"), row("lamp.set", "config")], "home");
+    expect(g.map((x) => x.cap)).toEqual(["backup", "lamp"]);
+    expect(g[0].rows).toHaveLength(2);
+    expect(g[0].source).toBe("config + center home");
   });
 });
 
 describe("Audit", () => {
+  it("says what a settings change, an install and a restore did", async () => {
+    const d = nodeData();
+    const at = Date.now() - 5 * 60_000;
+    (d.audit.entries as unknown[]).push(
+      { ts: at, kind: "settings", version: 104, by: "local", user: "root", changes: [{ key: "center.home.folders", old: ["/srv/a"], new: [] }] },
+      { ts: at + 1, kind: "node", event: "install", steps: ["made the user nerve", "started the service"] },
+      { ts: at + 2, kind: "config", event: "restored", file: "/etc/nerve/node.toml", reason: "from a backup" },
+    );
+    const { el } = await node("audit", { "GET /api/audit": () => d.audit });
+    expect(allByText(el, /^entry/, ".lrow")).toHaveLength(0);
+    await click(allByText(el, /settings v104/, ".lrow")[0]);
+    const detail = () => text(el.querySelector(".dcol")!);
+    expect(detail()).toContain('center.home.folders: ["/srv/a"] → []');
+    expect(text(allByText(el, /settings v104/, ".lrow")[0])).toContain("by local (root)");
+    await click(allByText(el, /^install/, ".lrow")[0]);
+    expect(detail()).toContain("started the service");
+    await click(allByText(el, /config restored/, ".lrow")[0]);
+    expect(detail()).toContain("from a backup");
+    // The search finds them by what they say.
+    await type(el.querySelector("input[type=search]"), "folders");
+    expect(allByText(el, /settings v104/, ".lrow")).toHaveLength(1);
+    expect(allByText(el, /^install/, ".lrow")).toHaveLength(0);
+  });
+
   it("shows the rule as it will be stored before it adds it", async () => {
     const { el, f } = await node("audit", { "POST /api/audit/rule": () => ({}) });
     await click(allByText(el, /git push --force/, ".lrow")[0]);

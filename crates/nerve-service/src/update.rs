@@ -307,9 +307,8 @@ pub async fn update(
                 && v < o
                 && !placed
             {
-                return Err(format!(
-                    "the new program is {name} {v}, older than the installed {o}; nothing changed"
-                ));
+                let latest = from.is_none() && p.release.ends_with(LATEST);
+                return Err(older_than_installed(name, v, o, latest));
             }
             new_v = Some(v);
         }
@@ -331,6 +330,10 @@ pub async fn update(
         Err(e) => {
             if stage {
                 let _ = std::fs::remove_file(&staged);
+            }
+            if let Some(said) = e.strip_prefix(NEWER_HERE) {
+                steps.did(said);
+                return Ok(false);
             }
             return Err(e);
         }
@@ -495,6 +498,26 @@ pub enum Release {
 
 /// The end of where the latest release's files are, after the repository.
 const LATEST: &str = "/releases/latest/download";
+
+/// What marks the check's answer that the installed program is newer than
+/// the latest release: the update ends, having changed nothing.
+const NEWER_HERE: &str = "\u{0}newer:";
+
+/// What `update` says of a new program `name` `new`, older than the
+/// `installed` one: a plain `update` (`latest`) on a pre-release finds the
+/// latest release older, which is nothing to update ([`NEWER_HERE`]), with
+/// how to take the newest pre-release, not a failure (#213, L1-4); a file or
+/// a tag the owner named is refused.
+fn older_than_installed(name: &str, new: Version, installed: Version, latest: bool) -> String {
+    match latest {
+        true => format!(
+            "{NEWER_HERE}the installed {name} {installed} is newer than the latest release ({new}), as a pre-release is; nothing to update. `update --pre` takes the newest pre-release"
+        ),
+        false => format!(
+            "the new program is {name} {new}, older than the installed {installed}; nothing changed"
+        ),
+    }
+}
 
 impl Release {
     /// The release `--pre` and `--tag` choose.
@@ -714,6 +737,24 @@ mod tests {
         sys.add_account("svc", Path::new("/var/lib/svc"), "Svc")
             .unwrap();
         at
+    }
+
+    /// A plain `update` that finds the latest release older than the
+    /// installed pre-release changes nothing and is no failure; a file or a
+    /// tag that is older is refused (#213, L1-4).
+    #[test]
+    fn an_older_latest_release_is_nothing_to_update() {
+        let (new, installed) = (Version(0, 0, 8), Version(0, 1, 0));
+        let said = older_than_installed("svc", new, installed, true);
+        let said = said.strip_prefix(NEWER_HERE).expect("marked");
+        assert!(said.contains("nothing to update"), "{said}");
+        assert!(said.contains("`update --pre`"), "{said}");
+        let refused = older_than_installed("svc", new, installed, false);
+        assert!(!refused.starts_with(NEWER_HERE), "{refused}");
+        assert!(
+            refused.contains("older than the installed 0.1.0"),
+            "{refused}"
+        );
     }
 
     fn program(at: &At) -> Program<'_> {

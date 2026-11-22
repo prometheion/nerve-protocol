@@ -52,7 +52,9 @@ the restarted node walks each again) and the service starts again where it
 ran or was starting; a later failure starts it again too. `acl::sync` keeps
 the grants of earlier accounts that did not come off in `Record::left`,
 walks them at each sync and refuses `nerve-run`'s commands while one is
-left; `remove_all` takes them off. Then what runs as the owner
+left; `remove_all` takes them off, and on what `nerve-run` made and it
+gives to the owner also the owner's named entries that came from the node's
+default entries (`acl::drop_owners`). Then what runs as the owner
 runs as root (uid 0, root's groups, `HOME` root's, no `no_new_privs`, the
 capabilities of root's exec), and the account check below is skipped for
 it; `nerve-run`'s commands are unchanged. No other account with uid 0 is an
@@ -1265,7 +1267,8 @@ grant or not.
   are stored at the account's home as it is.
   While the switch is on, the node ends the pairing's running commands
   (`exec.run` and config capabilities) that have the network, audited as
-  `killed` with `code: "no_network"`. It goes by each command (whether the
+  `killed` with `code: "no_network"`; the call's result has
+  `"killed": "network"` and a `reason`. It goes by each command (whether the
   filter is on it), not by the switch going on, at every config change and
   every 5 s, and also for the commands of a link that dropped and waits for
   its resume, while the node waits to dial again or for the center's
@@ -1287,7 +1290,11 @@ Folder and user have no time limit by default: once set, they stay until the
 owner changes them. A limit is opt-in (`until`, or `nerve-node mode user
 --for HOURS`). When it runs out, a timed `user` is back in the mode before it,
 `policy.then` (`folder`, or `allowlist` when unset; never `user`), and a timed
-`folder` in `allowlist`, the default deny mode.
+`folder` in `allowlist`, the default deny mode. Calls are judged by that mode
+from the moment the limit passes (`CenterPolicy::mode_at`); within a second
+the running node writes it down (`SettingsStore::end_timers`: `mode` the new
+one, no `until` or `then`), a settings change `by: "timer"` in the audit and a
+line in the log.
 
 Reading in folder mode where the node reads as the command account: the
 installed Linux node does a center's file calls as `nerve-run`

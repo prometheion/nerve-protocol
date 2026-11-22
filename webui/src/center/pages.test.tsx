@@ -84,10 +84,31 @@ describe("Overview", () => {
     const { el } = await center("overview", { "GET /api/overview": () => d.overview, "POST /api/pair": () => pairing, "POST /api/pair/status": () => ({ open: true }) });
     const card = el.querySelector("[aria-label='Get started']")!;
     expect(text(card)).toContain("1. Pair a machine");
-    expect(text(card)).toContain("2. Give it a folder: nerve-node folder add");
+    // The command once, in its copy box, not in the title too (#213, L4-9).
+    expect(text(card).split("nerve-node folder add").length - 1).toBe(1);
+    expect(text(card)).toContain("2. Give it a folder");
     expect(text(card)).toContain("3. Connect a harness");
+    // Nothing paired is said as such, not "0 of 0".
+    expect(text(el)).not.toContain("0 of 0");
+    expect(text(el)).toContain("None paired yet.");
     await click(button(card, "Pair a machine"));
-    expect(document.querySelector("[role=dialog]")).not.toBeNull();
+    const dialog = document.querySelector("[role=dialog]")!;
+    expect(dialog).not.toBeNull();
+    // One "Then", and the folder line says when it needs --center (L2-11).
+    await settle(4);
+    expect(text(dialog).split("Then").length - 1).toBe(1);
+    expect(text(dialog)).toContain("with --center <name> where it has other centers");
+  });
+
+  it("says on a Windows center where a Windows machine gets its folder", async () => {
+    const d = centerData();
+    d.overview.nodes = [];
+    d.overview.sessions = [];
+    (d.overview.center as { os?: string }).os = "windows";
+    const { el } = await center("overview", { "GET /api/overview": () => d.overview });
+    const card = text(el.querySelector("[aria-label='Get started']")!);
+    expect(card).toContain("on Windows in the Nerve app, Permissions › Folders");
+    expect(card).toContain("Linuxnerve-node folder add ~/project rwx");
   });
 
   it("drops Get started once a machine is paired with a folder and a harness is connected", async () => {
@@ -175,6 +196,9 @@ describe("Audit", () => {
   it("gives the exact sudo rule to paste, and none where no shell reads it the same", () => {
     expect(sudoRuleLine("sudo apt update *")).toBe("nerve-node rule add allow --action exec.run --exact 'sudo apt update *'");
     for (const odd of ["sudo echo 'x'", "sudo a\\b", "sudo a\nrm -rf /", "sudo a\rb", "sudo a\u0000b", "sudo a\tb"]) expect(sudoRuleLine(odd)).toBeNull();
+    // A mark that shows as nothing, or turns the text around, shows another
+    // command than the line puts on the list (#213, review).
+    for (const odd of ["sudo ls \u202e/tmp", "sudo a\u200bb", "sudo a\u2066b", "sudo a\ufeffb", "sudo a\u2028b"]) expect(sudoRuleLine(odd)).toBeNull();
   });
 
   it("disables the machine's rules without its settings grant and says why", async () => {
@@ -183,6 +207,26 @@ describe("Audit", () => {
     const deny = button(el.querySelector(".dcol")!, "Deny");
     expect(deny.disabled).toBe(true);
     expect(text(el)).toContain("This machine did not give this center the settings grant.");
+  });
+
+  it("says which line is the checker's, and counts no call twice", async () => {
+    const d = centerData();
+    const at = Date.now() - 60_000;
+    const call = { ts: at, node: "dev", node_id: "n-dev", cap: "exec", action: "run", target: "ls -la" };
+    d.audit.decisions = [
+      { ...call, decision: "allowed", by: "action checker", checker: { layer: "model", detail: "score 0.02", scope: "global" } },
+      { ...call, decision: "allowed" },
+      { ...call, ts: at + 1, target: "rm -rf /", decision: "forbidden", code: "forbidden", by: "action checker", checker: { layer: "blocklist", detail: "rm -rf", scope: "global" } },
+    ] as never;
+    const { el } = await center("audit", { "GET /api/audit": () => d.audit });
+    expect(text(el)).toContain("All3");
+    expect(text(el)).toContain("Allowed1");
+    expect(text(el)).toContain("Refused1");
+    await click(allByText(el, /rm -rf/, ".lrow")[0]);
+    expect(text(el.querySelector(".dcol")!)).toContain("forbidden by action checker");
+    expect(text(el.querySelector(".dcol")!)).not.toContain("[forbidden]");
+    await click(allByText(el, /ls -la/, ".lrow").at(-1)!);
+    expect(text(el.querySelector(".dcol")!)).toContain("passed the action checker");
   });
 
   it("lets a refusal of the model become a rule that skips it, and sends a blocklist refusal to the checker", async () => {
@@ -318,6 +362,19 @@ describe("Action checker", () => {
     await click(button(document.querySelector("[role=dialog]")!, "Install and turn on"));
     await settle(6);
     expect(f.to("POST", "/api/checker/install")[0].body).toEqual({ gpu: false, model: "d1-2b" });
+    expect(f.to("POST", "/api/checker")[0].body).toMatchObject({ config: { model_on: true } });
+  });
+
+  it("turns the model on during an install without offering another", async () => {
+    const d = centerData();
+    d.checker.config.model_on = false;
+    d.checker.installed = false;
+    d.checker.install = { phase: "downloading", llama: { done: 1, total: 2 }, model: { done: 0, total: 9 }, gpu: false, model_id: "d1-2b" } as never;
+    const { el, f } = await center("checker", { "GET /api/checker": () => d.checker, "POST /api/checker": () => ({}) });
+    await click(el.querySelectorAll(".strip [role=switch]")[1]);
+    await settle(6);
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+    expect(f.to("POST", "/api/checker/install")).toHaveLength(0);
     expect(f.to("POST", "/api/checker")[0].body).toMatchObject({ config: { model_on: true } });
   });
 });

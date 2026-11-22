@@ -10,7 +10,7 @@ import { escapeControls, when } from "../format";
 import { Btn, Icon, ListCard, Loading, LRow, More, PageHead, Pill, RemoveAsk, Seg, Switch, TextInput, failed, toast } from "../ui";
 import { useNode } from "./App";
 import { CenterTabs } from "./CenterTabs";
-import type { CenterEntry, Json } from "./types";
+import { onWindows, type CenterEntry, type Json } from "./types";
 
 type Folder = { path: string; read: boolean; write: boolean; execute: boolean; rights?: string };
 type Perm = { rules: { allow?: string[]; deny?: string[]; sudo?: string[]; stale?: Record<string, string> }; folders: { folders?: Folder[] }; sudo: { sudo?: string } };
@@ -168,12 +168,13 @@ const ICON: Record<Sec, string> = { folders: "folder", deny: "ban", allow: "chec
 
 /** The form row of a folder (a new one, or one whose rights change). */
 function FolderForm({ start, fixed, save, cancel }: { start: Folder; fixed?: boolean; save: (f: Folder) => Promise<unknown>; cancel: () => void }) {
+  const windows = onWindows(useNode().o);
   const [f, setF] = useState(start);
   return (
     <div className="prow form">
       <div className="pl">
         <Icon name="folder" />
-        <TextInput value={f.path} onChange={(path) => setF({ ...f, path })} mono readOnly={fixed} placeholder={PLACEHOLDER.folders} aria-label="Folder" autoFocus={!fixed} />
+        <TextInput value={f.path} onChange={(path) => setF({ ...f, path })} mono readOnly={fixed} placeholder={windows ? "C:\\Users\\you\\project" : PLACEHOLDER.folders} aria-label="Folder" autoFocus={!fixed} />
       </div>
       <div className="pl2">
         <Rights f={f} set={(x) => setF(x)} label="Rights of the new folder" />
@@ -221,7 +222,8 @@ function RuleForm({ sec, start, edit, save, cancel }: { sec: Sec; start: string;
 }
 
 function PermOf({ c }: { c: CenterEntry }) {
-  const { status } = useNode();
+  const { status, o } = useNode();
+  const windows = onWindows(o);
   const perm = usePoll(() => api<Perm>("GET", `/api/perm?center=${encodeURIComponent(c.name)}`), [c.name], 0);
   const [sec, setSec] = useState<Sec>("folders");
   // The row being edited: "new", a folder's path or a rule.
@@ -323,7 +325,11 @@ function PermOf({ c }: { c: CenterEntry }) {
       <div className="prow note meta">Count only in allowlist mode.</div>
     ) : sec === "sudo" ? (
       <div className="prow note meta">
-        {sudoOn ? "Sudo is on: the commands on this list run with sudo." : "Off: nothing runs with sudo. Its list waits below. Turning sudo on is done at the CLI: sudo nerve-node sudo on."}
+        {sudoOn
+          ? "Sudo is on: the commands on this list run with sudo."
+          : windows
+            ? "Off: nothing runs with sudo. Its list waits below. Turning sudo on is done in the Nerve app: Permissions, Sudo."
+            : "Off: nothing runs with sudo. Its list waits below. Turning sudo on is done at the CLI: sudo nerve-node sudo on."}
         {sudoOn ? (
           <Btn
             kind="danger"
@@ -338,7 +344,7 @@ function PermOf({ c }: { c: CenterEntry }) {
         ) : null}
       </div>
     ) : sec === "folders" ? (
-      <div className="prow note meta">What the center may do in each folder in folder mode. A whole path, starting at /.</div>
+      <div className="prow note meta">What the center may do in each folder in folder mode. {windows ? "A whole path, like C:\\Users\\you\\project." : "A whole path, starting at /."}</div>
     ) : null;
   return (
     <div className="psplit">

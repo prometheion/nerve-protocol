@@ -306,7 +306,8 @@ can turn its own network off, never on again: only you can. It may change
 its mode while it is off, as no mode escapes the switch, but it can give
 itself no new folder to write while it is off (see below). A command that is
 running when you turn the switch off is ended by the node, and the audit log
-says so (`killed`, `no_network`): it started with the network, and could pass
+says so (`killed`, `no_network`), as its result does (`"killed": "network"`
+with a `reason`): it started with the network, and could pass
 it on to the commands that follow through a socket it listens on. That holds
 when you turn it off and on again quickly, and for the commands of a link
 that dropped and that the center may still resume. Commands
@@ -844,7 +845,7 @@ still work while agents' jobs hold every other place.
 |---|---|
 | Memory | The command is killed, with everything it started. Its result has `"killed": "memory"` and a `reason`, such as `the command went past its memory limit of 4096 MiB and was killed`, and `"signal": "kill"`. |
 | CPU | The command is slowed down. It is not killed. |
-| Processes | The command cannot start more. A shell says `Cannot fork` or `Resource temporarily unavailable`. |
+| Processes | The command cannot start more. A shell says `Cannot fork` or `Resource temporarily unavailable`; its result has `"held": "processes"` and a `reason`, such as `the command reached its limit of 20 processes: starting more was refused` (from `pids.events`; on Windows from the job's message). |
 
 Only a command that reached its own limit gets `killed`. When the machine
 runs out of memory as a whole, the kernel may kill a command below its

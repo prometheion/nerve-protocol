@@ -316,8 +316,12 @@ fn center_summary(c: &Value) -> Option<String> {
         n("sudo_rules")?,
     );
     let network = if c["no_network"] == true { "off" } else { "on" };
+    let folders = match folders {
+        1 => "1 folder".to_string(),
+        n => format!("{n} folders"),
+    };
     Some(format!(
-        "{folders} folders · network {network} · rules {allow} allow, {deny} deny, {sudo} sudo"
+        "{folders} · network {network} · rules {allow} allow, {deny} deny, {sudo} sudo"
     ))
 }
 
@@ -571,6 +575,8 @@ Next  Start it:       nerve-node service start
             "0 folders · network off · rules 0 allow, 0 deny, 0 sudo\n",
             "Next  Give lab a folder:  nerve-node folder add ~/project rwx --center lab\n",
             "    home   the center is older than this node: update it first   folder mode",
+            // One folder is one (#213, L1-7: "1 folders").
+            "folder mode   1 folder · network on",
         ] {
             assert!(t.contains(want), "{want}\n{t}");
         }

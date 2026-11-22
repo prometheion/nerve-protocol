@@ -1006,6 +1006,18 @@ mod tests {
         let last = c.audit().pop().unwrap();
         assert_eq!(last["checker"]["layer"], "allow rule");
         assert_eq!(last["target"], "/home/me/notes/today.md");
+        // The log names the rule as the page does (#213, L4-7).
+        let log = c.log_json(&nerve_transport::log::Query {
+            limit: 50,
+            ..Default::default()
+        });
+        assert!(
+            log["entries"].as_array().unwrap().iter().any(|e| e["msg"]
+                .as_str()
+                .unwrap()
+                .contains("allowed notes.save by its Skip the model rule for every node")),
+            "{log}"
+        );
         // Its pin choices are the schema's arguments, not the junk keys.
         let kept: Vec<&String> = last["args"].as_object().unwrap().keys().collect();
         assert_eq!(kept, ["path", "text"]);

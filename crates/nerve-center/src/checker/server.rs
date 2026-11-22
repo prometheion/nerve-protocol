@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nerve_transport::log::Level;
 use nerve_transport::sync::lock;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -58,6 +59,13 @@ pub struct Status {
 }
 
 const OUTPUT_KEEP: usize = 20;
+
+/// Where the supervisor says what happened to the server: the center's log.
+/// The checker page's banner sends the owner there, and `nerve-center log
+/// --problems` is where the terminal looks (#213, L4-2: the log said nothing
+/// of a server that ended or could not start). The center adds to a warning
+/// what happens to the calls meanwhile, which its settings decide.
+pub type Say = Arc<dyn Fn(Level, String) + Send + Sync>;
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -146,6 +154,7 @@ impl LocalServer {
     /// fetched it), so there is no download at start.
     /// Starts the server of `bin` on `model`; its socket goes in `dir`, the
     /// center's state folder.
+    /// `say` gets what the log should hold of it ([`Say`]).
     pub fn start(
         bin: PathBuf,
         model: PathBuf,
@@ -153,8 +162,9 @@ impl LocalServer {
         gpu: bool,
         timeout_ms: u64,
         pin: &ModelPin,
+        say: Say,
     ) -> Result<LocalServer, String> {
-        LocalServer::start_at(bin, model, Listen::for_dir(dir)?, gpu, timeout_ms, pin)
+        LocalServer::start_at(bin, model, Listen::for_dir(dir)?, gpu, timeout_ms, pin, say)
     }
 
     fn start_at(
@@ -164,6 +174,7 @@ impl LocalServer {
         gpu: bool,
         timeout_ms: u64,
         pin: &ModelPin,
+        say: Say,
     ) -> Result<LocalServer, String> {
         let context = pin.context;
         if !bin.exists() {
@@ -189,6 +200,7 @@ impl LocalServer {
             shutdown.clone(),
             exited.clone(),
             budget.clone(),
+            say,
         ));
         Ok(LocalServer {
             inner,
@@ -324,6 +336,11 @@ fn free_port() -> Result<u16, String> {
 /// The command line for a server that listens at a place.
 type ArgsFor = Box<dyn Fn(&Listen) -> Vec<String> + Send>;
 
+/// What the log says of the calls while a model that ended on a call
+/// starts again: they are refused then, whatever `on error` says.
+pub const LOST_CALL_NOTE: &str =
+    "The call it was reading was lost, so the calls until it is ready again are refused.";
+
 /// Runs the server, restarting it with backoff until the task is aborted. A
 /// non-decision model is a reason not to restart. Each process starts with
 /// the budget's speeds forgotten.
@@ -338,9 +355,15 @@ async fn supervise(
     shutdown: Arc<tokio::sync::Notify>,
     exited: Arc<tokio::sync::Notify>,
     budget: Arc<ReadBudget>,
+    say: Say,
 ) {
     let mut backoff = Duration::from_secs(1);
     let mut first = true;
+    let teller = Teller {
+        say,
+        said: Mutex::new(String::new()),
+    };
+    let tell = |level, text| teller.tell(level, text);
     loop {
         set(&inner, |i| {
             i.phase = Some(Phase::Starting);
@@ -371,11 +394,59 @@ async fn supervise(
                     &inner,
                     &shutdown,
                     &budget,
+                    &teller,
                 )
                 .await
             }
             Err(e) => RunEnd::StartFailed(format!("no free port: {e}")),
         };
+        let last_line = || {
+            lock(&inner)
+                .output
+                .iter()
+                .rev()
+                .find(|l| !l.starts_with("llama-server ended"))
+                .map(|l| format!(" Its last line: {l}"))
+                .unwrap_or_default()
+        };
+        match &run {
+            RunEnd::Exited { how, was_ready } => {
+                let what = match (how, was_ready) {
+                    (Some(how), true) => format!("ended ({how})"),
+                    (Some(how), false) => format!("ended before it was ready ({how})"),
+                    (None, _) => lock(&inner).message.clone(),
+                };
+                // A call lost with it is refused until the new process is
+                // ready, also with allow-and-log; the center's log line
+                // then says no more about the calls meanwhile.
+                let lost = match budget.died_on_call() {
+                    true => format!(" {LOST_CALL_NOTE}"),
+                    false => String::new(),
+                };
+                tell(
+                    Level::Warn,
+                    format!(
+                        "the action checker's local model {what}; it starts again.{lost}{}",
+                        last_line()
+                    ),
+                );
+            }
+            RunEnd::StartFailed(e) => tell(
+                Level::Warn,
+                format!(
+                    "the action checker cannot start its local model: cannot start {}: {e}; it tries again",
+                    program.display()
+                ),
+            ),
+            RunEnd::NotDecision => tell(
+                Level::Warn,
+                format!(
+                    "the action checker's local model does not run: {}",
+                    lock(&inner).message
+                ),
+            ),
+            RunEnd::Stopped => {}
+        }
         match run {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
@@ -389,7 +460,7 @@ async fn supervise(
                 exited.notify_waiters();
                 return;
             }
-            RunEnd::Exited => {}
+            RunEnd::Exited { .. } => {}
             RunEnd::StartFailed(e) => {
                 // The restart came to nothing: the model is down, not
                 // ended on a call, and allow-and-log applies as it says.
@@ -412,11 +483,47 @@ async fn supervise(
     }
 }
 
+/// The supervisor's lines in the log. The last problem said is kept: a
+/// server that fails the same way at every try is said once, not every 30 s,
+/// and its coming back once.
+struct Teller {
+    say: Say,
+    said: Mutex<String>,
+}
+
+impl Teller {
+    fn tell(&self, level: Level, text: String) {
+        let mut said = lock(&self.said);
+        if *said != text {
+            *said = text.clone();
+            (self.say)(level, text);
+        }
+    }
+
+    /// The server runs: said where a problem was said before.
+    fn ready(&self) {
+        let mut said = lock(&self.said);
+        if !said.is_empty() {
+            said.clear();
+            (self.say)(
+                Level::Info,
+                "the action checker's local model runs again".into(),
+            );
+        }
+    }
+}
+
 enum RunEnd {
     /// The process could not be started.
     StartFailed(String),
-    /// It ran and exited (crash); restart after the backoff.
-    Exited,
+    /// It ran and exited (crash), how if it ended by itself (else the
+    /// message says why it was ended), and whether it was ready before;
+    /// restart after the backoff.
+    Exited {
+        how: Option<String>,
+        was_ready: bool,
+    },
+
     /// It was asked to stop and the child has exited; do not restart.
     Stopped,
     /// It loaded a model that is not a decision model; do not restart.
@@ -498,6 +605,7 @@ async fn spawn_held(mut cmd: Command) -> std::io::Result<tokio::process::Child> 
         .map_err(|_| std::io::Error::other("the thread that starts llama-server ended"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     program: &PathBuf,
     args: &[String],
@@ -506,6 +614,7 @@ async fn run_once(
     inner: &Arc<Mutex<Inner>>,
     shutdown: &Arc<tokio::sync::Notify>,
     budget: &ReadBudget,
+    teller: &Teller,
 ) -> RunEnd {
     // A socket a run before left behind would stop this one from listening;
     // it is the center's own, in its own folder.
@@ -587,7 +696,7 @@ async fn run_once(
                     i.url = None;
                     push_line(&mut i.output, format!("llama-server ended ({how})"));
                 });
-                return RunEnd::Exited;
+                return RunEnd::Exited { how: Some(how), was_ready: false };
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 // Who answers is checked before the real key is sent: a
@@ -602,7 +711,7 @@ async fn run_once(
                             i.message = format!("another process answers at {url} for the local model, and takes keys it was not given; the checker does not trust it");
                         });
                         kill_and_wait(&mut child).await;
-                        return RunEnd::Exited;
+                        return RunEnd::Exited { how: None, was_ready: false };
                     }
                     // Not up yet.
                     None => continue,
@@ -617,6 +726,7 @@ async fn run_once(
                             // with the phase, under its lock.
                             budget.became_ready();
                         });
+                        teller.ready();
                         // Stay here until the child exits or we are stopped.
                         tokio::select! {
                             _ = shutdown.notified() => {
@@ -636,7 +746,7 @@ async fn run_once(
                                     i.url = None;
                                     push_line(&mut i.output, format!("llama-server ended ({how})"));
                                 });
-                                return RunEnd::Exited;
+                                return RunEnd::Exited { how: Some(how), was_ready: true };
                             }
                         }
                     }
@@ -934,6 +1044,7 @@ mod tests {
                 false,
                 5000,
                 pin,
+                quiet(),
             )
             .expect("start");
             let budget = server.endpoint().budget.expect("a budget");
@@ -969,6 +1080,7 @@ mod tests {
             false,
             5000,
             crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b),
+            quiet(),
         )
         .expect("start");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -1014,7 +1126,8 @@ mod tests {
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, dir.path(), false, 5000, pin).expect("start");
+        let server =
+            LocalServer::start(bin, model, dir.path(), false, 5000, pin, quiet()).expect("start");
         let until = async |what: &str, f: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while !f() {
@@ -1120,7 +1233,8 @@ mod tests {
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
         let at = Listen::Port(free_port().unwrap());
-        let server = LocalServer::start_at(bin, model, at, false, 5000, pin).expect("start");
+        let server =
+            LocalServer::start_at(bin, model, at, false, 5000, pin, quiet()).expect("start");
         until(&server, "ready", &|| server.ready()).await;
         server.stop().await;
     }
@@ -1182,7 +1296,8 @@ mod tests {
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
         let server =
-            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin, quiet())
+                .expect("start");
         // Several probe rounds (one every 500 ms) go by.
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(!server.ready(), "{:?}", server.status());
@@ -1209,7 +1324,8 @@ mod tests {
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
         let server =
-            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin, quiet())
+                .expect("start");
         until(&server, "ready", &|| server.ready()).await;
         let Listen::Port(now) = server.listen() else {
             panic!("a port")
@@ -1278,7 +1394,8 @@ mod tests {
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
         let server =
-            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin, quiet())
+                .expect("start");
         let pid = dir.path().join("pid");
         until(&server, "started", &|| pid.exists()).await;
         // The process ends with a call in it, before it was ever ready.
@@ -1360,7 +1477,7 @@ mod tests {
         let model = dir.join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, dir, false, 5000, pin).expect("start");
+        let server = LocalServer::start(bin, model, dir, false, 5000, pin, quiet()).expect("start");
         until(&server, "ready", &|| server.ready()).await;
         server
     }
@@ -1376,6 +1493,71 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// A [`Say`] that says nothing, for a test that does not read the log.
+    fn quiet() -> Say {
+        Arc::new(|_, _| {})
+    }
+
+    /// The log says why the local model does not run, as the checker page
+    /// does, and that it runs again; a server that fails the same way at
+    /// every try is said once (#213, L4-2: the banner sent the owner to a
+    /// log that said nothing).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_log_says_why_the_local_model_does_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let heard: Arc<Mutex<Vec<(Level, String)>>> = Arc::default();
+        let say: Say = {
+            let heard = heard.clone();
+            Arc::new(move |level, text| heard.lock().unwrap().push((level, text)))
+        };
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin.clone(), model, dir.path(), false, 5000, pin, say)
+            .expect("start");
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(heard.lock().unwrap().is_empty(), "{heard:?}");
+        let mode =
+            |m: u32| std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o644);
+        kill_fake(dir.path());
+        let failed = || {
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, t)| t.contains("cannot start"))
+        };
+        until(&server, "said it cannot start", &failed).await;
+        // A few more tries fail the same way, and are not said again.
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        mode(0o755);
+        until(&server, "ready again", &|| server.ready()).await;
+        server.stop().await;
+        let heard = heard.lock().unwrap().clone();
+        let texts: Vec<&str> = heard.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(heard.len(), 3, "{texts:#?}");
+        assert_eq!(heard[0].0, Level::Warn);
+        assert!(
+            texts[0].starts_with("the action checker's local model ended ("),
+            "{texts:#?}"
+        );
+        assert!(texts[0].contains("; it starts again."), "{texts:#?}");
+        assert_eq!(heard[1].0, Level::Warn);
+        assert!(texts[1].contains("Permission denied"), "{texts:#?}");
+        assert!(texts[1].contains(&bin.display().to_string()), "{texts:#?}");
+        assert_eq!(
+            heard[2],
+            (
+                Level::Info,
+                "the action checker's local model runs again".into()
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -1601,8 +1783,16 @@ mod tests {
         let bin = dir.path().join("llama-server");
         std::fs::write(&bin, "x").unwrap();
         let server = Arc::new(
-            LocalServer::start(bin, dir.path().join("m"), dir.path(), false, 5000, pin)
-                .expect("start"),
+            LocalServer::start(
+                bin,
+                dir.path().join("m"),
+                dir.path(),
+                false,
+                5000,
+                pin,
+                quiet(),
+            )
+            .expect("start"),
         );
         while server.status().phase != Phase::Failed {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1636,7 +1826,8 @@ mod tests {
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, dir.path(), false, 5000, pin).expect("start");
+        let server =
+            LocalServer::start(bin, model, dir.path(), false, 5000, pin, quiet()).expect("start");
         // The supervisor is past its restart and probing; the first probe is
         // after 500 ms.
         tokio::time::sleep(Duration::from_millis(200)).await;

@@ -829,6 +829,10 @@ fields it does not know.
   (`{"entries": [...]}`, the lines as the file holds them; with `--follow`
   one a line). `status` has `"daemon"`:
   `"running"`, with what the running node says, or `"not running"`.
+  The running node's `"confinement"` says what this machine can confine
+  commands with (`"landlock v6"`, `"appcontainer"` or `"none"`); whether a
+  center's commands are confined now is that center's `"confined"`, and the
+  top level has none.
   It names the installed node's `"owner"` and `"owner_full_rights"` (what
   runs as the owner has every right of the machine: root is the owner on
   Linux, so `user` mode runs as root; the owner is an administrator on

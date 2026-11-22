@@ -880,7 +880,11 @@ async fn api(ctx: &Call<'_>, req: &Request, b: &Value, cfg: &NodeConfig) -> ApiR
 /// What the Overview page shows: the node's status, as `nerve-node status`
 /// reads it.
 fn overview(ctx: &Ctx, _cfg: &NodeConfig) -> Value {
-    ctx.shared.status()
+    let mut v = ctx.shared.status();
+    // The pages word their hints by it: on Windows there is no nerve-node
+    // to type, and no root or systemctl (#213, W4-1).
+    v["os"] = json!(std::env::consts::OS);
+    v
 }
 
 /// Settings › Web UI: where it listens, and the tokens by label.

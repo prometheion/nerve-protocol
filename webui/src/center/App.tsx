@@ -78,7 +78,7 @@ export function CenterApp() {
   );
   const ov = overview.data;
   const online = ov ? ov.nodes.filter((n) => n.online).length : 0;
-  const status = ov ? { tone: "ok" as const, title: "Running", line: `${online} of ${plural(ov.nodes.length, "node")} online` } : null;
+  const status = ov ? { tone: "ok" as const, title: "Running", line: ov.nodes.length ? `${online} of ${plural(ov.nodes.length, "node")} online` : "No node paired yet" } : null;
   const View = VIEWS[page];
   return (
     <Shell role="center" pages={PAGES} page={page} status={status}>

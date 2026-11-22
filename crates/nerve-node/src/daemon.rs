@@ -1505,6 +1505,38 @@ impl Shared {
         self.tell_confinement(&cfg);
     }
 
+    /// Writes down the timed modes that ran out, so the config, the log and
+    /// the audit say when a mode ended and which one holds now; the calls
+    /// were judged by the mode after it already (#213, L3-5). A config file
+    /// ahead of the node refuses the write; the timer ends again once the
+    /// node took it.
+    pub fn end_timers(&self) {
+        let now = crate::now_ms();
+        let cfg = self.config();
+        if cfg
+            .centers
+            .iter()
+            .all(|c| c.policy.mode_at(now) == c.policy.mode)
+        {
+            return;
+        }
+        let ended = lock(&self.store).end_timers(now);
+        match ended {
+            Ok(ended) if ended.is_empty() => {}
+            Ok(ended) => {
+                for (center, was, mode) in ended {
+                    tracing::info!(
+                        "center {center}: the time of its {} mode ran out; it is in {} mode now",
+                        was.as_str(),
+                        mode.as_str()
+                    );
+                }
+                self.bump();
+            }
+            Err(e) => tracing::debug!("the end of a timed mode is not written down yet: {e:?}"),
+        }
+    }
+
     /// Reads the config file again because the owner asked (SIGHUP, the
     /// control socket). Nothing else rereads it: the node keeps its config
     /// in memory, and a file it did not sign is refused.
@@ -2116,13 +2148,18 @@ pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this ce
 /// [`NETWORK_NOT_HELD`] on Windows, where the Windows Firewall service keeps
 /// a container off the network ([`container_holds_network`]).
 #[cfg(windows)]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: the Windows Firewall service, which keeps their AppContainer off the network, does not run, so the node runs none of its commands; the owner starts that service, or turns the network back on with `nerve-node network on`";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: the Windows Firewall service, which keeps their AppContainer off the network, does not run, so the node runs none of its commands; the owner starts that service, or turns the network back on in the Nerve app (Permissions, Network)";
 
 /// Why a pairing's commands may not run where its owner turned their
 /// network off and they run as the owner in the mode it is in
 /// ([`Shared::network_refusal`]): nothing holds them back from the owner's
 /// programs, which reach the network for them.
+#[cfg(not(windows))]
 pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node network on`, or has them run as nerve-run: `nerve-node mode folder`, or `nerve-node mode allowlist` without `--as-owner`";
+/// [`NETWORK_AS_OWNER`] on Windows, which has no nerve-node to type: the
+/// Nerve app does it (#213, W3-6).
+#[cfg(windows)]
+pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on in the Nerve app (Permissions, Network), or has them run as nerve-run: folder mode, or allowlist mode not as the owner (Permissions, Mode)";
 
 /// Why a pairing's commands may not run where the owner turned their network
 /// off on a node run by hand, which runs them as its own user
@@ -2174,7 +2211,11 @@ pub fn by_hand_apart(full_rights: bool, landlock_abi: Option<i32>) -> bool {
 /// Why a command on the sudo list does not run while the owner keeps the
 /// pairing's commands off the network: it runs outside the filter that
 /// holds them, with rights that reach past any.
+#[cfg(not(windows))]
 pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on with `nerve-node network on`";
+/// [`NETWORK_SUDO`] on Windows, where the Nerve app turns it on.
+#[cfg(windows)]
+pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on in the Nerve app (Permissions, Network)";
 
 /// Why commands of `folder` mode may not run ([`Shared::unconfined_as`]),
 /// or `None`: `sandbox` says whether the machine confines them, `service`
@@ -2759,6 +2800,7 @@ async fn supervise(shared: Arc<Shared>) {
     let mut acl_synced: Option<u64> = None;
     loop {
         shared.settle_sudo();
+        shared.end_timers();
         let cfg = shared.config();
         // The folder grants follow the config as it changes (crate::grants);
         // a command syncs them as well before it runs. The first sync walks
@@ -5404,6 +5446,57 @@ mod tests {
         }
     }
 
+    /// The node writes down the end of a timed mode as it comes: the config
+    /// says the mode in force, and the audit the timer's change (#213, L3-5).
+    #[tokio::test]
+    async fn the_node_writes_down_the_end_of_a_timed_mode() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let until = crate::now_ms() + 300;
+        daemon.owner_edit(|c| {
+            c.centers.push(nerve_policy::CenterEntry {
+                name: "home".into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: "n".into(),
+                settings: Default::default(),
+                paused: true,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: nerve_policy::config::CenterPolicy {
+                    mode: nerve_policy::Mode::User,
+                    until: Some(until),
+                    then: Some(nerve_policy::Mode::Folder),
+                    ..Default::default()
+                },
+                capabilities: Vec::new(),
+            })
+        });
+        let policy = || daemon.config().centers[0].policy.clone();
+        for _ in 0..50 {
+            if policy().until.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let p = policy();
+        assert_eq!(
+            (p.mode, p.until, p.then),
+            (nerve_policy::Mode::Folder, None, None)
+        );
+        assert!(crate::now_ms() >= until);
+        let audit = AuditLog::new(daemon.shared.paths.audit_log());
+        let last = audit.read().unwrap().pop().unwrap();
+        assert_eq!(last["by"], "timer", "{last}");
+        daemon.stop().await;
+    }
+
     /// Landlock below ABI 3 confines the installed node's commands still,
     /// which without it would run as nerve-run held by nothing else; a node
     /// run by hand takes it as none and runs no command of folder mode.
@@ -6614,6 +6707,17 @@ node_id = "n1"
 #[cfg(test)]
 mod confinement_tests {
     use super::*;
+
+    /// What a refusal for the network switch tells the agent to pass on
+    /// names the place the owner changes it here: on Windows the Nerve app,
+    /// which has no nerve-node to type (#213, W3-6).
+    #[test]
+    fn the_network_refusals_name_the_owner_s_place() {
+        for why in [NETWORK_NOT_HELD, NETWORK_AS_OWNER, NETWORK_SUDO] {
+            assert_eq!(why.contains("nerve-node"), !cfg!(windows), "{why}");
+            assert_eq!(why.contains("the Nerve app"), cfg!(windows), "{why}");
+        }
+    }
 
     /// The refusal for keys in the keyring names what applies on the platform:
     /// the session bus and the installed node's nerve-run on Linux, the

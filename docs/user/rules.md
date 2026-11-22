@@ -59,6 +59,7 @@ argument of the call.
 nerve-node rule add allow /srv/data/report.txt --action fs.read
 nerve-node rule add deny '/srv/data/*' --action fs.write
 nerve-node rule add deny '' --action lamp.set --arg room=bedroom
+nerve-node rule rm '/srv/data/*' --action fs.write   # as it was added
 ```
 
 `--exact` takes the text as it is, a `*` at its end too. Rules on an
@@ -123,7 +124,8 @@ nerve-node sudo off
 
 `sudo on` asks your password to show that you may run commands as root here.
 On the installed node it needs `sudo` in front. The password stays in
-memory only, so a restart turns sudo off.
+memory only, so a restart turns sudo off. With root as the owner it asks
+none: sudo checks no password of root's.
 
 - Commands on the sudo list run as root, outside the folders. Put on the
   list only what you would run as root yourself
@@ -156,6 +158,8 @@ No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
 or another center's pairing, or change the proxy or a machine setting (the
 shell, `allow_root`, the sudo path, where the keys are, the log level). Nor
 may it put a command on the sudo list (or take off an `exec` deny rule that can match one), turn its network on or release a protected path ([the grant](../dev/settings-and-config.md#the-settings-grant)).
+For a refused sudo command its Audit page and `nerve-center audit allow`
+add no rule: they show the line to run on the machine.
 
 - A center with the grant can widen its rights up to `user` mode. Give it
   only to a center you would also give a shell.
@@ -176,6 +180,7 @@ nerve-node cap
 | `on` | Normal: the rules and the mode decide |
 | `off` | Calls are refused with `disabled`; the center sees it as off |
 | `hidden` | The center is not told of it, and calls are refused |
+| `default` | None chosen again: its mode decides (**By mode** in the web UI) |
 
 A switch applies in every mode, to a capability (`fs`) or one action
 (`exec.run`).

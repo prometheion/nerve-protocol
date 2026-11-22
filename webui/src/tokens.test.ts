@@ -1,6 +1,6 @@
 // The web UIs look like the app: every token of tokens.css is the value of
-// the same name in the app's theme.slint, light and dark, and the widths
-// where the layout changes are the app's.
+// the same name in the app's theme.slint, light and dark; a column folds
+// where its panes no longer fit.
 import { describe, expect, it } from "vitest";
 import theme from "../../crates/nerve/ui/theme.slint?raw";
 import tokens from "./styles/tokens.css?raw";
@@ -62,14 +62,43 @@ describe("the design tokens", () => {
     }
   });
 
-  it("change the layout where the app does", () => {
-    const shape = global("Shape");
-    const wide = shape.find(([n]) => n === "wide")![1].match(/>= (\d+)px/)![1];
-    const large = shape.find(([n]) => n === "large")![1].match(/>= (\d+)px/)![1];
-    expect(wide).toBe("1100");
-    expect(large).toBe("1800");
-    expect(app).toContain(`@media (min-width: ${wide}px)`);
-    expect(app).toContain(`@media (max-width: ${Number(wide) - 1}px)`);
-    expect(app).toContain(`@media (min-width: ${large}px)`);
+  // A column folds only where the panes no longer fit at their least
+  // widths, by the page's own width, not at fixed window widths (owner,
+  // #213): two panes at 260 + 400 px and the gap, three at 260 + 440 + 300.
+  it("fold a column only where the panes no longer fit", () => {
+    expect(app).not.toMatch(/@media \(min-width: 1800px\)/);
+    const gap = Number(tokens.match(/--space-lg: (\d+)px/)![1]);
+    const two = Number(app.match(/@container page \(min-width: (\d+)px\) \{\n  \.split \{/)![1]);
+    expect(two).toBeGreaterThanOrEqual(260 + gap + 400);
+    expect(app).toContain(`@container page (max-width: ${two - 1}px)`);
+    const three = Number(app.match(/@container page \(min-width: (\d+)px\) \{\n  \.split\.side3 \{/)![1]);
+    expect(three).toBeGreaterThanOrEqual(260 + 440 + 300 + 2 * gap);
+    expect(app).toContain("minmax(260px, var(--lw)) minmax(400px, var(--dw))");
+  });
+
+  // A width the owner dragged to (data-w) wins at every page width: each
+  // rule that sets a Split's columns without minding data-w is followed, in
+  // its own block, by a data-w rule of the same Split at least as weighty
+  // (owner, #213: the shares hold as the window changes).
+  it("let a dragged width win on every page width", () => {
+    const blocks = Array.from(app.matchAll(/@container page \(min-width: \d+px\) \{\n([\s\S]*?)\n\}/g), (m) => m[1]);
+    expect(blocks.length).toBeGreaterThanOrEqual(3);
+    const weight = (sel: string) => (sel.replace(/:not\([^)]*\)/g, "").match(/[.[]/g) || []).length;
+    const classes = (sel: string) => new Set(sel.replace(/:not\([^)]*\)|:has\(.*\)|\[[^\]]*\]/g, "").split(".").filter(Boolean));
+    let checked = 0;
+    for (const b of blocks) {
+      const rules = Array.from(b.matchAll(/^\s*([^{\n]+?) \{([^}]*)\}/gm), (m) => ({ sel: m[1], body: m[2] })).filter(
+        (r) => r.sel.startsWith(".split") && r.body.includes("grid-template-columns"),
+      );
+      rules.forEach((r, i) => {
+        if (r.sel.includes("[data-w")) return;
+        checked++;
+        const later = rules.slice(i + 1).filter((l) => /\[data-w\]/.test(l.sel.replace(/:not\(\[data-w\]\)/g, "")));
+        const own = classes(r.sel);
+        const wins = later.some((l) => [...classes(l.sel)].every((c) => own.has(c)) && weight(l.sel) >= weight(r.sel));
+        expect(wins, `${r.sel} sets its columns over a dragged width`).toBe(true);
+      });
+    }
+    expect(checked).toBeGreaterThanOrEqual(5);
   });
 });

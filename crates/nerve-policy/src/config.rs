@@ -18,7 +18,7 @@ use nerve_transport::files::Format;
 use crate::paths::within;
 
 mod capability;
-pub(crate) use capability::unseen;
+pub use capability::unseen;
 pub mod form;
 pub use capability::{
     BUILT_IN, CENTER_ADDED, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,
@@ -1172,6 +1172,20 @@ impl CenterPolicy {
     pub fn ends(&self, now_ms: u64) -> Option<(u64, Mode)> {
         let until = self.until.filter(|u| *u > now_ms)?;
         matches!(self.mode, Mode::Folder | Mode::User).then(|| (until, self.after()))
+    }
+
+    /// Writes down the end of a timed mode that ran out by `now_ms`: the mode
+    /// it fell back to ([`CenterPolicy::mode_at`] has judged by it since)
+    /// and no timer. The mode that ended and the one now; `None` where no
+    /// timer ran out.
+    pub fn end_timer(&mut self, now_ms: u64) -> Option<(Mode, Mode)> {
+        let ended = self.mode;
+        let now = self.mode_at(now_ms);
+        if now == ended {
+            return None;
+        }
+        (self.mode, self.until, self.then) = (now, None, None);
+        Some((ended, now))
     }
 
     /// Whether the commands of this pairing run as the owner's account at

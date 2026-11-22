@@ -17,6 +17,7 @@ import {
   Empty,
   Field,
   FormCard,
+  GrowArea,
   Icon,
   LRow,
   ListCard,
@@ -30,7 +31,6 @@ import {
   Seg,
   Split,
   Switch,
-  TextArea,
   TextInput,
   ask,
   failed,
@@ -381,11 +381,17 @@ function CheckerBanners({ cfg, meta }: { cfg: Cfg; meta: Json }) {
 }
 
 /** Turning the model on with no local model installed: it would refuse
- * every checked call, so the owner is asked to install it first. True to go
- * on with the switch. */
+ * every checked call, so the owner is asked to install it first. While an
+ * install runs it just turns on, and runs once the install is done (#213,
+ * L4-4: it offered a second install, which was refused). True to go on with
+ * the switch. */
 async function modelOnAsks(ctx: Ctx): Promise<boolean> {
   const { meta, cfg } = ctx;
   if (cfg.model.source !== "local" || meta.installed || !meta.platform_supported) return true;
+  if (meta.install && INSTALLING.includes(meta.install.phase)) {
+    toast("The model runs once the install is done.");
+    return true;
+  }
   const pin = meta.models[0];
   const what = cfg.model.fail_closed ? "every checked call is refused" : "every checked call passes unjudged (fail closed is off)";
   const yes = await ask({ title: "No model is installed", message: `With the model on and none installed, ${what}. Install ${pin.name} (${gb(pin.bytes)}) on the CPU now?`, confirm: "Install and turn on" });
@@ -827,7 +833,7 @@ function ModelDetail({ ctx }: { ctx: Ctx }) {
           <Picker label="Which calls the model sees" items={SCOPES} value={f.scope} onPick={put("scope")} />
           {m.fail_closed ? failSwitch : null}
           <Field label="Question (the command text is never put here; it goes only in the state sent to the model)">
-            <TextArea value={f.instructions} onChange={put("instructions")} rows={4} />
+            <GrowArea value={f.instructions} onChange={put("instructions")} />
           </Field>
           <div className="form-row">
             <Field label="When true (dangerous)">

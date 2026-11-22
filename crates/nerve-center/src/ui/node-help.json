@@ -218,8 +218,8 @@
                   "optional": true
                 }
               ],
-              "line": "Restore a backup (stop the node first)",
-              "more": "Put the config and keys of a backup in place of this node's. The node must not run.",
+              "line": "Restore a backup (the owner's restore stops the node; as root, stop it first)",
+              "more": "Put the config and keys of a backup in place of this node's. The owner of the installed node runs it without sudo, and it stops the node and starts it again; as root, stop the node first (`nerve-node service stop`), and start it after.",
               "name": "restore",
               "usage": "nerve-node restore [OPTIONS] <FILE>"
             }
@@ -548,10 +548,28 @@
                   "more": "The list (`allow`, `deny` or `sudo`), needed only when the entry is on two; then the entry.",
                   "name": "<ENTRY>",
                   "optional": false
+                },
+                {
+                  "line": "The rule `rule add --action` made of the entry",
+                  "more": "The entry is the path or target of a rule `rule add` made with this action, as in `rule rm '/srv/data/*' --action fs.read`.",
+                  "name": "--action <CAP.ACTION>",
+                  "optional": true
+                },
+                {
+                  "line": "With --action: the --arg the rule was made with",
+                  "more": "",
+                  "name": "--arg <FIELD=VALUE>",
+                  "optional": true
+                },
+                {
+                  "line": "With --action: the --exact the rule was made with",
+                  "more": "",
+                  "name": "--exact",
+                  "optional": true
                 }
               ],
               "line": "Take a rule off its list, as `rule` shows it",
-              "more": "Take an entry off its list: the entry as `rule` shows it, or the command line that made it.",
+              "more": "Take an entry off its list: the entry as `rule` shows it, or the command line that made it, `--action` too.",
               "name": "rule rm",
               "usage": "nerve-node rule rm [OPTIONS] [LIST] <ENTRY>"
             },
@@ -827,13 +845,13 @@
                   "optional": false
                 },
                 {
-                  "line": "`on`, `off` or `hidden`",
+                  "line": "`on`, `off`, `hidden`, or `default` (none chosen: its mode decides)",
                   "more": "",
                   "name": "<SETTING>",
                   "optional": false
                 }
               ],
-              "line": "Set a capability (`fs`) or one action (`exec.run`) to on, off or hidden",
+              "line": "Set a capability (`fs`) or one action (`exec.run`) to on, off, hidden or default",
               "more": "",
               "name": "cap set",
               "usage": "nerve-node cap set [OPTIONS] <CAP> <SETTING>"

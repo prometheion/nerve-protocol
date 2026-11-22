@@ -26,8 +26,8 @@ use serde_json::Value;
 
 use crate::audit::{AuditLog, Change, diff};
 use crate::config::{
-    Access, CapSetting, CenterDocument, ConfigCapability, Folder, NodeConfig, ProtectedOptions,
-    SecretStorage, SettingsGrant, Sudo,
+    Access, CapSetting, CenterDocument, ConfigCapability, Folder, Mode, NodeConfig,
+    ProtectedOptions, SecretStorage, SettingsGrant, Sudo,
 };
 use crate::paths::to_wire;
 use crate::protected::Protected;
@@ -60,6 +60,8 @@ impl std::fmt::Display for SetError {
 pub enum Writer<'a> {
     Local,
     Center(&'a str),
+    /// The node, where a timed mode ran out ([`SettingsStore::end_timers`]).
+    Timer,
 }
 
 impl Writer<'_> {
@@ -67,6 +69,7 @@ impl Writer<'_> {
         match self {
             Writer::Local => "local".into(),
             Writer::Center(n) => format!("center {n}"),
+            Writer::Timer => "timer".into(),
         }
     }
 }
@@ -720,6 +723,26 @@ impl SettingsStore {
         let mut new = NodeConfig::clone(&self.config);
         f(&mut new).map_err(SetError::Invalid)?;
         self.commit(Writer::Local, new, false)
+    }
+
+    /// Writes down the timed modes that ran out by `now_ms`, as a change by
+    /// the timer: the config and the audit say the mode in force, not the
+    /// one that ended (#213, L3-5). Each center whose mode ended, with the
+    /// mode that ended and the one now.
+    pub fn end_timers(&mut self, now_ms: u64) -> Result<Vec<(String, Mode, Mode)>, SetError> {
+        let mut new = NodeConfig::clone(&self.config);
+        let ended: Vec<_> = new
+            .centers
+            .iter_mut()
+            .filter_map(|c| {
+                let (was, now) = c.policy.end_timer(now_ms)?;
+                Some((c.name.clone(), was, now))
+            })
+            .collect();
+        if !ended.is_empty() {
+            self.commit(Writer::Timer, new, false)?;
+        }
+        Ok(ended)
     }
 
     /// Updates bookkeeping the node itself sets (revoked, unknown) without
@@ -2936,6 +2959,36 @@ mod tests {
         let past = s.config().centers[0].policy.clone();
         assert_eq!(past.mode_at(now + year), Mode::Allowlist);
         assert_eq!(refusals(&s), 0);
+    }
+
+    /// A timed mode that ran out is written down as a change by the timer:
+    /// the config shows the mode in force, and the audit when it ended
+    /// (#213, L3-5).
+    #[test]
+    fn the_end_of_a_timed_mode_is_written_down() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Off);
+        s.update(|c| {
+            let p = &mut c.centers[0].policy;
+            (p.mode, p.until, p.then) = (Mode::User, Some(1000), Some(Mode::Folder));
+            Ok(())
+        })
+        .unwrap();
+        let v = s.version();
+        assert_eq!(s.end_timers(999), Ok(vec![]));
+        assert_eq!(s.version(), v);
+        let ended = s.end_timers(1000).unwrap();
+        assert_eq!(ended, [("home".to_string(), Mode::User, Mode::Folder)]);
+        let p = &s.config().centers[0].policy;
+        assert_eq!((p.mode, p.until, p.then), (Mode::Folder, None, None));
+        let last = s.audit().read().unwrap().pop().unwrap();
+        assert_eq!(
+            (&last["kind"], &last["by"]),
+            (&json!("settings"), &json!("timer"))
+        );
+        assert_eq!(reopen(d.path()).unwrap().config(), s.config());
+        // Nothing more to end.
+        assert_eq!(s.end_timers(5000), Ok(vec![]));
     }
 
     #[test]

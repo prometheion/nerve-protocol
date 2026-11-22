@@ -358,6 +358,8 @@ async fn a_token_logs_in_and_the_session_is_the_header() {
     let a = get(addr, "/api/overview", &session).await;
     assert_eq!(a.status, 200);
     assert_eq!(a.json()["ui"]["served"], true);
+    // The pages word their hints by the platform (#213, W4-1).
+    assert_eq!(a.json()["os"], std::env::consts::OS);
     assert_eq!(a.header("cache-control"), Some("no-store"));
     let csp = a.header("content-security-policy").unwrap();
     assert!(csp.contains("worker-src 'none'"), "{csp}");

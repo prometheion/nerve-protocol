@@ -39,10 +39,12 @@ export function centerOnWindows(o: Overview | null): boolean {
  * command's own, where it would be a wildcard, every command that starts
  * so, as root. Null where a line to copy could not be trusted: inside
  * single quotes a word reads the same in POSIX shells and in fish unless it
- * holds a quote or a backslash (fish reads \' and \\ there), and a line
- * break would run what is before it when pasted. */
+ * holds a quote or a backslash (fish reads \' and \\ there), a line
+ * break would run what is before it when pasted, and a format mark (Cf:
+ * zero-width, bidirectional) shows the command otherwise than it is. As
+ * checker_glue.rs `sudo_allow_refusal`. */
 export function sudoRuleLine(command: string): string | null {
-  if (/['\\\u0000-\u001f\u007f]/.test(command)) return null;
+  if (/['\\\p{Cc}\p{Cf}\u2028\u2029]/u.test(command)) return null;
   return `nerve-node rule add allow --action exec.run --exact '${command}'`;
 }
 

@@ -504,7 +504,9 @@ by you only. Where you may not open the file, the owner of its folder opens it:
 in a root shell (`sudo -i`, which still knows who ran `sudo`) a file in `/root`
 is root's, and one in `/var/lib/nerve/state` is written as `nerve`. Run as root
 without `sudo`, it opens the file as root. The file `--passphrase-file` names
-is read as `nerve`; typing the passphrase needs no file.
+is read the same way, as you (as root without `sudo`), before the command
+becomes `nerve`, with the same second try as the owner of its folder (none
+through `pkexec`); typing the passphrase needs no file.
 
 An owner of the installed node (see [service](service.md#use-the-commands))
 needs no `sudo` for either:

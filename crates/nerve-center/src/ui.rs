@@ -26,7 +26,7 @@ use nerve_transport::log::{Level, Query};
 use nerve_transport::net::BoxIo;
 use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches};
 
-use crate::center::{Center, Change, audit_rule};
+use crate::center::{Center, Change, audit_rule, sudo_allow_refusal};
 use crate::listen::Server;
 use crate::owner::OwnerToken;
 use crate::store::{PAIR_CODE_MAX_MINUTES, TokenRecord};
@@ -648,6 +648,16 @@ impl Ui {
             // sudo for a sudo command; `cap`, `action` and `target` are the
             // entry's own fields.
             ("POST", "/api/audit/rule") => {
+                if (s("list"), s("cap"), s("action"))
+                    == ("allow".into(), "exec".into(), "run".into())
+                {
+                    let platform =
+                        c.read(|st| st.nodes.get(&s("node_id")).map(|n| n.platform.clone()));
+                    let platform = platform.unwrap_or_default();
+                    if let Some(why) = sudo_allow_refusal(&platform, &s("target")) {
+                        return Err(bad(why));
+                    }
+                }
                 let wildcard = b.get("wildcard").and_then(Value::as_bool) == Some(true);
                 let pin = pin_of(b)?;
                 let pin = pin.as_ref().map(|(f, v)| (f.as_str(), v));
@@ -1724,6 +1734,67 @@ mod tests {
                 .contains("only the machine's owner"),
             "{e}"
         );
+    }
+
+    /// An allow rule does not let a sudo command run, so the Audit row's
+    /// API (and `nerve-center audit allow`, which calls it) writes none and
+    /// says what the owner runs on the machine instead (#213, L2-2: it wrote
+    /// one and said it was added).
+    #[tokio::test]
+    async fn an_audit_allow_of_a_sudo_command_says_what_to_run_on_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        c.update(|s| {
+            s.nodes.insert(
+                "n1".into(),
+                crate::center::tests::node_record("n1", "linux"),
+            );
+            s.nodes.insert(
+                "w1".into(),
+                crate::center::tests::node_record("w1", "windows"),
+            );
+        });
+        let ui = Ui::new(&c, None, true);
+        let allow = |node: &str, target: &str| {
+            let body = json!({"list": "allow", "cap": "exec", "action": "run",
+                              "target": target, "node_id": node});
+            let ui = &ui;
+            async move {
+                ui.api(&req("POST", "/api/audit/rule", &[], ""), &body)
+                    .await
+            }
+        };
+        let (status, e) = allow("n1", "sudo whoami").await.unwrap_err();
+        assert_eq!(status, 400);
+        let e = e["error"].as_str().unwrap();
+        assert!(
+            e.contains("nerve-node rule add allow --action exec.run --exact 'sudo whoami'"),
+            "{e}"
+        );
+        let (_, e) = allow("w1", "sudo net session").await.unwrap_err();
+        let e = e["error"].as_str().unwrap();
+        assert!(e.contains("in the Nerve app on that machine"), "{e}");
+        assert!(!e.contains("nerve-node"), "{e}");
+        // A line that no shell reads the same way is not given to copy.
+        let (_, e) = allow("n1", "sudo sh -c 'id'").await.unwrap_err();
+        assert!(e["error"].as_str().unwrap().contains("'COMMAND'"), "{e}");
+        // A deny rule of it is the machine's to keep, as any other.
+        assert_eq!(
+            audit_rule("deny", "exec", "run", "sudo whoami", false, None).unwrap(),
+            "exec.run:sudo whoami"
+        );
+        assert_eq!(sudo_allow_refusal("linux", "ls -la"), None);
+        // Nor one whose marks show it otherwise than it is: zero-width and
+        // bidirectional marks (#213, review).
+        for odd in [
+            "sudo ls \u{202e}/tmp",
+            "sudo a\u{200b}b",
+            "sudo a\u{2066}b",
+            "sudo a\u{feff}b",
+        ] {
+            let e = sudo_allow_refusal("linux", odd).unwrap();
+            assert!(e.contains("'COMMAND'"), "{odd:?}: {e}");
+        }
     }
 
     /// The relative luminance of `#rrggbb`, as WCAG defines it.

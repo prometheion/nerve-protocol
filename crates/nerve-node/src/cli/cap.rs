@@ -3,7 +3,9 @@
 
 use super::*;
 
-/// `cap set`: a capability on, off or hidden for a center.
+/// `cap set`: a capability on, off or hidden for a center, or `default`,
+/// back to none chosen, where its mode decides (#213, L2-4: nothing took a
+/// switch back).
 pub(super) async fn set_cap(
     paths: NodePaths,
     cap: String,
@@ -11,14 +13,29 @@ pub(super) async fn set_cap(
     center: CenterArg,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let s = CapSetting::parse(&setting)
-        .ok_or_else(|| format!("unknown setting {setting} (on, off or hidden)"))?;
+    let s = match setting.as_str() {
+        "default" => None,
+        _ => Some(
+            CapSetting::parse(&setting)
+                .ok_or_else(|| format!("unknown setting {setting} (on, off, hidden or default)"))?,
+        ),
+    };
     let name = edit_center(&paths, &center, |e| {
-        e.policy.caps.insert(cap.clone(), s);
+        match s {
+            Some(s) => {
+                e.policy.caps.insert(cap.clone(), s);
+            }
+            None => {
+                e.policy.caps.remove(&cap);
+            }
+        }
         Ok(())
     })
     .await?;
-    w(out, format!("{name}: {cap} {setting}"));
+    match s {
+        Some(_) => w(out, format!("{name}: {cap} {setting}")),
+        None => w(out, format!("{name}: {cap} by its mode (none chosen)")),
+    }
     Ok(())
 }
 
@@ -566,6 +583,27 @@ mod tests {
     /// effect, where it comes from and each center's setting (`--center`:
     /// that one's), a setting for what nothing offers now, and the programs
     /// allowed; a stopped node knows no program's capabilities and says so.
+    /// A switch goes back to none chosen, where the mode decides (#213,
+    /// L2-4: only node.toml by hand took it back).
+    #[test]
+    fn cap_set_default_takes_the_switch_back() {
+        let (_d, paths) = setup(&["home"]);
+        run(&paths, &["cap", "set", "fs.read", "on"]).unwrap();
+        assert!(
+            load(&paths)
+                .center("home")
+                .unwrap()
+                .policy
+                .caps
+                .contains_key("fs.read")
+        );
+        let said = run(&paths, &["cap", "set", "fs.read", "default"]).unwrap();
+        assert!(said.contains("fs.read by its mode"), "{said}");
+        assert!(load(&paths).center("home").unwrap().policy.caps.is_empty());
+        let e = run(&paths, &["cap", "set", "fs.read", "maybe"]).unwrap_err();
+        assert!(e.contains("on, off, hidden or default"), "{e}");
+    }
+
     #[test]
     fn cap_ls_lists_every_capability_with_its_effect_and_settings() {
         let (_d, paths) = setup(&["home", "lab"]);

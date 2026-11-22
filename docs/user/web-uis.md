@@ -34,9 +34,11 @@ From another machine, use an SSH tunnel:
 `ssh -L 7480:127.0.0.1:7480 you@center-host`.
 
 Each page has the app's layout: a list on the left and the picked row's
-details on the right (on a small window the details open with **Back to the
-list**). Adding is a form in the details, pairing a small window over the
-page, and **Remove** asks in its row.
+details on the right (where both do not fit, the details open with **Back to
+the list**). Drag the gap between them to give one more room; the page keeps
+that width in this browser, and a double-click on the gap gives it back.
+A form gets the larger share by itself. Adding is a form in the details,
+pairing a small window over the page, and **Remove** asks in its row.
 
 | Page | Does |
 |---|---|
@@ -121,9 +123,9 @@ web UI off ([the center in the app](center.md#in-the-app)).
 | **Settings** | Name, keys, log level, backup, update and uninstall |
 | **Help** | The keys, and the command reference |
 
-A page is a list and the details of the row you pick: side by side in a wide
-window, and in a narrow one the list first, then the details with **Back to
-the list**. The up and down keys move through a list. Adding something opens
+A page is a list and the details of the row you pick: side by side where
+both fit, with the gap between them to drag, and in a narrow window the list
+first, then the details with **Back to the list**. The up and down keys move through a list. Adding something opens
 a form where it belongs, and removing asks in the row (**Remove?**, then
 **Cancel** or **Remove**). The Log's search reads the newest lines on the
 page; **Show more** reads further back.

@@ -34,8 +34,16 @@ async fn the_local_server_starts_and_gates_a_call() {
     // The default model's pin; a larger model may need its own.
     let pin = &nerve_center::checker::install::MODELS[0];
     let dir = tempfile::tempdir().unwrap();
-    let server =
-        LocalServer::start(llama, model, dir.path(), false, 8000, pin).expect("start the server");
+    let server = LocalServer::start(
+        llama,
+        model,
+        dir.path(),
+        false,
+        8000,
+        pin,
+        std::sync::Arc::new(|_, _| {}),
+    )
+    .expect("start the server");
 
     // Wait up to two minutes for it to load the model and report ready.
     let deadline = Instant::now() + Duration::from_secs(120);

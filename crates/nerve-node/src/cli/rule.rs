@@ -374,6 +374,12 @@ fn shown_entry(list: &[String], text: &str) -> String {
     }
 }
 
+/// Whether `text` reads as a path, which no command line starts with.
+fn is_path(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with('/') || text.starts_with("~/")
+}
+
 /// The entry of one list that `text` names for `rule rm`: as the list shows
 /// it, or the command line that made it. An error when both forms are on
 /// the list as two entries.
@@ -453,7 +459,13 @@ pub(super) async fn rule_cmd(
                 }
             }
         }
-        RuleCmd::Rm { words, center } => {
+        RuleCmd::Rm {
+            words,
+            action,
+            arg,
+            exact,
+            center,
+        } => {
             // `rule rm [LIST] ENTRY`, and a line of `rule` as it shows all
             // three lists (`allow  exec.run:git status`).
             let (named, text) =
@@ -484,7 +496,17 @@ pub(super) async fn rule_cmd(
                 };
                 let mut found = Vec::new();
                 for l in lists {
-                    if let Some(entry) = entry_on(l, l.of(&mut e.policy), &text, &name)? {
+                    let list = l.of(&mut e.policy);
+                    // With --action the entry is the rule `rule add` made of
+                    // the same words (#213, L3-7).
+                    let entry = match &action {
+                        Some(a) => l
+                            .action_rule(a, &text, arg.as_deref(), exact)
+                            .ok()
+                            .filter(|r| list.contains(r)),
+                        None => entry_on(l, list, &text, &name)?,
+                    };
+                    if let Some(entry) = entry {
                         found.push((l, entry));
                     }
                 }
@@ -500,6 +522,12 @@ pub(super) async fn rule_cmd(
                                 "{text:?} is not on the {}; `nerve-node rule {}` shows it",
                                 l.label(),
                                 l.word()
+                            ),
+                            // A path is a rule of an action: `rule` shows
+                            // it with the action in front.
+                            None if action.is_none() && is_path(&text) => format!(
+                                "{text:?} is on no list of {name}; a path's rule goes with its action, as in `nerve-node rule rm '{}' --action fs.read`",
+                                text.trim()
                             ),
                             None => format!(
                                 "{text:?} is on no list of {name}; `nerve-node rule` shows them"
@@ -723,6 +751,19 @@ mod tests {
         run(&paths, &["rule", "rm", "allow", made, "--center", "work"]).unwrap();
         run(&paths, &args).unwrap();
         assert!(load(&paths).center("work").unwrap().policy.allow.is_empty());
+    }
+
+    /// A rule `rule add --action` made goes with the same words, and a bare
+    /// path says how to name it (#213, L3-7).
+    #[test]
+    fn an_action_rule_is_removed_with_the_line_that_made_it() {
+        let (_d, paths) = setup(&["home"]);
+        let made = ["/srv/data/*", "--action", "fs.read"];
+        run(&paths, &[&["rule", "add", "allow"][..], &made].concat()).unwrap();
+        let e = run(&paths, &["rule", "rm", "/srv/data/*"]).unwrap_err();
+        assert!(e.contains("rule rm '/srv/data/*' --action fs.read"), "{e}");
+        run(&paths, &[&["rule", "rm"][..], &made].concat()).unwrap();
+        assert!(load(&paths).center("home").unwrap().policy.allow.is_empty());
     }
 
     #[test]

@@ -1456,10 +1456,13 @@ fn owner_of_install(
         }
     };
     if account.uid == 0 {
-        steps.did(format!(
-            "Warning: root is the owner of the node, as you confirmed: {ROOT_OWNER_MEANS}.{}",
-            granted_note(&settings_granted(&layout.paths))
-        ));
+        // In the words of `status`, whose page closes the install: the
+        // warning is said once there (#213, L3-8: twice, in two wordings).
+        steps.did(format!("Warning: {}", crate::owner::ROOT_OWNER_NOTE));
+        let granted = granted_note(&settings_granted(&layout.paths));
+        if !granted.is_empty() {
+            steps.did(format!("Warning: {}", granted.trim()));
+        }
     } else {
         steps.did(format!(
             "{name} is the owner of the node: `{}` changes its settings and starts and stops it without sudo, and user mode runs commands as {name}",
@@ -1469,16 +1472,15 @@ fn owner_of_install(
     // nerve-run is another account: without Landlock only that keeps it
     // from the owner's files, so it reads in the owner's home what others
     // may, once it may enter the home. With Landlock nothing is said.
+    // One warning of it: the home's where it is open, which `status`
+    // says in the same words, else what a folder given there would leave
+    // (#213, L3-8: both, saying it twice).
     #[cfg(unix)]
     if !sys.landlock() {
-        steps.did(format!(
-            "Warning: {}",
-            crate::account::no_landlock_warning()
-        ));
         let open = crate::account::home_open(&account.home);
-        if let Some(w) = crate::account::home_warning(&account.home, open, &[]) {
-            steps.did(format!("Warning: {w}"));
-        }
+        let w = crate::account::home_warning(&account.home, open, &[])
+            .unwrap_or_else(crate::account::no_landlock_warning);
+        steps.did(format!("Warning: {w}"));
     }
     // A Landlock that does not hold all the node asks for is named, with
     // what it leaves.
@@ -1762,11 +1764,36 @@ fn uninstall_steps(
         &layout.paths.state_dir,
     ];
     if purge {
+        // The centers are not told: the keys go, so the pairings cannot
+        // come back, and each center keeps the machine as offline until
+        // its owner removes it there (#213, L1-3). One that revoked the
+        // machine, or no longer knows it, lists it no more.
+        let centers: Vec<String> = crate::secrets::stated_config(&layout.paths)
+            .map(|c| {
+                c.centers
+                    .iter()
+                    .filter(|e| !e.revoked && !e.unknown)
+                    .map(|e| e.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         for dir in folders {
             if dir.exists() {
                 std::fs::remove_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 steps.did(format!("deleted {}", dir.display()));
             }
+        }
+        if !centers.is_empty() {
+            steps.did(match centers.len() {
+                1 => format!(
+                    "note: the center {} still lists this machine, offline: remove it there (Nodes, Remove)",
+                    centers[0]
+                ),
+                _ => format!(
+                    "note: the centers {} still list this machine, offline: remove it there (Nodes, Remove)",
+                    centers.join(", ")
+                ),
+            });
         }
     } else if folders.iter().any(|d| d.exists()) {
         // Their user goes; a uid nobody has must not own the keys, since
@@ -3006,11 +3033,10 @@ pub(crate) mod tests {
             install(&l, &sys, &exe, "alice", &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("alice is the owner of the node"), "{out}");
-            assert_eq!(
-                out.contains(
-                    "this kernel has no Landlock, so the commands of nerve-run run without it"
-                ),
-                !landlock,
+            // The open home is said, and only it: the general warning
+            // would say the same again (#213, L3-8).
+            assert!(
+                !out.contains("this kernel has no Landlock, so the commands of nerve-run"),
                 "{out}"
             );
             assert_eq!(
@@ -3022,6 +3048,21 @@ pub(crate) mod tests {
                 "{out}"
             );
             assert!(landlock || out.contains("umask 027"), "{out}");
+            // A closed home: what a folder given there would leave open.
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o750)).unwrap();
+            let l = layout(&d.path().join("closed"));
+            let mut out = Vec::new();
+            install(&l, &sys, &exe, "alice", &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(
+                out.contains("this kernel has no Landlock, so the commands of nerve-run"),
+                !landlock,
+                "{out}"
+            );
+            assert!(
+                !out.contains("Without Landlock, nerve-run can read"),
+                "{out}"
+            );
         }
     }
 
@@ -3286,8 +3327,11 @@ pub(crate) mod tests {
             r.unwrap();
             assert!(out.contains(question), "{out}");
             assert!(out.contains(ROOT_OWNER_MEANS), "{out}");
-            assert!(
-                out.contains("Warning: root is the owner of the node, as you confirmed"),
+            // Once, in the words `status` closes the install with (#213,
+            // L3-8).
+            assert_eq!(
+                out.matches(crate::owner::ROOT_OWNER_NOTE).count(),
+                1,
                 "{out}"
             );
             assert!(!out.contains("Warning: no owner"), "{out}");
@@ -3708,7 +3752,7 @@ pub(crate) mod tests {
         r.unwrap();
         assert!(!out.contains("[y/N]"), "{out}");
         assert!(
-            out.contains("Warning: root is the owner of the node, as you confirmed"),
+            out.contains(&format!("Warning: {}", crate::owner::ROOT_OWNER_NOTE)),
             "{out}"
         );
         assert_eq!(owner_of_unit(&l).as_deref(), Some("root"));
@@ -4383,7 +4427,30 @@ pub(crate) mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
-        uninstall(&l, &sys, true, &mut Vec::new()).unwrap();
+        let mut cfg = nerve_policy::NodeConfig::parse(
+            &std::fs::read_to_string(l.paths.config_file()).unwrap_or_default(),
+        )
+        .unwrap();
+        cfg.centers.push(crate::cli::tests::entry("lab"));
+        // One revoked the machine, one no longer knows it: neither lists it.
+        let mut gone = crate::cli::tests::entry("old");
+        gone.revoked = true;
+        cfg.centers.push(gone);
+        let mut gone = crate::cli::tests::entry("lost");
+        gone.unknown = true;
+        cfg.centers.push(gone);
+        std::fs::write(l.paths.config_file(), cfg.to_toml()).unwrap();
+        let mut out = Vec::new();
+        uninstall(&l, &sys, true, &mut out).unwrap();
+        // Its centers are not told, and it says where to remove it (#213,
+        // L1-3).
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains(
+                "note: the center lab still lists this machine, offline: remove it there"
+            ),
+            "{said}"
+        );
         for p in [
             &l.unit,
             &l.bin,
