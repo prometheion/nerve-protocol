@@ -50,8 +50,9 @@ that starts another shell (`sh`, `bash`, `eval`), needs a rule that names the
 whole line. So `git *` does not allow `git x; rm -rf ~` ([what a wildcard
 covers](../dev/policy-engine.md#what-a-wildcard-covers)). On Windows a path
 with `\` needs a rule of its own: write it with `/` (`Get-ChildItem C:/work`),
-which PowerShell takes too. Rules match case as written: `Get-Date` does not
-cover `get-date`.
+which PowerShell takes too. A deny rule's wildcard covers any line. Rules
+match case as written: `Get-Date` does not cover `get-date`, so a deny rule
+on Windows needs one per spelling (and per alias).
 
 ## Rules for files and other actions
 

@@ -697,9 +697,14 @@ runs in the container as well, unless the pairing runs as you.
   (`inherit::Walk::left_out`). The grant is on; the record keeps what it
   left out (`left_out`), which `status`, Permissions › Folders and the
   Overview name until a walk there finds it changeable (**Sync folders**).
-  A grant taken off with such a file below stays recorded and stale, so it
-  is tried again at every sync and the owner is told to take the file over
-  or delete it; only the pairing whose grant it is stops.
+  Such a file keeps the entries it had, also those the change would take
+  away. So a change that takes flags away (a grant taken off or narrowed,
+  a folder closed with `none`, a grant inside a wider one of the same
+  pairing) with such a file below is not done: it stays recorded, stale
+  (or unclosed) and unfinished, so it is tried again at every sync and the
+  owner is told to take the file over or move it out; only the pairing
+  whose grant it is stops. A change that only adds flags is done: the file
+  keeps less than the grant gives.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
   none runs): a step by hand only, for a folder the watch leaves alone.

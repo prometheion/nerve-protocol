@@ -207,9 +207,9 @@ and every limit is in
   this one, removes the old role whole with its data, then opens the
   installer for the other role.
 - A backup is saved to your Documents by default, takes the keys in the
-  keyring unless you leave them out, and warns when its file lies in a
-  folder a center's commands may read. After a reinstall the first-run
-  steps offer **Restore a backup…**.
+  keyring unless you leave them out, and warns when a center's commands may
+  read its file (in a folder of theirs, or as you). After a reinstall the
+  first-run steps offer **Restore a backup…**.
 - `nerve-center --json backup -` and `restore -` hand the sealed backup over
   the answer and the input, with `--passphrase-file -`. The app's restore
   takes another center's backup where **It is another center's backup** is
@@ -217,9 +217,9 @@ and every limit is in
 - Each page is a list and the picked row's details: side by side wherever
   both fit, in turns with Back to the list where they do not, and the page
   scrolls as a whole. The divider between two panes moves with a drag, the
-  app keeps the widths per page, and a double-click resets them. Switches sit in the rows, adding is a form where it
-  happens, and removing asks in the row
-  ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
+  app keeps the widths per page, and a double-click resets them. Switches
+  sit in the rows, adding is a form where it happens, and removing asks in
+  the row ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
 - On Windows it is the only way to the node: no message sends you to a
   terminal.
 - The node's own web UI, on Linux and Windows, off in the app until it is

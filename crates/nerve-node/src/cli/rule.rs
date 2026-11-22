@@ -319,8 +319,9 @@ fn wildcard_start(line: &str) -> Option<&str> {
 
 /// What a rule made of `command` covers, said after `rule add` when the
 /// command has a wildcard: `rm *` is every `rm`, not the files in a folder.
-/// On Windows (`windows`) it adds that a `\` in a path makes a line a
-/// wildcard does not cover.
+/// On Windows (`windows`) it adds what the rule does not cover: for an
+/// allow list a line with a `\` in a path (not a plain command), for a
+/// deny rule, which covers any line, a command in another case.
 fn wildcard_note(list: List, command: &str, windows: bool) -> Option<String> {
     let start = wildcard_start(command)?;
     let verb = match list {
@@ -332,12 +333,14 @@ fn wildcard_note(list: List, command: &str, windows: bool) -> Option<String> {
     } else {
         format!("it {verb} every command that starts with `{start}`")
     };
-    Some(if windows {
-        format!(
+    Some(match (windows, list) {
+        (false, _) => covers,
+        (true, List::Deny) => format!(
+            "{covers} written in this case; another case or an alias needs a rule of its own"
+        ),
+        (true, List::Allow | List::Sudo) => format!(
             "{covers} with plain words after it; a path with `\\` needs a rule of its own, or `/` in the path"
-        )
-    } else {
-        covers
+        ),
     })
 }
 
@@ -1529,5 +1532,11 @@ mod tests {
         );
         let linux = wildcard_note(List::Allow, "git *", false).unwrap();
         assert_eq!(linux, "it allows every `git` command");
+        // A deny rule covers any line, but only the case it names.
+        let deny = wildcard_note(List::Deny, "Remove-Item *", true).unwrap();
+        assert_eq!(
+            deny,
+            "it forbids every `Remove-Item` command written in this case; another case or an alias needs a rule of its own"
+        );
     }
 }

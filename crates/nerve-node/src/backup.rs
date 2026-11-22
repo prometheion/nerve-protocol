@@ -66,8 +66,8 @@ pub struct BackupReport {
     /// What was not taken, and why.
     pub left_out: Vec<LeftOut>,
     /// A center whose commands may read the file, and its folder that holds
-    /// it ([`readable_by`]).
-    pub readable_by: Option<(String, PathBuf)>,
+    /// it, `None` where they run as the owner ([`readable_by`]).
+    pub readable_by: Option<(String, Option<PathBuf>)>,
 }
 
 /// A key a backup did not take.
@@ -131,26 +131,48 @@ pub fn backup(
 }
 
 /// The first center whose commands may read `file`, a backup, with the
-/// folder of its that holds it: there a center's agent could take the file
-/// and try passphrases at leisure (#213 W4-4).
-pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, PathBuf)> {
+/// folder of its that holds it, or `None` for one whose commands run as
+/// the owner and read it anywhere: such a center's agent could take the
+/// file and try passphrases at leisure (#213 W4-4).
+pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Option<PathBuf>)> {
+    readable_on(cfg, file, cfg!(windows), crate::now_ms())
+}
+
+/// [`readable_by`] on Windows (`windows`) or elsewhere, at `now_ms`.
+fn readable_on(
+    cfg: &NodeConfig,
+    file: &Path,
+    windows: bool,
+    now_ms: u64,
+) -> Option<(String, Option<PathBuf>)> {
+    // Writing reads too; on Windows running does, as a script's
+    // interpreter opens the file (`nerve_sandbox::acl::masks`).
+    let reads = |a: &nerve_policy::config::Access| a.read || a.write || (windows && a.execute);
     cfg.centers.iter().find_map(|c| {
+        if c.policy.runs_as_owner(now_ms) {
+            return Some((c.name.clone(), None));
+        }
         c.policy
             .folders
             .iter()
-            .filter(|f| f.access.read)
+            .filter(|f| reads(&f.access))
             .map(|f| PathBuf::from(&f.path))
             .find(|f| nerve_policy::paths::within(file, f))
-            .map(|f| (c.name.clone(), f))
+            .map(|f| (c.name.clone(), Some(f)))
     })
 }
 
 /// The warning of [`readable_by`].
-pub fn readable_warning(center: &str, folder: &Path) -> String {
-    format!(
-        "Warning: the file is in {}, which {center}'s commands may read; keep it in a folder of your own",
-        folder.display()
-    )
+pub fn readable_warning(center: &str, folder: Option<&Path>) -> String {
+    match folder {
+        Some(folder) => format!(
+            "Warning: the file is in {}, which {center}'s commands may read; keep it in a folder of your own",
+            folder.display()
+        ),
+        None => format!(
+            "Warning: {center}'s commands run as you, so they may read the file; move it off this machine"
+        ),
+    }
 }
 
 /// What a key is read as: its text, still in the keyring, or not there.
@@ -1160,7 +1182,7 @@ pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn std::io::Write)
         let _ = writeln!(out, "  left out: {s}");
     }
     if let Some((center, folder)) = &r.readable_by {
-        let _ = writeln!(out, "{}", readable_warning(center, folder));
+        let _ = writeln!(out, "{}", readable_warning(center, folder.as_deref()));
     }
     let _ = writeln!(
         out,
@@ -1182,7 +1204,8 @@ pub fn backup_data(r: &BackupReport, file: &Path) -> serde_json::Value {
         "saved": r.saved,
         "left_out": left_out,
         "readable_by": r.readable_by.as_ref().map(|(center, folder)| {
-            serde_json::json!({"center": center, "folder": folder.display().to_string()})
+            let folder = folder.as_ref().map(|f| f.display().to_string());
+            serde_json::json!({"center": center, "folder": folder})
         }),
     })
 }
@@ -1312,19 +1335,37 @@ mod tests {
             path: "/home/alex/none".into(),
             access: nerve_policy::config::Access::NONE,
         });
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: "/home/alex/tools".into(),
+            access: nerve_policy::config::Access::parse("x").unwrap(),
+        });
         let mut cfg = NodeConfig::default();
         cfg.centers.push(lab);
+        let on = |cfg: &NodeConfig, file: &str, windows: bool| {
+            readable_on(cfg, Path::new(file), windows, 0)
+        };
         assert_eq!(
-            readable_by(&cfg, Path::new("/home/alex/project/sub/n.backup")),
-            Some(("lab".to_string(), PathBuf::from("/home/alex/project")))
+            on(&cfg, "/home/alex/project/sub/n.backup", false),
+            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/project"))))
         );
-        assert_eq!(readable_by(&cfg, Path::new("/home/alex/n.backup")), None);
+        assert_eq!(on(&cfg, "/home/alex/n.backup", false), None);
+        assert_eq!(on(&cfg, "/home/alex/none/n.backup", false), None);
+        // On Windows running a file reads it too.
+        assert_eq!(on(&cfg, "/home/alex/tools/n.backup", false), None);
         assert_eq!(
-            readable_by(&cfg, Path::new("/home/alex/none/n.backup")),
-            None
+            on(&cfg, "/home/alex/tools/n.backup", true),
+            Some(("lab".to_string(), Some(PathBuf::from("/home/alex/tools"))))
         );
-        let warn = readable_warning("lab", Path::new("/home/alex/project"));
+        let warn = readable_warning("lab", Some(Path::new("/home/alex/project")));
         assert!(warn.contains("lab's commands may read"), "{warn}");
+        // Commands that run as the owner read it anywhere.
+        cfg.centers[0].policy.mode = nerve_policy::config::Mode::User;
+        assert_eq!(
+            on(&cfg, "/home/alex/n.backup", false),
+            Some(("lab".to_string(), None))
+        );
+        let warn = readable_warning("lab", None);
+        assert!(warn.contains("lab's commands run as you"), "{warn}");
     }
 
     /// After a rotation the key no longer hashes to the node id; the key the

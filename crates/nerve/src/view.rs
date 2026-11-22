@@ -46,7 +46,7 @@ pub const FOLDERS_NOT_AS_SET: &str = "Some folders do not have the access you se
 
 /// The Overview's warning when a file in a granted folder is another
 /// account's, so the grant could not reach it.
-pub const FOLDERS_LEFT_OUT: &str = "Another account owns a file in your folders, so the commands do not reach it. Permissions › Folders says which.";
+pub const FOLDERS_LEFT_OUT: &str = "Another account owns a file in your folders, so it keeps the permissions it had. Permissions › Folders says which.";
 
 /// The Overview's warning while the service runs an older program than the
 /// installed one: a package replaced it and its restart failed.
@@ -725,11 +725,16 @@ pub fn backup_written(said: &Value) -> String {
     // A center's agent could take a file in its folder and try passphrases
     // at leisure (#213 W4-4).
     if let Some(r) = b["readable_by"].as_object() {
-        text.push_str(&format!(
-            "\n\nIt lies in {}, which {}'s commands may read. Move it to a folder of your own.",
-            s(&r["folder"]),
-            s(&r["center"])
-        ));
+        text.push_str(&match r["folder"].as_str() {
+            Some(folder) => format!(
+                "\n\nIt lies in {folder}, which {}'s commands may read. Move it to a folder of your own.",
+                s(&r["center"])
+            ),
+            None => format!(
+                "\n\n{}'s commands run as you, so they may read it. Move it off this machine.",
+                s(&r["center"])
+            ),
+        });
     }
     text.push_str("\n\nThe file is sealed with your passphrase. Keep both: without the passphrase nobody can open the file, you included.");
     text
@@ -2320,6 +2325,15 @@ mod tests {
         let text = backup_written(&readable);
         assert!(
             text.contains("It lies in C:\\t, which lab's commands may read."),
+            "{text}"
+        );
+        let as_you = json!({"backup": {"file": "C:\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": null}}});
+        let text = backup_written(&as_you);
+        assert!(
+            text.contains(
+                "lab's commands run as you, so they may read it. Move it off this machine."
+            ),
             "{text}"
         );
     }

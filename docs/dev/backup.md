@@ -82,6 +82,11 @@ they know.
    `relay.pin`; one that does not fit is left out and said.
 3. The proxy's header values are read from their keyring entry, again only
    with consent.
+4. The file is written, and the backup warns when a center's commands may
+   read it (`backup::readable_by`): it lies in a folder of that center that
+   reads (`r` or `w`; on Windows `x` too, as a script's interpreter opens
+   the file), or the center's commands run as the owner (`user` mode, or
+   allowlist mode with `as_owner`), which read it anywhere.
 
 ## Restore of a node
 
@@ -550,6 +555,8 @@ that user put in the folder, and what a restore writes stays the center's.
 
 | Message | Cause |
 |---|---|
+| `Warning: the file is in …, which …'s commands may read` | The backup lies in a folder of that center's. Move it to a folder of your own |
+| `Warning: …'s commands run as you, so they may read the file` | That center is in `user` mode, or allowlist mode with `as_owner`. Move the file off the machine |
 | `cannot open the backup: the passphrase is wrong, or the file was changed` | The two cannot be told apart |
 | `a nerve-node runs on these folders` | Stop the node, then restore |
 | `a nerve-center runs on …` | Stop the center, then restore |

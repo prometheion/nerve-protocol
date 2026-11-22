@@ -339,9 +339,21 @@ fn resolve_by(
         .iter()
         .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
         .count();
-    // The longest prefix that resolves; one that does not, but is there
-    // (as a link), is a dangling link.
-    let mut existing = comps.len();
+    // Where the path stops being there, from the root forward: a folder
+    // the account may not look at goes on, the first missing one ends it.
+    // So a long missing rest costs one look, not one search per component
+    // (a center sends the path).
+    let mut existing = roots;
+    let mut prefix: PathBuf = comps[..roots].iter().collect();
+    while let Some(c) = comps.get(existing) {
+        prefix.push(c);
+        match look(&prefix) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            _ => existing += 1,
+        }
+    }
+    // The longest prefix up to there that resolves; one that does not, but
+    // is there (as a link), is a dangling link.
     let real_prefix = loop {
         let prefix: PathBuf = comps[..existing].iter().collect();
         match canonical(&prefix) {
@@ -768,6 +780,24 @@ mod tests {
             resolve_by(Path::new("/t/other/x"), &canonical, &look),
             Err(PathError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied
         ));
+        // A long missing rest is not searched component by component.
+        let calls = std::cell::Cell::new(0);
+        let count = |p: &Path, f: &dyn Fn(&Path) -> io::Result<()>| {
+            calls.set(calls.get() + 1);
+            f(p)
+        };
+        let long = format!("/t/project/new{}", "/a".repeat(2000));
+        let got = resolve_by(
+            Path::new(&long),
+            &|p| {
+                calls.set(calls.get() + 1);
+                canonical(p)
+            },
+            &|p| count(p, &look),
+        )
+        .unwrap();
+        assert_eq!(got, Path::new(&long));
+        assert!(calls.get() < 10, "{} calls", calls.get());
     }
 
     #[test]

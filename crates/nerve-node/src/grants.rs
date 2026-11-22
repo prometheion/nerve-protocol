@@ -285,7 +285,7 @@ pub struct Synced {
     /// How many grants were taken off.
     pub removed: usize,
     /// What a grant that is on could not reach below its folder
-    /// ([`Grant::left_out`]): the commands do not reach it.
+    /// ([`Grant::left_out`]): it keeps the permissions it had.
     pub left_out: Vec<PathBuf>,
     /// The containers' profiles a cleanup removed or left ([`remove_all`]).
     pub profiles: Profiles,
@@ -378,11 +378,23 @@ fn not_taken_off(path: &Path, left: &[PathBuf]) -> String {
     )
 }
 
+/// The error of a change at `path` that takes flags away, except from
+/// what is `left` below it, which another account owns: that keeps the
+/// permissions it had until the owner takes it over or moves it out.
+fn not_narrowed(path: &Path, left: &[PathBuf]) -> String {
+    let names: Vec<String> = left.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "cannot change the grant of {} whole: another account owns {}, so it keeps the permissions it had; take it over or move it out, then Sync folders",
+        path.display(),
+        names.join(", ")
+    )
+}
+
 /// What the owner is told of `path`, a file or folder in a granted folder
 /// that the grant could not reach ([`Report::left_out`]).
 pub fn left_out_line(path: &str) -> String {
     format!(
-        "{path}: another account owns it, so the commands do not reach it; take it over or move it out, then Sync folders"
+        "{path}: another account owns it, so it keeps the permissions it had; take it over or move it out, then Sync folders"
     )
 }
 
@@ -1513,6 +1525,25 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
         }
         keep_replaced(w, &mut out, &mut kept, false);
     }
+    // Whether a change to `w` takes flags away from what is below its
+    // folder: it closes the folder, the record it replaces may give more,
+    // or a grant of the same container around it gives more, which what is
+    // below inherited.
+    let takes_away = |w: &Grant| {
+        let more = |a: Access| {
+            (a.read && !w.access.read)
+                || (a.write && !w.access.write)
+                || (a.execute && !w.access.execute)
+        };
+        w.access == Access::NONE
+            || replaced
+                .iter()
+                .filter(|o| o.same_place(w))
+                .any(|o| o.states().any(more))
+            || want
+                .iter()
+                .any(|g| g.container == w.container && within(&w.path, &g.path) && more(g.access))
+    };
     let todo: Vec<&Grant> = want
         .iter()
         .zip(done.iter().zip(&onto))
@@ -1583,10 +1614,32 @@ fn sync_in_turn(file: &Path, want: &[Grant], shut: &Shut, folders: &mut impl Fol
                         expect.as_deref(),
                     ) {
                         Ok(id) => {
+                            let left_out = folders.left_out();
+                            // What the walk left out keeps the entries it
+                            // had, also those of flags this change takes
+                            // away: it is not done, and the commands stop
+                            // until the owner takes those over or moves
+                            // them out, as for a take-off (#213 W2-5).
+                            if !left_out.is_empty() && takes_away(w) {
+                                out.errors.push(not_narrowed(&w.path, &left_out));
+                                if !replaced.iter().any(|o| o.same_place(w)) {
+                                    let g = Grant {
+                                        unfinished: true,
+                                        id,
+                                        left_out,
+                                        ..w.clone()
+                                    };
+                                    if w.access != Access::NONE {
+                                        out.stale.push(g.clone());
+                                    }
+                                    kept.push(g);
+                                }
+                                keep_replaced(w, &mut out, &mut kept, true);
+                                continue;
+                            }
                             if let Some(i) = index(w) {
                                 shut[i] = true;
                             }
-                            let left_out = folders.left_out();
                             out.left_out.extend(left_out.iter().cloned());
                             kept.push(Grant {
                                 id,
@@ -4273,6 +4326,75 @@ mod tests {
         let s = sync(&file, std::slice::from_ref(&a), &mut f);
         assert!(s.stale.is_empty() && s.errors.is_empty(), "{s:?}");
         assert_eq!(recorded(&file), [a]);
+    }
+
+    /// A file another account owns keeps the entries it had, also those of
+    /// flags a change takes away. So a grant narrowed, a folder closed with
+    /// `none`, or a narrower grant inside a wider one with such a file below
+    /// is not done: stale or unclosed, so that pairing's commands stop, and
+    /// tried again until the file is taken over (#213 review). A change
+    /// that only adds flags is done.
+    #[test]
+    fn a_change_that_takes_flags_away_is_not_done_past_another_account_s_file() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let mut f = Fake::default();
+        f.make("/w/a");
+        f.make("/w/a/sub");
+        f.make("/w/a/low");
+        let wide = grant("c1", "/w/a", "rwx");
+        sync(&file, std::slice::from_ref(&wide), &mut f);
+        f.owned.push(("/w/a".into(), "/w/a/adm.ps1".into()));
+        f.owned.push(("/w/a/sub".into(), "/w/a/sub/key.txt".into()));
+        f.owned.push(("/w/a/low".into(), "/w/a/low/key.txt".into()));
+
+        // Narrowed: stale, and tried again.
+        let narrow = grant("c1", "/w/a", "r");
+        for _ in 0..2 {
+            let s = sync(&file, std::slice::from_ref(&narrow), &mut f);
+            assert!(s.refusal("c1").is_some(), "{s:?}");
+            assert!(
+                s.errors[0].contains("another account owns /w/a/adm.ps1")
+                    && s.errors[0].contains("keeps the permissions it had"),
+                "{s:?}"
+            );
+            let r = read_record(&file).unwrap();
+            assert!(r.iter().all(|g| g.unfinished), "{r:?}");
+        }
+        f.owned.retain(|(at, _)| at != Path::new("/w/a"));
+        let s = sync(&file, std::slice::from_ref(&narrow), &mut f);
+        assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
+        assert_eq!(recorded(&file), std::slice::from_ref(&narrow));
+
+        // Closed inside it: unclosed. A narrower grant inside a wider one:
+        // stale.
+        sync(&file, std::slice::from_ref(&wide), &mut f);
+        let (closed, low) = (grant("c1", "/w/a/sub", ""), grant("c1", "/w/a/low", "r"));
+        let s = sync(&file, &[wide.clone(), closed.clone(), low.clone()], &mut f);
+        assert_eq!(
+            s.unclosed.iter().map(plain).collect::<Vec<_>>(),
+            std::slice::from_ref(&closed),
+            "{s:?}"
+        );
+        assert_eq!(
+            s.stale.iter().map(plain).collect::<Vec<_>>(),
+            std::slice::from_ref(&low),
+            "{s:?}"
+        );
+        assert!(s.refusal("c1").is_some());
+        f.owned.clear();
+        let s = sync(&file, &[wide.clone(), closed.clone(), low.clone()], &mut f);
+        assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
+
+        // Widened past such a file: done, the file said.
+        f.owned.push(("/w/a/low".into(), "/w/a/low/key.txt".into()));
+        let s = sync(
+            &file,
+            &[wide.clone(), closed, grant("c1", "/w/a/low", "rwx")],
+            &mut f,
+        );
+        assert!(s.errors.is_empty() && s.refusal("c1").is_none(), "{s:?}");
+        assert_eq!(s.left_out, [Path::new("/w/a/low/key.txt")]);
     }
 
     /// Folders added get their grant, one removed loses it, a changed flag

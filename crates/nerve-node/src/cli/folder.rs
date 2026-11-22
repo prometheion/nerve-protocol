@@ -1142,7 +1142,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "C:\\project\\adm2.txt: another account owns it, so the commands do not reach it; take it over or move it out, then Sync folders"
+            "C:\\project\\adm2.txt: another account owns it, so it keeps the permissions it had; take it over or move it out, then Sync folders"
         );
         assert!(grant_lines_on(&g, false)[0].contains("no command of nerve-run runs"));
     }

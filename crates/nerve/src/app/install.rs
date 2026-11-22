@@ -111,10 +111,15 @@ fn update_args(from: Option<String>, pre: bool) -> Vec<String> {
 /// says in the app's words itself (nerve_node::account::NO_ACCOUNT_INSTALL).
 pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
     let (mut did, mut warn) = (Vec::new(), Vec::new());
+    let mut next = false;
     for line in v["messages"].as_array().into_iter().flatten() {
         let Some(line) = line.as_str() else { continue };
-        // The next steps are the window's own buttons, not steps done.
-        if line.starts_with("Next:") || line.starts_with("Next ") {
+        // The next steps are the window's own buttons, not steps done: a
+        // page's `Next` block, with the indented items under its first.
+        next = line.starts_with("Next:")
+            || line.starts_with("Next ")
+            || (next && line.starts_with(' '));
+        if next {
             continue;
         }
         let line = line.to_string();
@@ -141,11 +146,13 @@ pub fn nothing_updated(did: &[String]) -> bool {
     did.iter().any(|l| l.ends_with("; nothing to update"))
 }
 
-/// Takes the owner token the center's install shows (its line
-/// `Owner token  <token>`) out of `did`, to show it apart with a Copy
+/// Takes the owner token the center's install shows (its page's row
+/// `  Owner token   <token>`) out of `did`, to show it apart with a Copy
 /// button (#213 W1-F6).
 pub fn take_owner_token(did: &mut Vec<String>) -> Option<String> {
-    let at = did.iter().position(|l| l.starts_with("Owner token"))?;
+    let at = did
+        .iter()
+        .position(|l| l.trim_start().starts_with("Owner token"))?;
     let line = did.remove(at);
     line.split_whitespace()
         .last()
@@ -884,11 +891,15 @@ mod tests {
     /// W1-F6, W1-F1).
     #[test]
     fn the_center_s_owner_token_stands_apart() {
-        let v = serde_json::json!({"messages": [
-            "the service nerve-center runs and starts with the machine",
-            "Owner token   nrv_owner_abc123",
-            "Next  Pair a machine:  Nodes › Pair a machine in the Nerve app",
-        ]});
+        // The center's page as its install prints it (`out::Page::render`:
+        // rows indented, `Next` items under the first), and its `--json`
+        // answer of it.
+        let page = "the service nerve-center runs and starts with the machine\n\
+                    Nerve center · running\n\n  \
+                    Owner token   nrv_owner_abc123\n\n\
+                    Next  Pair a machine:  Nodes › Pair a machine in the Nerve app\n      \
+                    Start:           Overview › Start\n";
+        let v = nerve_center::json::answer(page.as_bytes(), &Ok(()));
         let (mut did, _) = steps(&v);
         assert_eq!(
             take_owner_token(&mut did).as_deref(),
@@ -896,7 +907,10 @@ mod tests {
         );
         assert_eq!(
             did,
-            ["the service nerve-center runs and starts with the machine"]
+            [
+                "the service nerve-center runs and starts with the machine",
+                "Nerve center · running"
+            ]
         );
         assert_eq!(take_owner_token(&mut did), None);
     }

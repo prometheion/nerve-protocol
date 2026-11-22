@@ -75,7 +75,8 @@ On Windows the app does each step:
 
 1. On the old machine, **Settings › Backup › Back up…**, with **Include the
    keys in the system keyring** where the keys are there. Keep the file in a
-   folder of your own, not in one a center was given.
+   folder of your own, not in one a center was given; while a center's
+   commands run as you, keep it off the machine.
 2. Install Nerve on the new one, then **Settings › Backup › Restore…** with
    **It is another node's backup**. **Leave its proxy out** where the new
    machine reaches its centers its own way; **Keep its keys in files** keeps

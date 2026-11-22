@@ -89,9 +89,9 @@ The watch costs:
 - An external disk that holds a granted folder cannot be removed safely.
   A stick or card is not watched.
 
-A file another account owns keeps its own permissions, so commands do not
-reach it; the rest of the folder gets its access. **Permissions › Folders**
-names it: take it over or move it out, then **Sync folders**.
+A file another account owns keeps its permissions; where a change takes
+access away, that pairing's commands stop. **Permissions › Folders** names
+it: take it over or move it out, then **Sync folders**.
 
 ## A capability's argument
 
