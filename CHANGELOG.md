@@ -93,7 +93,8 @@ and every limit is in
 
 - Three modes: `folder` (only the folders you give, with `r`, `w`, `x` or
   none), `allowlist` (only the commands you allow) and `user` (as you);
-  each also for a time (`--for`).
+  each also for a time (`--for`), whose end the settings and the audit
+  record.
 - Allow and deny rules, with a trailing `*` and with conditions on an
   action's arguments (`lamp.set:room=office`).
 - A built-in guard against changing the node by mistake, and protected paths.
@@ -101,7 +102,7 @@ and every limit is in
 - The settings grant, which lets a center change its own settings, and
   `center settings off`, which says what stays.
 - A network switch per center, and limits per command: memory, CPU and
-  processes.
+  processes. A command's result says when the switch or a limit ended it.
 
 ### How the commands are held
 
@@ -165,6 +166,8 @@ and every limit is in
 - `update --pre` takes the newest release, a pre-release too, and
   `update --tag <tag>` one release, for the center and the node; the same
   version from another release is taken (a pre-release, then its release).
+  A plain `update` on a pre-release newer than the latest release has
+  nothing to update.
   The desktop app's **Settings › App › Pre-releases** does it there, on Linux
   and Windows.
 - `uninstall` keeps the data, or deletes it with `--purge` (**Delete the
