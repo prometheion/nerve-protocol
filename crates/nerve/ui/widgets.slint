@@ -1664,7 +1664,9 @@ export component TextArea {
     }
     // Enter in a one-line field is its `accepted`, not a new line.
     keys := FocusScope {
+        // Only the text takes the focus, by click and by Tab.
         focus-on-click: false;
+        focus-on-tab-navigation: false;
         capture-key-pressed(event) => {
             if (root.one-line && event.text == Key.Return) {
                 root.accepted();

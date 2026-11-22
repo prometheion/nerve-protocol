@@ -109,6 +109,27 @@ pub fn cap_sections(
     (names, counts)
 }
 
+/// The group the Capabilities list shows after the rows changed: the one
+/// picked (`group`, a number of `old`'s rows) when the new rows still have
+/// it by its name and source, else the first. Your capabilities (-1) and the
+/// programs (-2) stay. A provider that left takes its group with it, and
+/// the numbers after it move up (#213).
+pub fn keep_group(old: &[CapRow], group: i32, now: &[CapRow]) -> i32 {
+    if group < 0 {
+        return group;
+    }
+    let heads = |rows: &[CapRow]| -> Vec<(SharedString, SharedString)> {
+        rows.iter()
+            .filter(|r| !r.action)
+            .map(|r| (r.name.clone(), r.source.clone()))
+            .collect()
+    };
+    let (old, now) = (heads(old), heads(now));
+    old.get(group as usize)
+        .and_then(|pick| now.iter().position(|h| h == pick))
+        .unwrap_or(0) as i32
+}
+
 /// Whether the providers attached to the node differ between two answers
 /// of `status --json`.
 pub fn providers_changed(before: &Value, now: &Value) -> bool {
@@ -2272,6 +2293,46 @@ mod tests {
         assert!(groups > 0, "{rows:?}");
         assert_eq!(names[0], rows[0].name.as_str());
         assert_eq!(counts[0], rows[0].units.to_string());
+    }
+
+    /// The picked group stays by its name when a provider leaves: the list
+    /// never goes empty, and a number past the groups is the first (#213).
+    #[test]
+    fn the_picked_capabilities_group_survives_a_provider_leaving() {
+        let unit = |name: &str, source: &str| {
+            json!({"name": name, "source": source, "effect": "read"})
+        };
+        let with = cap_rows(
+            &json!({"capabilities": [
+                unit("fs.read", "built-in"),
+                unit("exec.run", "built-in"),
+                unit("desk.open", "program desk"),
+                unit("mail.send", "program mail")]}),
+            "lab",
+        );
+        let without = cap_rows(
+            &json!({"capabilities": [
+                unit("fs.read", "built-in"),
+                unit("exec.run", "built-in"),
+                unit("mail.send", "program mail")]}),
+            "lab",
+        );
+        let number = |rows: &[CapRow], name: &str| {
+            rows.iter().find(|r| !r.action && r.name == name).unwrap().group
+        };
+        // `desk` was picked and left: the first group, not a stranger.
+        assert_eq!(keep_group(&with, number(&with, "desk"), &without), 0);
+        // `mail` was picked and its number moved up.
+        let mail = number(&with, "mail");
+        let kept = keep_group(&with, mail, &without);
+        assert_eq!(kept, number(&without, "mail"));
+        assert_ne!(kept, mail);
+        // A group that stays, and the two sections past them.
+        assert_eq!(keep_group(&with, 1, &without), 1);
+        assert_eq!(keep_group(&with, -1, &without), -1);
+        assert_eq!(keep_group(&with, -2, &without), -2);
+        // Nothing before: the first.
+        assert_eq!(keep_group(&[], 0, &without), 0);
     }
 
     /// A provider that attaches or leaves is seen, an answer without a

@@ -25,6 +25,9 @@ slint::slint! {
         public function focus-area() {
             area.focus();
         }
+        public function focus-before() {
+            before.focus();
+        }
         in property <int> rows;
         in-out property <int> made;
         in property <length> details-height: 200px;
@@ -67,6 +70,11 @@ slint::slint! {
                     root.removed += 1;
                 }
             }
+        }
+        // A field of its own just before the TextArea, to Tab from.
+        before := FocusScope {
+            width: 10px;
+            height: 10px;
         }
         area := TextArea {
             text <=> root.typed;
@@ -133,6 +141,9 @@ slint::slint! {
         out property <length> area-height: probe.area-height;
         public function focus-area() {
             probe.focus-area();
+        }
+        public function focus-before() {
+            probe.focus-before();
         }
         in property <int> rows <=> probe.rows;
         out property <int> made: probe.made;
@@ -629,4 +640,16 @@ fn a_field_grows_with_its_text(screen: &Screen, window: &Window_) {
     w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
     assert_eq!(window.get_accepted(), 1, "Enter did not accept");
     assert_eq!(window.get_typed(), "x", "Enter made a new line");
+
+    // Tab goes into the text itself, not to a stop of the field's own:
+    // what is typed after one Tab arrives.
+    window.set_typed("".into());
+    window.invoke_focus_before();
+    let key = |text: slint::SharedString| {
+        w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    };
+    key(slint::platform::Key::Tab.into());
+    key("k".into());
+    assert_eq!(window.get_typed(), "k", "a Tab stop took the keys");
 }

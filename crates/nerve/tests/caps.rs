@@ -105,6 +105,26 @@ fn a_capability_is_added_through_the_dialog() {
     );
     assert_eq!(caps.get_declared().row_count(), 0);
 
+    // The group the list shows is a provider's, and the provider leaves:
+    // the reload keeps the list on a group that is there, not on a number
+    // that names no group.
+    let listing = |names: &[&str]| {
+        let units: Vec<_> = names
+            .iter()
+            .map(|n| {
+                serde_json::json!({"name": format!("{n}.go"), "effect": "read",
+                    "source": format!("program {n}"), "summary": "",
+                    "centers": {"home": "on"}, "now": {"home": "on"}})
+            })
+            .collect();
+        serde_json::json!({"running": true, "capabilities": units, "config": []})
+    };
+    ctl.caps_loaded(ctl.caps_asked(), "home", Ok(listing(&["desk", "mail"])));
+    caps.set_group(1);
+    ctl.caps_loaded(ctl.caps_asked(), "home", Ok(listing(&["desk"])));
+    assert_eq!(caps.get_group(), 0, "the group that left is still picked");
+    caps.invoke_refresh();
+
     // Picking the other center shows its rows, and its switches are the
     // ones a click changes.
     let run_setting = || {

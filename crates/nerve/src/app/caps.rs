@@ -10,7 +10,7 @@ use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{Choose, Ctl, Pending};
-use crate::{Caps, Load, Page, Tone, view};
+use crate::{CapRow, Caps, Load, Page, Tone, view};
 
 impl Ctl {
     pub(super) fn with_caps<R>(&self, f: impl FnOnce(&Caps<'_>) -> R) -> Option<R> {
@@ -95,6 +95,9 @@ impl Ctl {
                 let (sections, counts) = view::cap_sections(&rows, declared.len(), programs.len());
                 *self.caps_listing.borrow_mut() = v.clone();
                 self.with_caps(|c| {
+                    // The pick stays by its name when a provider left.
+                    let old: Vec<CapRow> = c.get_rows().iter().collect();
+                    c.set_group(view::keep_group(&old, c.get_group(), &rows));
                     c.set_rows(ModelRc::new(VecModel::from(rows)));
                     let text = |v: Vec<String>| {
                         ModelRc::new(VecModel::from(

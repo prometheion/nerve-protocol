@@ -144,19 +144,20 @@ pub enum Reach {
 /// The first center whose commands may read `file`, a backup, and how: such
 /// a center's agent could take the file and try passphrases at leisure
 /// (#213 W4-4). A relative `file` is judged by the folder it names, and
-/// one named through `..` or a link by where it really is as well: the
-/// folders are kept resolved, but a `~` folder is expanded from the
-/// unresolved home, so the file is judged in both forms.
+/// one named through `..` or a link by where it really is: the file by its
+/// real place only (as written, `project/../other/n.backup` would lie in
+/// `project`), the folders as written and resolved, since the folders are
+/// kept resolved but a `~` folder is expanded from the unresolved home.
 pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Reach)> {
     let home = crate::paths::home_dir();
     let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
-    let forms = forms(&file);
-    readable_on(cfg, &forms, &home, cfg!(windows), crate::now_ms())
+    // Only a file that does not resolve is judged as it was given.
+    let real = nerve_policy::paths::resolve(&file).unwrap_or(file);
+    readable_on(cfg, &[real], &home, cfg!(windows), crate::now_ms())
 }
 
-/// `path` as given and, when it differs, where it really is (its links
-/// followed, its `..` folded). The file or folder may be missing: then
-/// only the given form is left.
+/// A folder as given and, when it differs, where it really is (its links
+/// followed). The folder may be missing: then only the given form is left.
 fn forms(path: &Path) -> Vec<PathBuf> {
     let mut forms = vec![path.to_path_buf()];
     if let Ok(real) = nerve_policy::paths::resolve(path)
@@ -1505,8 +1506,17 @@ mod tests {
             found
         );
         assert_eq!(readable_by(&cfg, &tools.join("n.backup")), None);
+        // Out of the folder with `..`: it lies in a folder of its own.
+        assert_eq!(
+            readable_by(&cfg, &project.join("..").join("tools").join("n.backup")),
+            None
+        );
         #[cfg(unix)]
         {
+            // Through a link in the folder that leads out of it.
+            let usb = project.join("usb");
+            std::os::unix::fs::symlink(&tools, &usb).unwrap();
+            assert_eq!(readable_by(&cfg, &usb.join("n.backup")), None);
             // Through a link to the folder.
             let link = root.join("proj");
             std::os::unix::fs::symlink(&project, &link).unwrap();

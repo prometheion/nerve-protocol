@@ -23,6 +23,9 @@ pub enum PathError {
     /// UNC, `\\?\` or device paths, or a backslash in a Windows wire path.
     Unc,
     Nul,
+    /// Longer than the system takes a path to be; a path a center sends is
+    /// looked at part by part, so its length is bounded first.
+    TooLong,
     /// A Windows device name (`CON`, `NUL`, `COM1`, ...) as a path component.
     Reserved(String),
     /// A component Windows would silently change or read as a stream: a `:`
@@ -47,6 +50,7 @@ impl std::fmt::Display for PathError {
             ),
             PathError::Unc => write!(f, "UNC and device paths are not accepted"),
             PathError::Nul => write!(f, "path contains a NUL byte"),
+            PathError::TooLong => write!(f, "file name too long"),
             PathError::Reserved(c) => write!(f, "{c} is a Windows device name"),
             PathError::BadComponent(c) => write!(f, "{c:?} is not a plain file name"),
             PathError::DanglingSymlink(p) => write!(f, "{} is a dangling symlink", p.display()),
@@ -60,9 +64,24 @@ impl std::fmt::Display for PathError {
 
 impl std::error::Error for PathError {}
 
+/// The longest path the system takes: `PATH_MAX` bytes on Linux, 32 767
+/// UTF-16 units on Windows.
+#[cfg(not(windows))]
+fn too_long(s: &str) -> bool {
+    s.len() > 4096
+}
+
+#[cfg(windows)]
+fn too_long(s: &str) -> bool {
+    s.len() > 32_767 && s.encode_utf16().count() > 32_767
+}
+
 fn common_checks(s: &str) -> Result<(), PathError> {
     if s.is_empty() {
         return Err(PathError::Empty);
+    }
+    if too_long(s) {
+        return Err(PathError::TooLong);
     }
     if s.contains('\0') {
         return Err(PathError::Nul);
@@ -351,15 +370,19 @@ fn resolve_by(
         .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
         .count();
     // Where the path stops being there, from the root forward: a folder
-    // the account may not look at goes on, the first missing one ends it.
-    // So a long missing rest costs one look, not one search per component
-    // (a center sends the path).
+    // the account may not look at goes on, the first missing one ends it,
+    // and any other error is the answer (the old walk's: `canonical` would
+    // fail with it at once). So a long path costs a bounded number of looks
+    // (a center sends it).
     let mut existing = roots;
     let mut prefix: PathBuf = comps[..roots].iter().collect();
     while let Some(c) = comps.get(existing) {
         prefix.push(c);
         match look(&prefix) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) if e.kind() != io::ErrorKind::PermissionDenied => {
+                return Err(PathError::Io(e));
+            }
             _ => existing += 1,
         }
     }
@@ -814,6 +837,45 @@ mod tests {
         .unwrap();
         assert_eq!(got, Path::new(&long));
         assert!(calls.get() < 10, "{} calls", calls.get());
+    }
+
+    /// A path a center sends is bounded before anything looks at it, and a
+    /// look that fails for another reason than "not there" or "refused" ends
+    /// the walk at once (the error is `canonical`'s too), so a path of
+    /// thousands of parts costs a handful of looks.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_long_path_is_not_walked_part_by_part() {
+        let long = format!("/{}", "a/".repeat(2000));
+        let calls = std::cell::Cell::new(0);
+        let too_long = || io::Error::from_raw_os_error(36); // ENAMETOOLONG
+        let got = resolve_by(
+            Path::new(&long),
+            &|_| Ok(()),
+            &|p| {
+                calls.set(calls.get() + 1);
+                if p == Path::new("/") {
+                    Ok(p.to_path_buf())
+                } else {
+                    Err(too_long())
+                }
+            },
+            &|p| {
+                calls.set(calls.get() + 1);
+                if p == Path::new("/") {
+                    Ok(())
+                } else {
+                    Err(too_long())
+                }
+            },
+        );
+        assert!(matches!(got, Err(PathError::Io(_))));
+        assert!(calls.get() < 10, "{} calls", calls.get());
+        // A wire path over the system's longest is refused unread.
+        let over = format!("/{}", "a".repeat(40_000));
+        assert!(matches!(parse_device_path(&over), Err(PathError::TooLong)));
+        let fits = format!("/{}", "a".repeat(100));
+        assert!(parse_device_path(&fits).is_ok());
     }
 
     /// The links on the way are judged before anything opens a part of the
