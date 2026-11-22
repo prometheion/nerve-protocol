@@ -667,6 +667,41 @@ fn give(o: &Opened, to: (u32, u32)) -> std::io::Result<()> {
     }
 }
 
+/// Takes the named entries of the owner and of the `heir` off what
+/// `nerve-run` made and the walk gave to the heir: the owner's came from
+/// the node's default entries above (where the owner had none there of its
+/// own, `keep`), and the heir's names the file's own owner. Neither grants
+/// anything, but `ls -l` showed a `+` after `uninstall` (#213, L1-5). A
+/// folder's default ACL goes where nothing of it is left that was the
+/// owner's own, as in [`put`].
+fn drop_owners(o: &Opened, owner: u32, heir: u32, keep: Own) -> std::io::Result<()> {
+    let at = o.at();
+    let names: &[&str] = if o.m.is_dir() {
+        &[ACCESS, DEFAULT]
+    } else {
+        &[ACCESS]
+    };
+    for &name in names {
+        let Some(mut acl) = get(&at, name)? else {
+            continue;
+        };
+        let before = acl.clone();
+        acl.set_user(heir, None);
+        if !keep.entry {
+            acl.set_user(owner, None);
+        }
+        if acl == before {
+            continue;
+        }
+        if name == DEFAULT && !acl.has_named() && !keep.plain {
+            remove(&at, DEFAULT)?;
+        } else {
+            set(&at, name, &acl)?;
+        }
+    }
+    Ok(())
+}
+
 /// Gives or takes the pass-through entry (`--x`) of a folder above a grant.
 fn pass(path: &Path, who: Who, on: bool) -> std::io::Result<()> {
     let o = open_path(path)?;
@@ -840,6 +875,7 @@ fn walk(
         // What is no folder and has a second name may lie outside every
         // grant, as for its entries below: it is not given away either.
         let twin = !ft.is_dir() && o.m.nlink() > 1;
+        let mut given = None;
         if let Some(to) = everyone
             && o.m.uid() == who.run
             && o.m.dev() == dev
@@ -851,6 +887,8 @@ fn walk(
             } else if let Err(e) = give(&o, to) {
                 report.errors.push(failed(&path, &e));
                 whole = false;
+            } else {
+                given = Some(to.0);
             }
         }
         if ft.is_symlink() || o.m.dev() != dev || !(ft.is_dir() || ft.is_file()) {
@@ -879,7 +917,12 @@ fn walk(
             if twin {
                 report.skipped += 1;
             }
-            match put(&o, who, (perm != 0).then_some(perm), mine, keep) {
+            let put =
+                put(&o, who, (perm != 0).then_some(perm), mine, keep).and_then(|p| match given {
+                    Some(heir) => drop_owners(&o, who.owner, heir, keep).map(|()| p),
+                    None => Ok(p),
+                });
+            match put {
                 Ok(p) if ft.is_dir() => {
                     own_here = p.own;
                     defaults.note(&path, p, perm == 0);
@@ -2141,6 +2184,44 @@ mod tests {
         let r = remove_all(&file, &|_| heir);
         assert!(r.errors.is_empty() && r.stale.is_empty(), "{r:?}");
         assert_eq!(r.not_given, 2, "{r:?}");
+    }
+
+    /// What `nerve-run` made in a grant and `uninstall` gave to the owner
+    /// keeps no entry of the node: neither its own, nor the owner's that
+    /// came from the node's default entries (#213, L1-5). Root in a
+    /// namespace of its own, to own files as other accounts.
+    #[test]
+    fn what_nerve_run_made_keeps_no_entry_after_uninstall() {
+        if !in_a_namespace("what_nerve_run_made_keeps_no_entry_after_uninstall") {
+            return;
+        }
+        let Some(d) = tree() else { return };
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let file = root.join("acl.json");
+        assert!(
+            sync(&file, &[grant(&work, "rw")], who(), &none)
+                .errors
+                .is_empty()
+        );
+        // As if nerve-run made them: they take the folder's default entries.
+        let made = work.join("made");
+        std::fs::create_dir(&made).unwrap();
+        std::fs::write(made.join("f"), "f").unwrap();
+        std::fs::write(work.join("g"), "g").unwrap();
+        let all = [made.clone(), made.join("f"), work.join("g")];
+        for p in &all {
+            assert_eq!(rights(p, uid()), Some(R | W | X), "{p:?}");
+            std::os::unix::fs::lchown(p, Some(RUN), Some(RUN)).unwrap();
+        }
+        let r = remove_all(&file, &|_| (uid(), gid()));
+        assert!(r.errors.is_empty() && r.stale.is_empty(), "{r:?}");
+        for p in &all {
+            assert_eq!(std::fs::metadata(p).unwrap().uid(), uid(), "{p:?}");
+            assert_eq!(acl_of(p, ACCESS), None, "{p:?}");
+            assert_eq!(acl_of(p, DEFAULT), None, "{p:?}");
+        }
     }
 
     /// A grant that failed (a folder below it closed) stays failed in the

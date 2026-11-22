@@ -52,7 +52,9 @@ the restarted node walks each again) and the service starts again where it
 ran or was starting; a later failure starts it again too. `acl::sync` keeps
 the grants of earlier accounts that did not come off in `Record::left`,
 walks them at each sync and refuses `nerve-run`'s commands while one is
-left; `remove_all` takes them off. Then what runs as the owner
+left; `remove_all` takes them off, and on what `nerve-run` made and it
+gives to the owner also the owner's named entries that came from the node's
+default entries (`acl::drop_owners`). Then what runs as the owner
 runs as root (uid 0, root's groups, `HOME` root's, no `no_new_privs`, the
 capabilities of root's exec), and the account check below is skipped for
 it; `nerve-run`'s commands are unchanged. No other account with uid 0 is an
