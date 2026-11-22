@@ -1505,6 +1505,38 @@ impl Shared {
         self.tell_confinement(&cfg);
     }
 
+    /// Writes down the timed modes that ran out, so the config, the log and
+    /// the audit say when a mode ended and which one holds now; the calls
+    /// were judged by the mode after it already (#213, L3-5). A config file
+    /// ahead of the node refuses the write; the timer ends again once the
+    /// node took it.
+    pub fn end_timers(&self) {
+        let now = crate::now_ms();
+        let cfg = self.config();
+        if cfg
+            .centers
+            .iter()
+            .all(|c| c.policy.mode_at(now) == c.policy.mode)
+        {
+            return;
+        }
+        let ended = lock(&self.store).end_timers(now);
+        match ended {
+            Ok(ended) if ended.is_empty() => {}
+            Ok(ended) => {
+                for (center, was, mode) in ended {
+                    tracing::info!(
+                        "center {center}: the time of its {} mode ran out; it is in {} mode now",
+                        was.as_str(),
+                        mode.as_str()
+                    );
+                }
+                self.bump();
+            }
+            Err(e) => tracing::debug!("the end of a timed mode is not written down yet: {e:?}"),
+        }
+    }
+
     /// Reads the config file again because the owner asked (SIGHUP, the
     /// control socket). Nothing else rereads it: the node keeps its config
     /// in memory, and a file it did not sign is refused.
@@ -2768,6 +2800,7 @@ async fn supervise(shared: Arc<Shared>) {
     let mut acl_synced: Option<u64> = None;
     loop {
         shared.settle_sudo();
+        shared.end_timers();
         let cfg = shared.config();
         // The folder grants follow the config as it changes (crate::grants);
         // a command syncs them as well before it runs. The first sync walks
@@ -5411,6 +5444,57 @@ mod tests {
             );
             daemon.stop().await;
         }
+    }
+
+    /// The node writes down the end of a timed mode as it comes: the config
+    /// says the mode in force, and the audit the timer's change (#213, L3-5).
+    #[tokio::test]
+    async fn the_node_writes_down_the_end_of_a_timed_mode() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let until = crate::now_ms() + 300;
+        daemon.owner_edit(|c| {
+            c.centers.push(nerve_policy::CenterEntry {
+                name: "home".into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: "n".into(),
+                settings: Default::default(),
+                paused: true,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: nerve_policy::config::CenterPolicy {
+                    mode: nerve_policy::Mode::User,
+                    until: Some(until),
+                    then: Some(nerve_policy::Mode::Folder),
+                    ..Default::default()
+                },
+                capabilities: Vec::new(),
+            })
+        });
+        let policy = || daemon.config().centers[0].policy.clone();
+        for _ in 0..50 {
+            if policy().until.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let p = policy();
+        assert_eq!(
+            (p.mode, p.until, p.then),
+            (nerve_policy::Mode::Folder, None, None)
+        );
+        assert!(crate::now_ms() >= until);
+        let audit = AuditLog::new(daemon.shared.paths.audit_log());
+        let last = audit.read().unwrap().pop().unwrap();
+        assert_eq!(last["by"], "timer", "{last}");
+        daemon.stop().await;
     }
 
     /// Landlock below ABI 3 confines the installed node's commands still,

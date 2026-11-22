@@ -1288,7 +1288,11 @@ Folder and user have no time limit by default: once set, they stay until the
 owner changes them. A limit is opt-in (`until`, or `nerve-node mode user
 --for HOURS`). When it runs out, a timed `user` is back in the mode before it,
 `policy.then` (`folder`, or `allowlist` when unset; never `user`), and a timed
-`folder` in `allowlist`, the default deny mode.
+`folder` in `allowlist`, the default deny mode. Calls are judged by that mode
+from the moment the limit passes (`CenterPolicy::mode_at`); within a second
+the running node writes it down (`SettingsStore::end_timers`: `mode` the new
+one, no `until` or `then`), a settings change `by: "timer"` in the audit and a
+line in the log.
 
 Reading in folder mode where the node reads as the command account: the
 installed Linux node does a center's file calls as `nerve-run`

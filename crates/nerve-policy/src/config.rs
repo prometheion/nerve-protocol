@@ -1174,6 +1174,20 @@ impl CenterPolicy {
         matches!(self.mode, Mode::Folder | Mode::User).then(|| (until, self.after()))
     }
 
+    /// Writes down the end of a timed mode that ran out by `now_ms`: the mode
+    /// it fell back to ([`CenterPolicy::mode_at`] has judged by it since)
+    /// and no timer. The mode that ended and the one now; `None` where no
+    /// timer ran out.
+    pub fn end_timer(&mut self, now_ms: u64) -> Option<(Mode, Mode)> {
+        let ended = self.mode;
+        let now = self.mode_at(now_ms);
+        if now == ended {
+            return None;
+        }
+        (self.mode, self.until, self.then) = (now, None, None);
+        Some((ended, now))
+    }
+
     /// Whether the commands of this pairing run as the owner's account at
     /// `now_ms` on the installed node: in `user` mode, and in `allowlist`
     /// mode with `as_owner`. Every other command runs as `nerve-run`, in
