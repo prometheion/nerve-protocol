@@ -302,14 +302,26 @@ pub async fn update(
                 steps.did(why);
                 return Ok(false);
             }
-            let b = fetch_release(p.release, &asset)
+            let have = std::fs::read(p.bin).ok();
+            match fetch_release(p.release, &asset, have.as_deref())
                 .await
-                .map_err(|e| no_program_in(e, p.release, &asset))?;
-            steps.did(format!(
-                "downloaded {asset} from {} and checked it against its SHA256SUMS",
-                p.release
-            ));
-            b
+                .map_err(|e| no_program_in(e, p.release, &asset))?
+            {
+                Some(b) => {
+                    steps.did(format!(
+                        "downloaded {asset} from {} and checked it against its SHA256SUMS",
+                        p.release
+                    ));
+                    b
+                }
+                // It still brings the files it has, below.
+                None => {
+                    steps.did(format!(
+                        "the installed program is the release's {asset} already, so it was not downloaded"
+                    ));
+                    have.unwrap_or_default()
+                }
+            }
         }
     };
     let old = match &p.placed {
@@ -518,11 +530,19 @@ fn mode_of(path: &Path) -> u32 {
 }
 
 /// Downloads `asset` from the release at `base` and checks it against the
-/// release's `SHA256SUMS`.
-pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
-    fetch_release_where(base, asset, &|name| name == asset)
-        .await
-        .map(|(_, b)| b)
+/// release's `SHA256SUMS`. `None` where `have`, the installed program, is
+/// that file already: its line there names its hash, so a program of 90 MB
+/// is not downloaded to find nothing newer (#213 W1-F12).
+pub async fn fetch_release(
+    base: &str,
+    asset: &str,
+    have: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, String> {
+    let (_, want) = release_line(base, asset, &|name| name == asset).await?;
+    if have.is_some_and(|h| nerve_transport::keys::sha256_hex(h) == want) {
+        return Ok(None);
+    }
+    fetch_checked(base, asset, &want).await.map(Some)
 }
 
 /// Which release `update` takes: the latest (GitHub's latest leaves the
@@ -631,6 +651,19 @@ pub async fn fetch_release_where(
     what: &str,
     pick: &dyn Fn(&str) -> bool,
 ) -> Result<(String, Vec<u8>), String> {
+    let (asset, want) = release_line(base, what, pick).await?;
+    let program = fetch_checked(base, &asset, &want).await?;
+    Ok((asset, program))
+}
+
+/// The name and hash of the first file that the `SHA256SUMS` of the
+/// release at `base` lists and `pick` takes; `what` names it where the
+/// list has none.
+async fn release_line(
+    base: &str,
+    what: &str,
+    pick: &dyn Fn(&str) -> bool,
+) -> Result<(String, String), String> {
     nerve_transport::init_crypto();
     // A tag with no release (`--tag` mistyped) has no SHA256SUMS either.
     let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX)
@@ -639,7 +672,7 @@ pub async fn fetch_release_where(
             true => format!("no release is at {base}: {e}"),
             false => e,
         })?;
-    let (asset, want) = String::from_utf8_lossy(&sums)
+    String::from_utf8_lossy(&sums)
         .lines()
         .find_map(|l| {
             let (hash, name) = l.split_once(char::is_whitespace)?;
@@ -647,7 +680,12 @@ pub async fn fetch_release_where(
             let name = name.strip_prefix('*').unwrap_or(name);
             pick(name).then(|| (name.to_string(), hash.to_ascii_lowercase()))
         })
-        .ok_or_else(|| format!("the release's SHA256SUMS lists no {what}"))?;
+        .ok_or_else(|| format!("the release's SHA256SUMS lists no {what}"))
+}
+
+/// `asset` of the release at `base`, checked against `want`, its hash in
+/// the release's `SHA256SUMS`.
+async fn fetch_checked(base: &str, asset: &str, want: &str) -> Result<Vec<u8>, String> {
     let program = download(&format!("{base}/{asset}"), PROGRAM_MAX).await?;
     let got = nerve_transport::keys::sha256_hex(&program);
     if got != want {
@@ -655,7 +693,7 @@ pub async fn fetch_release_where(
             "the downloaded {asset} does not match its line in SHA256SUMS; nothing changed"
         ));
     }
-    Ok((asset, program))
+    Ok(program)
 }
 
 /// `GET url`, following redirects (never from https to http), through the
@@ -1154,6 +1192,46 @@ mod release_tests {
             .is_none()
         );
         assert!(older_release(&base("v0.0.8"), "nerve", None).is_none());
+    }
+
+    /// The installed program that the release's SHA256SUMS names is not
+    /// downloaded again; another one is, and checked (#213 W1-F12).
+    #[tokio::test]
+    async fn the_installed_program_is_not_downloaded_again() {
+        use nerve_transport::http::{Response, read_request};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let program = b"nerve 0.1.0, pre2".to_vec();
+        let sums = format!(
+            "{}  nerve.exe\n",
+            nerve_transport::keys::sha256_hex(&program)
+        );
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (served, count) = (program.clone(), asked.clone());
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = listener.accept().await {
+                let req = read_request(&mut io, 0).await.unwrap();
+                let r = match req.path.as_str() {
+                    "/r/SHA256SUMS" => Response::text(200, &sums),
+                    "/r/nerve.exe" => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Response::new(200, "application/octet-stream", &served[..])
+                    }
+                    _ => Response::text(404, "no"),
+                };
+                let _ = r.write(&mut io).await;
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}/r");
+        let got = fetch_release(&base, "nerve.exe", Some(&program)).await;
+        assert_eq!(got, Ok(None));
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        let got = fetch_release(&base, "nerve.exe", Some(b"nerve 0.1.0, pre1")).await;
+        assert_eq!(got, Ok(Some(program.clone())));
+        let got = fetch_release(&base, "nerve.exe", None).await;
+        assert_eq!(got, Ok(Some(program)));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
 
     /// The latest release without this machine's program says that there

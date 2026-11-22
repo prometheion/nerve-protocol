@@ -430,8 +430,10 @@ an hour per address) names its tag, and its files come from
 `releases/download/<tag>/`, checked against that release's `SHA256SUMS`.
 When GitHub refuses (HTTP 403 or 429), `update` says so and names `--tag`.
 `--tag <tag>` takes that release the same way without asking the API. An
-older version is refused; the same version is taken when the program
-differs, so a pre-release gives way to its release. The app from a `.deb`,
+older version is refused, by its tag before anything is downloaded; the same
+version is taken when the program differs, so a pre-release gives way to its
+release. A program whose hash in `SHA256SUMS` is the installed one's is not
+downloaded at all. The app from a `.deb`,
 `.rpm` or Arch package has its package manager install the same version again
 (`apt-get install --reinstall`, `dnf reinstall`; `pacman -U` takes it as it
 is).
