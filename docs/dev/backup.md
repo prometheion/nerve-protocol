@@ -88,7 +88,10 @@ they know.
    the file), or the center's commands run as the owner (`user` mode, or
    allowlist mode with `as_owner`), which read it anywhere, or the center has
    the settings grant and may switch itself to `user` mode or add the folder.
-   A relative file name is made absolute first.
+   A relative file name is made absolute first, and the file is judged as
+   named and where it really is (`..` folded, links followed), against each
+   folder as written and resolved: a `~` folder is expanded from the
+   unresolved home.
 
 ## Restore of a node
 

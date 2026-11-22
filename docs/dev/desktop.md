@@ -124,8 +124,10 @@ every call of the web UI's pages, answered by the same handlers.
   `owner-token`, `backup -`, `restore -`) each start a broker of their own,
   which ends with the command (one Save that changes two addresses runs both
   in one broker). The center role keeps no broker.
-- **Copied secrets** (`hub::clip`): a harness line, the owner token, a
-  pairing link. On Windows the copy is set with
+- **Copied secrets** (`hub::clip`): a harness line, the owner token (the
+  Settings page's, and the installer's done step after a center's install,
+  which shows it as plain text, not a selectable field), a pairing link.
+  On Windows the copy is set with
   `ExcludeClipboardContentFromMonitorProcessing`,
   `CanIncludeInClipboardHistory` = 0 and `CanUploadToCloudClipboard` = 0;
   after a minute the clipboard is emptied if its sequence number is still

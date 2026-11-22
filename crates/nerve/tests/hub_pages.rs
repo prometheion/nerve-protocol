@@ -14,7 +14,7 @@ use nerve::headless::Screen;
 use nerve::hub::keep::{self, Keyring};
 use nerve::hub::{Failed, Holder, Peer};
 use nerve::runner::Runner;
-use nerve::{AppWindow, Hub, HubPage};
+use nerve::{AppWindow, Hub, HubPage, Install};
 use nerve_center::config::Args;
 use serde_json::{Value, json};
 use slint::{ComponentHandle, Model};
@@ -176,6 +176,49 @@ fn the_center_s_pages_drive_it_over_its_owner_channel() {
     hub.invoke_copy_secret(header.clone());
     ctl.end();
     assert_eq!(clipboard().as_deref(), Some(""));
+
+    // The installer's done step shows the new center's owner token with a
+    // Copy that is a secret copy as well: it leaves the clipboard after
+    // its minute (a plain text copy would stay).
+    let install = window.global::<Install>();
+    window.show().unwrap();
+    install.set_shown(true);
+    install.set_action("install-center".into());
+    install.set_step("done".into());
+    install.set_center_token("nrv_installertoken".into());
+    _screen.draw();
+    let (width, height) = (1440, 900);
+    'copy: for y in (0..height).step_by(4) {
+        for x in (0..width).rev().step_by(8) {
+            let at = slint::LogicalPosition::new(x as f32, y as f32);
+            for event in [
+                slint::platform::WindowEvent::PointerMoved { position: at },
+                slint::platform::WindowEvent::PointerPressed {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+                slint::platform::WindowEvent::PointerReleased {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+            ] {
+                window.window().dispatch_event(event);
+            }
+            if clipboard().is_some_and(|c| !c.is_empty()) {
+                break 'copy;
+            }
+        }
+    }
+    assert_eq!(clipboard().as_deref(), Some("nrv_installertoken"));
+    ctl.hub_clip_expired();
+    assert_eq!(
+        clipboard().as_deref(),
+        Some(""),
+        "the installer's Copy left the token on the clipboard"
+    );
+    install.set_center_token("".into());
+    install.set_shown(false);
+    window.hide().unwrap();
 
     // The checker: a blocklist rule from the form, in the center's config.
     hub.invoke_show(HubPage::Checker);

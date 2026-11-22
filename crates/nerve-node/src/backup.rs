@@ -143,18 +143,35 @@ pub enum Reach {
 
 /// The first center whose commands may read `file`, a backup, and how: such
 /// a center's agent could take the file and try passphrases at leisure
-/// (#213 W4-4). A relative `file` is judged by the folder it names.
+/// (#213 W4-4). A relative `file` is judged by the folder it names, and
+/// one named through `..` or a link by where it really is as well: the
+/// folders are kept resolved, but a `~` folder is expanded from the
+/// unresolved home, so the file is judged in both forms.
 pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Reach)> {
     let home = crate::paths::home_dir();
     let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
-    readable_on(cfg, &file, &home, cfg!(windows), crate::now_ms())
+    let forms = forms(&file);
+    readable_on(cfg, &forms, &home, cfg!(windows), crate::now_ms())
 }
 
-/// [`readable_by`] on Windows (`windows`) or elsewhere, at `now_ms`, with
-/// `home` as the folders' `~`.
+/// `path` as given and, when it differs, where it really is (its links
+/// followed, its `..` folded). The file or folder may be missing: then
+/// only the given form is left.
+fn forms(path: &Path) -> Vec<PathBuf> {
+    let mut forms = vec![path.to_path_buf()];
+    if let Ok(real) = nerve_policy::paths::resolve(path)
+        && real != path
+    {
+        forms.push(real);
+    }
+    forms
+}
+
+/// [`readable_by`] for the `files` forms of one file, on Windows
+/// (`windows`) or elsewhere, at `now_ms`, with `home` as the folders' `~`.
 fn readable_on(
     cfg: &NodeConfig,
-    file: &Path,
+    files: &[PathBuf],
     home: &Path,
     windows: bool,
     now_ms: u64,
@@ -171,7 +188,13 @@ fn readable_on(
             .iter()
             .filter(|f| reads(&f.access))
             .filter_map(|f| nerve_policy::protected::expand(home, &f.path))
-            .find(|f| nerve_policy::paths::within(file, f))
+            .find(|f| {
+                forms(f).iter().any(|f| {
+                    files
+                        .iter()
+                        .any(|file| nerve_policy::paths::within(file, f))
+                })
+            })
             .map(|f| (c.name.clone(), Reach::Folder(f)))
             // With the settings grant its agent sets its own mode and
             // folders.
@@ -1366,7 +1389,13 @@ mod tests {
         let mut cfg = NodeConfig::default();
         cfg.centers.push(lab);
         let on = |cfg: &NodeConfig, file: &str, windows: bool| {
-            readable_on(cfg, Path::new(file), Path::new("/home/alex"), windows, 0)
+            readable_on(
+                cfg,
+                &[PathBuf::from(file)],
+                Path::new("/home/alex"),
+                windows,
+                0,
+            )
         };
         assert_eq!(
             on(&cfg, "/home/alex/project/sub/n.backup", false),
@@ -1441,6 +1470,55 @@ mod tests {
             readable_by(&cfg, Path::new("n.backup")),
             Some(("lab".to_string(), Reach::Folder(here)))
         );
+    }
+
+    /// The folder grant of `folder`, read and write.
+    #[cfg_attr(windows, allow(dead_code))]
+    fn granted(folder: &Path) -> Vec<nerve_policy::config::Folder> {
+        vec![nerve_policy::config::Folder {
+            path: folder.display().to_string(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+        }]
+    }
+
+    /// A file named through `..` or a link is judged by where it is, and
+    /// so is a folder that is a link.
+    #[test]
+    fn a_backup_named_through_dots_or_a_link_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // The folders are kept resolved, as the CLI stores them.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (project, tools) = (root.join("project"), root.join("tools"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let key = NodeKey::generate().unwrap();
+        let mut cfg = NodeConfig::default();
+        let mut lab = entry("lab", &key);
+        lab.policy.folders = granted(&project);
+        cfg.centers.push(lab);
+        let found = Some(("lab".to_string(), Reach::Folder(project.clone())));
+        std::fs::write(project.join("n.backup"), b"x").unwrap();
+        assert_eq!(readable_by(&cfg, &project.join("n.backup")), found);
+        // From another folder, with `..`.
+        assert_eq!(
+            readable_by(&cfg, &tools.join("..").join("project").join("n.backup")),
+            found
+        );
+        assert_eq!(readable_by(&cfg, &tools.join("n.backup")), None);
+        #[cfg(unix)]
+        {
+            // Through a link to the folder.
+            let link = root.join("proj");
+            std::os::unix::fs::symlink(&project, &link).unwrap();
+            assert_eq!(readable_by(&cfg, &link.join("n.backup")), found);
+            // A granted folder that is itself a link, the file named by
+            // its real path.
+            cfg.centers[0].policy.folders = granted(&link);
+            assert_eq!(
+                readable_by(&cfg, &project.join("n.backup")),
+                Some(("lab".to_string(), Reach::Folder(link.clone())))
+            );
+        }
     }
 
     /// After a rotation the key no longer hashes to the node id; the key the

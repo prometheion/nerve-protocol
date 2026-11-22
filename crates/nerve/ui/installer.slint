@@ -7,9 +7,10 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
 import { Install } from "store.slint";
+import { Hub } from "hub.slint";
 import {
     Button, ButtonKind, CheckBox, Card, Banner, Field, TextField, InfoRow, Icon, IconTile, OptionTile,
-    Reveal, Fit, Dots, PathText, Divider, OptionTile, Fold, CopyText,
+    Reveal, Fit, Dots, PathText, Divider, OptionTile, Fold,
 } from "widgets.slint";
 
 // One thing that will be installed.
@@ -340,6 +341,12 @@ export component InstallerView inherits Rectangle {
     background: Theme.window;
     property <length> column: min(620px, scroll.visible-width - 2 * Space.page);
     property <bool> working: Install.step == "working";
+    property <bool> token-copied;
+    // A new token is not the one copied.
+    changed center-token-now => {
+        root.token-copied = false;
+    }
+    property <string> center-token-now: Install.center-token;
 
     // In the middle of the window, or scrolling when the window is too low
     // for a step: the window never needs to be higher than the screen.
@@ -765,9 +772,43 @@ export component InstallerView inherits Rectangle {
                                     Field {
                                         label: "Owner token";
                                         hint: "Nerve asks for it. Keep it in your password manager.";
-                                        CopyText {
-                                            text: Install.center-token;
-                                            copy-button: true;
+                                        // As the app shows its secrets: not selectable, and Copy
+                                        // goes through the app's secret copy, which keeps it out of
+                                        // the clipboard history and clears it after a minute.
+                                        HorizontalLayout {
+                                            spacing: Space.md;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                background: Theme.inset;
+                                                border-radius: Radius.md;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                min-height: token-line.preferred-height + 16px;
+                                                token-line := Text {
+                                                    x: 12px;
+                                                    width: parent.width - 24px;
+                                                    text: Install.center-token;
+                                                    color: Theme.text;
+                                                    font-size: Type.small;
+                                                    font-family: Type.mono;
+                                                    wrap: char-wrap;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Button {
+                                                    text: root.token-copied ? "Copied" : "Copy";
+                                                    icon: root.token-copied ? @image-url("icons/check.svg") : @image-url("icons/copy.svg");
+                                                    kind: ButtonKind.ghost;
+                                                    small: true;
+                                                    accessible-label: "Copy the owner token";
+                                                    clicked => {
+                                                        Hub.copy-secret(Install.center-token);
+                                                        root.token-copied = true;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
