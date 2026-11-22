@@ -90,6 +90,25 @@ pub fn settings_grant_ask(name: &str, root: bool) -> String {
     }
 }
 
+/// The sections of the Capabilities page, as its switch above the list
+/// shows them where the section column folds: each capability's group,
+/// then your capabilities and the programs; with their counts (#213).
+pub fn cap_sections(
+    rows: &[CapRow],
+    declared: usize,
+    programs: usize,
+) -> (Vec<String>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut counts: Vec<String> = Vec::new();
+    for r in rows.iter().filter(|r| !r.action) {
+        names.push(r.name.to_string());
+        counts.push(r.units.to_string());
+    }
+    names.extend(["Your capabilities".to_string(), "Programs".to_string()]);
+    counts.extend([declared.to_string(), programs.to_string()]);
+    (names, counts)
+}
+
 /// Whether the providers attached to the node differ between two answers
 /// of `status --json`.
 pub fn providers_changed(before: &Value, now: &Value) -> bool {
@@ -2224,6 +2243,26 @@ mod tests {
             "{neither}"
         );
         assert!(started_after_restore(true, Err("x")).contains("did not start again: x"));
+    }
+
+    /// The sections of the Capabilities page are its groups, then your
+    /// capabilities and the programs, each with its count (#213).
+    #[test]
+    fn the_capabilities_sections_are_its_groups_and_two_more() {
+        let v = json!({"capabilities": [
+            {"name": "fs.read", "capability": "fs", "source": "built-in", "effect": "read"},
+            {"name": "fs.list", "capability": "fs", "source": "built-in", "effect": "read"},
+            {"name": "exec.run", "capability": "exec", "source": "built-in", "effect": "execute"}]});
+        let rows = cap_rows(&v, "lab");
+        let (names, counts) = cap_sections(&rows, 3, 1);
+        assert_eq!(names.len(), counts.len());
+        assert_eq!(&names[names.len() - 2..], ["Your capabilities", "Programs"]);
+        assert_eq!(&counts[counts.len() - 2..], ["3", "1"]);
+        let groups = rows.iter().filter(|r| !r.action).count();
+        assert_eq!(names.len(), groups + 2);
+        assert!(groups > 0, "{rows:?}");
+        assert_eq!(names[0], rows[0].name.as_str());
+        assert_eq!(counts[0], rows[0].units.to_string());
     }
 
     /// A provider that attaches or leaves is seen, an answer without a

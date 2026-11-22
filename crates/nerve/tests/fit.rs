@@ -288,7 +288,8 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     caps.set_edit_new(true);
     caps.set_edit_name("sensors.read".into());
     caps.set_edit_effect(3);
-    let schema: Vec<String> = (0..8).map(|i| format!("  \"line-{i}\": {{}},")).collect();
+    // More lines than the box grows to, so that it scrolls.
+    let schema: Vec<String> = (0..30).map(|i| format!("  \"line-{i}\": {{}},")).collect();
     caps.set_edit_params(schema.join("\n").into());
     for set in [
         Caps::set_name_error,
@@ -303,8 +304,13 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     }
     // Add is there with the fields not ready: a click shows what is missing.
     caps.set_edit_ready(false);
-    // The details pane: right of the list, its 400 px before the margin.
-    let pane = (ROOM.0 - 32.0 - 400.0, ROOM.0 - 32.0);
+    // The details pane: right of the list, as wide as the panes leave it,
+    // before the margin.
+    caps.set_edit_open(true);
+    screen.draw();
+    let details = window.global::<nerve::Panes>().get_details_width();
+    assert!(details >= 360.0, "the form has {details} px");
+    let pane = (ROOM.0 - 32.0 - details, ROOM.0 - 32.0);
     // The page to its end, with the pane in view at its top, then the
     // form to its end.
     let to_the_end = || {
@@ -605,13 +611,14 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         "the look's switch is not at the foot"
     );
 
-    // Every page at the window's four sizes, the least, a small one, a
-    // middle and a large one, its list and its details: nothing runs into
-    // the page's right margin, however long a name, a path or a rule is.
+    // Every page at every 100 px from the least window to 2200 px, its list
+    // and its details: nothing runs into the page's right margin, however
+    // long a name, a path or a rule is, and no pane is narrower than its
+    // least width.
     // Light only: the layout is the same in dark.
     store.on_show(|_| {});
     made_up(&window);
-    for (width, height) in SIZES {
+    for (width, height) in sizes() {
         screen.resize(width, height);
         // The margin right of the page, left of its scroll bar.
         let margin = if width >= 1100 { 32 } else { 24 };
@@ -648,9 +655,13 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     }
 }
 
-/// The window's sizes the pages fit: the least, a small window, a middle
-/// one and a large one (the breakpoints are 1100 and 1800 px).
-const SIZES: [(u32, u32); 4] = [(900, 580), (1024, 700), (1440, 900), (2200, 1200)];
+/// Every 100 px from the least window, 900 px, to 2200 px, so that no width
+/// between the points where a column folds breaks a page (#213).
+fn sizes() -> impl Iterator<Item = (u32, u32)> {
+    (900..=2200)
+        .step_by(100)
+        .map(|w| (w, if w == 900 { 580 } else { 800 }))
+}
 
 /// Made-up rows for every page, with long names, paths and rules.
 fn made_up(window: &AppWindow) {

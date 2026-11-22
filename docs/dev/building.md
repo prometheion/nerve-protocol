@@ -29,6 +29,12 @@ more than a 16 GB runner has. `nerve` re-exports the generated types
 NERVE_DESKTOP_SHOTS=/tmp/shots cargo test -p nerve --test shots -- --ignored
 ```
 
+`NERVE_DESKTOP_SHOTS_SIZE=1500x800` takes them at another size; a loop over
+every 100 px from 900 to 2200 shows each width between the points where a
+column folds (`tests/hub_shots.rs` the same for the center). `tests/fit.rs`,
+`tests/hub_fit.rs` and `tests/layout.rs` check those widths without shots:
+no page runs into its margin, and the panes fit at their least widths.
+
 Started from `target/`, the app shows its installer: it opens its pages only
 from its installed place. `tests/real.rs` installs, controls, updates and
 removes it through the app's code; run it on a test machine only, as root (on

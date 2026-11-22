@@ -65,34 +65,38 @@ component VerbBlock inherits VerticalLayout {
             horizontal-stretch: 1;
         }
     }
-    if root.verb.usage != "" || root.verb.more != "": Fold {
-        summary: root.verb.args.length > 0 ? "Options (" + root.verb.args.length + ")" : "More";
-        more: root.verb.more;
-        kept: true;
-        open: root.verb.open;
-        toggled => {
-            Manual.ref-toggle("options:" + root.verb.name);
-        }
-        if root.verb.usage != "": Code {
-            text: root.verb.usage;
-        }
-        for a in root.verb.args: Fit {
-            HorizontalLayout {
-                spacing: Space.md;
-                Text {
-                    width: 200px;
-                    text: a.name;
-                    color: Theme.text;
-                    font-size: Type.caption;
-                    font-family: Type.mono;
-                    wrap: char-wrap;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    text: a.about;
-                    color: Theme.text-muted;
-                    font-size: Type.caption;
-                    wrap: word-wrap;
+    // None on Windows for a command without more to say (#213 W4-2).
+    Reveal {
+        shown: root.verb.usage != "" || root.verb.more != "";
+        Fold {
+            summary: root.verb.args.length > 0 ? "Options (" + root.verb.args.length + ")" : "More";
+            more: root.verb.more;
+            kept: true;
+            open: root.verb.open;
+            toggled => {
+                Manual.ref-toggle("options:" + root.verb.name);
+            }
+            if root.verb.usage != "": Code {
+                text: root.verb.usage;
+            }
+            for a in root.verb.args: Fit {
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        width: 200px;
+                        text: a.name;
+                        color: Theme.text;
+                        font-size: Type.caption;
+                        font-family: Type.mono;
+                        wrap: char-wrap;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: a.about;
+                        color: Theme.text-muted;
+                        font-size: Type.caption;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }

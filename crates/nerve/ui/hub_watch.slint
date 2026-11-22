@@ -513,9 +513,8 @@ export component HubAuditPage inherits PageFrame {
         Split {
             ListPane {
                 open: Hub.details-open;
-                stretch: Shape.large ? 1 : 5;
                 least: 320px;
-                most: 100000px;
+                share: 0.46;
                 ListCard {
                     label: "Audit";
                     step(d) => {
@@ -569,7 +568,6 @@ export component HubAuditPage inherits PageFrame {
             }
             DetailsPane {
                 open: Hub.details-open;
-                stretch: Shape.large ? 1 : 6;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {
@@ -664,9 +662,8 @@ export component HubLogPage inherits PageFrame {
         Split {
             ListPane {
                 open: Hub.details-open;
-                stretch: Shape.large ? 1 : 5;
                 least: 320px;
-                most: 100000px;
+                share: 0.46;
                 ListCard {
                     label: "Log";
                     step(d) => {
@@ -730,7 +727,6 @@ export component HubLogPage inherits PageFrame {
             }
             DetailsPane {
                 open: Hub.details-open;
-                stretch: Shape.large ? 1 : 6;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {

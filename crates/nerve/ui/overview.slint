@@ -413,6 +413,7 @@ export component OverviewPage inherits PageFrame {
         shown: Store.status.state != "" && Store.centers.length > 0;
         gap: Space.lg;
         Split {
+            side: true;
             ListPane {
                 open: Store.details-open;
                 CenterList {
@@ -432,6 +433,8 @@ export component OverviewPage inherits PageFrame {
                 }
             }
             SidePane {
+                least: 300px;
+                share: 0.24;
                 Card {
                     HorizontalLayout {
                         spacing: Space.md;

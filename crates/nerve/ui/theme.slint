@@ -131,14 +131,101 @@ export global Size {
     out property <length> dialog: 520px;
 }
 
-// The window's width, which the pages follow (the window sets it,
-// ui/app.slint): below 1100 px a list and its details take turns, from 1100
-// px they stand side by side, and from 1800 px a page may add a third pane.
-// The app opens at 1180 px and is at least 900 px wide.
+// The panes of the page's Split, side by side or folded (#213): a page
+// shows one Split at a time, which says here how wide it is and whether it
+// has a third pane (Split); its panes say their least widths and default
+// shares (ListPane, DetailsPane, SidePane); and the app gives the shares
+// the owner dragged on this page (`load`, from its settings). A column
+// folds only when the panes no longer fit at their least widths. Between
+// those points the panes stay joined, fill the width and keep their
+// shares of it; a drag of the divider between two neighbours moves only
+// those two, each down to its least width.
+export global Panes {
+    in-out property <length> width: 1000px;
+    // The page has a third pane, before the list (`side-leading`) or after
+    // the details.
+    in-out property <bool> side;
+    in-out property <bool> side-leading;
+    in-out property <length> side-least: 180px;
+    in-out property <length> list-least: 260px;
+    in-out property <length> details-least: 360px;
+    // The share of the whole a third pane takes, and the list's of the list
+    // and the details, until the owner drags them.
+    in-out property <float> side-default: 0.15;
+    in-out property <float> list-default: 0.3;
+    // The details hold a form: a list that is no wider than it needs gives
+    // it the room.
+    in-out property <bool> form;
+    // What the owner dragged; below 0 the page's default.
+    in-out property <float> list-share: -1;
+    in-out property <float> side-share: -1;
+    // A divider is being dragged.
+    out property <bool> dragging;
+    out property <length> gap: Space.lg;
+    out property <bool> two: root.width >= root.list-least + root.gap + root.details-least;
+    out property <bool> three: root.side && root.width >= root.side-least + root.list-least + root.details-least + 2 * root.gap;
+    property <float> side-now: root.side-share >= 0 ? root.side-share : root.side-default;
+    property <float> list-now: root.list-share >= 0 ? root.list-share
+        : root.form ? min(root.list-default, 0.34) : root.list-default;
+    out property <length> side-width: !root.three ? 0px
+        : clamp(root.width * root.side-now, root.side-least, root.width - root.list-least - root.details-least - 2 * root.gap);
+    // The list and the details together, without the gap between them.
+    out property <length> both: root.width - (root.three ? root.side-width + root.gap : 0px) - root.gap;
+    out property <length> list-width: !root.two ? root.width
+        : clamp(root.both * root.list-now, root.list-least, root.both - root.details-least);
+    out property <length> details-width: !root.two ? root.width : root.both - root.list-width;
+    // The app reads the page's shares from its settings, and keeps them.
+    callback load();
+    callback save();
+    // The widths when a drag began.
+    property <length> from-side;
+    property <length> from-list;
+    property <length> from-details;
+    public function grab() {
+        root.from-side = root.side-width;
+        root.from-list = root.list-width;
+        root.from-details = root.details-width;
+        root.dragging = true;
+    }
+    // The divider between the list and the details, `dx` from where it was
+    // grabbed: the list grows by what the details give up.
+    public function drag-list(dx: length) {
+        let list = clamp(root.from-list + dx, root.list-least, root.from-list + root.from-details - root.details-least);
+        root.list-share = list / root.both;
+    }
+    // The divider of the third pane: with the list where it leads, else
+    // with the details. The pane on the other side keeps its width.
+    public function drag-side(dx: length) {
+        let side = root.side-leading
+            ? clamp(root.from-side + dx, root.side-least, root.from-side + root.from-list - root.list-least)
+            : clamp(root.from-side - dx, root.side-least, root.from-side + root.from-details - root.details-least);
+        let both = root.width - side - 2 * root.gap;
+        let list = root.side-leading ? root.from-list - (side - root.from-side) : root.from-list;
+        root.side-share = side / root.width;
+        root.list-share = list / both;
+    }
+    public function let-go() {
+        root.dragging = false;
+        root.save();
+    }
+    // A double-click on a divider: the page's defaults again.
+    public function reset() {
+        root.list-share = -1;
+        root.side-share = -1;
+        root.save();
+    }
+}
+
+// The window's width, which the pages follow (the window sets it), and
+// whether the page's panes stand side by side (`wide`) and with a third
+// one (`large`): where they fit at their least widths (Panes), not at fixed
+// widths.
 export global Shape {
     in-out property <length> window-width: 1180px;
-    out property <bool> wide: root.window-width >= 1100px;
-    out property <bool> large: root.window-width >= 1800px;
+    out property <bool> wide: Panes.two;
+    out property <bool> large: Panes.three;
+    // A window with room for the page's wide margins.
+    out property <bool> roomy: root.window-width >= 1100px;
 }
 
 // How things move: every animation of the app takes its time from here, and

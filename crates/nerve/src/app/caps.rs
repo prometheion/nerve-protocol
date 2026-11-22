@@ -92,9 +92,17 @@ impl Ctl {
                 let rows = view::cap_rows(&v, center);
                 let programs = view::programs(&v);
                 let declared = view::declared(&v);
+                let (sections, counts) = view::cap_sections(&rows, declared.len(), programs.len());
                 *self.caps_listing.borrow_mut() = v.clone();
                 self.with_caps(|c| {
                     c.set_rows(ModelRc::new(VecModel::from(rows)));
+                    let text = |v: Vec<String>| {
+                        ModelRc::new(VecModel::from(
+                            v.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+                        ))
+                    };
+                    c.set_sections(text(sections));
+                    c.set_section_counts(text(counts));
                     c.set_declared(ModelRc::new(VecModel::from(declared)));
                     c.set_programs(ModelRc::new(VecModel::from(programs)));
                     c.set_running(v["running"] == true);

@@ -1,7 +1,7 @@
 // The window: the sidebar of pages, the page, and the dialogs over it.
 
 import { Palette } from "std-widgets.slint";
-import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape, Panes } from "theme.slint";
 import {
     Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow,
     ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
@@ -36,7 +36,7 @@ import { HubSettingsPage, HubHelpPage } from "hub_settings.slint";
 import { HubPairDialog, HubUninstallDialog, HubBackupDialog, HubRestoreDialog, HubRoleDialog } from "hub_dialogs.slint";
 
 export {
-    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Shape, Tone, Page, Load, NodeStatus, CenterRow,
+    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Shape, Panes, Tone, Page, Load, NodeStatus, CenterRow,
     AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow, ProgramRow, LogRow, HelpArg, RefRow, RefVerb, RefGroup,
     RelayNodeRow, TunnelRow, Pick, Limit, Hub, HubPage, HubNode, HubToken, HubSession, HubRule, HubWhere,
     HubMachine, HubCap, HubFigure, HubCall, HubCount, HubStatRow, HubAudit, HubLog, HubTask, HubRef,

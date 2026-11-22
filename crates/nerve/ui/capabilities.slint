@@ -7,7 +7,7 @@
 // left, and the list shows the one picked. Each change runs one
 // `nerve-node` command.
 
-import { Theme, Type, Space, Radius, Size, Tone, Shape } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Shape, Panes } from "theme.slint";
 import { Load, CapRow, DeclaredRow, ProgramRow } from "data.slint";
 import { Store, Caps, Perm } from "store.slint";
 import {
@@ -126,9 +126,13 @@ component CapForm inherits PaneForm {
         label: "Command";
         hint: "The program first. A word with blanks goes in quotes.";
         error: Caps.command-error;
-        TextField {
+        // One line that wraps, so a long command is seen whole (#213).
+        TextArea {
             text <=> Caps.edit-command;
             mono: true;
+            one-line: true;
+            lines-high: 38px;
+            most: 160px;
             invalid: Caps.command-error != "";
             placeholder: "sensors -j";
             label: "Command";
@@ -153,6 +157,7 @@ component CapForm inherits PaneForm {
             mono: true;
             invalid: Caps.params-error != "";
             lines-high: 110px;
+            most: 360px;
             placeholder: "{\"type\": \"object\", \"properties\": {\"chip\": {\"type\": \"string\"}}}";
             label: "Arguments";
             edited => {
@@ -169,6 +174,7 @@ component CapForm inherits PaneForm {
             mono: true;
             invalid: Caps.result-error != "";
             lines-high: 76px;
+            most: 280px;
             placeholder: "{\"type\": \"object\"}";
             label: "Result";
             edited => {
@@ -342,11 +348,9 @@ export component CapabilitiesPage inherits PageFrame {
         : Caps.pick-kind == 1 && Caps.pick-at >= Caps.declared.length ? -1
         : Caps.pick-kind == 2 && Caps.pick-at >= Caps.programs.length ? -1
         : Caps.pick-kind;
-    // The list is wide enough for each unit's line: what the window leaves
-    // it beside the sidebar, the margins and the other panes. (Its own width
-    // would follow from what it shows.)
-    property <length> list-room: Shape.window-width - Size.sidebar - (Shape.wide ? 2 * Space.page : 2 * Space.xxl)
-        - (Shape.large ? 200px + 460px + 2 * Space.lg : Shape.wide ? 400px + Space.lg : 0px);
+    // The list is wide enough for each unit's line (Panes: its own width
+    // would follow from what it shows).
+    property <length> list-room: Panes.list-width;
     property <bool> wide: root.list-room > 600px;
     property <bool> open: Store.details-open || Caps.edit-open;
     gap: 0;
@@ -416,10 +420,12 @@ export component CapabilitiesPage inherits PageFrame {
         shown: Caps.read;
         gap: Space.lg;
         Split {
+            side: true;
             // On a large window: the capabilities, your capabilities and
             // the programs, one of them in the list beside.
             SidePane {
-                pane-width: 200px;
+                least: 170px;
+                share: 0.13;
                 leading: true;
                 ListCard {
                     label: "Groups";
@@ -501,9 +507,21 @@ export component CapabilitiesPage inherits PageFrame {
             }
             ListPane {
                 open: root.open;
-                stretch: 1;
                 least: 380px;
-                most: 100000px;
+                share: 0.42;
+                // Where the section column folds, its sections are a switch
+                // above the list: each still one click away (#213).
+                if !Shape.large: ListSwitch {
+                    label: "Section";
+                    options: Caps.sections;
+                    counts: Caps.section-counts;
+                    // The groups by their number, then your capabilities (-1)
+                    // and the programs (-2).
+                    current: Caps.group >= 0 ? Caps.group : Caps.group == -1 ? Caps.sections.length - 2 : Caps.sections.length - 1;
+                    chosen(i) => {
+                        Caps.group = i < Caps.sections.length - 2 ? i : i == Caps.sections.length - 2 ? -1 : -2;
+                    }
+                }
                 ListCard {
                     label: "Capabilities";
                     // A line on the switches, and the rest of it folded.
@@ -532,7 +550,7 @@ export component CapabilitiesPage inherits PageFrame {
                         }
                     }
                     for c[i] in Caps.rows: VerticalLayout {
-                        property <bool> other: Shape.large && c.group != Caps.group;
+                        property <bool> other: c.group != Caps.group;
                         // A capability: its name, where it comes from and its
                         // own switch, over its units.
                         ListGroup {
@@ -561,12 +579,12 @@ export component CapabilitiesPage inherits PageFrame {
                     }
                     // Your capabilities: those of node.toml.
                     ListGroup {
-                        collapsed: Shape.large && Caps.group != -1;
+                        collapsed: Caps.group != -1;
                         text: "Your capabilities";
                         count: Caps.declared.length;
                     }
                     Reveal {
-                        shown: Caps.config-note != "" && !(Shape.large && Caps.group != -1);
+                        shown: Caps.config-note != "" && !(Caps.group != -1);
                         VerticalLayout {
                             padding-left: Space.lg;
                             padding-right: Space.lg;
@@ -580,7 +598,7 @@ export component CapabilitiesPage inherits PageFrame {
                         }
                     }
                     for d[i] in Caps.declared: ListItem {
-                        collapsed: Shape.large && Caps.group != -1;
+                        collapsed: Caps.group != -1;
                         selected: root.kind == 1 && Caps.pick-at == i;
                         label: d.name;
                         clicked => {
@@ -611,7 +629,7 @@ export component CapabilitiesPage inherits PageFrame {
                         }
                     }
                     AddItem {
-                        collapsed: Shape.large && Caps.group != -1;
+                        collapsed: Caps.group != -1;
                         text: "Add a capability…";
                         active: Caps.edit-open && Caps.edit-new;
                         clicked => {
@@ -620,12 +638,12 @@ export component CapabilitiesPage inherits PageFrame {
                     }
                     // The programs allowed as providers.
                     ListGroup {
-                        collapsed: Shape.large && Caps.group != -2;
+                        collapsed: Caps.group != -2;
                         text: "Programs";
                         count: Caps.programs.length;
                     }
                     for p[i] in Caps.programs: ListItem {
-                        collapsed: Shape.large && Caps.group != -2;
+                        collapsed: Caps.group != -2;
                         selected: root.kind == 2 && Caps.pick-at == i;
                         label: p.name;
                         clicked => {
@@ -657,7 +675,7 @@ export component CapabilitiesPage inherits PageFrame {
                         }
                     }
                     AddItem {
-                        collapsed: Shape.large && Caps.group != -2;
+                        collapsed: Caps.group != -2;
                         text: "Allow a program…";
                         active: root.kind == 3;
                         clicked => {
@@ -668,9 +686,8 @@ export component CapabilitiesPage inherits PageFrame {
             }
             DetailsPane {
                 open: root.open;
-                stretch: 0;
-                least: 300px;
-                most: Shape.large ? 460px : 400px;
+                least: 360px;
+                form: root.kind >= 3;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {

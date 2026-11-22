@@ -399,18 +399,37 @@ Most pages are a list and the picked row's details. The rows are one
 line each (Centers and the Overview two); the details show the picked one's
 whole text, its settings and its buttons, and stay in view while the page
 scrolls the list beside them. Details taller than the window scroll on their
-own, with a thin bar. The window's width decides the shape, with one layout
-for every size, so a resize keeps what you typed and what you picked:
+own, with a thin bar. The room decides the shape, with one layout for every
+size, so a resize keeps what you typed and what you picked. Each pane has a
+least width (a list 230 to 380 px, the details 360 px, a third pane 170 to
+300 px), and a column folds only when the panes no longer fit at those:
 
-| Window | Shape |
+| Room | Shape |
 |---|---|
-| below 1100 px (the app is at least 900) | the list fills the page; a picked row shows its details there, with **Back to the list** |
-| 1100 to 1799 px (the app opens at 1180) | the list and the details side by side |
-| from 1800 px | a third pane where it helps: **Pair a center** on the Overview, the capabilities as a list of their own on Capabilities |
+| less than the list and the details need | the list fills the page; a picked row shows its details there, with **Back to the list** |
+| both fit (the app opens at 1180 px) | the list and the details side by side |
+| a third pane fits too | a third pane where it helps: **Pair a center** on the Overview, the sections as a column of their own on Capabilities |
+
+Between those points the panes follow the window: they stay joined, fill the
+page's width and keep their shares of it. Each page's defaults put the room
+where the content is: a list of short rows takes about a third, Audit and Log
+nearly half, and a list beside a form in the details (adding a capability, a
+program, a relay's node, a rule) gives the form what it does not need. The gap
+between two panes is a divider: on hover a line shows it, a drag moves it
+(one pane gains what its neighbour gives up, each stops at its least width),
+and a double-click gives the page its defaults again. The app keeps the shares
+per page in its settings file (`panes`), so they stay over a restart and a
+resize (the `Panes` global in `ui/theme.slint`; `Split` says the page's width
+there, its panes their least widths and defaults).
+
+Where the section column of Capabilities folds, its sections become a switch
+above the list, so each is still one click away. A capability's command, its
+arguments and its result grow with their text (the command stays one line,
+which wraps; Enter saves), up to a size where they scroll.
 
 Settings and Help list their sections the same way. **Permissions** has no
 details: its sections (Folders, Forbidden commands, Allowed commands, Sudo)
-on the left, below 1100 px a switch above the list, and the chosen one's list
+on the left, folded a switch above the list, and the chosen one's list
 on the right. A folder's **Read**, **Write** and **Run** switch in its row,
 and **Capabilities** has each action's **On**, **Off** and **Hidden** in its
 row, so nothing needs opening to switch it.

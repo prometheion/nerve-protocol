@@ -2,7 +2,7 @@
 // from these only, so a button or a card looks the same everywhere.
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape } from "theme.slint";
+import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve, Shape, Panes } from "theme.slint";
 
 export component Icon inherits Image {
     in property <length> size: Size.icon;
@@ -1520,7 +1520,7 @@ export component PageFrame {
     out property <length> view-height: scroll.visible-height;
     // The side margins grow on a very wide window, so the content keeps its
     // width; a small window keeps less of them.
-    property <length> pad: Shape.wide ? Space.page : Space.xxl;
+    property <length> pad: Shape.roomy ? Space.page : Space.xxl;
     property <length> side: max(root.pad, (scroll.visible-width - Size.page-max) / 2);
     // How far it came in, 0 to 1.
     property <float> came: 0;
@@ -1542,7 +1542,7 @@ export component PageFrame {
             width: scroll.visible-width;
             padding-left: root.side;
             padding-right: root.side;
-            padding-top: Shape.wide ? 28px : Space.xxl;
+            padding-top: Shape.roomy ? 28px : Space.xxl;
             padding-bottom: Space.page;
             spacing: root.gap;
             alignment: start;
@@ -1641,13 +1641,18 @@ export component TextArea {
     in property <bool> mono;
     in property <string> label;
     in property <length> lines-high: 76px;
+    // It grows with its text up to this, then scrolls (#213).
+    in property <length> most: root.lines-high;
+    // A command: one line that wraps, Enter is `accepted`.
+    in property <bool> one-line;
     in property <bool> invalid;
     // How far the text is scrolled up: 0, or less once it is longer than
     // the box.
     in-out property <length> scrolled;
     callback edited(string);
+    callback accepted();
     forward-focus: input;
-    height: root.lines-high;
+    height: clamp(input.preferred-height + 18px, root.lines-high, max(root.lines-high, root.most));
     accessible-role: text-input;
     accessible-label: root.label;
     accessible-value: root.text;
@@ -1657,58 +1662,69 @@ export component TextArea {
         border-width: input.has-focus ? 2px : 1px;
         border-color: root.invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border-strong;
     }
-    Rectangle {
-        x: 12px;
-        y: 9px;
-        width: parent.width - 24px;
-        height: parent.height - 18px;
-        clip: true;
-        // A TextInput does not scroll itself: the lines past the box's
-        // height are reached with the wheel, and the box follows the
-        // cursor to the line it moves to. A mouse drag selects text and does
-        // not pan the box, as in Slint's own TextEdit.
-        flick := Flickable {
-            mouse-drag-pan-enabled: false;
-            width: parent.width;
-            height: parent.height;
-            content-width: self.width;
-            content-height: max(self.height, input.preferred-height);
-            content-y <=> root.scrolled;
-            input := TextInput {
-                width: parent.content-width;
-                height: parent.content-height;
-                text <=> root.text;
-                single-line: false;
-                wrap: word-wrap;
-                color: Theme.text;
-                font-size: Type.small;
-                font-family: root.mono ? Type.mono : "";
-                selection-background-color: Theme.accent.transparentize(0.6);
-                selection-foreground-color: Theme.text;
-                edited => {
-                    root.edited(self.text);
-                }
-                cursor-position-changed(cursor) => {
-                    // The cursor's line is a line high from its top.
-                    let line = self.font-size * 1.5;
-                    if (cursor.y + flick.content-y < 0px) {
-                        flick.content-y = min(0px, max(flick.height - self.height, -cursor.y));
-                    } else if (cursor.y + line + flick.content-y > flick.height) {
-                        flick.content-y = min(0px, max(flick.height - self.height, flick.height - cursor.y - line));
+    // Enter in a one-line field is its `accepted`, not a new line.
+    keys := FocusScope {
+        focus-on-click: false;
+        capture-key-pressed(event) => {
+            if (root.one-line && event.text == Key.Return) {
+                root.accepted();
+                return accept;
+            }
+            reject
+        }
+        Rectangle {
+            x: 12px;
+            y: 9px;
+            width: parent.width - 24px;
+            height: parent.height - 18px;
+            clip: true;
+            // A TextInput does not scroll itself: the lines past the box's
+            // height are reached with the wheel, and the box follows the
+            // cursor to the line it moves to. A mouse drag selects text and does
+            // not pan the box, as in Slint's own TextEdit.
+            flick := Flickable {
+                mouse-drag-pan-enabled: false;
+                width: parent.width;
+                height: parent.height;
+                content-width: self.width;
+                content-height: max(self.height, input.preferred-height);
+                content-y <=> root.scrolled;
+                input := TextInput {
+                    width: parent.content-width;
+                    height: parent.content-height;
+                    text <=> root.text;
+                    single-line: false;
+                    wrap: word-wrap;
+                    color: Theme.text;
+                    font-size: Type.small;
+                    font-family: root.mono ? Type.mono : "";
+                    selection-background-color: Theme.accent.transparentize(0.6);
+                    selection-foreground-color: Theme.text;
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    cursor-position-changed(cursor) => {
+                        // The cursor's line is a line high from its top.
+                        let line = self.font-size * 1.5;
+                        if (cursor.y + flick.content-y < 0px) {
+                            flick.content-y = min(0px, max(flick.height - self.height, -cursor.y));
+                        } else if (cursor.y + line + flick.content-y > flick.height) {
+                            flick.content-y = min(0px, max(flick.height - self.height, flick.height - cursor.y - line));
+                        }
                     }
                 }
             }
-        }
-        Text {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            text: root.placeholder;
-            visible: root.text == "";
-            color: Theme.text-faint;
-            font-size: Type.small;
-            font-family: root.mono ? Type.mono : "";
-            wrap: word-wrap;
+            Text {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                text: root.placeholder;
+                visible: root.text == "";
+                color: Theme.text-faint;
+                font-size: Type.small;
+                font-family: root.mono ? Type.mono : "";
+                wrap: word-wrap;
+            }
         }
     }
 }
@@ -2005,34 +2021,83 @@ export component ScrollBox {
 }
 
 // The list and its details (#231): a list of one-line rows on the left, the
-// picked row's text and settings on the right. From 1100 px (Shape.wide) the
-// two stand side by side; below it they take turns: the list fills the page,
-// and a picked row shows its details there, with Back to the list. One tree
-// for both, so a resize keeps what was typed, the focus and the pick.
-// Its children are a ListPane, a DetailsPane and, where a page has one, a
-// SidePane.
-// The gap between the panes is the panes' own (the details' and a third
-// pane's), so a pane that is not shown leaves none.
+// picked row's text and settings on the right. Where both fit at their least
+// widths (Panes) the two stand side by side; else they take turns: the list
+// fills the page, and a picked row shows its details there, with Back to the
+// list. One tree for both, so a resize keeps what was typed, the focus and
+// the pick. Its children are a ListPane, a DetailsPane and, where a page has
+// one (`side`), a SidePane. The gap between two panes is the panes' own (the
+// details' and a third pane's), so a pane that is not shown leaves none; it
+// is the divider a drag moves (PaneGrip).
 export component Split inherits HorizontalLayout {
+    // The page has a SidePane.
+    in property <bool> side;
     spacing: 0px;
+    init => {
+        Panes.side = root.side;
+        Panes.width = root.width;
+        Panes.list-share = -1;
+        Panes.side-share = -1;
+        Panes.load();
+    }
+    changed width => {
+        Panes.width = root.width;
+    }
 }
 
-// The list's side of a Split. Side by side it is `least` to `most` wide, or
-// takes the room with `stretch`; below 1100 px it fills the page until the
-// details open (`open`) and take its place.
+// The divider between two panes of a Split: the gap between them. A drag
+// moves it (`moved`, by how far from where it was grabbed), a double-click
+// gives the page its default widths again, and a line shows it while the
+// pointer is on it.
+component PaneGrip {
+    callback moved(length);
+    property <length> start;
+    touch := TouchArea {
+        mouse-cursor: col-resize;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                // The pointer in the window: the grip moves with the drag.
+                root.start = self.absolute-position.x + self.mouse-x;
+                Panes.grab();
+            } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                Panes.let-go();
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.moved(self.absolute-position.x + self.mouse-x - root.start);
+            }
+        }
+        double-clicked => {
+            Panes.reset();
+        }
+    }
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        width: 3px;
+        border-radius: 1.5px;
+        background: touch.pressed ? Theme.accent : touch.has-hover ? Theme.border-strong : transparent;
+        animate background { duration: Motion.quick; }
+    }
+}
+
+// The list's side of a Split. Side by side it is as wide as its share of
+// the room (Panes), at least `least`, `share` until the owner drags the
+// divider; folded it fills the page until the details open (`open`) and
+// take its place.
 export component ListPane {
     in property <bool> open;
     in property <length> least: 260px;
-    in property <length> most: 320px;
-    in property <float> stretch: 0;
+    in property <float> share: 0.3;
     property <bool> shown: Shape.wide || !root.open;
+    init => {
+        Panes.list-least = root.least;
+        Panes.list-default = root.share;
+    }
     visible: root.shown;
-    horizontal-stretch: Shape.wide ? root.stretch : 1;
-    // A list of its own width takes its most; one that stretches shares
-    // the room with the details by their stretch alone.
-    preferred-width: root.stretch > 0 ? 1px : root.most;
-    min-width: !root.shown ? 0px : Shape.wide ? root.least : 0px;
-    max-width: !root.shown ? 0px : Shape.wide ? root.most : 100000px;
+    horizontal-stretch: Shape.wide ? 0 : 1;
+    min-width: !root.shown ? 0px : Shape.wide ? Panes.list-width : 0px;
+    max-width: !root.shown ? 0px : Shape.wide ? Panes.list-width : 100000px;
     // Hidden, it adds nothing to the height of the Split.
     min-height: 0px;
     preferred-height: root.shown ? column.preferred-height : 0px;
@@ -2043,31 +2108,41 @@ export component ListPane {
     }
 }
 
-// The details' side of a Split. Side by side it stays in view while the page
-// scrolls the list beside it, and scrolls on its own only when it is taller
-// than the window. Below 1100 px it shows only while `open`, in the list's
-// place, with Back to the list above it (`back`).
+// The details' side of a Split: the room the list and a third pane leave,
+// at least `least`; `form` says it holds a form, which takes room from a
+// list that has not been dragged (Panes). Side by side it stays in view
+// while the page scrolls the list beside it, and scrolls on its own only when
+// it is taller than the window; the gap on its left is the divider. Folded,
+// it shows only while `open`, in the list's place, with Back to the list
+// above it (`back`).
 export component DetailsPane {
     in property <bool> open;
-    in property <length> least: 300px;
-    in property <length> most: 100000px;
-    in property <float> stretch: 1;
+    in property <length> least: 360px;
+    in property <bool> form;
     // The page's visible part (PageFrame's view-top and view-height).
     in property <length> view-top;
     in property <length> view-height: 100000px;
     callback back();
+    init => {
+        Panes.details-least = root.least;
+        Panes.form = root.form;
+    }
+    changed form => {
+        Panes.form = root.form;
+    }
     property <bool> shown: Shape.wide || root.open;
     // Its gap to the list beside it.
-    property <length> gap: Shape.wide ? Space.lg : 0px;
+    property <length> gap: Shape.wide ? Panes.gap : 0px;
     // As tall as its content, side by side up to the window's height less
     // a margin above and below.
     property <length> natural: body.preferred-height;
     out property <length> tall: Shape.wide ? min(root.natural, max(160px, root.view-height - 2 * Space.lg)) : root.natural;
     visible: root.shown;
-    horizontal-stretch: root.stretch;
+    horizontal-stretch: 1;
     preferred-width: 1px;
-    min-width: !root.shown ? 0px : Shape.wide ? root.least + root.gap : 0px;
-    max-width: !root.shown ? 0px : Shape.wide ? root.most + root.gap : 100000px;
+    min-width: !root.shown ? 0px : Shape.wide ? Panes.details-least + root.gap : 0px;
+    // Hidden, it takes no room from the list.
+    max-width: !root.shown ? 0px : 100000px;
     min-height: 0px;
     preferred-height: root.shown ? root.tall : 0px;
     // How far it moved down to stay in view: from where the page's visible
@@ -2077,6 +2152,15 @@ export component DetailsPane {
     // own over the card's padding; the others take no wheel, so it scrolls
     // the page.
     property <bool> long: root.natural > root.tall + 1px;
+    if Shape.wide: PaneGrip {
+        x: 0px;
+        y: root.follow;
+        width: root.gap;
+        height: root.tall;
+        moved(dx) => {
+            Panes.drag-list(dx);
+        }
+    }
     flick := Flickable {
         x: root.gap;
         y: root.follow;
@@ -2126,23 +2210,38 @@ export component DetailsPane {
     }
 }
 
-// A third pane of a Split, from 1800 px only (Shape.large), `pane-width`
-// wide, with its gap on the side of the list: before it (`leading`) or
-// after the details.
+// A third pane of a Split (the Split says `side`), where all three fit at
+// their least widths (Shape.large): its share of the page, at least `least`,
+// `share` until the owner drags its divider, which is its gap on the side of
+// the list: before the list (`leading`) or after the details.
 export component SidePane {
-    in property <length> pane-width: 380px;
+    in property <length> least: 200px;
+    in property <float> share: 0.18;
     in property <bool> leading;
+    init => {
+        Panes.side-least = root.least;
+        Panes.side-default = root.share;
+        Panes.side-leading = root.leading;
+    }
     visible: Shape.large;
-    min-width: Shape.large ? root.pane-width + Space.lg : 0px;
-    max-width: Shape.large ? root.pane-width + Space.lg : 0px;
+    min-width: Shape.large ? Panes.side-width + Panes.gap : 0px;
+    max-width: Shape.large ? Panes.side-width + Panes.gap : 0px;
     min-height: 0px;
     preferred-height: Shape.large ? column.preferred-height : 0px;
     column := VerticalLayout {
-        x: root.leading ? 0px : Space.lg;
-        width: root.pane-width;
+        x: root.leading ? 0px : Panes.gap;
+        width: Panes.side-width;
         alignment: start;
         spacing: Space.md;
         @children
+    }
+    if Shape.large: PaneGrip {
+        x: root.leading ? Panes.side-width : 0px;
+        width: Panes.gap;
+        height: root.height;
+        moved(dx) => {
+            Panes.drag-side(dx);
+        }
     }
 }
 

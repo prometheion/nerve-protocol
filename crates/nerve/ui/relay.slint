@@ -250,6 +250,7 @@ export component RelayPage inherits PageFrame {
         }
         DetailsPane {
             open: Store.details-open || Prefs.relay-add-open;
+            form: Prefs.relay-add-open;
             view-top: root.view-top;
             view-height: root.view-height;
             back => {

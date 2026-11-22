@@ -14,7 +14,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::broker::Launch;
 use crate::runner::{Follow, Runner};
-use crate::{AppWindow, Install, Load, Manual, Motion, Page, Perm, Prefs, Store, Tone, Type, view};
+use crate::{
+    AppWindow, Install, Load, Manual, Motion, Page, Panes, Perm, Prefs, Store, Tone, Type, view,
+};
 
 mod caps;
 mod hub;
@@ -433,6 +435,11 @@ impl Ctl {
         store.on_unlock(move || c.lock(false));
         let c = ctl.clone();
         store.on_set_appearance(move |i| c.set_appearance(i));
+        let panes = window.global::<Panes>();
+        let c = ctl.clone();
+        panes.on_load(move || c.panes_load());
+        let c = ctl.clone();
+        panes.on_save(move || c.panes_save());
         node::wire(&ctl, window);
         perm::wire(&ctl, window);
         caps::wire(&ctl, window);
@@ -1368,6 +1375,51 @@ impl Ctl {
             && let Err(e) = crate::settings::save_pre_releases(file, on)
         {
             self.toast(format!("The choice is not saved: {e}"), Tone::Danger);
+        }
+    }
+
+    /// The page shown, as the app's settings keep its panes' shares under
+    /// it: `node-capabilities`, `center-overview`.
+    fn panes_key(&self) -> Option<String> {
+        let w = self.window.upgrade()?;
+        let hub = w.global::<crate::Hub>();
+        let key = if hub.get_shown() {
+            format!("center-{:?}", hub.get_page())
+        } else {
+            format!("node-{:?}", w.global::<Store>().get_page())
+        };
+        Some(key.to_lowercase())
+    }
+
+    /// Gives the page that opens the shares the owner dragged on it, or
+    /// its defaults (#213).
+    fn panes_load(&self) {
+        let (Some(key), Some(w)) = (self.panes_key(), self.window.upgrade()) else {
+            return;
+        };
+        let (list, side) = self
+            .settings
+            .borrow()
+            .as_deref()
+            .map(|f| crate::settings::pane_shares(f, &key))
+            .unwrap_or_default();
+        let panes = w.global::<Panes>();
+        panes.set_list_share(list.unwrap_or(-1.0));
+        panes.set_side_share(side.unwrap_or(-1.0));
+    }
+
+    /// Keeps the shares of the page's panes, after a drag or a reset.
+    fn panes_save(self: &Rc<Self>) {
+        let (Some(key), Some(w)) = (self.panes_key(), self.window.upgrade()) else {
+            return;
+        };
+        let panes = w.global::<Panes>();
+        let share = |f: f32| (f >= 0.0).then_some(f);
+        let (list, side) = (share(panes.get_list_share()), share(panes.get_side_share()));
+        if let Some(file) = self.settings.borrow().as_ref()
+            && let Err(e) = crate::settings::save_pane_shares(file, &key, list, side)
+        {
+            self.toast(format!("The widths are not saved: {e}"), Tone::Danger);
         }
     }
 

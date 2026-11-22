@@ -7,7 +7,7 @@ import { Theme, Type, Space, Radius, Tone, Size } from "theme.slint";
 import { Hub, HubCap } from "hub.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Reveal, Icon, Split, ListPane,
-    DetailsPane, ListCard, ListGroup, ListItem, AddItem, DetailCard, TextField, RemoveAsk,
+    DetailsPane, ListCard, ListGroup, ListItem, AddItem, DetailCard, TextField, TextArea, RemoveAsk,
     PaneForm, Field, Segmented, EmptyState, ListSwitch, Code,
 } from "widgets.slint";
 
@@ -139,9 +139,13 @@ component CapForm inherits PaneForm {
     Field {
         label: "Command";
         hint: "Run as nerve-run, without a shell.";
-        TextField {
+        // One line that wraps, so a long command is seen whole (#213).
+        TextArea {
             text <=> Hub.cap-command;
             mono: true;
+            one-line: true;
+            lines-high: 38px;
+            most: 160px;
             placeholder: "pg_dump site -f backups/site.sql";
             label: "Command";
         }
@@ -291,6 +295,7 @@ export component HubCapsPage inherits PageFrame {
             }
             DetailsPane {
                 open: Hub.details-open;
+                form: Hub.cap-form;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {

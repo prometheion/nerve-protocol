@@ -1,5 +1,5 @@
-//! The center role's pages fit the window at its four sizes (900x580,
-//! 1024x700, 1440x900, 2200x1200), each with its list and its details:
+//! The center role's pages fit the window at every 100 px from 900 to 2200
+//! (#213), each with its list and its details:
 //! nothing runs into the page's right margin, however long a name, a path
 //! or a rule is. The sidebar names the center's pages.
 
@@ -11,7 +11,13 @@ use nerve::runner::Runner;
 use nerve::{AppWindow, Hub, HubPage};
 use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 
-const SIZES: [(u32, u32); 4] = [(900, 580), (1024, 700), (1440, 900), (2200, 1200)];
+/// Every 100 px from the least window, 900 px, to 2200 px, so that no width
+/// between the points where a column folds breaks a page (#213).
+fn sizes() -> impl Iterator<Item = (u32, u32)> {
+    (900..=2200)
+        .step_by(100)
+        .map(|w| (w, if w == 900 { 580 } else { 800 }))
+}
 
 /// The window once nothing moves in it any more.
 fn settled(screen: &Screen) -> SharedPixelBuffer<Rgba8Pixel> {
@@ -58,7 +64,7 @@ fn every_center_page_fits_the_window() {
     // The sidebar says what the machine is.
     assert!(hub.get_shown());
     // The log-in, before anything else.
-    for (width, height) in SIZES {
+    for (width, height) in sizes() {
         screen.resize(width, height);
         let shot = settled(&screen);
         assert_eq!(
@@ -80,7 +86,7 @@ fn every_center_page_fits_the_window() {
         HubPage::Settings,
         HubPage::Help,
     ];
-    for (width, height) in SIZES {
+    for (width, height) in sizes() {
         screen.resize(width, height);
         for page in pages {
             hub.set_page(page);

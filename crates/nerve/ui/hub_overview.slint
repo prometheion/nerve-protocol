@@ -365,6 +365,7 @@ export component HubOverviewPage inherits PageFrame {
         shown: Hub.nodes.length > 0;
         gap: Space.lg;
         Split {
+            side: true;
             ListPane {
                 open: Hub.details-open;
                 NodeList { }
@@ -381,6 +382,8 @@ export component HubOverviewPage inherits PageFrame {
                 }
             }
             SidePane {
+                least: 300px;
+                share: 0.24;
                 SessionsCard { }
             }
         }

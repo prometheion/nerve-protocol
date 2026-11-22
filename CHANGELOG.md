@@ -214,9 +214,10 @@ and every limit is in
   the answer and the input, with `--passphrase-file -`. The app's restore
   takes another center's backup where **It is another center's backup** is
   ticked (`--replace`), so a center moves to a new machine, Windows too.
-- Each page is a list and the picked row's details: side by side from a
-  window of 1100 px, in turns with Back to the list on a smaller one, and the
-  page scrolls as a whole. Switches sit in the rows, adding is a form where it
+- Each page is a list and the picked row's details: side by side wherever
+  both fit, in turns with Back to the list where they do not, and the page
+  scrolls as a whole. The divider between two panes moves with a drag, the
+  app keeps the widths per page, and a double-click resets them. Switches sit in the rows, adding is a form where it
   happens, and removing asks in the row
   ([#231](https://github.com/prometheion/nerve-protocol/issues/231)).
 - On Windows it is the only way to the node: no message sends you to a

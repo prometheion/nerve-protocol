@@ -335,6 +335,11 @@ export global Caps {
     in-out property <int> pick-kind;
     in-out property <int> pick-at: 1;
     in-out property <int> group;
+    // The sections: the groups of `rows`, then your capabilities and the
+    // programs, with their counts; the switch above the list where the
+    // section column folds.
+    in-out property <[string]> sections;
+    in-out property <[string]> section-counts;
     // Whether the node runs: only then does it know the programs'
     // capabilities and whether a center may use each one now.
     in-out property <bool> running;

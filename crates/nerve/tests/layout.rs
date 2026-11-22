@@ -12,12 +12,19 @@ use nerve::headless::Screen;
 use slint::ComponentHandle;
 
 slint::slint! {
-    import { PageFrame, Split, ListPane, DetailsPane, SidePane, ListCard, ListItem, ListSwitch, RemoveAsk } from "../ui/widgets.slint";
-    import { Shape } from "../ui/theme.slint";
-    export { Shape }
+    import { PageFrame, Split, ListPane, DetailsPane, SidePane, ListCard, ListItem, ListSwitch, RemoveAsk, TextArea } from "../ui/widgets.slint";
+    import { Shape, Panes } from "../ui/theme.slint";
+    export { Shape, Panes }
 
     component Probe inherits PageFrame {
         in property <bool> open;
+        in property <bool> form;
+        in-out property <string> typed;
+        in-out property <int> accepted;
+        out property <length> area-height: area.height;
+        public function focus-area() {
+            area.focus();
+        }
         in property <int> rows;
         in-out property <int> made;
         in property <length> details-height: 200px;
@@ -61,13 +68,24 @@ slint::slint! {
                 }
             }
         }
+        area := TextArea {
+            text <=> root.typed;
+            one-line: true;
+            lines-high: 38px;
+            most: 160px;
+            accepted => {
+                root.accepted += 1;
+            }
+        }
         switch := ListSwitch {
             options: ["Folders", "Forbidden commands", "Allowed commands", "Sudo"];
             counts: ["4", "2", "3", "Off"];
         }
         split := Split {
+            side: true;
             list := ListPane {
                 open: root.open;
+                share: 0.45;
                 card := ListCard {
                     step(d) => {
                         root.stepped += d;
@@ -83,6 +101,7 @@ slint::slint! {
             }
             pane := DetailsPane {
                 open: root.open;
+                form: root.form;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {
@@ -97,6 +116,8 @@ slint::slint! {
                 }
             }
             side := SidePane {
+                least: 300px;
+                share: 0.24;
                 Rectangle {
                     height: 50px;
                 }
@@ -106,6 +127,13 @@ slint::slint! {
 
     export component Window_ inherits Window {
         in property <bool> open <=> probe.open;
+        in property <bool> form <=> probe.form;
+        in-out property <string> typed <=> probe.typed;
+        out property <int> accepted: probe.accepted;
+        out property <length> area-height: probe.area-height;
+        public function focus-area() {
+            probe.focus-area();
+        }
         in property <int> rows <=> probe.rows;
         out property <int> made: probe.made;
         in property <length> details-height <=> probe.details-height;
@@ -268,17 +296,20 @@ fn at(screen: &Screen, width: u32, height: u32) {
     }
 }
 
-/// The list and its details at the window's sizes (1440x900, 2200x1200,
-/// 1024x700 and 900x580): side by side from 1100 px, in turns below it with Back to the list, the details in view while
-/// the page scrolls a long list, a third pane from 1800 px, the page's cap,
-/// the switch above a list wrapping where it is narrow, and one tree for
-/// every size.
+/// The list and its details as the window changes (#231, #213): side by
+/// side wherever both fit at their least widths, a third pane wherever all
+/// three do, joined and filling the page at every width from 900 to 2200
+/// px; in turns where they do not, with Back to the list; the details in
+/// view while the page scrolls a long list; the page's cap; a drag of a
+/// divider, its shares kept on a resize, a double-click back to the
+/// defaults; and one tree for every size.
 #[test]
 fn the_list_and_its_details_follow_the_window() {
     let screen = Screen::install(1440, 900, 1.0).unwrap();
     let window = Window_::new().unwrap();
     window.set_rows(40);
     window.show().unwrap();
+    let panes = window.global::<Panes>();
     at(&screen, 1440, 900);
 
     // Side by side: the list at the left, the details right of it, both
@@ -288,15 +319,48 @@ fn the_list_and_its_details_follow_the_window() {
         window.get_details_x() > window.get_list_x() + window.get_list_width(),
         "the details are not right of the list"
     );
-    assert!((260.0..=320.0).contains(&window.get_list_width()));
     assert_eq!(
         window.get_card_height(),
         40.0 * 40.0 + 6.0,
         "the list does not grow with its rows"
     );
-    assert_eq!(window.get_side_width(), 0.0, "a third pane below 1800 px");
+
+    // At every width the panes that fit are shown, each at least its least
+    // width, and together they fill the page, with nothing beside them.
+    for width in (900..=2200).step_by(100) {
+        at(&screen, width, 900);
+        let page = window.get_split_width();
+        assert_eq!(
+            panes.get_width(),
+            page,
+            "at {width}: the panes know another width"
+        );
+        let (list, details, side) = (
+            window.get_list_width(),
+            window.get_details_width(),
+            window.get_side_width(),
+        );
+        assert!(
+            list >= 260.0 && details >= 360.0,
+            "at {width}: {list} and {details}"
+        );
+        let three = page >= 300.0 + 260.0 + 360.0 + 2.0 * 16.0;
+        assert_eq!(
+            side > 0.0,
+            three,
+            "at {width}: the third pane is {side} wide"
+        );
+        assert!(
+            !three || side >= 300.0 + 16.0,
+            "at {width}: the third pane is {side}"
+        );
+        // The details' gap is their own; the third pane's too.
+        let sum = list + 16.0 + details + side;
+        assert!((sum - page).abs() < 1.0, "at {width}: {sum} of {page}");
+    }
 
     // Scrolled far down the list, the details stay in view at its top.
+    at(&screen, 1440, 900);
     let top = window.get_top();
     window
         .window()
@@ -323,29 +387,132 @@ fn the_list_and_its_details_follow_the_window() {
     window.set_details_height(200.0);
     screen.draw();
 
-    // A large window adds the third pane; the page keeps margins past its
-    // cap.
+    // A form in the details takes room from a list that was not dragged.
+    let list = window.get_list_width();
+    window.set_form(true);
+    at(&screen, 1440, 900);
+    assert!(
+        window.get_list_width() < list - 50.0,
+        "the list is {} beside a form, {list} without",
+        window.get_list_width()
+    );
+    window.set_form(false);
+    at(&screen, 1440, 900);
+
+    // The divider between the list and the details: a drag moves it, the
+    // list gaining what the details give up and the third pane as it was.
+    let press = |x: f32, y: f32| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position: slint::LogicalPosition::new(x, y),
+                button: slint::platform::PointerEventButton::Left,
+            });
+    };
+    let release = |x: f32, y: f32| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position: slint::LogicalPosition::new(x, y),
+                button: slint::platform::PointerEventButton::Left,
+            });
+    };
+    let drag = |x: f32, y: f32, dx: f32| {
+        press(x, y);
+        for step in 1..=10 {
+            window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(x + dx * step as f32 / 10.0, y),
+                });
+            screen.draw();
+        }
+        release(x + dx, y);
+        screen.draw();
+    };
+    let (list, details, side) = (
+        window.get_list_width(),
+        window.get_details_width(),
+        window.get_side_width(),
+    );
+    let grip = (window.get_details_x() - 8.0, window.get_details_y() + 20.0);
+    drag(grip.0, grip.1, 100.0);
+    assert!(
+        (window.get_list_width() - (list + 100.0)).abs() < 1.5,
+        "the list is {} after a drag of 100 from {list}",
+        window.get_list_width()
+    );
+    assert!((window.get_details_width() - (details - 100.0)).abs() < 1.5);
+    assert_eq!(window.get_side_width(), side, "the third pane moved");
+    // The drag stops at the details' least width.
+    let grip = (window.get_details_x() - 8.0, window.get_details_y() + 20.0);
+    drag(grip.0, grip.1, 2000.0);
+    assert!(
+        (window.get_details_width() - 360.0).abs() < 1.5,
+        "the details are {} after a drag past their least width",
+        window.get_details_width()
+    );
+    // A wider window keeps the shares: the list's of the list and the
+    // details stays what the drag made it.
+    let share = panes.get_list_share();
+    assert!(share > 0.0);
+    at(&screen, 2000, 900);
+    let ratio = window.get_list_width() / (window.get_list_width() + window.get_details_width());
+    assert!(
+        (ratio - share).abs() < 0.01,
+        "{ratio} after a resize, {share} before"
+    );
+    // A double-click on the divider: the page's defaults again.
+    let grip = (window.get_details_x() - 8.0, window.get_details_y() + 20.0);
+    for _ in 0..2 {
+        press(grip.0, grip.1);
+        release(grip.0, grip.1);
+    }
+    screen.draw();
+    assert_eq!(panes.get_list_share(), -1.0, "a double-click kept the drag");
+
+    // The third pane's divider: before the details here, the details give
+    // up what it gains and the list stays.
+    at(&screen, 1600, 900);
+    let (list, side) = (window.get_list_width(), window.get_side_width());
+    let grip = (
+        window.get_details_x() + window.get_details_width() + 8.0,
+        window.get_details_y() + 20.0,
+    );
+    drag(grip.0, grip.1, -60.0);
+    assert!(
+        (window.get_side_width() - (side + 60.0)).abs() < 1.5,
+        "the third pane is {} after a drag of 60 from {side}",
+        window.get_side_width()
+    );
+    assert!(
+        (window.get_list_width() - list).abs() < 1.5,
+        "the list moved"
+    );
+    panes.invoke_reset();
+
+    // A large window: the page keeps margins past its cap.
     at(&screen, 2200, 1200);
-    // Its 380 px and the gap to the details.
-    assert_eq!(window.get_side_width(), 396.0, "no third pane from 1800 px");
     assert!(
         window.get_split_width() > 1900.0 && window.get_split_width() <= 2000.0,
         "the page is {} wide in a window of 2200",
         window.get_split_width()
     );
 
-    // Below 1100 px the list fills the page, without the details, until a
-    // row opens them; then they take the list's place, and Back goes back.
-    at(&screen, 1000, 700);
+    // Where the list and the details do not fit side by side, the list
+    // fills the page, without the details, until a row opens them; then
+    // they take the list's place, and Back goes back.
+    at(&screen, 640, 700);
     assert!(window.get_list_shown() && !window.get_details_shown());
     assert!(
-        window.get_list_width() > 900.0,
-        "the list does not fill the page"
+        window.get_list_width() > 540.0,
+        "the list does not fill the page: {}",
+        window.get_list_width()
     );
     window.set_open(true);
     screen.draw();
     assert!(!window.get_list_shown() && window.get_details_shown());
-    assert!(window.get_details_width() > 900.0);
+    assert!(window.get_details_width() > 540.0);
     let back = std::rc::Rc::new(std::cell::Cell::new(false));
     let b = back.clone();
     window.on_went_back(move || b.set(true));
@@ -365,16 +532,8 @@ fn the_list_and_its_details_follow_the_window() {
         }
     }
     assert!(back.get(), "no Back to the list above the details");
-    // The app's least window: the same.
-    at(&screen, 900, 580);
-    assert!(!window.get_list_shown() && window.get_details_shown());
     window.set_open(false);
     screen.draw();
-    assert!(window.get_list_shown() && !window.get_details_shown());
-    assert!(
-        window.get_list_width() > 800.0,
-        "the list does not fill the page"
-    );
 
     // The switch above a list takes a second line where it is narrow.
     let one = window.get_switch_height();
@@ -445,4 +604,29 @@ fn the_list_and_its_details_follow_the_window() {
 
     // Every size drew the same details: nothing was made again.
     assert_eq!(window.get_made(), 1, "a resize made the details anew");
+    a_field_grows_with_its_text(&screen, &window);
+}
+
+/// A command or JSON field grows with its text up to its most, then
+/// scrolls; a one-line one takes Enter as accepted, not as a new line
+/// (#213). Part of the test above: Slint takes one platform per process.
+fn a_field_grows_with_its_text(screen: &Screen, window: &Window_) {
+    at(screen, 1000, 900);
+    let one = window.get_area_height();
+    assert_eq!(one, 38.0, "one line is {one} high");
+    window.set_typed("a-long-command --with many --arguments ".repeat(8).into());
+    at(screen, 1000, 900);
+    let some = window.get_area_height();
+    assert!(some > one + 15.0, "a wrapped command stays {some} high");
+    window.set_typed("word ".repeat(2000).into());
+    at(screen, 1000, 900);
+    assert_eq!(window.get_area_height(), 160.0, "it grows past its most");
+    window.set_typed("x".into());
+    window.invoke_focus_area();
+    let text: slint::SharedString = slint::platform::Key::Return.into();
+    let w = window.window();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    assert_eq!(window.get_accepted(), 1, "Enter did not accept");
+    assert_eq!(window.get_typed(), "x", "Enter made a new line");
 }
