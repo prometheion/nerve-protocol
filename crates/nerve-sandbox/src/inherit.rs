@@ -180,7 +180,16 @@ pub struct Walk<'a> {
     pub links: Option<Links<'a>>,
     /// Told how far the walk is, now and then.
     pub progress: &'a mut dyn FnMut(Walked),
+    /// Told of each object below the top that the walk may not open, list
+    /// or write (access denied: a file another account owns, such as one an
+    /// administrator moved in): it is left as it is, with what is below it,
+    /// and the walk goes on with the rest. `None`: such an object ends the
+    /// walk with its error.
+    pub left_out: Option<LeftOut<'a>>,
 }
+
+/// [`Walk::left_out`].
+pub type LeftOut<'a> = &'a mut dyn FnMut(&Path);
 
 /// A folder on the way down.
 struct Frame<O: Objects> {
@@ -223,6 +232,15 @@ pub fn pass_down<O: Objects>(
     mut walk: Walk,
 ) -> io::Result<Walked> {
     let gone = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
+    // An object below the top that the walk may not touch is left out, when
+    // the caller wants to be told of those ([`Walk::left_out`]).
+    let mut left_out = |path: &Path, e: &io::Error| match walk.left_out.as_mut() {
+        Some(tell) if e.kind() == io::ErrorKind::PermissionDenied => {
+            tell(path);
+            true
+        }
+        _ => false,
+    };
     let mut walked = Walked::default();
     let writes = walk.write;
     let open_frame = |objects: &mut O,
@@ -231,10 +249,11 @@ pub fn pass_down<O: Objects>(
                       path: PathBuf,
                       write: bool|
      -> io::Result<Frame<O>> {
+        // The error as it is: the caller tells a folder left out by it.
         let entries = match objects.entries(&obj) {
             Ok(e) => e,
             Err(e) if gone(&e) => Vec::new(),
-            Err(e) => return Err(about(&path, e)),
+            Err(e) => return Err(e),
         };
         let mut todo: Vec<OsString> = entries.iter().map(|(n, _)| n.clone()).collect();
         todo.reverse();
@@ -248,15 +267,17 @@ pub fn pass_down<O: Objects>(
             listed,
         })
     };
-    let first = open_frame(objects, top, list, path.to_path_buf(), write_top)?;
+    let first = open_frame(objects, top, list, path.to_path_buf(), write_top)
+        .map_err(|e| about(path, e))?;
     let mut stack: Vec<Frame<O>> = vec![first];
     while let Some(frame) = stack.last_mut() {
         let Some(name) = frame.todo.pop() else {
             let mut done = stack.pop().expect("a frame");
-            if done.write && walk.write {
+            if done.write && writes {
                 match objects.write(&done.obj, &done.list) {
                     Ok(()) => {}
                     Err(e) if gone(&e) => continue,
+                    Err(e) if done.path != path && left_out(&done.path, &e) => continue,
                     Err(e) => return Err(about(&done.path, e)),
                 }
                 // What was made in it while the walk was below it took its
@@ -287,6 +308,7 @@ pub fn pass_down<O: Objects>(
             Ok(Some(o)) => o,
             Ok(None) => continue,
             Err(e) if gone(&e) => continue,
+            Err(e) if left_out(&path, &e) => continue,
             Err(e) => return Err(about(&path, e)),
         };
         // Told when the objects so far are done.
@@ -300,6 +322,7 @@ pub fn pass_down<O: Objects>(
         let (kind, derived) = match derived {
             Ok(d) => d,
             Err(e) if gone(&e) => continue,
+            Err(e) if left_out(&path, &e) => continue,
             Err(e) => return Err(about(&path, e)),
         };
         // A file with more than one name, judged by every name it has.
@@ -315,6 +338,7 @@ pub fn pass_down<O: Objects>(
                 match capped {
                     Ok(d) => d,
                     Err(e) if gone(&e) => continue,
+                    Err(e) if left_out(&path, &e) => continue,
                     Err(e) => return Err(about(&path, e)),
                 }
             }
@@ -330,14 +354,18 @@ pub fn pass_down<O: Objects>(
             }
         };
         if kind.walked() {
-            let next = open_frame(objects, obj, list, path, write)?;
-            stack.push(next);
+            match open_frame(objects, obj, list, path.clone(), write) {
+                Ok(next) => stack.push(next),
+                Err(e) if left_out(&path, &e) => {}
+                Err(e) => return Err(about(&path, e)),
+            }
             continue;
         }
-        if walk.write {
+        if writes {
             match objects.write(&obj, &list) {
-                Err(e) if !gone(&e) => return Err(about(&path, e)),
-                _ => {}
+                Err(e) if gone(&e) || left_out(&path, &e) => {}
+                Err(e) => return Err(about(&path, e)),
+                Ok(()) => {}
             }
         }
     }
@@ -386,6 +414,8 @@ mod tests {
         /// Objects that cannot be looked at, with an error of a kind that
         /// would say nothing changed.
         failing: Vec<String>,
+        /// Objects whose list may not be written (another account's).
+        denied: Vec<String>,
     }
 
     impl Fake {
@@ -475,6 +505,7 @@ mod tests {
                     every,
                     links,
                     progress,
+                    left_out: None,
                 },
             )
             .unwrap()
@@ -588,6 +619,9 @@ mod tests {
         }
 
         fn write(&mut self, obj: &usize, list: &List) -> io::Result<()> {
+            if self.denied.contains(&self.nodes[*obj].name) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
             let n = &mut self.nodes[*obj];
             n.inherited = list.inherited.clone();
             n.own = list.own.clone();
@@ -912,6 +946,48 @@ mod tests {
         assert_eq!(f.has("l"), ["g:r"]);
     }
 
+    /// A file or folder the walk may not change (an administrator's, moved
+    /// in) is left as it is and told, and the walk goes on: what comes
+    /// after it, and its folder, get the change (#213 W3-2). Without a
+    /// caller to tell, it ends the walk as before.
+    #[test]
+    fn what_the_walk_may_not_change_is_left_out_and_the_rest_goes_on() {
+        let tree = &["a/", "a/adm", "a/m4", "b/", "b/x", "z"];
+        let mut f = Fake::new(tree);
+        f.denied = vec!["a/adm".into(), "b".into()];
+        let list = List {
+            own: ["g".to_string()].into(),
+            inherited: Default::default(),
+        };
+        let mut told = Vec::new();
+        let walk = Walk {
+            write: true,
+            every: false,
+            links: None,
+            progress: &mut |_| {},
+            left_out: Some(&mut |p: &Path| told.push(p.to_path_buf())),
+        };
+        pass_down(&mut f, 0, list.clone(), Path::new("/top"), true, walk).unwrap();
+        assert_eq!(told, [Path::new("/top/a/adm"), Path::new("/top/b")]);
+        for n in ["a", "a/m4", "b/x", "z"] {
+            assert_eq!(f.has(n), ["g"], "{n}");
+        }
+        assert!(f.has("a/adm").is_empty() && f.has("b").is_empty());
+        assert_eq!(f.nodes[0].own.iter().collect::<Vec<_>>(), ["g"]);
+
+        let mut f = Fake::new(tree);
+        f.denied = vec!["a/adm".into()];
+        let walk = Walk {
+            write: true,
+            every: false,
+            links: None,
+            progress: &mut |_| {},
+            left_out: None,
+        };
+        assert!(pass_down(&mut f, 0, list, Path::new("/top"), true, walk).is_err());
+        assert!(f.has("a/m4").is_empty(), "the walk stops at the first");
+    }
+
     /// An error from inside the walk names the object, and is never of a
     /// kind that says nothing changed: what came before it was written.
     #[test]
@@ -927,6 +1003,7 @@ mod tests {
             every: false,
             links: None,
             progress: &mut |_| {},
+            left_out: None,
         };
         let e = pass_down(&mut f, 0, list, Path::new("/top"), true, walk).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Other, "{e}");

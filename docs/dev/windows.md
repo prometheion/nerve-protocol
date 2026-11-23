@@ -140,7 +140,9 @@ it through the service, which runs them as its own account. The node
 refuses every request from a process of a command it runs. A panic the node
 does not take over the pipe makes the app stop the service, which ends
 every link and command, and then save the lock for its next start; the app
-says that the links ended only once the service has stopped. With the node
+says that the links ended only once the service has stopped. With the
+service stopped, the app saves a panic or an unlock with the
+administrator's rights, and starts the service after an unlock. With the node
 stopped, a change goes to the signed `node.toml`, which the node takes when
 it starts; a node that runs without its pipe, or does not answer within 90
 seconds, is an error, so nothing is written behind it. A node that does not
@@ -437,10 +439,14 @@ account of the commands into `node.toml` (`machine.user`), which this version
 refuses, and the file is signed with a key the installer does not hold. So
 the install and the update refuse before they change anything when
 `node.toml` holds that key (`winsvc::check_not_from_0_0_6`), and say to
-uninstall with **Delete the data** and pair again. The update needs it too:
-the installer opened over 0.0.6 finds a node and offers **Update**, not
-**Install**. The 0.0.6 app's **Update** finds that the new program
-does not start and puts the old one back. 0.0.6 also named its owners in the
+uninstall with **Delete the data** and pair again. The installer opened over
+a node whose service runs another program (0.0.6, a pre-release's
+`nerve-node-desktop.exe`) skips the role step and offers the node's
+**Install** (`install::first_step`), which takes the node over and removes the
+program the service ran before (`winsvc::install_steps`), or refuses 0.0.6.
+The 0.0.6 app's **Update** changes nothing: the latest release has no
+`nerve-node-desktop` file, and a 0.1.0 file is not its program. 0.0.6 also
+named its owners in the
 registry value `Owners`, which this version does not read.
 
 **Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
@@ -457,14 +463,21 @@ administrators only. A later install takes them up again.
 own file at once: it moves it aside, and Windows deletes it at its next
 start. Where Windows still holds the profile of `nerve` or `nerve-run`
 (Windows Search can, and a loaded registry of `nerve-run` stays loaded after
-its service stopped until Windows restarts), the uninstall says where to
-remove it after a restart.
+its service stopped until Windows restarts), the uninstall says so. The
+next install or uninstall removes the profiles of those accounts that are
+gone and that Windows no longer holds: the profile list's entries whose
+account Windows cannot name and whose folder has the account's name
+(`nerve_service::win::profiles`). The center's install and uninstall do the
+same for `C:\Windows\ServiceProfiles\nerve-center`.
 
 ## The center as a Windows service
 
 As on Linux, the center runs as a service of its own, so an agent's shell
 command, which runs as you or as the node's account, cannot read its owner
 token or its TLS key.
+
+The open app holds the owner token in its memory, which any program of yours
+can read: run the harness under another account.
 
 What follows is the `nerve-center.exe` built from source, which the release
 does not have. The app's center (**A center** in its installer, or
@@ -678,6 +691,20 @@ runs in the container as well, unless the pairing runs as you.
   finished by the next sync (the grant stays marked), and one that could
   not even be marked (the record could not be written) is walked at the
   next start or by **Sync folders**.
+  A file or folder below a grant that neither the owner nor `nerve-run`
+  may change (another account's, such as one an administrator moved in
+  with its own list) is left as it is, and the walk goes on with the rest
+  (`inherit::Walk::left_out`). The grant is on; the record keeps what it
+  left out (`left_out`), which `status`, Permissions › Folders and the
+  Overview name until a walk there finds it changeable (**Sync folders**).
+  Such a file keeps the entries it had, also those the change would take
+  away. So a change that takes flags away (a grant taken off or narrowed,
+  a folder closed with `none`, a grant inside a wider one of the same
+  pairing) with such a file below is not done: it stays recorded, stale
+  (or unclosed) and unfinished, so it is tried again at every sync and the
+  owner is told to take the file over or move it out; only the pairing
+  whose grant it is stops. A change that only adds flags is done: the file
+  keeps less than the grant gives.
   **Sync folders** under **Permissions › Folders** walks every grant at
   once (`folder sync`; the running node does it, or the app's command when
   none runs): a step by hand only, for a folder the watch leaves alone.
@@ -1044,21 +1071,31 @@ container and `nerve-run` may open.
   pipe a program of yours made with the default security were refused. The
   RPC endpoint mapper (`epmapper`) and a pipe made open to all AppContainers
   were opened. So a program of yours that makes a pipe open to all
-  AppContainers can be talked to. Not checked: other local endpoints (COM
-  servers, ALPC ports).
+  AppContainers can be talked to.
+- **COM and ALPC.** Checked (pre2 test round): in-process COM objects are
+  made (`Scripting.FileSystemObject`, `WScript.Shell`, `MSXML2`), but their
+  calls into services are refused (`Shell.Application`, the firewall's
+  `HNetCfg`, WMI's `SWbemLocator`, 0x80070005), and out-of-process servers
+  are refused at activation (`MMC20.Application`, `ShellWindows`,
+  `Microsoft.Update.Session`). Listing `\RPC Control` is refused, but by
+  name a command connects to about half of the ALPC ports there, among them
+  `epmapper`, `lsasspirpc`, `eventlog` and `ntsvcs`. Through `eventlog` a
+  command can write an entry into the Application log under any source,
+  `nerve-node` too: the Event Viewer's entries of that source are not proof
+  that the node wrote them. The node's audit log is its record. Reading the
+  event logs is refused.
 - **The clipboard and your windows.** The command has a window station and
-  desktop of its own (code). Checked: reading the clipboard fails. Not
-  checked against a signed-in desktop with something on its clipboard: the
-  test session had no desktop.
-- **Credentials.** Not checked: the Credential Manager, since the test
-  session could not use it. The container has none of the capabilities for
-  your sign-in credentials or certificates (code), so it should not reach
-  network shares as you; not checked. With the node's keys in the
+  desktop of its own (code). Checked against a signed-in desktop with text
+  on its clipboard: opening `WinSta0` and its `Default` desktop is refused,
+  no window of the desktop is found, and the clipboard gives nothing.
+- **Credentials.** Checked: the Credential Manager refuses the container
+  every call (enumerate, write, read: error 5). The container has none of
+  the capabilities for your sign-in credentials or certificates (code), and
+  shares on this machine were not reachable as you (checked). With the node's keys in the
   Credential Manager (`machine.secret_storage = keyring`), they are in that of
   `nerve`, which commands of `nerve-run`, another account, do not reach.
   Checked: a blob protected with DPAPI for the machine can be opened by the
-  command. A blob for your user could not be made in the test session, so
-  that is not checked. The node's own keys are files in folders that get no
+  command; one protected for your user cannot. The node's own keys are files in folders that get no
   grant (code).
 - **The token.** Checked: low integrity level, no privileges but
   `SeChangeNotifyPrivilege` and `SeIncreaseWorkingSetPrivilege`, and

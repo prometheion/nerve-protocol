@@ -7,6 +7,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
 import { Install } from "store.slint";
+import { Hub } from "hub.slint";
 import {
     Button, ButtonKind, CheckBox, Card, Banner, Field, TextField, InfoRow, Icon, IconTile, OptionTile,
     Reveal, Fit, Dots, PathText, Divider, OptionTile, Fold,
@@ -159,7 +160,8 @@ export component UninstallChoice {
             icon: @image-url("icons/trash.svg");
             title: "Delete the data";
             text: Install.action == "uninstall-center" ? "Keys, pairings and tokens go. Every node must pair again."
-                : "Keys, pairings and the audit log go. A center must pair again.";
+                : Install.windows ? "Keys, pairings, your stored Windows password and the audit log go. A center must pair again, unless you restore a backup."
+                : "Keys, pairings and the audit log go. A center must pair again, unless you restore a backup.";
             selected: Install.purge;
             clicked => {
                 Install.purge = true;
@@ -339,6 +341,12 @@ export component InstallerView inherits Rectangle {
     background: Theme.window;
     property <length> column: min(620px, scroll.visible-width - 2 * Space.page);
     property <bool> working: Install.step == "working";
+    property <bool> token-copied;
+    // A new token is not the one copied.
+    changed center-token-now => {
+        root.token-copied = false;
+    }
+    property <string> center-token-now: Install.center-token;
 
     // In the middle of the window, or scrolling when the window is too low
     // for a step: the window never needs to be higher than the screen.
@@ -586,6 +594,17 @@ export component InstallerView inherits Rectangle {
                                         }
                                     }
                                 }
+                                // An account without a password installs too, and
+                                // is told what it then lacks (#213 W1-F2).
+                                Reveal {
+                                    shown: Install.windows && !Install.node-only && Install.password == "";
+                                    Text {
+                                        text: "Without it Nerve installs, but runs no command as you: Windows lets no program log on to an account without a password.";
+                                        color: Theme.text-muted;
+                                        font-size: Type.small;
+                                        wrap: word-wrap;
+                                    }
+                                }
                                 StepFoot {
                                     note: "The system asks for an administrator's password next.";
                                     note-icon: @image-url("icons/shield.svg");
@@ -610,7 +629,6 @@ export component InstallerView inherits Rectangle {
                                         text: Install.node-only ? "Add the app" : "Install";
                                         icon: @image-url("icons/shield.svg");
                                         kind: ButtonKind.primary;
-                                        enabled: !Install.windows || Install.node-only || Install.password != "";
                                         clicked => {
                                             Install.install();
                                         }
@@ -746,8 +764,53 @@ export component InstallerView inherits Rectangle {
                                         : "Nerve is installed";
                                     text: Install.action == "update" ? "The service runs the new version."
                                         : Install.action == "uninstall" || Install.action == "uninstall-center" ? (Install.purge ? "Nerve and its data are gone." : "Nerve is gone. Its data stays for a new install.")
-                                        : Install.action == "install-center" ? "It runs and starts with the machine. Open Nerve to manage it; it asks for the owner token, which the steps above show. Keep it in your password manager."
+                                        : Install.action == "install-center" ? "It runs and starts with the machine. Open Nerve to manage it with the owner token below."
                                         : "The node runs and starts with the machine. Open Nerve to pair it with a center.";
+                                }
+                                Reveal {
+                                    shown: Install.action == "install-center" && Install.center-token != "";
+                                    Field {
+                                        label: "Owner token";
+                                        hint: "Nerve asks for it. Keep it in your password manager.";
+                                        // As the app shows its secrets: not selectable, and Copy
+                                        // goes through the app's secret copy, which keeps it out of
+                                        // the clipboard history and clears it after a minute.
+                                        HorizontalLayout {
+                                            spacing: Space.md;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                background: Theme.inset;
+                                                border-radius: Radius.md;
+                                                border-width: 1px;
+                                                border-color: Theme.border;
+                                                min-height: token-line.preferred-height + 16px;
+                                                token-line := Text {
+                                                    x: 12px;
+                                                    width: parent.width - 24px;
+                                                    text: Install.center-token;
+                                                    color: Theme.text;
+                                                    font-size: Type.small;
+                                                    font-family: Type.mono;
+                                                    wrap: char-wrap;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Button {
+                                                    text: root.token-copied ? "Copied" : "Copy";
+                                                    icon: root.token-copied ? @image-url("icons/check.svg") : @image-url("icons/copy.svg");
+                                                    kind: ButtonKind.ghost;
+                                                    small: true;
+                                                    accessible-label: "Copy the owner token";
+                                                    clicked => {
+                                                        Hub.copy-secret(Install.center-token);
+                                                        root.token-copied = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 DidList { }
                                 StepFoot {

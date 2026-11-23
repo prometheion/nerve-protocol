@@ -145,6 +145,10 @@ fn owner_row(owner: Option<&str>, full: bool, p: &mut Page) {
 
 /// What `status` says when the service runs an older program than the
 /// installed one (nerve_service::stale).
+/// What `status` warns of where the node on Windows has no working copy of
+/// the owner's password.
+pub const OWNER_PASSWORD_MISSING: &str = "No working Windows password of the owner is stored: commands as the owner, and the folders' permissions, wait for it (the app's Settings › General › Account for commands takes it).";
+
 pub const OLDER_PROGRAM: &str = "The service still runs the program it started with, older than the installed one: `nerve-node service restart` starts the new one.";
 
 /// What `status` shows of the node, from `status --json`'s `v` (a running
@@ -214,6 +218,10 @@ fn status_page(v: &Value) -> Page {
     }
     for l in grant_lines(&v["folder_access"]) {
         p.warn(l);
+    }
+    // A Windows node without a working password of the owner's (#213 W1-F3).
+    if matches!(v["owner_password"].as_str(), Some("missing" | "stale")) {
+        p.warn(OWNER_PASSWORD_MISSING);
     }
     let mut centers = Vec::new();
     for c in v["centers"].as_array().into_iter().flatten() {
@@ -374,6 +382,18 @@ mod tests {
         status_page(v).render(Style::PLAIN)
     }
 
+    /// A Windows node without a working password of the owner's says so
+    /// (#213 W1-F3).
+    #[test]
+    fn a_missing_owner_password_is_said() {
+        for state in ["missing", "stale"] {
+            let v = json!({"daemon": "running", "owner_password": state});
+            assert!(text(&v).contains("No working Windows password"), "{v}");
+        }
+        let v = json!({"daemon": "running", "owner_password": "stored"});
+        assert!(!text(&v).contains("No working Windows password"));
+    }
+
     /// `status` of a running node: as whom each pairing runs and whether
     /// without Landlock, what nerve-run may read of the owner's home, and
     /// the folder grants, access nerve-run should have lost worded as such
@@ -402,6 +422,23 @@ mod tests {
             ],
         });
         let t = text(&v);
+        // A grant the node could not take off, in its own words: Windows names the folder first.
+        let stale = |p: &str, why: &str| match cfg!(windows) {
+            true => format!(
+                "         {p} keeps access it should have lost; the commands of the pairing it was for do not run until it is off: {why}\n"
+            ),
+            false => format!(
+                "         nerve-run keeps its access to {p}, which it should have lost; no command of nerve-run runs until it is taken off: {why}\n"
+            ),
+        };
+        let gone = stale(
+            "/home/alice/gone",
+            "/home/alice/gone/x: Permission denied (os error 13)",
+        );
+        let acl = stale(
+            "/var/lib/nerve/state/acl.json",
+            "/var/lib/nerve/state/acl.json: expected value at line 1",
+        );
         for want in [
             "  Owner       alice\n",
             "  Confined    landlock abi 6\n",
@@ -412,8 +449,8 @@ mod tests {
             "    b   connected   folder mode · as nerve-run\n",
             "    c   connected   user mode · as alice\n",
             "    d   connected   folder mode\n",
-            "         nerve-run keeps its access to /home/alice/gone, which it should have lost; no command of nerve-run runs until it is taken off: /home/alice/gone/x: Permission denied (os error 13)\n",
-            "         nerve-run keeps its access to /var/lib/nerve/state/acl.json, which it should have lost; no command of nerve-run runs until it is taken off: /var/lib/nerve/state/acl.json: expected value at line 1\n",
+            gone.as_str(),
+            acl.as_str(),
             "         nerve-run did not get every folder: /home/alice/usb: its file system does not support POSIX ACLs\n",
         ] {
             assert!(t.contains(want), "{want}\n{t}");

@@ -111,9 +111,15 @@ fn update_args(from: Option<String>, pre: bool) -> Vec<String> {
 /// says in the app's words itself (nerve_node::account::NO_ACCOUNT_INSTALL).
 pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
     let (mut did, mut warn) = (Vec::new(), Vec::new());
+    let mut next = false;
     for line in v["messages"].as_array().into_iter().flatten() {
         let Some(line) = line.as_str() else { continue };
-        if line.starts_with("Next:") {
+        // The next steps are the window's own buttons, not steps done: a
+        // page's `Next` block, with the indented items under its first.
+        next = line.starts_with("Next:")
+            || line.starts_with("Next ")
+            || (next && line.starts_with(' '));
+        if next {
             continue;
         }
         let line = line.to_string();
@@ -125,6 +131,33 @@ pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
         }
     }
     (did, warn)
+}
+
+/// What the node's install gets on stdin: on Windows the owner's password,
+/// an empty line where it was left empty; elsewhere, and for the app added
+/// to a node alone, nothing.
+pub fn install_input(windows: bool, node_only: bool, password: &str) -> Option<String> {
+    (windows && !node_only).then(|| format!("{password}\n"))
+}
+
+/// Whether an update's steps (`did`) say it found nothing newer and changed
+/// nothing (nerve_service::update's `Ok(false)`).
+pub fn nothing_updated(did: &[String]) -> bool {
+    did.iter().any(|l| l.ends_with("; nothing to update"))
+}
+
+/// Takes the owner token the center's install shows (its page's row
+/// `  Owner token   <token>`) out of `did`, to show it apart with a Copy
+/// button (#213 W1-F6).
+pub fn take_owner_token(did: &mut Vec<String>) -> Option<String> {
+    let at = did
+        .iter()
+        .position(|l| l.trim_start().starts_with("Owner token"))?;
+    let line = did.remove(at);
+    line.split_whitespace()
+        .last()
+        .filter(|t| t.starts_with("nrv_"))
+        .map(str::to_string)
 }
 
 fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
@@ -140,7 +173,9 @@ fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
 /// (Linux), Nerve installed already as a node, a center installed here, or
 /// what this machine becomes (the role is read from the installed
 /// services). The app's program without a role's service, as a package
-/// leaves it, is not installed yet.
+/// leaves it, is not installed yet. A node whose service runs another
+/// program (on Windows a pre-release's `nerve-node-desktop.exe`, or 0.0.6)
+/// is a node: its install takes it over, and no role is asked (#213 W1-F8).
 pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) -> &'static str {
     if node_only {
         "welcome"
@@ -148,6 +183,8 @@ pub fn first_step(app: bool, node_only: bool, roles: nerve_node::role::Roles) ->
         "installed"
     } else if roles.center {
         "center"
+    } else if roles.node {
+        "welcome"
     } else {
         "role"
     }
@@ -354,6 +391,8 @@ impl Ctl {
             i.set_error_title(SharedString::new());
             i.set_did(ModelRc::default());
             i.set_warnings(ModelRc::default());
+            i.set_center_token(SharedString::new());
+            i.set_unchanged(false);
         });
         self.with_rights(&args.clone(), move |c, runner| {
             c.with_install(|i| i.set_step("working".into()));
@@ -362,11 +401,15 @@ impl Ctl {
                 move |r| r.run_with(&super::strings(&args), input.as_deref()),
                 |c, answer| match answer {
                     Ok(v) => {
-                        let (did, warn) = steps(&v);
+                        let (mut did, warn) = steps(&v);
+                        let token = take_owner_token(&mut did).unwrap_or_default();
+                        let unchanged = nothing_updated(&did);
                         c.with_install(|i| {
                             i.set_password(SharedString::new());
                             i.set_did(shared(did));
                             i.set_warnings(shared(warn));
+                            i.set_center_token(token.into());
+                            i.set_unchanged(unchanged);
                         });
                         c.command(vec!["status".into()], None, |c, v| {
                             let version = v
@@ -399,10 +442,12 @@ impl Ctl {
 
     fn install_go(self: &Rc<Self>) {
         // Windows asks for the password of the account commands run as;
-        // it goes on stdin, never as an argument.
+        // it goes on stdin, never as an argument. One left empty goes as
+        // an empty line, which the install answers with why it does not do
+        // (#213 W1-F2); elsewhere none is asked.
         let input = self
-            .with_install(|i| i.get_password().to_string())
-            .filter(|p| !p.is_empty());
+            .with_install(|i| install_input(i.get_windows(), i.get_node_only(), &i.get_password()))
+            .flatten();
         self.run_service_command("install", vec!["install".into()], input);
     }
 
@@ -722,6 +767,10 @@ mod tests {
         assert_eq!(first_step(false, false, center), "center");
         assert_eq!(first_step(true, false, node), "installed");
         assert_eq!(first_step(false, true, node), "welcome");
+        // A node whose service runs another program (a pre-release's
+        // nerve-node-desktop.exe on Windows) is taken over by the node's
+        // install, with no role asked (#213 W1-F8).
+        assert_eq!(first_step(false, false, node), "welcome");
         // The app's program without a node's service: from its package
         // before its first start, or the program of the center role.
         assert_eq!(first_step(true, false, none), "role");
@@ -810,5 +859,59 @@ mod tests {
         for line in did.iter().chain(&warn) {
             assert!(!line.contains('`'), "{line}");
         }
+    }
+
+    /// An update that found nothing newer is said as such, not as an
+    /// update to the same version (#213 W1-F12).
+    #[test]
+    fn an_update_with_nothing_newer_is_told_apart() {
+        let did = |l: &str| vec!["downloaded x".to_string(), l.to_string()];
+        assert!(nothing_updated(&did(
+            "the installed program is that one already; nothing to update"
+        )));
+        assert!(nothing_updated(&did(
+            "the release v0.0.8 is nerve 0.0.8, older than the installed 0.1.0; nothing to update"
+        )));
+        assert!(!nothing_updated(&did("the service runs nerve 0.1.1")));
+    }
+
+    /// On Windows an empty password goes as an empty line, which the
+    /// install says why it does not do; elsewhere nothing is sent (#213
+    /// W1-F2).
+    #[test]
+    fn an_empty_password_goes_as_an_empty_line() {
+        assert_eq!(install_input(true, false, ""), Some("\n".into()));
+        assert_eq!(install_input(true, false, "pw"), Some("pw\n".into()));
+        assert_eq!(install_input(false, false, "pw"), None);
+        assert_eq!(install_input(true, true, "pw"), None);
+    }
+
+    /// The center's install: its owner token is taken out of the steps to
+    /// stand apart with Copy, and its next steps are none of them (#213
+    /// W1-F6, W1-F1).
+    #[test]
+    fn the_center_s_owner_token_stands_apart() {
+        // The center's page as its install prints it (`out::Page::render`:
+        // rows indented, `Next` items under the first), and its `--json`
+        // answer of it.
+        let page = "the service nerve-center runs and starts with the machine\n\
+                    Nerve center · running\n\n  \
+                    Owner token   nrv_owner_abc123\n\n\
+                    Next  Pair a machine:  Nodes › Pair a machine in the Nerve app\n      \
+                    Start:           Overview › Start\n";
+        let v = nerve_center::json::answer(page.as_bytes(), &Ok(()));
+        let (mut did, _) = steps(&v);
+        assert_eq!(
+            take_owner_token(&mut did).as_deref(),
+            Some("nrv_owner_abc123")
+        );
+        assert_eq!(
+            did,
+            [
+                "the service nerve-center runs and starts with the machine",
+                "Nerve center · running"
+            ]
+        );
+        assert_eq!(take_owner_token(&mut did), None);
     }
 }

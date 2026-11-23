@@ -49,6 +49,7 @@ rfd.workspace = true
 # (src/hub/clip.rs).
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Com",

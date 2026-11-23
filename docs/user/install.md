@@ -223,7 +223,7 @@ too, and `--tag pre2-v0.1.0` that one release, each checked against its own
 `SHA256SUMS`. An older version is refused, but a plain `update` on a
 pre-release newer than the latest release says there is nothing to update;
 the same version from another release (a pre-release, then the release) is
-taken. `--pre` asks GitHub
+taken, and the one you have is not downloaded again. `--pre` asks GitHub
 which release is the newest, which it answers 60 times an hour per machine
 without a login; when it refuses, name the release with `--tag`. The config, the keys and the audit log stay. If
 the new program does not start, the old one comes back. Changes of your own

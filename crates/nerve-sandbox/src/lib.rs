@@ -117,6 +117,8 @@ pub struct ShimSpec {
 /// when a command names a cmdlet, so `New-PSDrive`, `Get-Content` and
 /// `Out-File` were "not recognized" (#105, #106). After the import they are
 /// there; other modules still load on their own where that works.
+///
+/// It ends with a line break, so the command is the second line.
 pub const POWERSHELL_START: &str = concat!(
     r"Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; ",
     r"$null = New-PSDrive -Name Work -PSProvider FileSystem ",
@@ -208,6 +210,9 @@ pub const POWERSHELL_START: &str = concat!(
     r"$PSCmdlet.MyInvocation.ExpectingInput 2>&1 | ",
     r"ForEach-Object { if ($_ -is [Management.Automation.ErrorRecord]) { $PSCmdlet.WriteError($_) } ",
     r"else { $_ } } } }; ",
+    // The command starts a line of its own: PowerShell's error positions
+    // then show its own text and columns, not this start's (#213 W3-9).
+    "\n",
 );
 
 /// The AppContainer a Windows command runs in. Its SID is derived from the
@@ -1448,6 +1453,11 @@ pub mod acl {
     /// git trusts the repositories the command reaches, as on Linux: they
     /// are the owner's, given to it, and git refuses another account's
     /// otherwise ("dubious ownership").
+    ///
+    /// PowerShell keeps its module analysis cache in `ac` too: in a
+    /// container Windows gives it no local application data folder, and
+    /// without a path of its own it wrote the cache into the working folder,
+    /// the owner's project (#213 W3-8).
     pub fn container_home(ac: &std::path::Path) -> Vec<(String, String)> {
         // Windows paths, also where the tests run elsewhere.
         let text = format!("{}\\home", ac.display());
@@ -1462,6 +1472,10 @@ pub mod acl {
             ("HOMEDRIVE".into(), drive),
             ("HOMEPATH".into(), path),
             ("APPDATA".into(), format!("{text}\\AppData\\Roaming")),
+            (
+                "PSModuleAnalysisCachePath".into(),
+                format!("{}\\ModuleAnalysisCache", ac.display()),
+            ),
             ("GIT_CONFIG_COUNT".into(), "1".into()),
             ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
             ("GIT_CONFIG_VALUE_0".into(), "*".into()),
@@ -3240,6 +3254,11 @@ pub mod appcontainer {
         /// profile Windows gives you no right to change the list of a file
         /// another account made (#149).
         pub maker: Option<HANDLE>,
+        /// Told of what below the folder the change may not reach (another
+        /// account's, which the maker does not own either): it is left as it
+        /// is, and the change goes on ([`Walk::left_out`]). `None`: the
+        /// change stops there with the error.
+        pub left_out: Option<inherit::LeftOut<'a>>,
     }
 
     /// Passes the list `next` of the folder open as `f` (at `path`) down
@@ -3274,6 +3293,7 @@ pub mod appcontainer {
                 every,
                 links: below.links,
                 progress: below.progress,
+                left_out: below.left_out,
             },
         )
     }
@@ -3288,6 +3308,7 @@ pub mod appcontainer {
         own: bool,
     ) -> io::Result<Option<FileId>> {
         let below = Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -4818,6 +4839,10 @@ mod tests {
         assert_eq!(get("TEMP"), [r"C:\Users\nerve-run\AppData\Local\Temp"]);
         assert_eq!(get("GIT_CONFIG_KEY_0"), ["safe.directory"]);
         assert_eq!(get("GIT_CONFIG_VALUE_0"), ["*"]);
+        assert_eq!(
+            get("PSModuleAnalysisCachePath"),
+            [r"C:\Users\nerve-run\AppData\Local\Packages\nerve.ab\AC\ModuleAnalysisCache"]
+        );
         // The node's variables the owner passes on (`machine.command_env`)
         // do not move the home, also where they name it: it is in the
         // environment once.
@@ -5160,6 +5185,7 @@ mod tests {
                 Ok(inherit::Linked::Capped(cap.clone()))
             };
             let below = appcontainer::Below {
+                left_out: None,
                 links: Some(&mut capped),
                 progress: &mut |_| {},
                 maker: None,
@@ -5221,6 +5247,7 @@ mod tests {
         assert!(!writes(), "capped to read again");
 
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5250,6 +5277,7 @@ mod tests {
         let rw = acl::masks(true, true, false);
         let put = |name: &str, masks: Option<acl::Masks>, whole: bool| {
             let below = appcontainer::Below {
+                left_out: None,
                 links: None,
                 progress: &mut |_| {},
                 maker: None,
@@ -5617,6 +5645,7 @@ mod tests {
         let m = acl::masks(true, true, false);
         let set = |masks: Option<acl::Masks>, whole: bool| {
             let below = appcontainer::Below {
+                left_out: None,
                 links: None,
                 progress: &mut |_| {},
                 maker: None,
@@ -5650,6 +5679,7 @@ mod tests {
         // nothing written.
         let elsewhere = appcontainer::file_id(&outside).unwrap();
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5661,6 +5691,7 @@ mod tests {
         // The recorded folder moved away, nothing at the path: refused too,
         // not taken for nothing there.
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -5700,6 +5731,7 @@ mod tests {
         };
         let mut quiet = |_: inherit::Walked| {};
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut quiet,
             maker: None,
@@ -5733,6 +5765,7 @@ mod tests {
         // Granted itself, it carries the cap in place of the grant's
         // entry, which counts as granted.
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut quiet,
             maker: None,
@@ -5751,6 +5784,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut unheld),
             progress: &mut quiet,
             maker: None,
@@ -5921,6 +5955,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut |_| {},
             maker: Some(process),
@@ -5954,6 +5989,7 @@ mod tests {
         // SAFETY: a token of this process' own user.
         assert!(unsafe { ImpersonateLoggedOnUser(walker) } != 0);
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut capped),
             progress: &mut |_| {},
             maker: Some(process),
@@ -5965,6 +6001,7 @@ mod tests {
         assert!(walked.seen >= 2, "{walked:?}");
         assert_eq!(walked.changed, 0, "{walked:?}");
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6076,6 +6113,7 @@ mod tests {
         let name = format!("nerve.test.astoken.{}", std::process::id());
         let m = acl::masks(true, true, false);
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6102,6 +6140,7 @@ mod tests {
             assert!(icacls(&top.join(p)).contains("S-1-15-2-"), "{p}");
         }
         let below = appcontainer::Below {
+            left_out: None,
             links: None,
             progress: &mut |_| {},
             maker: None,
@@ -6139,6 +6178,7 @@ mod tests {
             }))
         };
         let below = appcontainer::Below {
+            left_out: None,
             links: Some(&mut closed),
             progress: &mut |_| {},
             maker: None,
@@ -6723,7 +6763,7 @@ mod tests {
             assert!(POWERSHELL_START.contains(cmd), "{cmd}");
         }
         assert!(!POWERSHELL_START.contains('"'));
-        assert!(POWERSHELL_START.ends_with("; "));
+        assert!(POWERSHELL_START.ends_with("\n"));
         // The core modules first: a container may not load them on its own.
         assert!(POWERSHELL_START.starts_with(
             "Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility -ErrorAction Stop; "

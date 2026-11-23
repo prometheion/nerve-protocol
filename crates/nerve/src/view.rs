@@ -35,6 +35,19 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 /// app's node.
 pub const ALSO_CENTER: &str = "Also a center, installed in the terminal. The app leaves it as it is: its own program updates it.";
 
+/// The Overview's warning when the node on Windows has no working copy of
+/// the owner's password.
+pub const OWNER_PASSWORD_MISSING: &str = "Your Windows password is not stored, or no longer works: commands as you, and the folders' permissions, wait for it. Settings › General › Account for commands takes it.";
+
+/// The Overview's warning when the folder grants did not all go as the
+/// owner set them (`status`'s `folder_access`): the details are on
+/// Permissions, Folders.
+pub const FOLDERS_NOT_AS_SET: &str = "Some folders do not have the access you set. Permissions › Folders says which, and what to do.";
+
+/// The Overview's warning when a file in a granted folder is another
+/// account's, so the grant could not reach it.
+pub const FOLDERS_LEFT_OUT: &str = "Another account owns a file in your folders, so it keeps the permissions it had. Permissions › Folders says which.";
+
 /// The Overview's warning while the service runs an older program than the
 /// installed one: a package replaced it and its restart failed.
 pub const OLDER_PROGRAM: &str =
@@ -61,6 +74,66 @@ pub fn settings_grant_said(name: &str, on: bool, root: bool, admin: bool) -> Str
             "{name} can no longer change this machine's settings. What it changed stays until you change it: its mode, rules, sudo list and folders on Permissions, its capability switches on Capabilities."
         ),
     }
+}
+
+/// What the settings grant gives `name` where the owner is root (`root`)
+/// or an administrator, asked before it is given (#213 W2-11).
+pub fn settings_grant_ask(name: &str, root: bool) -> String {
+    if root {
+        format!(
+            "Root is the owner of this node, so {name} could set its own mode to user, and its commands would then run as root."
+        )
+    } else {
+        format!(
+            "The owner of this node is an administrator, so {name} could set its own mode to user, and its commands could then take every right on this machine (UAC is no security boundary)."
+        )
+    }
+}
+
+/// The sections of the Capabilities page, as its switch above the list
+/// shows them where the section column folds: each capability's group,
+/// then your capabilities and the programs; with their counts (#213).
+pub fn cap_sections(
+    rows: &[CapRow],
+    declared: usize,
+    programs: usize,
+) -> (Vec<String>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut counts: Vec<String> = Vec::new();
+    for r in rows.iter().filter(|r| !r.action) {
+        names.push(r.name.to_string());
+        counts.push(r.units.to_string());
+    }
+    names.extend(["Your capabilities".to_string(), "Programs".to_string()]);
+    counts.extend([declared.to_string(), programs.to_string()]);
+    (names, counts)
+}
+
+/// The group the Capabilities list shows after the rows changed: the one
+/// picked (`group`, a number of `old`'s rows) when the new rows still have
+/// it by its name and source, else the first. Your capabilities (-1) and the
+/// programs (-2) stay. A provider that left takes its group with it, and
+/// the numbers after it move up (#213).
+pub fn keep_group(old: &[CapRow], group: i32, now: &[CapRow]) -> i32 {
+    if group < 0 {
+        return group;
+    }
+    let heads = |rows: &[CapRow]| -> Vec<(SharedString, SharedString)> {
+        rows.iter()
+            .filter(|r| !r.action)
+            .map(|r| (r.name.clone(), r.source.clone()))
+            .collect()
+    };
+    let (old, now) = (heads(old), heads(now));
+    old.get(group as usize)
+        .and_then(|pick| now.iter().position(|h| h == pick))
+        .unwrap_or(0) as i32
+}
+
+/// Whether the providers attached to the node differ between two answers
+/// of `status --json`.
+pub fn providers_changed(before: &Value, now: &Value) -> bool {
+    before["providers"] != now["providers"]
 }
 
 /// The node's status and its centers, from `status --json`.
@@ -140,6 +213,18 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         if v["service"]["also_center"] == true {
             warnings.push(ALSO_CENTER.into());
         }
+        let grants = &v["folder_access"];
+        let any = |k: &str| grants[k].as_array().is_some_and(|a| !a.is_empty());
+        if any("errors") || any("stale") || any("unclosed") {
+            warnings.push(FOLDERS_NOT_AS_SET.into());
+        } else if any("left_out") {
+            warnings.push(FOLDERS_LEFT_OUT.into());
+        }
+    }
+    // A Windows node without a working password of the owner's: commands
+    // as the owner and the folder grants stop (#213 W1-F3).
+    if owner_password_missing(v) {
+        warnings.push(OWNER_PASSWORD_MISSING.into());
     }
     // An owner with the machine's full rights is said whether the node runs
     // or not: what runs as the owner runs as root, or as an administrator
@@ -658,6 +743,24 @@ pub fn backup_written(said: &Value) -> String {
             text.push_str(&format!("\n{} {said}", sentence(&and_list(&what))));
         }
     }
+    // A center's agent could take a file in its folder and try passphrases
+    // at leisure (#213 W4-4).
+    if let Some(r) = b["readable_by"].as_object() {
+        text.push_str(&match r["folder"].as_str() {
+            Some(folder) => format!(
+                "\n\nIt lies in {folder}, which {}'s commands may read. Move it to a folder of your own.",
+                s(&r["center"])
+            ),
+            None if r.get("settings").and_then(Value::as_bool) == Some(true) => format!(
+                "\n\n{} may switch itself to user mode and then read it. Move it off this machine.",
+                s(&r["center"])
+            ),
+            None => format!(
+                "\n\n{}'s commands run as you, so they may read it. Move it off this machine.",
+                s(&r["center"])
+            ),
+        });
+    }
     text.push_str("\n\nThe file is sealed with your passphrase. Keep both: without the passphrase nobody can open the file, you included.");
     text
 }
@@ -679,7 +782,7 @@ pub fn relay_token(said: &Value) -> (String, String) {
     let t = &said["token"];
     let node = s(&t["node"]);
     let mut text = format!(
-        "{node} may reach {} through this relay. On {node}, paste this link under Relay, Connect.",
+        "{node} may reach {} through this relay. On {node}, paste this link under Relay, Connect in the Nerve app; a node without the app takes it with nerve-node proxy set -.",
         s(&t["reach"])
     );
     if t["new_pin"] == true {
@@ -704,11 +807,25 @@ pub fn web_ui(said: &Value) -> (String, String, Vec<String>) {
         .flatten()
         .filter_map(|t| t["label"].as_str().map(str::to_string))
         .collect();
-    (
-        s(&ui["listen"]).to_string(),
-        s(&ui["status"]).to_string(),
-        tokens,
-    )
+    let listen = s(&ui["listen"]).to_string();
+    // "listening on <its address>" says nothing the address beside it does
+    // not (#213 W4-9).
+    let status = match s(&ui["status"]) {
+        st if st == format!("listening on {listen}") => "listening".to_string(),
+        st => st.to_string(),
+    };
+    (listen, status, tokens)
+}
+
+/// What the app says once the keys moved: into the system keyring
+/// (`keyring`; on Windows the node's Credential Manager) or into files.
+/// The command itself says only "saved" (#213 W4-9).
+pub fn keys_moved(keyring: bool, windows: bool) -> &'static str {
+    match (keyring, windows) {
+        (true, true) => "The keys are in the node's Credential Manager now.",
+        (true, false) => "The keys are in the system keyring now.",
+        (false, _) => "The keys are in files now.",
+    }
 }
 
 /// A label for a new token of the web UI that `tokens` does not hold yet:
@@ -798,6 +915,31 @@ pub fn started_after_restore(restored: bool, started: Result<(), &str>) -> Strin
         ),
     }
 }
+
+/// What the Relay page says where Windows Firewall keeps other machines off
+/// the relay (`windows`), which listens at `listen`: nothing for one on
+/// loopback, which only this machine reaches anyway.
+pub fn relay_firewall(listen: &str, windows: bool) -> String {
+    let Some((host, port)) = listen.rsplit_once(':') else {
+        return String::new();
+    };
+    let host = host.trim_matches(['[', ']']);
+    let loopback = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+        || host.eq_ignore_ascii_case("localhost");
+    if !windows || loopback {
+        return String::new();
+    }
+    format!(
+        "Windows Firewall keeps other machines off it until you allow TCP port {port}: Windows Security › Firewall & network protection › Advanced settings › Inbound Rules › New Rule…"
+    )
+}
+
+/// What the app says of a panic while the installed service is stopped:
+/// the lock is saved for its start.
+pub const PANIC_WHILE_STOPPED: &str =
+    "Locked: the node is stopped, and it stays locked when it starts.";
 
 /// What the app says after it stopped the service for a lock the running
 /// node did not take: every link ended with it, and the lock is saved for
@@ -1912,6 +2054,12 @@ mod tests {
         );
         assert_eq!(tokens, ["first", "app-1"]);
         assert_eq!(super::web_ui_label(&tokens), "app-2");
+        assert_eq!(super::keys_moved(false, true), "The keys are in files now.");
+        assert!(super::keys_moved(true, true).contains("Credential Manager"));
+        // The address is said once (#213 W4-9).
+        let on = serde_json::json!({"ui": {"listen": "127.0.0.1:7470",
+            "status": "listening on 127.0.0.1:7470", "tokens": []}});
+        assert_eq!(super::web_ui(&on).1, "listening");
         // Off.
         let (listen, _, tokens) = super::web_ui(&serde_json::json!({"ui": {"listen": null}}));
         assert!(listen.is_empty() && tokens.is_empty());
@@ -1984,6 +2132,8 @@ mod tests {
             text.contains("paste this link under Relay, Connect"),
             "{text}"
         );
+        // A Linux node without the app takes it in its CLI (#213 W2-12).
+        assert!(text.contains("nerve-node proxy set -"), "{text}");
         assert!(text.contains("The relay is off"), "{text}");
         assert!(!text.contains('`') && !copy.contains('`'), "{text}");
     }
@@ -2125,6 +2275,79 @@ mod tests {
         assert!(started_after_restore(true, Err("x")).contains("did not start again: x"));
     }
 
+    /// The sections of the Capabilities page are its groups, then your
+    /// capabilities and the programs, each with its count (#213).
+    #[test]
+    fn the_capabilities_sections_are_its_groups_and_two_more() {
+        let v = json!({"capabilities": [
+            {"name": "fs.read", "capability": "fs", "source": "built-in", "effect": "read"},
+            {"name": "fs.list", "capability": "fs", "source": "built-in", "effect": "read"},
+            {"name": "exec.run", "capability": "exec", "source": "built-in", "effect": "execute"}]});
+        let rows = cap_rows(&v, "lab");
+        let (names, counts) = cap_sections(&rows, 3, 1);
+        assert_eq!(names.len(), counts.len());
+        assert_eq!(&names[names.len() - 2..], ["Your capabilities", "Programs"]);
+        assert_eq!(&counts[counts.len() - 2..], ["3", "1"]);
+        let groups = rows.iter().filter(|r| !r.action).count();
+        assert_eq!(names.len(), groups + 2);
+        assert!(groups > 0, "{rows:?}");
+        assert_eq!(names[0], rows[0].name.as_str());
+        assert_eq!(counts[0], rows[0].units.to_string());
+    }
+
+    /// The picked group stays by its name when a provider leaves: the list
+    /// never goes empty, and a number past the groups is the first (#213).
+    #[test]
+    fn the_picked_capabilities_group_survives_a_provider_leaving() {
+        let unit =
+            |name: &str, source: &str| json!({"name": name, "source": source, "effect": "read"});
+        let with = cap_rows(
+            &json!({"capabilities": [
+                unit("fs.read", "built-in"),
+                unit("exec.run", "built-in"),
+                unit("desk.open", "program desk"),
+                unit("mail.send", "program mail")]}),
+            "lab",
+        );
+        let without = cap_rows(
+            &json!({"capabilities": [
+                unit("fs.read", "built-in"),
+                unit("exec.run", "built-in"),
+                unit("mail.send", "program mail")]}),
+            "lab",
+        );
+        let number = |rows: &[CapRow], name: &str| {
+            rows.iter()
+                .find(|r| !r.action && r.name == name)
+                .unwrap()
+                .group
+        };
+        // `desk` was picked and left: the first group, not a stranger.
+        assert_eq!(keep_group(&with, number(&with, "desk"), &without), 0);
+        // `mail` was picked and its number moved up.
+        let mail = number(&with, "mail");
+        let kept = keep_group(&with, mail, &without);
+        assert_eq!(kept, number(&without, "mail"));
+        assert_ne!(kept, mail);
+        // A group that stays, and the two sections past them.
+        assert_eq!(keep_group(&with, 1, &without), 1);
+        assert_eq!(keep_group(&with, -1, &without), -1);
+        assert_eq!(keep_group(&with, -2, &without), -2);
+        // Nothing before: the first.
+        assert_eq!(keep_group(&[], 0, &without), 0);
+    }
+
+    /// A provider that attaches or leaves is seen, an answer without a
+    /// change is not (#213 W2-13).
+    #[test]
+    fn a_provider_that_attaches_is_seen() {
+        let none = json!({"providers": []});
+        let desk = json!({"providers": [{"name": "desk", "capabilities": ["desk.open"]}]});
+        assert!(providers_changed(&none, &desk));
+        assert!(providers_changed(&desk, &none));
+        assert!(!providers_changed(&desk, &desk.clone()));
+    }
+
     /// What a backup wrote, in the app's words: a key the keyring kept
     /// names the dialog's choice, never the CLI's flag.
     #[test]
@@ -2160,6 +2383,31 @@ mod tests {
         );
         assert!(
             text.contains("The node key for a and the node key for b are not in the file"),
+            "{text}"
+        );
+        assert!(!text.contains("commands may read"), "{text}");
+        // A file in a center's folder is warned of (#213 W4-4).
+        let readable = json!({"backup": {"file": "C:\\t\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": "C:\\t"}}});
+        let text = backup_written(&readable);
+        assert!(
+            text.contains("It lies in C:\\t, which lab's commands may read."),
+            "{text}"
+        );
+        let as_you = json!({"backup": {"file": "C:\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": null}}});
+        let by_settings = json!({"backup": {"file": "C:\\n.backup", "centers": ["lab"], "saved": [],
+            "left_out": [], "readable_by": {"center": "lab", "folder": null, "settings": true}}});
+        let text = backup_written(&by_settings);
+        assert!(
+            text.contains("lab may switch itself to user mode and then read it."),
+            "{text}"
+        );
+        let text = backup_written(&as_you);
+        assert!(
+            text.contains(
+                "lab's commands run as you, so they may read it. Move it off this machine."
+            ),
             "{text}"
         );
     }
@@ -2222,6 +2470,20 @@ mod tests {
         assert_eq!(centers[2].link, "Revoked");
     }
 
+    /// On Windows the Relay page says that the firewall keeps other
+    /// machines off its port until the owner allows it (#213 W2-7).
+    #[test]
+    fn the_relay_page_names_the_firewall_on_windows() {
+        let said = relay_firewall("0.0.0.0:7490", true);
+        assert!(
+            said.contains("TCP port 7490") && said.contains("Inbound Rules"),
+            "{said}"
+        );
+        assert_eq!(relay_firewall("127.0.0.1:7490", true), "");
+        assert_eq!(relay_firewall("[::1]:7490", true), "");
+        assert_eq!(relay_firewall("0.0.0.0:7490", false), "");
+    }
+
     #[test]
     fn a_stopped_or_locked_node() {
         let v = json!({"daemon": "not running", "locked": false, "sudo": "off",
@@ -2259,6 +2521,29 @@ mod tests {
         let (st, _) = status(&v, NOW);
         let w: Vec<SharedString> = st.warnings.iter().collect();
         assert_eq!(w, [SharedString::from(ALSO_CENTER)]);
+        // A Windows node without a working password of the owner's (#213
+        // W1-F3).
+        for state in ["missing", "stale"] {
+            let v = json!({"daemon": "running", "locked": false, "centers": [],
+                "owner_password": state});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(OWNER_PASSWORD_MISSING)], "{state}");
+        }
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "owner_password": "stored"});
+        assert_eq!(status(&v, NOW).0.warnings.row_count(), 0);
+        // Folders whose grants did not go as set, or that hold a file of
+        // another account, are said on the Overview too (#213 W2-5, W3-2).
+        for (grants, want) in [
+            (json!({"stale": ["C:\\second"]}), FOLDERS_NOT_AS_SET),
+            (json!({"errors": ["C:\\a: denied"]}), FOLDERS_NOT_AS_SET),
+            (json!({"left_out": ["C:\\a\\adm.txt"]}), FOLDERS_LEFT_OUT),
+        ] {
+            let v = json!({"daemon": "running", "locked": false, "centers": [],
+                "folder_access": grants});
+            let w: Vec<SharedString> = status(&v, NOW).0.warnings.iter().collect();
+            assert_eq!(w, [SharedString::from(want)], "{grants}");
+        }
     }
 
     /// Giving the settings grant where root is the owner says that the

@@ -38,7 +38,8 @@ component VerbBlock inherits VerticalLayout {
             wrap: word-wrap;
         }
     }
-    Code {
+    // None on Windows, where the app runs the commands (#213 W4-2).
+    if root.verb.example != "": Code {
         text: root.verb.example;
     }
     HorizontalLayout {
@@ -64,34 +65,38 @@ component VerbBlock inherits VerticalLayout {
             horizontal-stretch: 1;
         }
     }
-    Fold {
-        summary: root.verb.args.length > 0 ? "Options (" + root.verb.args.length + ")" : "More";
-        more: root.verb.more;
-        kept: true;
-        open: root.verb.open;
-        toggled => {
-            Manual.ref-toggle("options:" + root.verb.name);
-        }
-        Code {
-            text: root.verb.usage;
-        }
-        for a in root.verb.args: Fit {
-            HorizontalLayout {
-                spacing: Space.md;
-                Text {
-                    width: 200px;
-                    text: a.name;
-                    color: Theme.text;
-                    font-size: Type.caption;
-                    font-family: Type.mono;
-                    wrap: char-wrap;
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    text: a.about;
-                    color: Theme.text-muted;
-                    font-size: Type.caption;
-                    wrap: word-wrap;
+    // None on Windows for a command without more to say (#213 W4-2).
+    Reveal {
+        shown: root.verb.usage != "" || root.verb.more != "";
+        Fold {
+            summary: root.verb.args.length > 0 ? "Options (" + root.verb.args.length + ")" : "More";
+            more: root.verb.more;
+            kept: true;
+            open: root.verb.open;
+            toggled => {
+                Manual.ref-toggle("options:" + root.verb.name);
+            }
+            if root.verb.usage != "": Code {
+                text: root.verb.usage;
+            }
+            for a in root.verb.args: Fit {
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        width: 200px;
+                        text: a.name;
+                        color: Theme.text;
+                        font-size: Type.caption;
+                        font-family: Type.mono;
+                        wrap: char-wrap;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: a.about;
+                        color: Theme.text-muted;
+                        font-size: Type.caption;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }
@@ -631,7 +636,7 @@ export component HelpPage inherits PageFrame {
                         }
                         TaskRow {
                             task: "Allow one command";
-                            where: "Permissions › Allow";
+                            where: "Permissions › Allowed commands";
                             differs: "";
                         }
                         TaskRow {
@@ -782,11 +787,14 @@ export component HelpPage inherits PageFrame {
                                 }
                             }
                         }
-                        Text {
-                            text: "A command about one center takes --center <CENTER> when more than one is paired.";
-                            color: Theme.text-muted;
-                            font-size: Type.caption;
-                            wrap: word-wrap;
+                        Reveal {
+                            shown: !Install.windows;
+                            Text {
+                                text: "A command about one center takes --center <CENTER> when more than one is paired.";
+                                color: Theme.text-muted;
+                                font-size: Type.caption;
+                                wrap: word-wrap;
+                            }
                         }
                         Reveal {
                             shown: Manual.ref-groups.length == 0;

@@ -1345,6 +1345,11 @@ Only an allow rule that names the whole line covers such a command. This keeps
 `git *` from allowing `git x; rm -rf ~`. A Windows path with `\` needs an exact
 rule, or `/` in the path.
 
+A deny rule's wildcard covers every line, plain or not. Command rules match
+case as written on every platform (only path rules ignore case on Windows), so
+on Windows a deny rule covers one spelling: `Remove-Item *` does not forbid
+`remove-item` or the alias `ri`. `rule add` says so after such a rule.
+
 ### Switch a capability off
 
 `cap set` turns a capability or one action on, off or hidden for a center.

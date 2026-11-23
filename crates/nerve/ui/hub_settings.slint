@@ -310,7 +310,27 @@ component MachineSection inherits DetailCard {
     }
     MachineRow {
         title: "Version " + Hub.version;
-        line: Hub.update-line;
+        line: Hub.update-line != "" ? Hub.update-line : "Update takes the latest release; with Pre-releases, test builds too.";
+        // The same switch as the node's Settings › App (#213 W1-F4).
+        HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: "Pre-releases";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                Switch {
+                    checked: Install.pre-releases;
+                    label: "Pre-releases";
+                    toggled(on) => {
+                        Install.set-pre-releases(on);
+                    }
+                }
+            }
+        }
         Button {
             text: "Update";
             icon: @image-url("icons/download.svg");
@@ -325,21 +345,26 @@ component MachineSection inherits DetailCard {
     MachineRow {
         title: "Web UI";
         line: "The center's pages in your browser, on this machine.";
-        if Hub.set-ui != "" && Hub.set-ui != "off": Button {
-            text: "Open the web UI";
-            icon: @image-url("icons/external.svg");
-            kind: ButtonKind.ghost;
-            small: true;
-            clicked => {
-                Hub.open-web-ui();
-            }
-        }
         Switch {
             checked: Hub.set-ui != "" && Hub.set-ui != "off";
             enabled: Hub.busy != "web-ui";
             label: "Web UI";
             toggled(on) => {
                 Hub.web-ui-set(on);
+            }
+        }
+    }
+    // Below the row, so that the switch stays where it is when it turns
+    // the web UI on (#213 W1-F14).
+    if Hub.set-ui != "" && Hub.set-ui != "off": HorizontalLayout {
+        alignment: start;
+        Button {
+            text: "Open the web UI";
+            icon: @image-url("icons/external.svg");
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                Hub.open-web-ui();
             }
         }
     }

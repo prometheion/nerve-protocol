@@ -181,7 +181,7 @@ jobs:
           $code = $LASTEXITCODE
           Write-Host $said
           if ($code -eq 0) { throw 'the install took the folder' }
-          if ($said -notmatch 'another account \(S-1-5-21-[0-9-]+\) owns it.*delete it, then install again') {
+          if ($said -notmatch 'another account \([^)]*S-1-5-21-[0-9-]+\) owns it.*delete it, then install again') {
             throw 'the install did not say whose the folder is and what to do'
           }
           if (Get-LocalUser nerve -ErrorAction SilentlyContinue) { throw 'the refused install made the user nerve' }

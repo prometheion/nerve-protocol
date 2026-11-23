@@ -113,7 +113,7 @@ web UI off ([the center in the app](center.md#in-the-app)).
 
 | Page | Does |
 |---|---|
-| **Overview** | Status, the service (Start, Stop, Restart), **Panic** and **Unlock** |
+| **Overview** | Status, the service (Stop and Restart, Start while it is stopped), **Panic** and **Unlock** |
 | **Centers** | Pair from a link, pause, the settings grant, a new key, remove |
 | **Relay** | Connect through a relay, or be one |
 | **Permissions** | Mode, the network, folders, allow, deny and sudo rules, sudo off |
@@ -121,11 +121,13 @@ web UI off ([the center in the app](center.md#in-the-app)).
 | **Audit** | What the node allowed and refused, with **Allow** and **Deny** buttons |
 | **Log** | The node's log, with a search and problems only |
 | **Settings** | Name, keys, log level, backup, update and uninstall |
-| **Help** | The keys, and the command reference |
+| **Help** | Tasks and where they are done, the keys, and the command reference |
 
 A page is a list and the details of the row you pick: side by side where
-both fit, with the gap between them to drag, and in a narrow window the list
-first, then the details with **Back to the list**. The up and down keys move through a list. Adding something opens
+both fit, and in a narrow window the list first, then the details with **Back
+to the list**. Drag the divider between two panes to give one more room; the
+widths are kept per page, and a double-click on the divider resets them.
+The up and down keys move through a list. Adding something opens
 a form where it belongs, and removing asks in the row (**Remove?**, then
 **Cancel** or **Remove**). The Log's search reads the newest lines on the
 page; **Show more** reads further back.

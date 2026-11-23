@@ -99,6 +99,25 @@ pub trait WinSystem {
     /// then moves aside to a `nerve-center.*.del` beside it and goes at the
     /// next restart.
     fn remove_program(&self, path: &Path) -> Result<bool, String>;
+    /// Removes the profile folder of an earlier center's service that
+    /// Windows held at its uninstall and holds no more; the folders removed
+    /// (nerve_service::win::profiles).
+    fn sweep_profiles(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+}
+
+/// Says the profile folders [`WinSystem::sweep_profiles`] removed (#213
+/// W1-F10).
+fn swept_profiles(sys: &dyn WinSystem, steps: &mut Steps) {
+    let gone = sys.sweep_profiles();
+    if !gone.is_empty() {
+        let list: Vec<String> = gone.iter().map(|p| p.display().to_string()).collect();
+        steps.did(format!(
+            "removed the profile folder an earlier uninstall left: {}",
+            list.join(", ")
+        ));
+    }
 }
 
 /// The privileges the service keeps: to pass through folders it may not
@@ -325,6 +344,7 @@ pub fn install(
             "stopped the service {SERVICE_NAME} to install over it"
         ));
     }
+    swept_profiles(sys, &mut steps);
     // The folder above first: what is made in it after is made in a folder
     // only the administrators may write.
     sys.secure(&home(layout), &top_dacl())?;
@@ -475,6 +495,7 @@ pub fn uninstall(
             "stopped and removed the service {SERVICE_NAME}, and with it its account"
         ));
     }
+    swept_profiles(sys, &mut steps);
     if sys.delete_firewall()? {
         steps.did(format!(
             "removed the Windows Firewall rule \"{FIREWALL_RULE}\""
@@ -758,6 +779,9 @@ mod tests {
         path: RefCell<String>,
         /// The other services registered: the node's.
         others: RefCell<Vec<String>>,
+        /// The profile folder an earlier uninstall left, which Windows
+        /// holds no more.
+        left_profiles: RefCell<Vec<PathBuf>>,
     }
 
     impl Fake {
@@ -775,6 +799,7 @@ mod tests {
                 event_source: Cell::new(false),
                 path: RefCell::new(r"%SystemRoot%\system32".into()),
                 others: RefCell::new(Vec::new()),
+                left_profiles: RefCell::new(Vec::new()),
             }
         }
 
@@ -802,6 +827,9 @@ mod tests {
         }
         fn registered(&self, name: &str) -> bool {
             self.others.borrow().iter().any(|o| o == name)
+        }
+        fn sweep_profiles(&self) -> Vec<PathBuf> {
+            std::mem::take(&mut *self.left_profiles.borrow_mut())
         }
         fn secure(&self, dir: &Path, sddl: &str) -> Result<(), String> {
             std::fs::create_dir_all(dir).unwrap();
@@ -1131,8 +1159,8 @@ mod tests {
         assert!(out.contains(&format!("  Owner token   {owner}\n")), "{out}");
         let file = std::fs::read_to_string(l.settings()).unwrap();
         assert!(file.contains("NERVE_CENTER_HARNESS_TOKEN=nrv_"), "{file}");
-        // Windows texts in the file the owner edits.
-        assert!(file.contains("Restart-Service nerve-center"), "{file}");
+        // Windows texts in the file the owner edits: the app's places.
+        assert!(file.contains("Settings › This machine › Restart"), "{file}");
         assert!(!file.contains("systemctl"), "{file}");
         assert_eq!(
             std::fs::read_to_string(&l.bin).unwrap(),
@@ -1391,9 +1419,20 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = installed(d.path(), &sys, "1.0.0");
+        // The service's profile an earlier uninstall left goes (#213
+        // W1-F10).
+        let left = PathBuf::from("C:/Windows/ServiceProfiles/nerve-center");
+        sys.left_profiles.borrow_mut().push(left.clone());
         let mut out = Vec::new();
         uninstall(&l, &sys, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!(
+                "removed the profile folder an earlier uninstall left: {}",
+                left.display()
+            )),
+            "{out}"
+        );
         assert_eq!(sys.service.get(), None);
         assert_eq!(sys.firewall.get(), None);
         assert!(!l.bin.exists());

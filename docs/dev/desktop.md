@@ -124,8 +124,10 @@ every call of the web UI's pages, answered by the same handlers.
   `owner-token`, `backup -`, `restore -`) each start a broker of their own,
   which ends with the command (one Save that changes two addresses runs both
   in one broker). The center role keeps no broker.
-- **Copied secrets** (`hub::clip`): a harness line, the owner token, a
-  pairing link. On Windows the copy is set with
+- **Copied secrets** (`hub::clip`): a harness line, the owner token (the
+  Settings page's, and the installer's done step after a center's install,
+  which shows it as plain text, not a selectable field), a pairing link.
+  On Windows the copy is set with
   `ExcludeClipboardContentFromMonitorProcessing`,
   `CanIncludeInClipboardHistory` = 0 and `CanUploadToCloudClipboard` = 0;
   after a minute the clipboard is emptied if its sequence number is still
@@ -250,8 +252,11 @@ install makes (on Windows each pairing's in an AppContainer of its own), and
 When it is done, **Open Nerve** opens the app. Its first-run steps pair the
 first center, choose its mode and whether its commands may use the network,
 and in folder mode give it a first folder, as `nerve-node setup` asks; **Back**
-goes to the step before, **Skip** past one. The downloaded file is no longer
-needed.
+goes to the step before, **Skip** past one, and **Not now** on the first step
+ends the steps. **Restore a backup…** there ends them too and restores a
+backup, which brings the pairings back after a reinstall. The mode step starts at the mode a new pairing has, folder mode.
+A pairing link opened while the first step is open fills that step, with no
+second dialog over it. The downloaded file is no longer needed.
 
 On Windows `nerve.exe --silent` installs the node without a window and
 without a question, for scripts; the app asks for your Windows password
@@ -380,7 +385,11 @@ changes when it starts; the first-run steps start it at their end.
 **Panic** locks the running node at once and ends every link and command.
 When the node does not take the lock, the app stops the service, says that
 the links ended only once it has stopped, and saves the lock for its next
-start.
+start. With the service stopped already, **Panic** saves the lock and
+**Unlock** saves the unlock with the administrator's rights (an owner's
+change goes to the pipe a stopped service does not have), and **Unlock**
+then starts the service. A status the app cannot read leaves the
+Overview's cards unknown or stopped, never as they were.
 
 ## The window
 
@@ -392,18 +401,43 @@ Most pages are a list and the picked row's details. The rows are one
 line each (Centers and the Overview two); the details show the picked one's
 whole text, its settings and its buttons, and stay in view while the page
 scrolls the list beside them. Details taller than the window scroll on their
-own, with a thin bar. The window's width decides the shape, with one layout
-for every size, so a resize keeps what you typed and what you picked:
+own, with a thin bar. The room decides the shape, with one layout for every
+size, so a resize keeps what you typed and what you picked. Each pane has a
+least width (a list 230 to 380 px, the details 360 px, a third pane 170 to
+300 px), and a column folds only when the panes no longer fit at those:
 
-| Window | Shape |
+| Room | Shape |
 |---|---|
-| below 1100 px (the app is at least 900) | the list fills the page; a picked row shows its details there, with **Back to the list** |
-| 1100 to 1799 px (the app opens at 1180) | the list and the details side by side |
-| from 1800 px | a third pane where it helps: **Pair a center** on the Overview, the capabilities as a list of their own on Capabilities |
+| less than the list and the details need | the list fills the page; a picked row shows its details there, with **Back to the list** |
+| both fit (the app opens at 1180 px) | the list and the details side by side |
+| a third pane fits too | a third pane where it helps: **Pair a center** on the Overview, the sections as a column of their own on Capabilities |
+
+Between those points the panes follow the window: they stay joined, fill the
+page's width and keep their shares of it. Each page's defaults put the room
+where the content is: a list of short rows takes about a third, Audit and Log
+nearly half, and a list beside a form in the details (adding a capability, a
+program, a relay's node, a rule) gives the form what it does not need. The gap
+between two panes is a divider: on hover a line shows it, a drag moves it
+(one pane gains what its neighbour gives up, each stops at its least width),
+and a double-click gives the page its defaults again. The app keeps the shares
+per page in its settings file (`panes`), so they stay over a restart and a
+resize (the `Panes` global in `ui/theme.slint`; `Split` says the page's width
+there, its panes their least widths and defaults).
+
+On Windows a window (the app's and the installer's) opens within the work
+area, the screen without the taskbar, of the screen Windows opened it on, a
+screen left of or above the main one too, and is made smaller where that
+screen is (`app::dress`: `work_of` picks the screen that holds the window's
+middle, `fit_in` moves it in).
+
+Where the section column of Capabilities folds, its sections become a switch
+above the list, so each is still one click away. A capability's command, its
+arguments and its result grow with their text (the command stays one line,
+which wraps; Enter saves), up to a size where they scroll.
 
 Settings and Help list their sections the same way. **Permissions** has no
 details: its sections (Folders, Forbidden commands, Allowed commands, Sudo)
-on the left, below 1100 px a switch above the list, and the chosen one's list
+on the left, folded a switch above the list, and the chosen one's list
 on the right. A folder's **Read**, **Write** and **Run** switch in its row,
 and **Capabilities** has each action's **On**, **Off** and **Hidden** in its
 row, so nothing needs opening to switch it.
@@ -702,7 +736,10 @@ Windows needs no other program for the app itself. What it uses:
 
 - An owner account with a password: Windows logs no program on to an account
   without one, so `user` mode, `allowlist` mode with `--as-owner` and sudo
-  run nothing as an owner without a password, and the app says so. The
+  run nothing as an owner without a password, and the app says so: the
+  installer installs with the field left empty and says why under it and
+  on its last step, and while no working password is stored Settings ›
+  General, the Overview and `status` say so. The
   node also changes the owner's folder grants as the owner: without the
   password a folder you add gives the commands of `folder` and of `allowlist`
   mode as `nerve-run` no access, and one you remove or close stops the

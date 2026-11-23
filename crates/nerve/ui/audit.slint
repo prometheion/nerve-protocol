@@ -367,9 +367,8 @@ export component AuditPage inherits PageFrame {
         Split {
             ListPane {
                 open: Store.details-open;
-                stretch: Shape.large ? 1 : 5;
                 least: 320px;
-                most: 100000px;
+                share: 0.46;
                 ListCard {
                     label: "Audit";
                     step(d) => {
@@ -438,7 +437,6 @@ export component AuditPage inherits PageFrame {
             }
             DetailsPane {
                 open: Store.details-open;
-                stretch: Shape.large ? 1 : 6;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {

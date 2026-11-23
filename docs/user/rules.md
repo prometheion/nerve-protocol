@@ -45,9 +45,14 @@ covers.
 | `lamp.set:room=office` | a call of `lamp.set` with that argument |
 
 A wildcard covers plain commands only. A line with shell characters
-(`; & | $ ( ) < > { } ' "`), or one that starts another shell (`sh`,
-`bash`, `eval`), needs a rule that names the whole line. So `git *` does not
-allow `git x; rm -rf ~` ([what a wildcard covers](../dev/policy-engine.md#what-a-wildcard-covers)).
+(`` ; & | $ ` ( ) < > @ { } % ' " # , \ ``), or one
+that starts another shell (`sh`, `bash`, `eval`), needs a rule that names the
+whole line. So `git *` does not allow `git x; rm -rf ~` ([what a wildcard
+covers](../dev/policy-engine.md#what-a-wildcard-covers)). On Windows a path
+with `\` needs a rule of its own: write it with `/` (`Get-ChildItem C:/work`),
+which PowerShell takes too. A deny rule's wildcard covers any line. Rules
+match case as written: `Get-Date` does not cover `get-date`, so a deny rule
+on Windows needs one per spelling (and per alias).
 
 ## Rules for files and other actions
 
@@ -148,8 +153,9 @@ nerve-node center                      # shows the grant
 With the grant a center may change its own pairing's mode (up to `user`),
 folders, rules and capability switches, and turn sudo on and off. It may add
 rules with the audit page's buttons, and capabilities of its own: fixed
-commands that run as `nerve-run`. It turns those on itself; one that senses
-or acts waits for your `on`. To stop it changing things, take the grant back.
+commands that run as `nerve-run`. One it adds is off, and its agents do not
+see it, until it turns it on with its switch; one that senses or acts waits
+for your `on`. To stop it changing things, take the grant back.
 That leaves what it changed, still on: `center settings off` names each part
 and the command that shows it
 ([the grant](../dev/settings-and-config.md#without-the-grant)).

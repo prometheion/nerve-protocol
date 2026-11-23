@@ -233,13 +233,13 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
         on(&mut conn, "not-the-password").await,
         ErrorCode::Forbidden,
     );
-    assert!(e.contains("in the Nerve app on this machine"), "{e}");
+    assert!(e.contains("in the Nerve app on the node's machine"), "{e}");
     assert!(!e.contains("is wrong"), "{e}");
 
     // A center may not turn it on, not even with the right password: it
     // is the owner's Windows password, which only the app takes.
     let e = refused(on(&mut conn, &password).await, ErrorCode::Forbidden);
-    assert!(e.contains("in the Nerve app on this machine"), "{e}");
+    assert!(e.contains("in the Nerve app on the node's machine"), "{e}");
     assert_eq!(state(&mut conn).await, "off");
 
     // The installed program, as the app runs it: a wrong password is

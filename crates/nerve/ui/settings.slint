@@ -10,7 +10,7 @@ import { Store, Prefs, Install, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Segmented, Divider,
     TextField, Field, InfoRow, Icon, IconTile, Reveal, Fold, Switch, Split, ListPane, DetailsPane,
-    ListCard, ListItem,
+    ListCard, ListItem, RemoveAsk,
 } from "widgets.slint";
 
 // A setting of a section: its icon, title and sentence on top, its
@@ -288,9 +288,13 @@ export component SettingsPage inherits PageFrame {
                                 shown: Install.windows;
                                 gap: Space.sm;
                                 Text {
-                                    text: "User mode, allowlist mode as you and sudo run commands as "
+                                    // What the node says of the stored password, not what the
+                                    // install meant to store (#213 W1-F3).
+                                    text: Perm.owner-password-missing
+                                        ? "No working Windows password of yours is stored: user mode, allowlist mode as you and sudo run no command, and folder mode cannot change your folders' permissions. Enter it below."
+                                        : "User mode, allowlist mode as you and sudo run commands as "
                                         + (Prefs.account != "" ? Prefs.account : Install.account)
-                                        + ", with your Windows password, which the install stored. Folder mode needs it too: the node changes your folders' permissions as you.";
+                                        + ", with your Windows password, which the node keeps. Folder mode needs it too: the node changes your folders' permissions as you.";
                                     color: Theme.text;
                                     font-size: Type.small;
                                     wrap: word-wrap;
@@ -501,11 +505,17 @@ export component SettingsPage inherits PageFrame {
                                                 Prefs.proxy-edit();
                                             }
                                         }
-                                        Button {
-                                            text: "Remove";
-                                            kind: ButtonKind.danger-soft;
-                                            small: true;
-                                            clicked => {
+                                        RemoveAsk {
+                                            label: "Remove the proxy";
+                                            asking: Store.asking == "proxy";
+                                            ask => {
+                                                Store.asking = "proxy";
+                                            }
+                                            cancel => {
+                                                Store.asking = "";
+                                            }
+                                            confirmed => {
+                                                Store.asking = "";
                                                 Prefs.proxy-remove();
                                             }
                                         }
@@ -534,11 +544,21 @@ export component SettingsPage inherits PageFrame {
                                     font-size: Type.small;
                                     vertical-alignment: center;
                                 }
-                                Button {
-                                    text: "Revoke";
-                                    kind: ButtonKind.danger-soft;
-                                    small: true;
-                                    clicked => {
+                                // Asks in its row first, as a folder's or a
+                                // rule's removal does (#213 W4-9).
+                                RemoveAsk {
+                                    label: "Revoke the token " + label;
+                                    question: "Revoke?";
+                                    confirm: "Revoke";
+                                    asking: Store.asking == "token:" + label;
+                                    ask => {
+                                        Store.asking = "token:" + label;
+                                    }
+                                    cancel => {
+                                        Store.asking = "";
+                                    }
+                                    confirmed => {
+                                        Store.asking = "";
                                         Prefs.ui-token-rm(label);
                                     }
                                 }
@@ -553,6 +573,15 @@ export component SettingsPage inherits PageFrame {
                                     visible: Prefs.ui-listen != "";
                                     clicked => {
                                         Prefs.ui-open();
+                                    }
+                                }
+                                if Prefs.ui-listen != "": TextField {
+                                    width: 140px;
+                                    text <=> Prefs.ui-token-label;
+                                    placeholder: "laptop";
+                                    label: "Label of a new token";
+                                    accepted => {
+                                        Prefs.ui-token-add();
                                     }
                                 }
                                 Button {
@@ -752,7 +781,7 @@ export component SettingsPage inherits PageFrame {
                             spacing: Space.lg;
                             Text {
                                 horizontal-stretch: 1;
-                                text: "Removes the service, its user and the app. You choose whether the node's data stays.";
+                                text: "Removes the services, their users and the app. You choose whether the node's data stays.";
                                 color: Theme.text-muted;
                                 font-size: Type.small;
                                 vertical-alignment: center;

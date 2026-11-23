@@ -135,13 +135,14 @@ component ServiceCard inherits Card {
             }
         }
         // Beside the text on a small window, where the card is wide.
-        if !Shape.wide: VerticalLayout {
+        if !Shape.roomy: VerticalLayout {
             alignment: center;
             ServiceButtons { }
         }
     }
-    // Below it on a wide window, beside the node's state.
-    if Shape.wide: HorizontalLayout {
+    // Below it on a wide window, beside the node's state. The top row goes by the window (Shape.roomy), not by
+    // whether the panes below fit: beside the node's state the card needs the room a 1100 px window gives.
+    if Shape.roomy: HorizontalLayout {
         alignment: start;
         padding-left: 36px + Space.lg;
         ServiceButtons { }
@@ -182,7 +183,7 @@ export component OverviewPage inherits PageFrame {
         shown: Store.status.state != "";
         gap: Space.xl;
         HorizontalLayout {
-            spacing: root.service-shown && Shape.wide ? Space.lg : 0px;
+            spacing: root.service-shown && Shape.roomy ? Space.lg : 0px;
         Rectangle {
             horizontal-stretch: 1.4;
             border-radius: Radius.lg;
@@ -275,7 +276,7 @@ export component OverviewPage inherits PageFrame {
         }
             // Beside it: nothing of it counts while it is not.
             Rectangle {
-                property <bool> here: root.service-shown && Shape.wide;
+                property <bool> here: root.service-shown && Shape.roomy;
                 visible: self.here;
                 horizontal-stretch: self.here ? 1 : 0;
                 max-width: self.here ? 100000px : 0px;
@@ -289,7 +290,7 @@ export component OverviewPage inherits PageFrame {
         }
     }
     Reveal {
-        shown: root.service-shown && !Shape.wide;
+        shown: root.service-shown && !Shape.roomy;
         gap: Space.lg;
         ServiceCard { }
     }
@@ -413,6 +414,7 @@ export component OverviewPage inherits PageFrame {
         shown: Store.status.state != "" && Store.centers.length > 0;
         gap: Space.lg;
         Split {
+            side: true;
             ListPane {
                 open: Store.details-open;
                 CenterList {
@@ -432,6 +434,8 @@ export component OverviewPage inherits PageFrame {
                 }
             }
             SidePane {
+                least: 300px;
+                share: 0.24;
                 Card {
                     HorizontalLayout {
                         spacing: Space.md;

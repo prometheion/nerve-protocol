@@ -67,3 +67,26 @@ fn the_app_is_the_center_behind_its_word_and_by_its_terminal_name() {
     let text = String::from_utf8_lossy(&o.stdout) + String::from_utf8_lossy(&o.stderr);
     assert!(text.contains("--help` lists every command"), "{text}");
 }
+
+/// A failed command of the app's program names the program, `nerve`, not
+/// `nerve-node`, which Windows does not have (#213 W2-6).
+#[test]
+fn a_failed_command_names_the_app_s_program() {
+    let d = tempfile::tempdir().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_nerve"))
+        .args(["center", "rm", "nosuch", "--config-dir"])
+        .arg(d.path().join("config"))
+        .arg("--state-dir")
+        .arg(d.path().join("state"))
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.lines()
+            .last()
+            .unwrap_or_default()
+            .starts_with("nerve: "),
+        "{err}"
+    );
+}

@@ -4,7 +4,9 @@
 `nerve-node help <command>` has the rest of one. The owner of the installed
 node runs them without `sudo`; `install`, `update`, `uninstall` and
 `sudo on` need it. The desktop app's `nerve` takes the same
-commands.
+commands on Linux. On Windows the app runs them for you: `nerve.exe` with a
+command is the app's way to the node, not one for a terminal, and
+PowerShell neither waits for it nor gets its exit code.
 
 ## `nerve-node`
 
@@ -60,8 +62,8 @@ a renamed or removed field is a CHANGELOG "Breaks" line
 | `nerve-center` alone | Runs the center; MCP on stdin, for a harness |
 
 From `pair` to `config` they ask the running center, as the app and the web
-UI do, also with the web UI off; run them as root for the installed center
-(on Windows in an administrator's terminal). Nothing is only in a window.
+UI do, also with the web UI off; run them as root for the installed center.
+Nothing is only in a window. On Windows the app's center pages do them.
 
 Its main settings are `--name`, `--public-url`, `--listen`, `--ui` and
 `--mcp`, each also a `NERVE_CENTER_*` variable ([center](center.md)).

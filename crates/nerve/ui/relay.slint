@@ -250,6 +250,7 @@ export component RelayPage inherits PageFrame {
         }
         DetailsPane {
             open: Store.details-open || Prefs.relay-add-open;
+            form: Prefs.relay-add-open;
             view-top: root.view-top;
             view-height: root.view-height;
             back => {
@@ -382,6 +383,14 @@ export component RelayPage inherits PageFrame {
                                         font-family: Type.mono;
                                         vertical-alignment: center;
                                     }
+                                }
+                            }
+                            Reveal {
+                                shown: root.on && Prefs.relay-firewall != "";
+                                gap: Space.lg;
+                                Banner {
+                                    tone: Tone.warn;
+                                    text: Prefs.relay-firewall;
                                 }
                             }
                             Reveal {

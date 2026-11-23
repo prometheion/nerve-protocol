@@ -503,7 +503,7 @@ fn the_notes_say_the_update_order() {
     for needed in [
         "A 0.0.8 node still talks to a 0.1.0 center, and a 0.1.0 node to a 0.0.8 center.",
         "from 0.0.6: uninstall it with **Delete the data**",
-        "The installer refuses to install or update over 0.0.6",
+        "The installer refuses to install over 0.0.6",
         "change only with a migration",
         "spec/README.md#what-stays-stable-from-010",
         "### On Windows",

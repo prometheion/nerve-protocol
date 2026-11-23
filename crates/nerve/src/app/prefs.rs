@@ -290,6 +290,9 @@ impl Ctl {
                             p.set_proxy_headers(headers.join(", ").into());
                             p.set_proxy_problem(s(&proxy["problem"]).into());
                             p.set_relay_listen(s(&relay["listen"]).into());
+                            p.set_relay_firewall(
+                                view::relay_firewall(&s(&relay["listen"]), cfg!(windows)).into(),
+                            );
                             p.set_relay_status(s(&relay["status"]).into());
                             p.set_relay_pin(s(&relay["pin"]).into());
                             p.set_relay_nodes(ModelRc::new(VecModel::from(view::relay_nodes(
@@ -553,7 +556,8 @@ impl Ctl {
             "machine.secret_storage".into(),
             to.into(),
         ];
-        self.prefs_change(args, None, String::new());
+        let said = view::keys_moved(i == 1, cfg!(windows));
+        self.prefs_change(args, None, said.into());
     }
 
     fn proxy_edit(&self) {
@@ -599,7 +603,10 @@ impl Ctl {
                         p.set_proxy_open(false);
                         p.set_proxy_new_password(SharedString::new());
                     });
-                    c.done(&v, "");
+                    c.done(
+                        &v,
+                        "The proxy is set: the node dials its centers through it now.",
+                    );
                 }
                 Err(e) => {
                     c.with_prefs(|p| p.set_proxy_error(e.into()));
@@ -986,6 +993,11 @@ impl Ctl {
         self.backup_choose(false);
     }
 
+    /// The node's restore, as Settings › Backup starts it.
+    pub(super) fn node_restore_choose(self: &Rc<Self>) {
+        self.backup_choose(true);
+    }
+
     fn backup_choose(self: &Rc<Self>, restore: bool) {
         let chooser = self.chooser.borrow().clone();
         let what = if restore {
@@ -1015,7 +1027,9 @@ impl Ctl {
                         p.set_backup_file(file);
                         p.set_backup_pass(SharedString::new());
                         p.set_backup_pass2(SharedString::new());
-                        p.set_backup_keyring(false);
+                        // A backup without them holds no key where the
+                        // node keeps them in the keyring (#213 W4-5).
+                        p.set_backup_keyring(true);
                         p.set_backup_error(SharedString::new());
                         p.set_backup_open(true);
                     }
@@ -1259,11 +1273,26 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     });
     let c = ctl.clone();
     p.on_ui_token_add(move || {
-        let tokens: Vec<String> = c
-            .with_prefs(|p| p.get_ui_tokens().iter().map(|t| t.to_string()).collect())
+        let (tokens, typed): (Vec<String>, String) = c
+            .with_prefs(|p| {
+                let tokens = p.get_ui_tokens().iter().map(|t| t.to_string()).collect();
+                let typed = p.get_ui_token_label().trim().to_string();
+                p.set_ui_token_label(SharedString::new());
+                (tokens, typed)
+            })
             .unwrap_or_default();
-        let label = view::web_ui_label(&tokens);
-        c.web_ui_change(vec!["ui".into(), "token".into(), "add".into(), label]);
+        // The owner's own label says what the token is for (#213 W4-9).
+        let label = match typed {
+            t if t.is_empty() => view::web_ui_label(&tokens),
+            t => t,
+        };
+        c.web_ui_change(vec![
+            "ui".into(),
+            "token".into(),
+            "add".into(),
+            "--".into(),
+            label,
+        ]);
     });
     let c = ctl.clone();
     p.on_ui_token_rm(move |label| {
@@ -1311,7 +1340,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
         c.prefs_change(
             vec!["proxy".into(), "off".into()],
             None,
-            "This node reaches its centers directly again.".into(),
+            "This node reaches its centers directly again: it dials them again now.".into(),
         )
     });
     let c = ctl.clone();

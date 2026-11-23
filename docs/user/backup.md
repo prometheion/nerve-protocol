@@ -74,6 +74,19 @@ Stop the old node before the new one links: a center keeps one link per
 machine. A proxy with a password needs a keyring on the new machine;
 otherwise restore with `--without-proxy` and set it again.
 
+On Windows the app does each step:
+
+1. On the old machine, **Settings › Backup › Back up…**, with **Include the
+   keys in the system keyring** where the keys are there. Keep the file in a
+   folder of your own, not in one a center was given; while a center's
+   commands run as you, keep it off the machine.
+2. Install Nerve on the new one, then **Settings › Backup › Restore…** with
+   **It is another node's backup**. **Leave its proxy out** where the new
+   machine reaches its centers its own way; **Keep its keys in files** keeps
+   them out of the Credential Manager.
+3. Check the folders on **Permissions**, and the relay's address.
+4. **Permissions › Sudo › Turn on**, if you used sudo.
+
 **A center to another machine, or into the service.**
 
 ```sh

@@ -354,7 +354,7 @@ and only for a file. There only the folders you granted count for a program:
 the folders of `nerve-run` itself (the pairing's own home and temporary
 folder, `/tmp`, `/var/tmp`, marked `own` in what the agent is told) are that account's, while the program works with
 your rights, so a path there is in no folder. A path given that is a link is followed to where it
-leads and judged there. A path to write that is itself a link is refused
+leads and judged there. A path longer than the system takes (4096 bytes on Linux, 32 767 UTF-16 units on Windows) is refused before anything looks at it. A path to write that is itself a link is refused
 (`bad_path`): the program would remove, rename or write the place it leads
 to, which you did not name, so name that place instead. The program gets the
 path as the node resolved it, links followed, so it works where the node
@@ -624,7 +624,9 @@ nerve-node cap add logs.tail --effect read \
   where `;` and `$(...)` run. So a command whose program is one of these is
   refused when a `{field}` goes into it, whether the owner declares it or a
   center adds it, with the safe form: a script run with `powershell
-  -NoProfile -File script.ps1 {field}` (only PowerShell's own options, then
+  -NoProfile -ExecutionPolicy Bypass -File script.ps1 {field}` (the
+  default execution policy of a Windows client runs no script; only
+  PowerShell's own options, then
   `-File` and a fixed script, before the first `{field}`: any other word
   before `-File` starts the command, and `-File` is then part of its text;
   an option counts from the shortest form Windows PowerShell 5.1 knows

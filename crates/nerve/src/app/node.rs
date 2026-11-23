@@ -26,13 +26,14 @@ impl Ctl {
         }
         self.command(vec!["status".into()], None, |c, answer| {
             c.asking_service.set(false);
-            if let Ok(v) = answer.map(|v| v["service"].clone()) {
-                let state = v["state"].as_str().unwrap_or("none").to_string();
-                c.with_store(|s| {
-                    s.set_service_state(state.into());
-                    s.set_service_enabled(v["enabled"] == true);
-                });
-            }
+            // A failed answer leaves the state unknown, not as it was: a
+            // stopped service shown as running offers no Start.
+            let v = answer.map(|v| v["service"].clone()).unwrap_or_default();
+            let state = v["state"].as_str().unwrap_or("").to_string();
+            c.with_store(|s| {
+                s.set_service_state(state.into());
+                s.set_service_enabled(v["enabled"] == true);
+            });
         });
     }
 
@@ -111,7 +112,9 @@ impl Ctl {
     pub(super) fn setup_start(self: &Rc<Self>) {
         self.with_store(|s| {
             s.set_setup_step(0);
-            s.set_setup_mode("allowlist".into());
+            // The mode a new pairing has: Continue without a look keeps it
+            // (#213 W2-8).
+            s.set_setup_mode("folder".into());
             s.set_setup_no_network(false);
             s.set_setup_folder(SharedString::new());
             s.set_setup_folder_write(true);
@@ -252,6 +255,13 @@ impl Ctl {
         self.with_store(|s| s.set_setup_open(false));
     }
 
+    /// The steps end, and a backup is restored instead: after a reinstall
+    /// it brings the pairings back (#213 W4-7).
+    fn setup_restore(self: &Rc<Self>) {
+        self.setup_close();
+        self.node_restore_choose();
+    }
+
     /// One step back. The pairing's confirmation goes back to its link; the
     /// mode, to the center it paired, which stays paired; the folder, to the
     /// mode; the end, to the folder in folder mode, else to the mode, or to
@@ -308,6 +318,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     store.on_setup_back(move || c.setup_back());
     let c = ctl.clone();
     store.on_setup_close(move || c.setup_close());
+    let c = ctl.clone();
+    store.on_setup_restore(move || c.setup_restore());
     let c = ctl.clone();
     store.on_setup_folder_choose(move || c.setup_folder_choose());
 }

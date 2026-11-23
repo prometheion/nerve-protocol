@@ -2734,6 +2734,10 @@ mod command_line_tests {
         let mut c = vec!["-Command".to_string(), "whoami".into()];
         super::start_powershell_in_its_folder(false, "powershell.exe", &mut c);
         assert_eq!(c[1], format!("{}whoami", nerve_sandbox::POWERSHELL_START));
+        // The command is a line of its own, so PowerShell's error positions
+        // show it and not the start (#213 W3-9).
+        assert_eq!(c[1].lines().last(), Some("whoami"));
+        assert_eq!(c[1].lines().count(), 2);
         let mut other = args();
         super::start_powershell_in_its_folder(false, "tool.exe", &mut other);
         assert_eq!(other, args());

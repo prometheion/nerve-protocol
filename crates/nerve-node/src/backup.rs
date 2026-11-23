@@ -16,7 +16,7 @@
 //! they name the center, the file or the keyring entry.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nerve_policy::audit::AuditLog;
 use nerve_policy::config::{SecretStorage, Sudo, valid_center_name};
@@ -65,6 +65,8 @@ pub struct BackupReport {
     pub saved: Vec<String>,
     /// What was not taken, and why.
     pub left_out: Vec<LeftOut>,
+    /// A center whose commands may read the file, and how ([`readable_by`]).
+    pub readable_by: Option<(String, Reach)>,
 }
 
 /// A key a backup did not take.
@@ -120,10 +122,104 @@ pub fn backup(
     opts: &BackupOpts,
 ) -> Result<BackupReport, String> {
     pass.check_new()?;
-    let (contents, report) = collect(paths, cfg, opts.include_keyring)?;
+    let (contents, mut report) = collect(paths, cfg, opts.include_keyring)?;
     let bytes = backup::seal_with(&contents, pass, opts.rounds)?;
     crate::caller_file::write(file, &bytes, opts.overwrite)?;
+    report.readable_by = readable_by(cfg, file);
     Ok(report)
+}
+
+/// How a center's commands may read a backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// The file lies in this folder of the center's.
+    Folder(PathBuf),
+    /// The commands run as the owner and read it anywhere.
+    Owner,
+    /// The center may switch itself to a mode that does, or add the
+    /// folder, with the settings grant.
+    Settings,
+}
+
+/// The first center whose commands may read `file`, a backup, and how: such
+/// a center's agent could take the file and try passphrases at leisure
+/// (#213 W4-4). A relative `file` is judged by the folder it names, and
+/// one named through `..` or a link by where it really is: the file by its
+/// real place only (as written, `project/../other/n.backup` would lie in
+/// `project`), the folders as written and resolved, since the folders are
+/// kept resolved but a `~` folder is expanded from the unresolved home.
+pub fn readable_by(cfg: &NodeConfig, file: &Path) -> Option<(String, Reach)> {
+    let home = crate::paths::home_dir();
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    // Only a file that does not resolve is judged as it was given.
+    let real = nerve_policy::paths::resolve(&file).unwrap_or(file);
+    readable_on(cfg, &[real], &home, cfg!(windows), crate::now_ms())
+}
+
+/// A folder as given and, when it differs, where it really is (its links
+/// followed). The folder may be missing: then only the given form is left.
+fn forms(path: &Path) -> Vec<PathBuf> {
+    let mut forms = vec![path.to_path_buf()];
+    if let Ok(real) = nerve_policy::paths::resolve(path)
+        && real != path
+    {
+        forms.push(real);
+    }
+    forms
+}
+
+/// [`readable_by`] for the `files` forms of one file, on Windows
+/// (`windows`) or elsewhere, at `now_ms`, with `home` as the folders' `~`.
+fn readable_on(
+    cfg: &NodeConfig,
+    files: &[PathBuf],
+    home: &Path,
+    windows: bool,
+    now_ms: u64,
+) -> Option<(String, Reach)> {
+    // Writing reads too; on Windows running does, as a script's
+    // interpreter opens the file (`nerve_sandbox::acl::masks`).
+    let reads = |a: &nerve_policy::config::Access| a.read || a.write || (windows && a.execute);
+    cfg.centers.iter().find_map(|c| {
+        if c.policy.runs_as_owner(now_ms) {
+            return Some((c.name.clone(), Reach::Owner));
+        }
+        c.policy
+            .folders
+            .iter()
+            .filter(|f| reads(&f.access))
+            .filter_map(|f| nerve_policy::protected::expand(home, &f.path))
+            .find(|f| {
+                forms(f).iter().any(|f| {
+                    files
+                        .iter()
+                        .any(|file| nerve_policy::paths::within(file, f))
+                })
+            })
+            .map(|f| (c.name.clone(), Reach::Folder(f)))
+            // With the settings grant its agent sets its own mode and
+            // folders.
+            .or_else(|| {
+                (c.settings == nerve_policy::config::SettingsGrant::Write)
+                    .then(|| (c.name.clone(), Reach::Settings))
+            })
+    })
+}
+
+/// The warning of [`readable_by`].
+pub fn readable_warning(center: &str, reach: &Reach) -> String {
+    match reach {
+        Reach::Folder(folder) => format!(
+            "Warning: the file is in {}, which {center}'s commands may read; keep it in a folder of your own",
+            folder.display()
+        ),
+        Reach::Owner => format!(
+            "Warning: {center}'s commands run as you, so they may read the file; move it off this machine"
+        ),
+        Reach::Settings => format!(
+            "Warning: {center} may switch itself to user mode and then read the file; move it off this machine"
+        ),
+    }
 }
 
 /// What a key is read as: its text, still in the keyring, or not there.
@@ -1152,6 +1248,9 @@ pub fn print_backup(r: &BackupReport, file: &Path, out: &mut dyn std::io::Write)
     for s in &r.left_out {
         let _ = writeln!(out, "  left out: {s}");
     }
+    if let Some((center, reach)) = &r.readable_by {
+        let _ = writeln!(out, "{}", readable_warning(center, reach));
+    }
     let _ = writeln!(
         out,
         "The file is encrypted with your passphrase. Keep both; nobody can recover the file without it."
@@ -1171,6 +1270,11 @@ pub fn backup_data(r: &BackupReport, file: &Path) -> serde_json::Value {
         "centers": r.centers,
         "saved": r.saved,
         "left_out": left_out,
+        "readable_by": r.readable_by.as_ref().map(|(center, reach)| match reach {
+            Reach::Folder(f) => serde_json::json!({"center": center, "folder": f.display().to_string()}),
+            Reach::Owner => serde_json::json!({"center": center, "folder": null}),
+            Reach::Settings => serde_json::json!({"center": center, "folder": null, "settings": true}),
+        }),
     })
 }
 
@@ -1282,6 +1386,170 @@ mod tests {
             old_pin: None,
             policy: Default::default(),
             capabilities: Vec::new(),
+        }
+    }
+
+    /// A backup file in a folder a center's commands may read is found, so
+    /// that the backup warns of it; one beside it is not (#213 W4-4).
+    #[test]
+    fn a_backup_in_a_center_s_folder_is_found() {
+        // Absolute on this machine: a drive on Windows, where a path from `/` is not.
+        let p = |s: &str| format!("{}{s}", if cfg!(windows) { "C:" } else { "" });
+        let key = NodeKey::generate().unwrap();
+        let mut lab = entry("lab", &key);
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: p("/home/alex/project"),
+            access: nerve_policy::config::Access::parse("r").unwrap(),
+        });
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: p("/home/alex/none"),
+            access: nerve_policy::config::Access::NONE,
+        });
+        lab.policy.folders.push(nerve_policy::config::Folder {
+            path: p("/home/alex/tools"),
+            access: nerve_policy::config::Access::parse("x").unwrap(),
+        });
+        let mut cfg = NodeConfig::default();
+        cfg.centers.push(lab);
+        let on = |cfg: &NodeConfig, file: &str, windows: bool| {
+            readable_on(
+                cfg,
+                &[PathBuf::from(file)],
+                Path::new(&p("/home/alex")),
+                windows,
+                0,
+            )
+        };
+        assert_eq!(
+            on(&cfg, &p("/home/alex/project/sub/n.backup"), false),
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from(p("/home/alex/project")))
+            ))
+        );
+        assert_eq!(on(&cfg, &p("/home/alex/n.backup"), false), None);
+        assert_eq!(on(&cfg, &p("/home/alex/none/n.backup"), false), None);
+        // On Windows running a file reads it too.
+        assert_eq!(on(&cfg, &p("/home/alex/tools/n.backup"), false), None);
+        assert_eq!(
+            on(&cfg, &p("/home/alex/tools/n.backup"), true),
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from(p("/home/alex/tools")))
+            ))
+        );
+        let warn = readable_warning("lab", &Reach::Folder(p("/home/alex/project").into()));
+        assert!(warn.contains("lab's commands may read"), "{warn}");
+        // A folder written from the home, and the home itself.
+        let mut tilde = cfg.clone();
+        tilde.centers[0].policy.folders = vec![nerve_policy::config::Folder {
+            path: "~/notes".into(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+        }];
+        assert_eq!(
+            on(&tilde, &p("/home/alex/notes/n.backup"), false),
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from(p("/home/alex/notes")))
+            ))
+        );
+        tilde.centers[0].policy.folders[0].path = "~".into();
+        assert_eq!(
+            on(&tilde, &p("/home/alex/Documents/n.backup"), false),
+            Some((
+                "lab".to_string(),
+                Reach::Folder(PathBuf::from(p("/home/alex")))
+            ))
+        );
+        // Commands that run as the owner read it anywhere.
+        cfg.centers[0].policy.mode = nerve_policy::config::Mode::User;
+        assert_eq!(
+            on(&cfg, &p("/home/alex/n.backup"), false),
+            Some(("lab".to_string(), Reach::Owner))
+        );
+        let warn = readable_warning("lab", &Reach::Owner);
+        assert!(warn.contains("lab's commands run as you"), "{warn}");
+        // With the settings grant it can switch to that mode itself.
+        cfg.centers[0].policy.mode = nerve_policy::config::Mode::Folder;
+        assert_eq!(on(&cfg, &p("/home/alex/n.backup"), false), None);
+        cfg.centers[0].settings = nerve_policy::config::SettingsGrant::Write;
+        assert_eq!(
+            on(&cfg, &p("/home/alex/n.backup"), false),
+            Some(("lab".to_string(), Reach::Settings))
+        );
+        let warn = readable_warning("lab", &Reach::Settings);
+        assert!(
+            warn.contains("lab may switch itself to user mode"),
+            "{warn}"
+        );
+        // A file named from the current folder is judged by where it is.
+        let here = std::env::current_dir().unwrap();
+        cfg.centers[0].settings = nerve_policy::config::SettingsGrant::Off;
+        cfg.centers[0].policy.folders = vec![nerve_policy::config::Folder {
+            path: here.display().to_string(),
+            access: nerve_policy::config::Access::parse("r").unwrap(),
+        }];
+        assert_eq!(
+            readable_by(&cfg, Path::new("n.backup")),
+            Some(("lab".to_string(), Reach::Folder(here)))
+        );
+    }
+
+    /// The folder grant of `folder`, read and write.
+    #[cfg_attr(windows, allow(dead_code))]
+    fn granted(folder: &Path) -> Vec<nerve_policy::config::Folder> {
+        vec![nerve_policy::config::Folder {
+            path: folder.display().to_string(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+        }]
+    }
+
+    /// A file named through `..` or a link is judged by where it is, and
+    /// so is a folder that is a link.
+    #[test]
+    fn a_backup_named_through_dots_or_a_link_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // The folders are kept resolved, as the CLI stores them.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (project, tools) = (root.join("project"), root.join("tools"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let key = NodeKey::generate().unwrap();
+        let mut cfg = NodeConfig::default();
+        let mut lab = entry("lab", &key);
+        lab.policy.folders = granted(&project);
+        cfg.centers.push(lab);
+        let found = Some(("lab".to_string(), Reach::Folder(project.clone())));
+        std::fs::write(project.join("n.backup"), b"x").unwrap();
+        assert_eq!(readable_by(&cfg, &project.join("n.backup")), found);
+        // From another folder, with `..`.
+        assert_eq!(
+            readable_by(&cfg, &tools.join("..").join("project").join("n.backup")),
+            found
+        );
+        assert_eq!(readable_by(&cfg, &tools.join("n.backup")), None);
+        // Out of the folder with `..`: it lies in a folder of its own.
+        assert_eq!(
+            readable_by(&cfg, &project.join("..").join("tools").join("n.backup")),
+            None
+        );
+        #[cfg(unix)]
+        {
+            // Through a link in the folder that leads out of it.
+            let usb = project.join("usb");
+            std::os::unix::fs::symlink(&tools, &usb).unwrap();
+            assert_eq!(readable_by(&cfg, &usb.join("n.backup")), None);
+            // Through a link to the folder.
+            let link = root.join("proj");
+            std::os::unix::fs::symlink(&project, &link).unwrap();
+            assert_eq!(readable_by(&cfg, &link.join("n.backup")), found);
+            // A granted folder that is itself a link, the file named by
+            // its real path.
+            cfg.centers[0].policy.folders = granted(&link);
+            assert_eq!(
+                readable_by(&cfg, &project.join("n.backup")),
+                Some(("lab".to_string(), Reach::Folder(link.clone())))
+            );
         }
     }
 

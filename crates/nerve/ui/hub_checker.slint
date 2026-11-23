@@ -584,7 +584,7 @@ export component HubCheckerPage inherits PageFrame {
             ListPane {
                 open: Hub.details-open;
                 least: 340px;
-                most: 560px;
+                share: 0.4;
                 ListCard {
                     label: "Action checker";
                     step(d) => {
@@ -716,6 +716,7 @@ export component HubCheckerPage inherits PageFrame {
             }
             DetailsPane {
                 open: Hub.details-open;
+                form: Hub.chk-view < 2 && root.pick < 0;
                 view-top: root.view-top;
                 view-height: root.view-height;
                 back => {

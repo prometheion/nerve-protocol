@@ -211,6 +211,32 @@ async fn a_rule_edit_changes_what_the_center_is_offered() {
     node.stop().await;
 }
 
+/// A proxy set or removed while the link is up takes the link along: it
+/// is dialled again with what is set now (#213 W2-4). The fake center is on
+/// loopback, which no proxy reaches, so the new link comes directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_change_reaches_the_running_link() {
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node(dir.path(), &center).await;
+    let mut conn = linked(&mut center).await;
+    for proxy in [Some("http://127.0.0.1:9".to_string()), None] {
+        owner_edit(node.paths(), |c| c.connection.proxy = proxy.clone()).await;
+        assert!(
+            conn.ends_within(WAIT).await.is_some(),
+            "the link did not end when the proxy became {proxy:?}"
+        );
+        conn = linked(&mut center).await;
+    }
+    // A change of anything else keeps the link.
+    owner_edit(node.paths(), |c| {
+        c.machine.command_env = vec!["LANG".into()]
+    })
+    .await;
+    assert!(conn.ends_within(Duration::from_secs(3)).await.is_none());
+    node.stop().await;
+}
+
 /// A folder the owner grants while the link is up reaches the center: the
 /// node tells it the descriptor changed, and the access block names the
 /// folder with its flags, the mode and the account.

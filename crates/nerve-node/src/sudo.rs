@@ -40,7 +40,7 @@ pub const ROOT_SUDO: &str = "root is the owner of this node, and sudo checks no 
 
 /// Why a center may not turn the switch on for a node on Windows: the
 /// password is the owner's Windows password.
-pub const WINDOWS_SUDO: &str = "on Windows sudo takes the owner's Windows password, which does not go through a center; turn sudo on in the Nerve app on this machine, under Permissions › Sudo";
+pub const WINDOWS_SUDO: &str = "on Windows sudo takes the owner's Windows password, which does not go through a center; turn sudo on in the Nerve app on the node's machine, under Permissions › Sudo";
 
 /// Whether a center may turn the switch on: not where the password shows
 /// nothing (root as the owner, whom `sudo -v` asks for none) and not on
@@ -286,7 +286,7 @@ mod tests {
         for root in [false, true] {
             assert_eq!(center_may_turn_on(true, root), Err(WINDOWS_SUDO));
         }
-        assert!(WINDOWS_SUDO.contains("in the Nerve app on this machine"));
+        assert!(WINDOWS_SUDO.contains("in the Nerve app on the node's machine"));
     }
 
     #[test]

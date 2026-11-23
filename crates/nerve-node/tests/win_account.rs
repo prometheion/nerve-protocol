@@ -445,6 +445,32 @@ async fn folder_and_allowlist_mode_run_as_nerve_run_in_their_containers() {
     assert!(said.contains("\\AC\\home"), "{r}");
     assert!(a.join("ok.txt").is_file());
 
+    // The node's file calls make a new file in its folder, as its
+    // container, which may not look at the folders above it; a missing
+    // file is not found, not "access denied" (#213 W3-1).
+    let new = nerve_policy::paths::to_wire(&a.join("new-by-fs.txt"));
+    call(
+        &mut conn_a,
+        "fs",
+        "write",
+        json!({"path": new, "content": "made by fs.write"}),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("fs.write of a new file: {e:?}"));
+    assert_eq!(
+        std::fs::read_to_string(a.join("new-by-fs.txt")).unwrap(),
+        "made by fs.write"
+    );
+    let missing = nerve_policy::paths::to_wire(&a.join("missing.txt"));
+    let e = call(&mut conn_a, "fs", "read", json!({ "path": missing }))
+        .await
+        .unwrap_err();
+    assert!(
+        !e.message.contains("os error 5") && e.message.contains("os error 2"),
+        "{}",
+        e.message
+    );
+
     // Outside its folders it is refused, and that is in the audit log: the
     // node looks at the folder as a's container, which may not look into
     // b's, so it does not resolve.

@@ -2,8 +2,10 @@
 //! stops the service, then saves the lock for the next start. An owner who
 //! is no administrator has his commands go to the node's pipe or socket,
 //! which the stopped service no longer has, so the save needs the
-//! administrator's rights. Slint takes one platform per process, so this is
-//! a test of its own beside `app.rs`.
+//! administrator's rights. Unlock, and a panic while the service is
+//! stopped, take the same way, and the unlock starts the service (#213
+//! W3-3). Slint takes one platform per process, so this is a test of its
+//! own beside `app.rs`.
 
 #![cfg(unix)]
 
@@ -48,11 +50,14 @@ fn the_lock_after_a_stopped_service_is_saved_with_the_rights() {
 case "$1" in {arg}) exec {real} "$@";; esac
 case " $* " in
   *" service stop "*) echo '{{"state":"stopped"}}';;
+  *" service start "*) touch {started}; echo '{{"state":"running"}}';;
   *" panic "*) echo '{{"error":"the node does not answer"}}'; exit 1;;
+  *" unlock "*) echo '{{"error":"the node is installed as a service and does not run"}}'; exit 1;;
   *) echo '{{}}';;
 esac
 "#,
             arg = nerve::broker::ARG,
+            started = root.join("started").display(),
         ),
     )
     .unwrap();
@@ -87,4 +92,28 @@ esac
         "{}",
         store.get_toast()
     );
+
+    // Unlock while the service is stopped: saved with the rights, and the
+    // service starts.
+    let locked = || {
+        nerve_policy::NodeConfig::load(&paths.config_file())
+            .unwrap()
+            .locked
+    };
+    store.invoke_unlock();
+    assert!(!locked(), "not unlocked: {}", store.get_toast());
+    assert!(root.join("started").is_file(), "the service did not start");
+    assert!(
+        store
+            .get_toast()
+            .starts_with("Unlocked: the service started"),
+        "{}",
+        store.get_toast()
+    );
+
+    // A panic while it is stopped saves the lock without stopping it first.
+    store.set_service_state("stopped".into());
+    store.invoke_panic();
+    assert!(locked(), "the lock was not saved: {}", store.get_toast());
+    assert_eq!(store.get_toast(), nerve::view::PANIC_WHILE_STOPPED);
 }

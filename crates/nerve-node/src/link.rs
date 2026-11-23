@@ -1051,6 +1051,9 @@ impl Link {
         }
         let mut rev = self.descriptor(&cfg, &entry).rev;
         let mut version = cfg.version;
+        // The proxy or relay the link was dialled through: one set,
+        // changed or removed since takes the link along (#213 W2-4).
+        let route = cfg.connection.clone();
         loop {
             tokio::select! {
                 got = read(stream) => {
@@ -1150,6 +1153,17 @@ impl Link {
                     }
                     if entry.revoked || entry.unknown {
                         return self.end(ByeReason::Unpaired, Outcome::Stop).await;
+                    }
+                    // A link through a proxy or relay the owner removed or
+                    // changed keeps going through it until it drops: it is
+                    // dialled again through what is set now, and resumes,
+                    // its commands with it.
+                    if cfg.connection != route {
+                        tracing::info!(
+                            "center {}: the proxy or relay changed; dialling again through what is set now",
+                            self.name
+                        );
+                        return Outcome::Lost;
                     }
                     // Told that the old pin no longer counts (the center
                     // serves its new key): a connection under it ends now.
@@ -4603,6 +4617,7 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+            left_out: Vec::new(),
             closed_at: None,
         };
         assert!(super::grants_refusal(&Synced::default(), "c1").is_ok());

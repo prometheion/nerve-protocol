@@ -1,7 +1,8 @@
 //! The app's own settings, kept for each user apart from the node's: the
 //! appearance the owner chose (system, light or dark), whether Update
-//! takes the pre-releases too, and whether the center's log-in is kept in
-//! the user's keyring (crate::hub::keep). A small JSON file in
+//! takes the pre-releases too, whether the center's log-in is kept in
+//! the user's keyring (crate::hub::keep), and the shares of the panes the
+//! owner dragged on each page. A small JSON file in
 //! the user's config folder, `nerve-app/settings.json` (not `nerve`, which is
 //! the node's); the node's
 //! settings stay the node's (`nerve-node config`).
@@ -71,6 +72,44 @@ pub fn save_keep_login(path: &Path, on: bool) -> Result<(), String> {
     change(path, |v| v["keep_center_login"] = json!(on))
 }
 
+/// The shares of a page's panes the owner dragged, as saved in `path`
+/// under the page's `key`: the list's share of the list and the details,
+/// and the side pane's of the whole; `None` for one not dragged, which
+/// takes the page's default.
+pub fn pane_shares(path: &Path, key: &str) -> (Option<f32>, Option<f32>) {
+    let v = read(path).unwrap_or_default();
+    let share = |which: &str| {
+        v["panes"][key][which]
+            .as_f64()
+            .map(|f| f as f32)
+            .filter(|f| (0.0..=1.0).contains(f))
+    };
+    (share("list"), share("side"))
+}
+
+/// Saves a page's shares in `path` (`None` forgets one: the page's default
+/// again), the rest of the file as it was.
+pub fn save_pane_shares(
+    path: &Path,
+    key: &str,
+    list: Option<f32>,
+    side: Option<f32>,
+) -> Result<(), String> {
+    change(path, |v| {
+        if !v["panes"].is_object() {
+            v["panes"] = json!({});
+        }
+        match (list, side) {
+            (None, None) => {
+                if let Some(panes) = v["panes"].as_object_mut() {
+                    panes.remove(key);
+                }
+            }
+            _ => v["panes"][key] = json!({"list": list, "side": side}),
+        }
+    })
+}
+
 /// The file at `path` with `f` applied, the rest as it was.
 fn change(path: &Path, f: impl FnOnce(&mut Value)) -> Result<(), String> {
     let mut v = read(path)
@@ -121,6 +160,29 @@ mod tests {
         assert_eq!(appearance(&f), 2);
         save_pre_releases(&f, false).unwrap();
         assert!(!pre_releases(&f));
+    }
+
+    /// A page's shares are kept by its key, apart from the other pages',
+    /// and a reset forgets them; a share out of 0 to 1 is not taken (#213).
+    #[test]
+    fn the_panes_shares_are_kept_per_page() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("nerve/settings.json");
+        assert_eq!(pane_shares(&f, "node-capabilities"), (None, None));
+        save_appearance(&f, 1).unwrap();
+        save_pane_shares(&f, "node-capabilities", Some(0.25), Some(0.125)).unwrap();
+        save_pane_shares(&f, "node-audit", Some(0.5), None).unwrap();
+        assert_eq!(
+            pane_shares(&f, "node-capabilities"),
+            (Some(0.25), Some(0.125))
+        );
+        assert_eq!(pane_shares(&f, "node-audit"), (Some(0.5), None));
+        assert_eq!(appearance(&f), 1);
+        save_pane_shares(&f, "node-capabilities", None, None).unwrap();
+        assert_eq!(pane_shares(&f, "node-capabilities"), (None, None));
+        assert_eq!(pane_shares(&f, "node-audit"), (Some(0.5), None));
+        std::fs::write(&f, r#"{"panes": {"x": {"list": 7}}}"#).unwrap();
+        assert_eq!(pane_shares(&f, "x"), (None, None));
     }
 
     /// The center's log-in stays in memory until the owner turns the

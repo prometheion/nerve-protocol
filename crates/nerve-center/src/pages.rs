@@ -1023,7 +1023,15 @@ fn checker_page(v: &Value, overview: &Value, said: Option<String>) -> Page {
             .collect();
         p.list(Some("Per machine"), rows);
     }
-    p.next("Add a rule", "nerve-center checker block add '<rule>'");
+    // On Windows the app is the way to the center (#213 W1-F1).
+    p.next(
+        "Add a rule",
+        if cfg!(windows) {
+            "Action checker › Add a rule… in the Nerve app"
+        } else {
+            "nerve-center checker block add '<rule>'"
+        },
+    );
     p
 }
 

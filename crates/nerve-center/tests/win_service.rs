@@ -357,14 +357,13 @@ fn the_center_runs_as_a_windows_service() {
         let (ok, said) = center(&["status"]);
         assert!(ok, "{said}");
         assert!(said.contains(" · running as a service\n"), "{said}");
+        // On Windows the next steps name the Nerve app, not a terminal (#213, W1-F1).
         assert!(
-            said.contains("Owner token:     nerve-center owner-token\n"),
+            said.contains("Nodes › Pair a machine in the Nerve app"),
             "{said}"
         );
-        assert!(
-            said.contains("Run these commands in an administrator's terminal."),
-            "{said}"
-        );
+        assert!(!said.contains("nerve-center owner-token"), "{said}");
+        assert!(!said.contains("administrator's terminal"), "{said}");
         // The installed center's folders are the ones Windows keeps, not
         // what `ProgramData` says: an elevated terminal takes it from the
         // account's own variables, which its unelevated programs may set

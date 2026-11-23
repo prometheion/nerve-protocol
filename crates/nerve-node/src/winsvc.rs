@@ -157,6 +157,12 @@ pub trait WinSystem {
     /// Removes the account, its rights and its profile; what Windows
     /// keeps of the profile until it restarts, said.
     fn remove_account(&self, name: &str) -> Result<Option<String>, String>;
+    /// Removes the profile folders of earlier `nerve` and `nerve-run`
+    /// accounts that Windows held at their uninstall and holds no more;
+    /// the folders removed (nerve_service::win::profiles).
+    fn sweep_profiles(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// Makes `dir` when it is missing, with the DACL `sddl` (and the owner
     /// it names) from its first moment, or gives the folder there that
     /// DACL; one another account owns is refused, as is a link in its place
@@ -801,6 +807,25 @@ fn new_password() -> String {
     format!("Nn1-{}", nerve_transport::keys::random_token(28))
 }
 
+/// Windows' refusal of a password for its policy (NERR_PasswordTooShort).
+const PASSWORD_POLICY: &str = "(os error 2245)";
+
+/// `set` with a [`new_password`], and with another while Windows refuses one
+/// for its policy, three tries in all: a CI runner refused one of these once
+/// for no reason the next one had (#243). The password that was taken.
+fn with_new_password(mut set: impl FnMut(&str) -> Result<(), String>) -> Result<String, String> {
+    let mut refused = String::new();
+    for _ in 0..3 {
+        let password = new_password();
+        match set(&password) {
+            Ok(()) => return Ok(password),
+            Err(e) if e.contains(PASSWORD_POLICY) => refused = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(refused)
+}
+
 /// The program's name without `.exe`: `nerve-node`, or the desktop app's.
 /// The start of the name a program gets when it moves aside, held by
 /// Windows, until it goes at the next start ([`WinSystem::remove_program`]).
@@ -892,13 +917,14 @@ fn install_steps(
             "stopped the service {SERVICE_NAME} to install over it"
         ));
     }
-    let password = new_password();
-    match sys.account(USER)? {
+    swept_profiles(sys, steps);
+    let password = match sys.account(USER)? {
         Some(a) if a.comment == USER_MARK => {
-            sys.reset_account(USER, &password, Kind::Node)?;
+            let password = with_new_password(|p| sys.reset_account(USER, p, Kind::Node))?;
             steps.did(format!(
                 "the user {USER} is there already; it has a new password"
             ));
+            password
         }
         Some(_) => {
             return Err(format!(
@@ -906,14 +932,15 @@ fn install_steps(
             ));
         }
         None => {
-            sys.add_account(USER, &password, Kind::Node)?;
+            let password = with_new_password(|p| sys.add_account(USER, p, Kind::Node))?;
             sys.account(USER)?
                 .ok_or_else(|| format!("Windows made no user {USER}"))?;
             steps.did(format!(
                 "made the user {USER}, which may log on as a service only"
             ));
+            password
         }
-    }
+    };
     // The folder above first: what is made in it after is made in a folder
     // only the administrators and nerve may write.
     let node = sys
@@ -942,6 +969,10 @@ fn install_steps(
     let run_password = run_account(layout, sys, steps)?;
     owner_account(layout, sys, steps);
     forget_old_owner_password(&layout.paths, steps);
+    // The program the service ran until now, where it is another one beside
+    // this (a pre-release's nerve-node-desktop.exe): read before the service
+    // is registered with this one.
+    let former = sys.program_of(SERVICE_NAME);
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
         steps.did(format!(
@@ -960,6 +991,7 @@ fn install_steps(
         steps.did(format!("put the program at {}", layout.bin.display()));
     }
     put_parts(layout, steps)?;
+    remove_former_program(layout, sys, former.as_deref(), steps)?;
     // What an update or an uninstall left behind when it ran from the
     // program it replaced or removed, or moved aside because the Event Log
     // held it: a name of [`ASIDE`].
@@ -985,19 +1017,74 @@ fn install_steps(
     Ok(())
 }
 
+/// Removes what an earlier uninstall left of its accounts' profiles,
+/// which Windows held until its restart, and says which (#213 W1-F10).
+fn swept_profiles(sys: &dyn WinSystem, steps: &mut Steps) {
+    let gone = sys.sweep_profiles();
+    if !gone.is_empty() {
+        let list: Vec<String> = gone.iter().map(|p| p.display().to_string()).collect();
+        steps.did(format!(
+            "removed the profile folders an earlier uninstall left: {}",
+            list.join(", ")
+        ));
+    }
+}
+
+/// Removes `former`, the program the node's service ran before this
+/// install, where it is another file in the program's folder (an earlier
+/// program of another name), that the center's service does not run: the
+/// service runs this one now, and nothing else would remove it (#213 W1-F8).
+fn remove_former_program(
+    layout: &Layout,
+    sys: &dyn WinSystem,
+    former: Option<&Path>,
+    steps: &mut Steps,
+) -> Result<(), String> {
+    let Some(former) = former else {
+        return Ok(());
+    };
+    let beside = former.parent().is_some_and(|dir| {
+        layout
+            .bin
+            .parent()
+            .is_some_and(|bin_dir| nerve_service::role::same_program(dir, bin_dir))
+    });
+    let center = sys
+        .program_of(nerve_service::role::Role::Center.service())
+        .is_some_and(|p| nerve_service::role::same_program(&p, former));
+    if !beside || center || nerve_service::role::same_program(former, &layout.bin) {
+        return Ok(());
+    }
+    if !former.exists() {
+        return Ok(());
+    }
+    if sys.remove_program(former)? {
+        steps.did(format!(
+            "removed {}, the program the service ran before",
+            former.display()
+        ));
+    } else {
+        steps.did(format!(
+            "removed {}, the program the service ran before; Windows holds it, so Windows deletes the file at its next start",
+            former.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The command account `nerve-run` at install: made, or given a new
 /// password when the install made it before, with that password stored with
 /// DPAPI ([`RUN_SECRET_FILE`]) and its profile made. One of that name that
 /// the install did not make, or that can open the node's folders or the
 /// owner's registry, is refused. Its password, for [`PROFILE_SERVICE`].
 fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Result<String, String> {
-    let password = new_password();
-    match sys.account(RUN_USER)? {
+    let password = match sys.account(RUN_USER)? {
         Some(a) if a.comment == RUN_MARK => {
-            sys.reset_account(RUN_USER, &password, Kind::Commands)?;
+            let password = with_new_password(|p| sys.reset_account(RUN_USER, p, Kind::Commands))?;
             steps.did(format!(
                 "the user {RUN_USER} is there already; it has a new password"
             ));
+            password
         }
         Some(_) => {
             return Err(format!(
@@ -1005,14 +1092,15 @@ fn run_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) -> Resul
             ));
         }
         None => {
-            sys.add_account(RUN_USER, &password, Kind::Commands)?;
+            let password = with_new_password(|p| sys.add_account(RUN_USER, p, Kind::Commands))?;
             sys.account(RUN_USER)?
                 .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
             steps.did(format!(
                 "made the user {RUN_USER}, which commands from centers run as: no administrator, and it may log on only as a batch job and as a service"
             ));
+            password
         }
-    }
+    };
     let run = sys
         .account(RUN_USER)?
         .ok_or_else(|| format!("Windows made no user {RUN_USER}"))?;
@@ -1052,15 +1140,24 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
         let (sid, name) = sys
             .owner_sid()
             .ok_or("this account has no SID the node can name")?;
-        let a = usable_owner(sys, &sid, &name)?;
-        let own = p.own();
         let file = p.config_dir.join(OWNER_SECRET_FILE);
         let stored = std::fs::read(&file)
             .ok()
             .and_then(|b| sys.unprotect(&b).ok())
-            .and_then(|b| Secret::read(&b).ok())
-            .filter(|s| s.sid == sid)
-            .map(|s| s.password);
+            .and_then(|b| Secret::read(&b).ok());
+        // Another owner's password is of no use to this one, whose install
+        // replaces the owner: it goes, whether this owner's password then
+        // works or not (#213 W1-F9).
+        if let Some(former) = stored.as_ref().filter(|s| s.sid != sid) {
+            let _ = std::fs::remove_file(&file);
+            steps.did(format!(
+                "deleted the stored password of {}, the former owner",
+                former.name
+            ));
+        }
+        let stored = stored.filter(|s| s.sid == sid).map(|s| s.password);
+        let a = usable_owner(sys, &sid, &name)?;
+        let own = p.own();
         let (reach, asked) = match stored.map(|pw| sys.check_logon(&a.name, &pw, &own)) {
             Some(Ok(reach)) => (reach, None),
             _ => {
@@ -1103,12 +1200,20 @@ fn owner_account(layout: &Layout, sys: &dyn WinSystem, steps: &mut Steps) {
     })();
     match r {
         Ok(step) => steps.did(step),
-        Err(e) => steps.did(format!(
-            "{}: {e}; {}",
-            crate::account::NO_COMMANDS_AS_YOU,
-            crate::account::NO_ACCOUNT_INSTALL
-        )),
+        Err(e) => steps.did(no_commands_as_you(&e)),
     }
+}
+
+/// The install's line for an owner whose password does not do (`e`): why,
+/// and where the app takes it, once (#213 W1-F2).
+pub fn no_commands_as_you(e: &str) -> String {
+    use crate::account::{
+        BLANK_PASSWORD, BLANK_PASSWORD_WHY, NO_ACCOUNT_INSTALL, NO_COMMANDS_AS_YOU,
+    };
+    if e == BLANK_PASSWORD {
+        return format!("{NO_COMMANDS_AS_YOU}: {BLANK_PASSWORD_WHY}, then {NO_ACCOUNT_INSTALL}");
+    }
+    format!("{NO_COMMANDS_AS_YOU}: {e}; {NO_ACCOUNT_INSTALL}")
 }
 
 /// Deletes the owner's password under its old name ([`OLD_OWNER_SECRET_FILE`])
@@ -1297,6 +1402,7 @@ fn uninstall_steps(
             None => {}
         }
     }
+    swept_profiles(sys, steps);
     // The app's program serves the center here too: the program and the
     // app's entries are the center's now, and stay.
     if sys
@@ -1634,6 +1740,8 @@ pub(crate) mod tests {
         stages: Cell<bool>,
         /// The service does not stop.
         stop_fails: Cell<bool>,
+        /// How many of the next passwords Windows refuses for its policy.
+        policy_refuses: Cell<u32>,
         pub(crate) calls: RefCell<Vec<String>>,
         /// `None`: not registered; else whether it runs.
         service: Cell<Option<bool>>,
@@ -1673,6 +1781,9 @@ pub(crate) mod tests {
         pub(crate) hive_open: Cell<bool>,
         /// The other services registered, with the program each starts.
         others: RefCell<Vec<(String, PathBuf)>>,
+        /// The profile folders an earlier uninstall left, which Windows
+        /// holds no more.
+        left_profiles: RefCell<Vec<PathBuf>>,
     }
 
     impl Fake {
@@ -1690,6 +1801,7 @@ pub(crate) mod tests {
                 vault_fails: RefCell::new(false),
                 stages: Cell::new(false),
                 stop_fails: Cell::new(false),
+                policy_refuses: Cell::new(0),
                 calls: RefCell::new(Vec::new()),
                 service: Cell::new(None),
                 starts: Cell::new(true),
@@ -1709,6 +1821,7 @@ pub(crate) mod tests {
                 profile_service: Cell::new(None),
                 hive_open: Cell::new(false),
                 others: RefCell::new(Vec::new()),
+                left_profiles: RefCell::new(Vec::new()),
             }
         }
 
@@ -1722,6 +1835,18 @@ pub(crate) mod tests {
 
         pub(crate) fn types(&self, password: &str) {
             self.typed.borrow_mut().push(password.into());
+        }
+
+        /// A password refused for the policy, while [`Fake::policy_refuses`] counts down.
+        fn policy(&self, name: &str) -> Result<(), String> {
+            let n = self.policy_refuses.get();
+            if n == 0 {
+                return Ok(());
+            }
+            self.policy_refuses.set(n - 1);
+            Err(format!(
+                "cannot give {name} a new password: The password does not meet the password policy requirements. (os error 2245)"
+            ))
         }
 
         /// `name` logs on with `password` from now on.
@@ -1770,6 +1895,7 @@ pub(crate) mod tests {
         }
         fn add_account(&self, name: &str, password: &str, kind: Kind) -> Result<(), String> {
             assert!(password.len() >= 16);
+            self.policy(name)?;
             self.call(format!("add {name}"));
             let (uid, mark) = match kind {
                 Kind::Node => (1010, USER_MARK),
@@ -1780,6 +1906,7 @@ pub(crate) mod tests {
             Ok(())
         }
         fn reset_account(&self, name: &str, password: &str, _: Kind) -> Result<(), String> {
+            self.policy(name)?;
             self.call(format!("reset {name}"));
             self.knows(name, password);
             Ok(())
@@ -2014,7 +2141,14 @@ pub(crate) mod tests {
             self.installer.borrow().clone()
         }
 
+        fn sweep_profiles(&self) -> Vec<PathBuf> {
+            std::mem::take(&mut *self.left_profiles.borrow_mut())
+        }
+
         fn program_of(&self, name: &str) -> Option<PathBuf> {
+            if name == SERVICE_NAME && self.service.get().is_some() {
+                return self.program.borrow().clone();
+            }
             let others = self.others.borrow();
             others
                 .iter()
@@ -2077,6 +2211,7 @@ pub(crate) mod tests {
                     id: None,
                     unfinished: false,
                     toward: Vec::new(),
+                    left_out: Vec::new(),
                     closed_at: None,
                 })
                 .collect();
@@ -2418,6 +2553,37 @@ pub(crate) mod tests {
         assert!(crate::secrets::vault::staged_all(&l.paths));
     }
 
+    /// A password Windows refuses for its policy is tried again with
+    /// another, for a new account and an existing one alike (a CI runner
+    /// refused one once, #243); three refusals in a row stop the install.
+    #[test]
+    fn a_password_refused_for_the_policy_is_tried_again_with_another() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        sys.types("alice's");
+        sys.policy_refuses.set(1);
+        install(&l, &sys, &exe, false, &mut Vec::new()).unwrap();
+        // Over it: nerve-run's reset is refused twice, and the third goes.
+        sys.policy_refuses.set(2);
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("the user nerve-run is there already; it has a new password"),
+            "{out}"
+        );
+        // The password that was taken is the one nerve-run logs on with: its profile was made with it.
+        let (_, kept) = stored(&sys, &l, RUN_SECRET_FILE).unwrap();
+        assert!(sys.logs_on(RUN_USER, &kept).is_ok());
+        sys.policy_refuses.set(3);
+        let e = install(&l, &sys, &exe, false, &mut Vec::new()).unwrap_err();
+        assert!(e.contains("(os error 2245)"), "{e}");
+    }
+
     #[test]
     fn install_registers_the_service_under_its_own_account() {
         let d = tempfile::tempdir().unwrap();
@@ -2709,6 +2875,11 @@ pub(crate) mod tests {
             save_owner_password(&l.paths, &sys, "").unwrap_err(),
             BLANK_PASSWORD
         );
+        // At install it says where the app takes it, once (#213 W1-F2).
+        let line = no_commands_as_you(BLANK_PASSWORD);
+        assert_eq!(line.matches("Settings › General").count(), 1, "{line}");
+        assert!(!line.contains("here"), "{line}");
+        assert!(line.contains("an account without a password"), "{line}");
     }
 
     /// An owner of a domain or of Microsoft Entra ID is refused by its SID,
@@ -3834,9 +4005,11 @@ pub(crate) mod tests {
     }
 
     /// Windows has no node alone to take over (#176): the app's install
-    /// leaves a `nerve-node.exe` beside it as it is, and says nothing of it.
+    /// over a node whose service ran another program beside it (a
+    /// pre-release's `nerve-node-desktop.exe`) runs the app's program, and
+    /// removes the one the service ran before (#213 W1-F8).
     #[test]
-    fn the_app_takes_no_node_alone_over() {
+    fn the_app_s_install_removes_the_program_the_service_ran_before() {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let node = installed(d.path(), &sys, "1.0.0").bin;
@@ -3852,11 +4025,75 @@ pub(crate) mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(!out.contains("installed alone"), "{out}");
         assert!(!out.contains("CLI edition"), "{out}");
-        assert_eq!(
-            std::fs::read_to_string(&node).unwrap(),
-            "nerve-node 1.0.0\n"
+        assert!(!node.exists(), "{out}");
+        assert!(
+            out.contains(&format!(
+                "removed {}, the program the service ran before",
+                node.display()
+            )),
+            "{out}"
         );
         assert_eq!(*sys.program.borrow(), Some(l.bin.clone()));
+        // Installed again over itself: nothing else goes.
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("the program the service ran before"), "{out}");
+        assert!(l.bin.exists());
+    }
+
+    /// The profile folders an earlier uninstall left (Windows held them until
+    /// its restart) go at the next install, and are said (#213 W1-F10).
+    #[test]
+    fn the_profiles_an_uninstall_left_go_at_the_next_install() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let left = PathBuf::from("C:/Users/nerve.DESKTOP-1.040");
+        sys.left_profiles.borrow_mut().push(left.clone());
+        let l = layout(d.path());
+        let exe = d.path().join("Downloads/nerve-node-x86_64-windows.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+        sys.types("alice's");
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!(
+                "removed the profile folders an earlier uninstall left: {}",
+                left.display()
+            )),
+            "{out}"
+        );
+        // And at an uninstall.
+        sys.left_profiles.borrow_mut().push(left.clone());
+        let mut out = Vec::new();
+        uninstall(&l, &by_hand(d.path()), &sys, false, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("an earlier uninstall left"), "{out}");
+    }
+
+    /// Another owner who installs over the data of a former one does not
+    /// leave the former owner's stored password, even where the new
+    /// owner's password does not work (#213 W1-F9).
+    #[test]
+    fn a_new_owner_s_install_deletes_the_former_owner_s_password() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        assert!(stored(&sys, &l, OWNER_SECRET_FILE).is_some());
+        *sys.installer.borrow_mut() = Some(("S-1-5-21-1-2-3-1002".into(), "bob".into()));
+        sys.types("wrong");
+        let exe = l.bin.clone();
+        let mut out = Vec::new();
+        install(&l, &sys, &exe, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("deleted the stored password of alice, the former owner"),
+            "{out}"
+        );
+        assert!(out.contains("no commands as you"), "{out}");
+        assert!(!l.paths.config_dir.join(OWNER_SECRET_FILE).exists());
     }
 
     /// The installer opened over a node of 0.0.6 offers Update: the update

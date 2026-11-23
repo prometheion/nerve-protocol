@@ -33,11 +33,16 @@ administrator (UAC). You become the node's owner. It installs:
 - **Nerve** in the Start menu, `nerve://` links, and an entry in Apps & features.
 
 Then the first-run steps pair your first center, choose its mode and its
-network, and in folder mode give it a first folder.
+network, and in folder mode give it a first folder. After a reinstall,
+**Restore a backup…** there brings your pairings back instead.
 
-`nerve-x86_64-windows.exe --silent` installs the node without a window
-or a question, for scripts. The app asks for your password later, where it
-needs it.
+An empty password is not stored: Windows logs no program on to an account
+without one. Commands that run as you wait until you set it under
+**Settings › General › Account for commands**. Over a node of another
+program (a pre-release) the install takes over and removes the old one.
+
+`nerve-x86_64-windows.exe --silent` installs the node without a window or a
+question, for scripts; the app asks for your password later.
 
 ### What it needs
 
@@ -51,8 +56,7 @@ needs it.
 | The center's local model | `tar.exe`, part of Windows |
 
 When your Windows password changes, save the new one under **Settings ›
-General › Account for commands**. Until then, commands that run as you fail,
-and a folder you add gives no access.
+General › Account for commands**; until then commands that run as you fail.
 
 ## Where each task is
 
@@ -85,13 +89,18 @@ The watch costs:
 - An external disk that holds a granted folder cannot be removed safely.
   A stick or card is not watched.
 
+A file another account owns keeps its permissions; where a change takes
+access away, that pairing's commands stop. **Permissions › Folders** names
+it: take it over or move it out, then **Sync folders**.
+
 ## A capability's argument
 
 A word `{field}` of a [capability of your own](capabilities.md) is one whole
 argument for the program. `cmd`, a `.bat` or `.cmd` file, and PowerShell
 without `-File` read their line again as commands, so a template with
 `{field}` for them is refused. Put the command in a script:
-`powershell -NoProfile -File script.ps1 {field}`.
+`powershell -NoProfile -ExecutionPolicy Bypass -File script.ps1 {field}`.
+Windows' default policy runs no script without the flag.
 
 ## The center as a service
 
@@ -100,51 +109,47 @@ installs the center as the service `nerve-center`, which runs the app's
 program, `C:\Program Files\Nerve\nerve.exe`. It keeps its state in
 `C:\ProgramData\nerve-center` and adds the firewall rule `Nerve center` for
 the node port (7443) of the center's service. Its last step shows what it
-did, the owner token among it. Keep the token in your password manager.
-**Nerve** in the Start menu then opens the center's pages, which ask for
-the token ([the center in the app](center.md#in-the-app)). Any program of
-yours can read the open app's memory: run the harness under another
-account.
+did, and the owner token with a **Copy** button. Keep the token in your
+password manager. **Nerve** in the Start menu then opens the center's pages,
+which ask for the token ([the center in the app](center.md#in-the-app)).
 
-Harnesses connect over HTTP MCP: **Harnesses › Connect a harness** makes a
-harness token and the entry. The center's settings are in
-`settings\center.env` there; MCP stays on this machine, and the app
-installs no second role beside it. The center's web UI is off:
-**Settings › This machine › Web UI** turns it on, on this machine.
+Harnesses connect over HTTP MCP (**Harnesses › Connect a harness**), on this
+machine only. The center's web UI is off: **Settings › This machine › Web
+UI** turns it on.
 
 **Change the role…** (Settings › This machine, on a node Settings › App)
 backs up, removes the role with its data, and installs the other.
 
-A relay on Windows needs a firewall rule for its port, which you add yourself.
+A relay needs a firewall rule for its port, which you add yourself in
+Windows Security; the **Relay** page says so.
 
 ## Update and uninstall
 
-Update the center first, then the nodes. **Settings › App › Update…** checks
-the download against `SHA256SUMS`; if the new program does not start, the
-old one comes back. **Pre-releases** beside it makes Update take test
-builds too.
+Update the center first, then the nodes. **Settings › App › Update…** (on a
+center **Settings › This machine › Update**) checks the download against
+`SHA256SUMS`; if the new program does not start, the old one comes back.
+**Pre-releases** beside it makes Update take test builds too. When no newer
+version is there, it says so and changes nothing.
 
 **Settings › App › Uninstall…** (or Apps & features) asks whether to **Keep
 the data** or **Delete the data**. On a center, Apps & features or
-**Settings › This machine › Uninstall…** removes the center and the app. The quiet uninstall of Apps & features
-keeps it. The data holds your stored Windows password too, open to the
-administrators: **Delete the data** deletes it. The Event Log's entries stay. A profile folder of `nerve` or
-`nerve-run` that Windows still holds goes after a restart; the uninstall
-says where.
+**Settings › This machine › Uninstall…** removes the center and the app. The
+quiet uninstall of Apps & features keeps it. The data holds your stored
+Windows password too, open to the administrators: **Delete the data** deletes
+it. The Event Log's entries stay. A profile folder of `nerve` or `nerve-run`
+that Windows still holds goes at Nerve's next install or uninstall after a
+restart; the uninstall says where.
 
-**From 0.0.6:** uninstall it with **Delete the data** (Apps & features),
-install this version, and pair the node again. The installer refuses to
-install or update over 0.0.6, whose settings it cannot read, and the app's
-**Update** of 0.0.6 puts the old program back.
+**From 0.0.6:** uninstall it with **Delete the data**, install this version,
+and pair the node again. The installer and the 0.0.6 app's **Update** change
+nothing over it.
 
 ## The node's web UI
 
 The node's own web UI is off until you turn it on in **Settings › Network ›
-Web UI**. There you make its tokens (each is shown once) and revoke them.
-Open it with **Open** there, once the app says it listens: the app checks
-first that the node holds the port. From this machine it lets in programs
-of your own session only, and closes the services and the commands of the
-centers; everyone needs a token at its login
+Web UI**, where you also make its tokens (each is shown once) and revoke
+them. From this machine it lets in programs of your own session only;
+everyone needs a token
 ([web UIs](web-uis.md#the-nodes-web-ui)).
 
 ## What Windows does not have
@@ -166,6 +171,8 @@ These are in [safety](safety.md#windows) too.
   the network until you turn it off.
 - Pipes, RPC and COM servers open to every AppContainer are open to the
   commands: a program that offers itself so can act for them, as you.
+- A command can write Event Viewer entries as `nerve-node`; the audit log is
+  the record.
 - Work started through WMI, the task scheduler or a service runs outside the
   command's job: a stop and the limits do not reach it.
 - Sudo commands run as you with your administrator rights, outside the
@@ -184,7 +191,6 @@ These are in [safety](safety.md#windows) too.
 |---|---|
 | `Windows lets no program log on to an account without a password …` | Give your account a password, then save it under **Settings › General › Account for commands** |
 | `… the Windows Firewall service … does not run …` | Start that service, or turn the pairing's network on |
-| `… is a network folder` (or `network drive`) | Grant a folder on a drive of this machine |
 | `node.toml holds changes the running node takes at its next start` | **Restart** on the Overview, then make the change again |
 | `the control pipe is not the node's` | Another program holds the node's pipe: end it, then **Restart** ([why](../dev/windows.md#the-control-pipe-is-not-the-nodes-windows)) |
 | `… may not open <path> …` | The rest of the message says why ([the list](../dev/windows.md#a-path-a-pairings-container-may-not-open-windows)) |

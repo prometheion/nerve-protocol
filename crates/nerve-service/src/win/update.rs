@@ -174,7 +174,22 @@ pub async fn update(
         }
         None => {
             let asset = p.asset.clone()?;
-            let b = fetch_release(p.release, &asset).await?;
+            let installed = sys
+                .version_of(p.bin)
+                .ok()
+                .and_then(|s| Version::parse_of(program, &s));
+            if let Some(why) = crate::older_release(p.release, program, installed) {
+                steps.did(why);
+                return Ok(false);
+            }
+            let have = std::fs::read(p.bin).ok();
+            let Some(b) = fetch_release(p.release, &asset, have.as_deref())
+                .await
+                .map_err(|e| crate::no_program_in(e, p.release, &asset))?
+            else {
+                steps.did("the installed program is that one already; nothing to update");
+                return Ok(false);
+            };
             steps.did(format!(
                 "downloaded {asset} from {} and checked it against its SHA256SUMS",
                 p.release
@@ -447,6 +462,46 @@ mod tests {
         );
         assert!(!out.contains("nerve-run-profile the new"), "{out}");
         assert!(!staged(&bin).exists() && !previous(&bin).exists());
+    }
+
+    /// A release whose program is the installed one is not downloaded,
+    /// and nothing changes (#213 W1-F12).
+    #[tokio::test]
+    async fn the_installed_program_of_the_release_is_not_downloaded() {
+        use nerve_transport::http::{Response, read_request};
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("nerve-node.exe");
+        let have = file("1.0.0", &["SeChangeNotifyPrivilege"]);
+        std::fs::write(&bin, &have).unwrap();
+        let sums = format!(
+            "{}  nerve.exe\n",
+            nerve_transport::keys::sha256_hex(have.as_bytes())
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = listener.accept().await {
+                let req = read_request(&mut io, 0).await.unwrap();
+                let r = match req.path.as_str() {
+                    "/r/SHA256SUMS" => Response::text(200, &sums),
+                    _ => Response::text(404, "no"),
+                };
+                let _ = r.write(&mut io).await;
+            }
+        });
+        let release = format!("http://127.0.0.1:{port}/r");
+        let p = Program {
+            release: &release,
+            asset: Ok("nerve.exe".into()),
+            ..program(&bin)
+        };
+        let sys = Fake::new(&bin, None);
+        let mut out = Vec::new();
+        let changed = update(&p, &sys, None, &mut Steps::new(&mut out)).await;
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(changed, Ok(false), "{out}");
+        assert!(out.contains("that one already"), "{out}");
+        assert!(sys.calls.borrow().is_empty());
     }
 
     /// A new program that does not start goes back with the old program's

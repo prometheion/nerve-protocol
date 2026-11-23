@@ -14,7 +14,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::broker::Launch;
 use crate::runner::{Follow, Runner};
-use crate::{AppWindow, Install, Load, Manual, Motion, Page, Perm, Prefs, Store, Tone, Type, view};
+use crate::{
+    AppWindow, Install, Load, Manual, Motion, Page, Panes, Perm, Prefs, Store, Tone, Type, view,
+};
 
 mod caps;
 mod hub;
@@ -95,6 +97,9 @@ enum Pending {
     Clear(bool),
     /// `cap rm` of a capability of node.toml.
     CapRemove(String),
+    /// The settings grant for a center, where the owner is root or an
+    /// administrator.
+    Grant(String),
 }
 
 /// What a command that keeps answering gave, until the window takes it.
@@ -335,7 +340,14 @@ impl Ctl {
             motion_source: Cell::new(
                 (exec == Exec::Threads).then_some(crate::motion::reduced_here as MotionSource),
             ),
-            reference: crate::reference::commands(&nerve_node::cli::help()),
+            reference: {
+                let all = crate::reference::commands(&nerve_node::cli::help());
+                if cfg!(windows) {
+                    crate::reference::for_windows(all)
+                } else {
+                    all
+                }
+            },
             ref_opened: RefCell::default(),
             relay_address: RefCell::new(String::new()),
             hub: hub::HubState::default(),
@@ -423,6 +435,11 @@ impl Ctl {
         store.on_unlock(move || c.lock(false));
         let c = ctl.clone();
         store.on_set_appearance(move |i| c.set_appearance(i));
+        let panes = window.global::<Panes>();
+        let c = ctl.clone();
+        panes.on_load(move || c.panes_load());
+        let c = ctl.clone();
+        panes.on_save(move || c.panes_save());
         node::wire(&ctl, window);
         perm::wire(&ctl, window);
         caps::wire(&ctl, window);
@@ -772,10 +789,15 @@ impl Ctl {
         // centers: they are not known, not none (so no first-run steps, and
         // the pages keep the centers they have).
         let answer = match answer {
-            Ok(v) if v["unread"].is_string() => Err(format!(
-                "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
-                v["unread"].as_str().unwrap_or_default()
-            )),
+            Ok(v) if v["unread"].is_string() => {
+                // The node card says it is stopped, not what it said last.
+                let (stopped, _) = view::status(&v, now_ms());
+                self.with_store(|s| s.set_status(stopped));
+                Err(format!(
+                    "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
+                    v["unread"].as_str().unwrap_or_default()
+                ))
+            }
             other => other,
         };
         match answer {
@@ -783,8 +805,14 @@ impl Ctl {
                 let (status, centers) = view::status(&v, now_ms());
                 let names: Vec<String> = centers.iter().map(|c| c.name.to_string()).collect();
                 let first = self.status.borrow().is_null();
+                let attached = !first && view::providers_changed(&self.status.borrow(), &v);
                 *self.centers.borrow_mut() = names.clone();
                 *self.status.borrow_mut() = v;
+                // A provider that attached or left changes the Capabilities
+                // page while it is open (#213 W2-13).
+                if attached && self.with_store(|s| s.get_page()) == Some(Page::Capabilities) {
+                    self.caps_load();
+                }
                 self.with_store(|s| {
                     s.set_status(status);
                     s.set_centers(ModelRc::new(VecModel::from(centers)));
@@ -831,7 +859,19 @@ impl Ctl {
             self.connect_read(&link);
             return;
         }
-        self.pair_start();
+        // The first-run steps' own first step pairs a center: the link goes
+        // there, not into a second dialog over it (#213 W2-9).
+        let in_steps = self
+            .with_store(|s| s.get_setup_open() && s.get_setup_step() == 0)
+            .unwrap_or(false);
+        if in_steps {
+            self.with_store(|s| {
+                s.set_pair_step(0);
+                s.set_pair_error(SharedString::new());
+            });
+        } else {
+            self.pair_start();
+        }
         self.with_store(|s| s.set_pair_link(link.as_str().into()));
         self.pair(&link, "", false);
     }
@@ -963,6 +1003,20 @@ impl Ctl {
     fn center_grant(self: &Rc<Self>, name: &str, on: bool) {
         let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
         let admin = self.with_perm(|p| p.get_owner_is_admin()).unwrap_or(false);
+        // What the grant gives where the owner holds every right is asked
+        // before, not said after (#213 W2-11).
+        if on && (root || admin) {
+            return self.confirm(
+                Pending::Grant(name.to_string()),
+                format!("Let {name} change settings?"),
+                view::settings_grant_ask(name, root),
+                "Allow",
+            );
+        }
+        self.grant(name, on, root, admin);
+    }
+
+    fn grant(self: &Rc<Self>, name: &str, on: bool, root: bool, admin: bool) {
         let said = view::settings_grant_said(name, on, root, admin);
         let value = if on { "on" } else { "off" };
         let args = vec![
@@ -1040,6 +1094,10 @@ impl Ctl {
             return;
         };
         match p {
+            Pending::Grant(name) => {
+                let root = self.with_perm(|p| p.get_owner_is_root()).unwrap_or(false);
+                self.grant(&name, true, root, !root);
+            }
             Pending::Unpair(name) => {
                 let args = vec!["center".into(), "rm".into(), "--".into(), name.clone()];
                 self.change(&name, args, format!("Unpaired {name}."));
@@ -1145,8 +1203,23 @@ impl Ctl {
     /// once the node took the lock or stopped.
     fn lock(self: &Rc<Self>, lock: bool) {
         if !lock {
-            let said = "Unlocked: the node links and works again.";
-            self.change("node", vec!["unlock".into()], said.into());
+            self.unlock();
+            return;
+        }
+        // A stopped service has no node to take the lock: it is saved for
+        // its start, with the administrator's rights.
+        if self.service.get()
+            && self.with_store(|s| s.get_service_state()).as_deref() == Some("stopped")
+        {
+            self.with_store(|s| s.set_busy("node".into()));
+            self.command_with_rights(vec!["panic".into()], None, |c, saved| {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                match saved {
+                    Ok(_) => c.toast(view::PANIC_WHILE_STOPPED, Tone::Warn),
+                    Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
+                }
+                c.refresh_status();
+            });
             return;
         }
         self.with_store(|s| s.set_busy("node".into()));
@@ -1157,6 +1230,59 @@ impl Ctl {
                 Err(e) if c.service.get() => c.stop_for_panic(e),
                 Err(e) => c.toast(format!("Not locked: {e}"), Tone::Danger),
             }
+            c.refresh_status();
+        });
+    }
+
+    /// Unlock. The node takes it at once; a stopped installed service takes
+    /// no change of its owner, so the app saves it with the administrator's
+    /// rights and starts the service: the node links and works again.
+    fn unlock(self: &Rc<Self>) {
+        const SAID: &str = "Unlocked: the node links and works again.";
+        self.with_store(|s| s.set_busy("node".into()));
+        self.command(vec!["unlock".into()], None, |c, answer| match answer {
+            Ok(v) if !(c.service.get() && waits_for_start(&v)) => {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                c.done(&v, SAID);
+                c.refresh_status();
+            }
+            Ok(_) => c.start_unlocked(),
+            Err(_) if c.service.get() => {
+                c.command_with_rights(vec!["unlock".into()], None, |c, saved| match saved {
+                    Ok(_) => c.start_unlocked(),
+                    Err(e) => {
+                        c.with_store(|s| s.set_busy(SharedString::new()));
+                        c.toast(format!("Not unlocked: {e}"), Tone::Danger);
+                        c.refresh_status();
+                    }
+                });
+            }
+            Err(e) => {
+                c.with_store(|s| s.set_busy(SharedString::new()));
+                c.toast(e, Tone::Danger);
+                c.refresh_status();
+            }
+        });
+    }
+
+    /// The unlock is saved for the stopped service's start: it starts now.
+    fn start_unlocked(self: &Rc<Self>) {
+        let start = vec!["service".into(), "start".into()];
+        self.command(start, None, |c, started| {
+            c.with_store(|s| s.set_busy(SharedString::new()));
+            match started {
+                Ok(_) => c.toast(
+                    "Unlocked: the service started, and the node links and works again.",
+                    Tone::Ok,
+                ),
+                Err(e) => c.toast(
+                    format!(
+                        "Unlocked, but the service did not start: {e}. Start it on the Overview."
+                    ),
+                    Tone::Warn,
+                ),
+            }
+            c.refresh_service();
             c.refresh_status();
         });
     }
@@ -1249,6 +1375,51 @@ impl Ctl {
             && let Err(e) = crate::settings::save_pre_releases(file, on)
         {
             self.toast(format!("The choice is not saved: {e}"), Tone::Danger);
+        }
+    }
+
+    /// The page shown, as the app's settings keep its panes' shares under
+    /// it: `node-capabilities`, `center-overview`.
+    fn panes_key(&self) -> Option<String> {
+        let w = self.window.upgrade()?;
+        let hub = w.global::<crate::Hub>();
+        let key = if hub.get_shown() {
+            format!("center-{:?}", hub.get_page())
+        } else {
+            format!("node-{:?}", w.global::<Store>().get_page())
+        };
+        Some(key.to_lowercase())
+    }
+
+    /// Gives the page that opens the shares the owner dragged on it, or
+    /// its defaults (#213).
+    fn panes_load(&self) {
+        let (Some(key), Some(w)) = (self.panes_key(), self.window.upgrade()) else {
+            return;
+        };
+        let (list, side) = self
+            .settings
+            .borrow()
+            .as_deref()
+            .map(|f| crate::settings::pane_shares(f, &key))
+            .unwrap_or_default();
+        let panes = w.global::<Panes>();
+        panes.set_list_share(list.unwrap_or(-1.0));
+        panes.set_side_share(side.unwrap_or(-1.0));
+    }
+
+    /// Keeps the shares of the page's panes, after a drag or a reset.
+    fn panes_save(self: &Rc<Self>) {
+        let (Some(key), Some(w)) = (self.panes_key(), self.window.upgrade()) else {
+            return;
+        };
+        let panes = w.global::<Panes>();
+        let share = |f: f32| (f >= 0.0).then_some(f);
+        let (list, side) = (share(panes.get_list_share()), share(panes.get_side_share()));
+        if let Some(file) = self.settings.borrow().as_ref()
+            && let Err(e) = crate::settings::save_pane_shares(file, &key, list, side)
+        {
+            self.toast(format!("The widths are not saved: {e}"), Tone::Danger);
         }
     }
 
@@ -1501,10 +1672,101 @@ fn dress(window: &AppWindow) {
             if let Ok(icon) = Icon::from_resource(1, None) {
                 w.set_window_icon(Some(icon));
             }
+            fit_window(w);
         });
+        // Slint sets the window's size and Windows its place once the event
+        // loop runs, after the fit above: it is put right again a moment
+        // later, as the app's window opened off the screen otherwise.
+        for ms in [150, 600, 1500] {
+            let weak = window.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(ms), move || {
+                if let Some(window) = weak.upgrade() {
+                    window.window().with_winit_window(fit_window);
+                }
+            });
+        }
     }
     #[cfg(not(windows))]
     let _ = window;
+}
+
+/// Puts the window within the screen and above the taskbar, smaller where
+/// the screen is (#213 W1-F5): the screen Windows opened it on.
+#[cfg(windows)]
+fn fit_window(w: &slint::winit_030::winit::window::Window) {
+    use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
+    let Ok(at) = w.outer_position() else {
+        return;
+    };
+    let (outer, inner) = (w.outer_size(), w.inner_size());
+    let screens = screens(w);
+    let Some(work) = work_of(&screens, (at.x, at.y), (outer.width, outer.height)) else {
+        return;
+    };
+    let (to, size) = fit_in(work, (at.x, at.y), (outer.width, outer.height));
+    if size != (outer.width, outer.height) {
+        let _ = w.request_inner_size(PhysicalSize::new(
+            inner.width - (outer.width - size.0),
+            inner.height - (outer.height - size.1),
+        ));
+    }
+    if to != (at.x, at.y) {
+        w.set_outer_position(PhysicalPosition::new(to.0, to.1));
+    }
+}
+
+/// A screen's area: left, top, right and bottom, in physical pixels.
+pub type Area = (i32, i32, i32, i32);
+
+/// Each screen's whole area and work area (the screen without the taskbar).
+#[cfg(windows)]
+fn screens(w: &slint::winit_030::winit::window::Window) -> Vec<(Area, Area)> {
+    use slint::winit_030::winit::platform::windows::MonitorHandleExtWindows;
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    let area = |r: RECT| (r.left, r.top, r.right, r.bottom);
+    w.available_monitors()
+        .filter_map(|m| {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: a MONITORINFO with its size set, for the call to fill.
+            let ok = unsafe { GetMonitorInfoW(m.hmonitor() as _, &raw mut info) };
+            (ok != 0).then(|| (area(info.rcMonitor), area(info.rcWork)))
+        })
+        .collect()
+}
+
+/// The work area of the screen in `screens` (whole area, work area) that
+/// holds the middle of a window of `size` at `at`, else of the screen
+/// nearest to it. Windows opens a window on the screen it was started
+/// from, also one left of or above the main screen, where it stays.
+pub fn work_of(screens: &[(Area, Area)], at: (i32, i32), size: (u32, u32)) -> Option<Area> {
+    let (x, y) = (at.0 + size.0 as i32 / 2, at.1 + size.1 as i32 / 2);
+    // How far the middle lies from a screen; 0 inside it.
+    let off = |(left, top, right, bottom): Area| {
+        let dx = i64::from((left - x).max(x - (right - 1)).max(0));
+        let dy = i64::from((top - y).max(y - (bottom - 1)).max(0));
+        dx * dx + dy * dy
+    };
+    screens
+        .iter()
+        .min_by_key(|(whole, _)| off(*whole))
+        .map(|(_, work)| *work)
+}
+
+/// Where a window of `size` (its frame included) at `at` goes so that it
+/// lies in the work area `work` (left, top, right, bottom): moved in, and
+/// smaller where the area is. On a 1280x800 screen the installer opened
+/// with its buttons under the taskbar (#213 W1-F5).
+pub fn fit_in(work: Area, at: (i32, i32), size: (u32, u32)) -> ((i32, i32), (u32, u32)) {
+    let (left, top, right, bottom) = work;
+    let w = size.0.min((right - left).max(0) as u32);
+    let h = size.1.min((bottom - top).max(0) as u32);
+    let x = at.0.clamp(left, right - w as i32);
+    let y = at.1.clamp(top, bottom - h as i32);
+    ((x, y), (w, h))
 }
 
 /// Brings `window` to the front: a later start of the app asked for it.
@@ -1549,5 +1811,42 @@ mod tests {
         let said = locked_said(&replaced);
         assert!(said.starts_with(LOCKED), "{said}");
         assert!(said.contains("replaced by the lock"), "{said}");
+    }
+
+    /// A window that would reach under the taskbar or off the screen is
+    /// moved in, and made smaller where the screen is (#213 W1-F5).
+    #[test]
+    fn a_window_fits_in_the_work_area() {
+        // 1280x800 with a 48 px taskbar.
+        let work = (0, 0, 1280, 752);
+        // The installer at y 187: moved up, its size kept.
+        assert_eq!(
+            fit_in(work, (260, 187), (776, 739)),
+            ((260, 13), (776, 739))
+        );
+        // The center's window off the right edge.
+        assert_eq!(
+            fit_in(work, (138, 161), (1196, 739)),
+            ((84, 13), (1196, 739))
+        );
+        // Taller than the work area: as tall as it is.
+        assert_eq!(fit_in(work, (0, 0), (900, 900)), ((0, 0), (900, 752)));
+        // One that fits stays.
+        assert_eq!(fit_in(work, (10, 10), (500, 500)), ((10, 10), (500, 500)));
+    }
+
+    /// A window is fitted into the screen it is on, also one left of the
+    /// main screen, and one off every screen into the nearest.
+    #[test]
+    fn a_window_stays_on_its_own_screen() {
+        let main = ((0, 0, 1920, 1080), (0, 0, 1920, 1032));
+        let left = ((-1280, 0, 0, 800), (-1280, 0, 0, 752));
+        let screens = [main, left];
+        assert_eq!(work_of(&screens, (100, 100), (800, 600)), Some(main.1));
+        assert_eq!(work_of(&screens, (-1100, 100), (800, 600)), Some(left.1));
+        // Mostly on the left screen.
+        assert_eq!(work_of(&screens, (-700, 100), (800, 600)), Some(left.1));
+        assert_eq!(work_of(&screens, (-3000, 2000), (800, 600)), Some(left.1));
+        assert_eq!(work_of(&[], (0, 0), (800, 600)), None);
     }
 }

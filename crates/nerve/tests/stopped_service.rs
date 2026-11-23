@@ -51,5 +51,7 @@ fn a_stopped_service_whose_folders_are_closed_opens_no_first_run() {
         1,
         "the centers were emptied"
     );
+    // The node's card says it is stopped, not that it runs (#213 W3-3).
+    assert_eq!(store.get_status().state, "stopped");
     assert!(!store.get_setup_open());
 }

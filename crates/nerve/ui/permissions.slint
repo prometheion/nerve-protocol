@@ -827,7 +827,7 @@ export component PermissionsPage inherits PageFrame {
             ListPane {
                 open: true;
                 least: 230px;
-                most: 270px;
+                share: 0.26;
                 ListCard {
                     label: "Sections";
                     step(d) => {
@@ -956,7 +956,7 @@ export component PermissionsPage inherits PageFrame {
                             Rules {
                                 list: 2;
                                 rules: Perm.sudo-list;
-                                placeholder: "sudo apt update";
+                                placeholder: Perm.windows ? "sudo net session" : "sudo apt update";
                                 add: "Add a sudo command…";
                                 new-text <=> Perm.sudo-text;
                                 new-wild <=> Perm.sudo-wild;
